@@ -13,35 +13,26 @@
     };
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      flake-utils,
-      rust-overlay,
-    }:
+  outputs = {
+    self,
+    nixpkgs,
+    flake-utils,
+    rust-overlay,
+  }:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        overlays = [ (import rust-overlay) ];
+      system: let
+        overlays = [(import rust-overlay)];
         pkgs = import nixpkgs {
           inherit system overlays;
         };
 
         # Use the latest stable Rust
-        rustVersion = pkgs.rust-bin.stable.latest.default;
-
-        # Create a custom rust toolchain with additional components
-        rustWithComponents = rustVersion.override {
-          extensions = [
-            "rust-src"
-            "rust-analyzer"
-          ];
-        };
-      in
-      {
+        rustVersion = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+      in {
         devShells.default = pkgs.mkShell {
           packages = [
+            pkgs.clang
+            pkgs.lld
             pkgs.pkg-config
             pkgs.alsa-lib
             pkgs.libudev-zero
@@ -57,7 +48,7 @@
           ];
 
           buildInputs = [
-            rustWithComponents
+            rustVersion
             pkgs.cargo-pgo
           ];
 
