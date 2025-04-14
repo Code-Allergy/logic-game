@@ -1,12 +1,21 @@
 use std::collections::HashMap;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum GateType {
     And,
     Or,
+    Identity,
     Not,
     Input,
     Output,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum TickError {
+    CycleDetected,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +40,8 @@ pub struct Connection {
 pub struct Circuit {
     gates: Vec<Gate>,
     connections: Vec<Connection>,
+    topological_order: Option<Vec<usize>>,
+    topological_dirty: bool,
 }
 
 impl Circuit {
@@ -38,6 +49,8 @@ impl Circuit {
         Circuit {
             gates: Vec::new(),
             connections: Vec::new(),
+            topological_order: None,
+            topological_dirty: true,
         }
     }
 
@@ -59,6 +72,14 @@ impl Circuit {
             target: target.0,
             target_input,
         });
+    }
+
+    pub fn get_topological_order(&mut self) -> Option<Vec<usize>> {
+        if self.topological_dirty {
+            self.topological_order = self.topological_sort();
+            self.topological_dirty = false;
+        }
+        self.topological_order.clone()
     }
 
     pub fn topological_sort(&self) -> Option<Vec<usize>> {
@@ -101,11 +122,11 @@ impl Circuit {
         }
     }
 
-    pub fn tick(&mut self) {
-        // Ensure you have an up-to-date topological order.
-        // If not, generate and cache one.
-        let order = self.topological_sort().expect("Failed to get TOPO sort");
-        // get cached version later
+    pub fn tick(&mut self) -> Result<(), TickError> {
+        let order = match self.get_topological_order() {
+            Some(order) => order,
+            None => return Err(TickError::CycleDetected),
+        };
 
         // Traverse the nodes in the defined order
         for gate_id in order.iter() {
@@ -116,7 +137,6 @@ impl Circuit {
                     panic!("Gate {} has uninitialized inputs!", gate_id);
                 }
 
-                // Compute the gate's output (currently just using the first input for testing)
                 gate.output = Some(compute_gate_logic(
                     gate.gate_type,
                     gate.inputs
@@ -136,15 +156,23 @@ impl Circuit {
                 .filter(|c| c.source == *gate_id)
                 .map(|c| (c.target, c.target_input))
                 .collect();
-            dbg!(&gate_id);
-            dbg!(&updates_needed);
+
             // Now apply all the updates
             for (target_id, target_input) in updates_needed {
                 if let Some(target_gate) = self.gates.get_mut(target_id) {
+                    debug_assert!(
+                        target_gate.inputs.len() > target_input,
+                        "Target gate {} has gate {} updating itself, but has an expected input port of {}",
+                        target_gate.id.0,
+                        gate_id,
+                        target_input
+                    );
                     target_gate.inputs[target_input] = gate_output;
                 }
             }
         }
+
+        Ok(())
     }
 
     pub fn set_input(&mut self, id: GateId, value: bool) {
@@ -204,6 +232,10 @@ impl Gate {
     pub fn new_not(id: GateId) -> Self {
         Gate::new(id.0, GateType::Not, vec![None], None)
     }
+
+    pub fn new_identity(id: GateId) -> Self {
+        Gate::new(id.0, GateType::Identity, vec![None], None)
+    }
 }
 
 pub fn compute_gate_logic(gate_type: GateType, inputs: Vec<bool>) -> bool {
@@ -211,325 +243,53 @@ pub fn compute_gate_logic(gate_type: GateType, inputs: Vec<bool>) -> bool {
 
     match gate_type {
         GateType::And => {
-            debug_assert_eq!(inputs.len(), 2, "AND gate requires exactly 2 inputs");
-            debug_assert!(inputs.len() <= 2, "AND gate cannot have more than 2 inputs");
+            debug_assert_eq!(
+                inputs.len(),
+                2,
+                "AND gate requires exactly 2 inputs, found: {}",
+                inputs.len()
+            );
             inputs.into_iter().all(|value| value)
         }
         GateType::Or => {
-            debug_assert_eq!(inputs.len(), 2, "OR gate requires exactly 2 inputs");
-            debug_assert!(inputs.len() <= 2, "OR gate cannot have more than 2 inputs");
+            debug_assert_eq!(
+                inputs.len(),
+                2,
+                "OR gate requires exactly 2 inputs, found: {}",
+                inputs.len()
+            );
             inputs.into_iter().any(|value| value)
         }
+        GateType::Identity => {
+            debug_assert_eq!(
+                inputs.len(),
+                1,
+                "Identity gate requires exactly 1 input, found: {}",
+                inputs.len()
+            );
+            inputs[0]
+        }
         GateType::Not => {
-            debug_assert_eq!(inputs.len(), 1, "NOT gate requires exactly 1 input");
-            debug_assert!(inputs.len() <= 1, "NOT gate cannot have more than 1 input");
+            debug_assert_eq!(
+                inputs.len(),
+                1,
+                "NOT gate requires exactly 1 input, found: {}",
+                inputs.len()
+            );
             !inputs[0]
         }
         GateType::Input => {
-            debug_assert_eq!(inputs.len(), 1, "Input gate requires exactly 1 input");
-            debug_assert!(
-                inputs.len() <= 1,
-                "Input gate cannot have more than 1 input"
+            debug_assert_eq!(
+                inputs.len(),
+                1,
+                "Input gate requires exactly 1 input, found: {}",
+                inputs.len()
             );
             inputs[0]
         }
         GateType::Output => {
             debug_assert_eq!(inputs.len(), 1, "Output gate requires exactly 1 input");
-            debug_assert!(
-                inputs.len() <= 1,
-                "Output gate cannot have more than 1 input"
-            );
             inputs[0]
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_compute_gate_logic_and() {
-        assert_eq!(
-            compute_gate_logic(GateType::And, vec![true, true]),
-            true,
-            "AND gate should return true when both inputs are true"
-        );
-        assert_eq!(
-            compute_gate_logic(GateType::And, vec![true, false]),
-            false,
-            "AND gate should return false when one input is false"
-        );
-        assert_eq!(
-            compute_gate_logic(GateType::And, vec![false, false]),
-            false,
-            "AND gate should return false when both inputs are false"
-        );
-        assert_eq!(
-            compute_gate_logic(GateType::And, vec![false, false]),
-            false,
-            "AND gate should return false when both inputs are false"
-        );
-    }
-
-    #[test]
-    fn test_compute_gate_logic_or() {
-        assert_eq!(
-            compute_gate_logic(GateType::Or, vec![true, true]),
-            true,
-            "OR gate should return true when both inputs are true"
-        );
-        assert_eq!(
-            compute_gate_logic(GateType::Or, vec![true, false]),
-            true,
-            "OR gate should return true when one input is true"
-        );
-        assert_eq!(
-            compute_gate_logic(GateType::Or, vec![false, true]),
-            true,
-            "OR gate should return true when one input is true"
-        );
-        assert_eq!(
-            compute_gate_logic(GateType::Or, vec![false, false]),
-            false,
-            "OR gate should return false when both inputs are false"
-        );
-    }
-
-    #[test]
-    fn test_compute_gate_logic_not() {
-        assert_eq!(
-            compute_gate_logic(GateType::Not, vec![true]),
-            false,
-            "NOT gate should return false when input is true"
-        );
-        assert_eq!(
-            compute_gate_logic(GateType::Not, vec![false]),
-            true,
-            "NOT gate should return true when input is false"
-        );
-    }
-
-    #[test]
-    fn test_compute_gate_logic_input() {
-        assert_eq!(
-            compute_gate_logic(GateType::Input, vec![true]),
-            true,
-            "Input gate should return true when input is true"
-        );
-        assert_eq!(
-            compute_gate_logic(GateType::Input, vec![false]),
-            false,
-            "Input gate should return false when input is false"
-        );
-    }
-
-    #[test]
-    fn test_compute_gate_logic_output() {
-        assert_eq!(
-            compute_gate_logic(GateType::Output, vec![true]),
-            true,
-            "Output gate should return true when input is true"
-        );
-        assert_eq!(
-            compute_gate_logic(GateType::Output, vec![false]),
-            false,
-            "Output gate should return false when input is false"
-        );
-    }
-
-    #[test]
-    fn test_simple_circuit_input_output() {
-        let mut circuit = Circuit::new();
-        let mut input_gate = Gate::new_input(GateId(0), None);
-        let mut output_gate = Gate::new_output(GateId(1));
-        let input_id = input_gate.id;
-        let output_id = output_gate.id;
-        circuit.add_gate(input_gate);
-        circuit.add_gate(output_gate);
-
-        circuit.add_connection(input_id, output_id, 0);
-        circuit.set_input(input_id, true);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(true),
-            "Circuit should return true when input is true"
-        );
-
-        circuit.set_input(input_id, false);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(false),
-            "Circuit should return false when input is false"
-        );
-    }
-
-    #[test]
-    fn test_simple_circuit_not() {
-        let mut circuit = Circuit::new();
-        let mut input_gate = Gate::new_input(GateId(0), None);
-        let mut output_gate = Gate::new_output(GateId(1));
-        let mut not_gate = Gate::new_not(GateId(2));
-        let input_id = input_gate.id;
-        let output_id = output_gate.id;
-        let not_id = not_gate.id;
-
-        circuit.add_gate(input_gate);
-        circuit.add_gate(output_gate);
-        circuit.add_gate(not_gate);
-
-        circuit.add_connection(input_id, not_id, 0);
-        circuit.add_connection(not_id, output_id, 0);
-        circuit.set_input(input_id, true);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(false),
-            "Circuit should return false when input is true"
-        );
-
-        circuit.set_input(input_id, false);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(true),
-            "Circuit should return true when input is false"
-        );
-    }
-
-    #[test]
-    fn test_simple_circuit_or() {
-        let mut circuit = Circuit::new();
-        let mut input_gate = Gate::new_input(GateId(0), None);
-        let mut output_gate = Gate::new_output(GateId(1));
-        let mut or_gate = Gate::new_or(GateId(2));
-        let mut input_gate2 = Gate::new_input(GateId(3), None);
-        let input_id = input_gate.id;
-        let input_id2 = input_gate2.id;
-        let output_id = output_gate.id;
-        let or_id = or_gate.id;
-
-        circuit.add_gate(input_gate);
-        circuit.add_gate(output_gate);
-        circuit.add_gate(or_gate);
-        circuit.add_gate(input_gate2);
-
-        circuit.add_connection(input_id, or_id, 0);
-        circuit.add_connection(input_id2, or_id, 1);
-        circuit.add_connection(or_id, output_id, 0);
-        circuit.set_input(input_id, true);
-        circuit.set_input(input_id2, true);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(true),
-            "Circuit should return true when input is true, true: {:?}",
-            circuit
-        );
-
-        circuit.set_input(input_id, false);
-        circuit.set_input(input_id2, true);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(true),
-            "Circuit should return true when input is false, true: {:?}",
-            circuit
-        );
-
-        circuit.set_input(input_id, true);
-        circuit.set_input(input_id2, false);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(true),
-            "Circuit should return true when input is true, false: {:?}",
-            circuit
-        );
-
-        circuit.set_input(input_id, false);
-        circuit.set_input(input_id2, false);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(false),
-            "Circuit should return false when input is false, false: {:?}",
-            circuit
-        );
-    }
-
-    #[test]
-    fn test_simple_circuit_and() {
-        let mut circuit = Circuit::new();
-        let mut input_gate = Gate::new_input(GateId(0), None);
-        let mut output_gate = Gate::new_output(GateId(1));
-        let mut and_gate = Gate::new_and(GateId(2));
-        let mut input_gate2 = Gate::new_input(GateId(3), None);
-        let input_id = input_gate.id;
-        let input_id2 = input_gate2.id;
-        let output_id = output_gate.id;
-        let and_id = and_gate.id;
-
-        circuit.add_gate(input_gate);
-        circuit.add_gate(output_gate);
-        circuit.add_gate(and_gate);
-        circuit.add_gate(input_gate2);
-
-        circuit.add_connection(input_id, and_id, 0);
-        circuit.add_connection(input_id2, and_id, 1);
-        circuit.add_connection(and_id, output_id, 0);
-        circuit.set_input(input_id, true);
-        circuit.set_input(input_id2, true);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(true),
-            "Circuit should return true when input is true, true: {:?}",
-            circuit
-        );
-
-        circuit.set_input(input_id, false);
-        circuit.set_input(input_id2, true);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(false),
-            "Circuit should return false when input is false, true: {:?}",
-            circuit
-        );
-
-        circuit.set_input(input_id, true);
-        circuit.set_input(input_id2, false);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(false),
-            "Circuit should return false when input is true, false: {:?}",
-            circuit
-        );
-
-        circuit.set_input(input_id, false);
-        circuit.set_input(input_id2, false);
-        circuit.tick();
-
-        assert_eq!(
-            circuit.read_output(output_id),
-            Some(false),
-            "Circuit should return false when input is false, false: {:?}",
-            circuit
-        );
     }
 }

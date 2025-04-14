@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.15.3"
+serde = { version = "1.0.219", features = ["derive"] }
 sim_core = { path = "crates/sim_core" }
