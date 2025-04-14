@@ -88,7 +88,8 @@ impl Circuit {
     }
 
     pub fn tick(&mut self) -> Result<(), TickError> {
-        let order = match self.get_topological_order() {
+        let result: Option<Vec<usize>> = self.get_topological_order();
+        let order = match result {
             Some(order) => order,
             None => return Err(TickError::CycleDetected),
         };
