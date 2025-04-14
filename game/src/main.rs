@@ -1,15 +1,15 @@
 use bevy::input::mouse::MouseButtonInput;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use bevy_egui::{egui, EguiContexts};
 use bevy_egui::{EguiContext, EguiPlugin};
-use bevy_egui::{EguiContexts, egui};
 use sim_core::circuits::*;
 use sim_core::gates::*;
 
 mod systems;
 use systems::*;
 
-const SIMULATION_TICK_RATE: f64 = 0.001; // 1 s
+const SIMULATION_TICK_RATE: f64 = 0.1; // 1 s
 
 pub const CONNECTION_Z_LEVEL: f32 = 10.0;
 

@@ -1,18 +1,9 @@
-[package]
-name = "logi-game"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-bevy = "0.15.3"
-bevy_egui = "0.33.0"
-sim_core = { path = "crates/sim_core" }
-
 [workspace]
+resolver = "3"
 members = [
-    "crates/sim_core"
+    "crates/sim_core",
+    "game"
 ]
-
 
 [profile.dev]
 opt-level = 1
