@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use sim_core::gates::{GateId, GateType};
+use std::collections::HashMap;
 
 use crate::{CONNECTION_Z_LEVEL, ConnectionLine, GateComponent, MainCamera, Selected, Simulation};
 
@@ -75,61 +76,69 @@ pub fn update_input_colours_system(
     }
 }
 
-pub fn interaction_system(
+// Generic function to find entity under mouse cursor
+fn find_entity_at_position(
+    position: Vec2,
+    grid: &SpatialGrid,
+    query: &Query<(Entity, &Transform), With<GateComponent>>,
+) -> Option<(Entity, Vec2)> {
+    // Returns entity and offset from cursor
+    // Query spatial grid for potential entities
+    let nearby_entities = grid.query_near(position, 50.0); // Search radius based on gate size
+
+    for entity in nearby_entities {
+        if let Ok((entity, transform)) = query.get(entity) {
+            let sprite_size = Vec2::new(50.0, 50.0);
+            let half_extents = sprite_size / 2.0;
+
+            let local_point = transform
+                .compute_matrix()
+                .inverse()
+                .transform_point3(position.extend(0.0));
+            let local_point_2d = Vec2::new(local_point.x, local_point.y);
+
+            if local_point_2d.x >= -half_extents.x
+                && local_point_2d.x <= half_extents.x
+                && local_point_2d.y >= -half_extents.y
+                && local_point_2d.y <= half_extents.y
+            {
+                let offset = transform.translation.truncate() - position;
+                return Some((entity, offset));
+            }
+        }
+    }
+
+    None
+}
+
+pub fn gate_selection_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-    mut query: Query<(Entity, &Transform, &GateComponent)>,
+
+    grid: Res<SpatialGrid>,
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
+    query: Query<(Entity, &Transform), With<GateComponent>>,
     mut commands: Commands,
     selected_query: Query<Entity, With<Selected>>,
 ) {
-    let (camera, camera_transform) = q_camera.single();
-    let window = q_window.single();
-
-    // Handle deselection first - if mouse released, remove all selections
-    if mouse_button_input.just_released(MouseButton::Right) {
-        for entity in selected_query.iter() {
-            commands.entity(entity).remove::<Selected>();
-        }
-        return;
-    }
-
-    // Handle selection if mouse is clicked
     if mouse_button_input.just_pressed(MouseButton::Right) {
-        if let Some(screen_pos) = window.cursor_position() {
-            // First remove any existing selections
-            for entity in selected_query.iter() {
-                commands.entity(entity).remove::<Selected>();
-            }
+        // Remove any existing selections as right click was pressed
+        for selected_entity in selected_query.iter() {
+            commands.entity(selected_entity).remove::<Selected>();
+        }
 
-            // Then try to select a new entity
-            if let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) {
+        if let Some(screen_pos) = q_window.single().cursor_position() {
+            let (camera, _) = q_camera.single();
+            if let Ok(ray) = camera.viewport_to_world(q_camera.single().1, screen_pos) {
                 let distance = -ray.origin.z / ray.direction.z;
                 let world_pos = ray.origin + ray.direction * distance;
 
-                for (entity, transform, _) in query.iter_mut() {
-                    let sprite_size = Vec2::new(50.0, 50.0);
-                    let half_extents = sprite_size / 2.0;
-
-                    let local_point = transform
-                        .compute_matrix()
-                        .inverse()
-                        .transform_point3(world_pos);
-                    let local_point_2d = Vec2::new(local_point.x, local_point.y);
-
-                    if local_point_2d.x >= -half_extents.x
-                        && local_point_2d.x <= half_extents.x
-                        && local_point_2d.y >= -half_extents.y
-                        && local_point_2d.y <= half_extents.y
-                    {
-                        // Calculate offset for smooth dragging
-                        let offset = transform.translation.truncate() - world_pos.truncate();
-
-                        // Add the Selected component
-                        commands.entity(entity).insert(Selected { offset });
-                        info!("Selected gate entity: {:?}", entity);
-                        break; // Only select one entity
-                    }
+                // Check for entity under cursor
+                if let Some((entity, offset)) =
+                    find_entity_at_position(world_pos.truncate(), &grid, &query)
+                {
+                    commands.entity(entity).insert(Selected { offset });
+                    info!("Selected gate entity: {:?}", entity);
                 }
             }
         }
@@ -202,11 +211,12 @@ pub fn draw_connections_system(
                 "Drawing connection from {:?} to {:?}",
                 connection.source, connection.target
             );
+
             // Create a line entity
             commands.spawn((
                 Sprite {
                     color: Color::WHITE,
-                    custom_size: Some(Vec2::new(distance, 8.0)), // Line with thickness of 2 pixels
+                    custom_size: Some(Vec2::new(distance, 2.0)), // Line with thickness of 2 pixels
                     ..Default::default()
                 },
                 Transform {
@@ -269,7 +279,6 @@ pub fn update_inputs_on_left_click(
     q_camera: Query<(&Camera, &GlobalTransform)>,
     mut simulation: ResMut<Simulation>,
     mut query: Query<(Entity, &Transform, &GateComponent)>,
-    mut commands: Commands,
 ) {
     let (camera, camera_transform) = q_camera.single();
     let window = q_window.single();
@@ -314,5 +323,98 @@ pub fn update_inputs_on_left_click(
                 }
             }
         }
+    }
+}
+
+// Define a 2D grid for spatial partitioning
+#[derive(Resource, Default)]
+pub struct SpatialGrid {
+    // Map from grid cell to entities in that cell
+    cells: HashMap<(i32, i32), Vec<Entity>>,
+    // Cell size for the grid
+    cell_size: f32,
+}
+
+impl SpatialGrid {
+    pub fn new(cell_size: f32) -> Self {
+        SpatialGrid {
+            cells: HashMap::new(),
+            cell_size,
+        }
+    }
+
+    // Convert world position to grid cell
+    fn get_cell(&self, position: Vec2) -> (i32, i32) {
+        (
+            (position.x / self.cell_size).floor() as i32,
+            (position.y / self.cell_size).floor() as i32,
+        )
+    }
+
+    // Add entity to the grid
+    pub fn insert(&mut self, entity: Entity, position: Vec2) {
+        let cell = self.get_cell(position);
+        self.cells.entry(cell).or_default().push(entity);
+    }
+
+    // Remove entity from the grid
+    pub fn remove(&mut self, entity: Entity, position: Vec2) {
+        let cell = self.get_cell(position);
+        if let Some(entities) = self.cells.get_mut(&cell) {
+            entities.retain(|&e| e != entity);
+        }
+    }
+
+    // Update entity position in the grid
+    pub fn update(&mut self, entity: Entity, old_pos: Vec2, new_pos: Vec2) {
+        self.remove(entity, old_pos);
+        self.insert(entity, new_pos);
+    }
+
+    // Query entities near a position
+    pub fn query_near(&self, position: Vec2, radius: f32) -> Vec<Entity> {
+        let mut result = Vec::new();
+        let cell = self.get_cell(position);
+
+        // Calculate how many cells we need to check based on radius
+        let cell_radius = (radius / self.cell_size).ceil() as i32;
+
+        // Check nearby cells
+        for i in -cell_radius..=cell_radius {
+            for j in -cell_radius..=cell_radius {
+                let query_cell = (cell.0 + i, cell.1 + j);
+                if let Some(entities) = self.cells.get(&query_cell) {
+                    result.extend(entities);
+                }
+            }
+        }
+
+        result
+    }
+
+    // Clear the grid
+    pub fn clear(&mut self) {
+        self.cells.clear();
+    }
+}
+
+pub fn update_spatial_grid_system(
+    mut grid: ResMut<SpatialGrid>,
+    query: Query<(Entity, &Transform, &GateComponent), Changed<Transform>>,
+) {
+    for (entity, transform, gate) in query.iter() {
+        grid.update(entity, gate.position, transform.translation.truncate());
+    }
+}
+
+// System to initialize or rebuild the grid
+pub fn rebuild_spatial_grid_system(
+    mut commands: Commands,
+    mut grid: ResMut<SpatialGrid>,
+    query: Query<(Entity, &Transform, &GateComponent)>,
+) {
+    grid.clear();
+    for (entity, transform, _) in query.iter() {
+        grid.insert(entity, transform.translation.truncate());
     }
 }

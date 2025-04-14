@@ -7,7 +7,7 @@ use sim_core::gates::*;
 mod systems;
 use systems::*;
 
-const SIMULATION_TICK_RATE: f64 = 0.1; // 1 s
+const SIMULATION_TICK_RATE: f64 = 0.001; // 1 s
 
 pub const CONNECTION_Z_LEVEL: f32 = 10.0;
 
@@ -16,6 +16,7 @@ pub struct Simulation {
     circuit: Circuit,
 }
 
+#[derive(Resource)]
 pub struct Config {}
 
 #[derive(Component)]
@@ -55,14 +56,6 @@ impl Simulation {
     fn tick(&mut self) {
         self.circuit.tick().expect("Tick failed in main loop");
     }
-
-    fn set_input(&mut self, gate_id: GateId, value: bool) {
-        if let Some(gate) = self.circuit.gates.get_mut(gate_id.0) {
-            if let GateType::Input = gate.gate_type {
-                gate.output = Some(value);
-            }
-        }
-    }
 }
 
 fn main() {
@@ -71,10 +64,18 @@ fn main() {
         .add_plugins(DefaultPlugins)
         // Insert our simulation as a resource
         .insert_resource(Simulation::new())
+        .insert_resource(Config {})
+        .insert_resource(SpatialGrid::new(100.0))
         // Register startup and update systems
         .add_systems(
             Startup,
-            (setup_system, draw_gates_system, draw_connections_system).chain(),
+            (
+                setup_system,
+                draw_gates_system,
+                draw_connections_system,
+                rebuild_spatial_grid_system,
+            )
+                .chain(),
         )
         .add_systems(FixedUpdate, simulation_update_system)
         .insert_resource(Time::<Fixed>::from_seconds(SIMULATION_TICK_RATE)) // Set the tick rate of the simulation
@@ -83,10 +84,11 @@ fn main() {
             Update,
             (
                 update_input_colours_system,
-                update_inputs_on_left_click,
-                interaction_system,
+                gate_selection_system,
                 drag_selected_system,
                 update_connections_system,
+                update_spatial_grid_system,
+                update_inputs_on_left_click,
             )
                 .chain(),
         )
