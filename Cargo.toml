@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.15.3"
-serde = { version = "1.0.219", features = ["derive"] }
+bevy_egui = "0.33.0"
 sim_core = { path = "crates/sim_core" }
 
 [workspace]

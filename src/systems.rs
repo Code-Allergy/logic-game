@@ -1,5 +1,5 @@
-use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use bevy::{prelude::*, sprite};
 use sim_core::gates::{GateId, GateType};
 use std::collections::HashMap;
 
@@ -14,30 +14,42 @@ pub fn simulation_update_system(mut simulation: ResMut<Simulation>) {
     simulation.tick();
 }
 
-pub fn draw_gates_system(simulation: Res<Simulation>, mut commands: Commands) {
+pub fn draw_gates_system(
+    simulation: Res<Simulation>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+) {
     // Iterate over the gates in the circuit. (You might need to make gates field public or provide a getter.)
     for gate in simulation.circuit.gates.iter() {
+        let texture_handle: Handle<Image> = asset_server.load("sprites/gates/test-sprite-0.png");
+        let inner_texture_handle: Handle<Image> = asset_server.load("sprites/gates/inner.png");
+
         // Procedurally position each gate based on its id (this is just a demo strategy).
-        let x = (gate.id.0 as f32) * 120.0 - 300.0;
+        let x = (gate.id.0 as f32) * 50.0 - 300.0;
         let y = 0.0;
 
         // Choose a color based on the gate type.
         let color = match gate.gate_type {
-            GateType::And => Color::srgb(0.0, 200.0, 150.0),
+            GateType::And => Color::srgb(0.0, 0.6, 0.3),
             GateType::Or => Color::srgb(255.0, 255.0, 0.0),
-            GateType::Not => Color::srgb(0.0, 255.0, 255.0),
+            GateType::Not => Color::srgb(0.0, 0.1, 0.5),
             GateType::Input => Color::srgb(0.0, 0.0, 255.0),
             GateType::Output => Color::srgb(255.0, 0.0, 255.0),
-            // Default for any other type.
             _ => Color::WHITE,
         };
 
+        // let sprite = if GateType::Input == gate.gate_type {
+        //     Sprite::from_image(texture_handle)
+        // } else {
+        let sprite = Sprite {
+            color,
+            custom_size: Some(Vec2::new(50.0, 50.0)),
+            ..Default::default()
+        };
+        // };
+
         commands.spawn((
-            Sprite {
-                color,
-                custom_size: Some(Vec2::new(50.0, 50.0)),
-                ..Default::default()
-            },
+            sprite,
             Transform::from_xyz(x, y, 0.0),
             GateComponent {
                 id: gate.id,
@@ -128,8 +140,8 @@ pub fn gate_selection_system(
         }
 
         if let Some(screen_pos) = q_window.single().cursor_position() {
-            let (camera, _) = q_camera.single();
-            if let Ok(ray) = camera.viewport_to_world(q_camera.single().1, screen_pos) {
+            let (camera, global_transform) = q_camera.single();
+            if let Ok(ray) = camera.viewport_to_world(global_transform, screen_pos) {
                 let distance = -ray.origin.z / ray.direction.z;
                 let world_pos = ray.origin + ray.direction * distance;
 
