@@ -7,7 +7,7 @@ use sim_core::gates::*;
 mod systems;
 use systems::*;
 
-const SIMULATION_TICK_RATE: f64 = 1.0; // 1 s
+const SIMULATION_TICK_RATE: f64 = 0.1; // 1 s
 
 pub const CONNECTION_Z_LEVEL: f32 = 10.0;
 
@@ -15,6 +15,8 @@ pub const CONNECTION_Z_LEVEL: f32 = 10.0;
 pub struct Simulation {
     circuit: Circuit,
 }
+
+pub struct Config {}
 
 #[derive(Component)]
 struct MainCamera;
@@ -39,9 +41,9 @@ struct Selected {
 impl Simulation {
     fn new() -> Self {
         let mut circuit = Circuit::new();
-        circuit.add_gate(Gate::new_input(GateId(0), Some(false)));
+        circuit.add_gate(Gate::new_input(GateId(0), Some(true)));
         circuit.add_gate(Gate::new_output(GateId(1)));
-        circuit.add_gate(Gate::new_or(GateId(2)));
+        circuit.add_gate(Gate::new_and(GateId(2)));
         circuit.add_gate(Gate::new_input(GateId(3), Some(false)));
         circuit.add_connection(GateId(0), GateId(2), 0);
         circuit.add_connection(GateId(3), GateId(2), 1);
@@ -52,6 +54,14 @@ impl Simulation {
     // might be good to delegate to async task if we can split stuff up, that way we can simulate multiple circuits at once
     fn tick(&mut self) {
         self.circuit.tick().expect("Tick failed in main loop");
+    }
+
+    fn set_input(&mut self, gate_id: GateId, value: bool) {
+        if let Some(gate) = self.circuit.gates.get_mut(gate_id.0) {
+            if let GateType::Input = gate.gate_type {
+                gate.output = Some(value);
+            }
+        }
     }
 }
 
@@ -72,6 +82,8 @@ fn main() {
         .add_systems(
             Update,
             (
+                update_input_colours_system,
+                update_inputs_on_left_click,
                 interaction_system,
                 drag_selected_system,
                 update_connections_system,

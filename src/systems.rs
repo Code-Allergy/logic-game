@@ -1,4 +1,3 @@
-use bevy::input::mouse::MouseButtonInput;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use sim_core::gates::{GateId, GateType};
@@ -11,9 +10,7 @@ pub fn setup_system(mut commands: Commands) {
 }
 
 pub fn simulation_update_system(mut simulation: ResMut<Simulation>) {
-    // Call the tick method on your simulation resource
     simulation.tick();
-    println!("Simulation ticked!");
 }
 
 pub fn draw_gates_system(simulation: Res<Simulation>, mut commands: Commands) {
@@ -25,9 +22,9 @@ pub fn draw_gates_system(simulation: Res<Simulation>, mut commands: Commands) {
 
         // Choose a color based on the gate type.
         let color = match gate.gate_type {
-            GateType::And => Color::srgb(0.0, 255.0, 0.0),
+            GateType::And => Color::srgb(0.0, 200.0, 150.0),
             GateType::Or => Color::srgb(255.0, 255.0, 0.0),
-            GateType::Not => Color::srgb(255.0, 0.0, 0.0),
+            GateType::Not => Color::srgb(0.0, 255.0, 255.0),
             GateType::Input => Color::srgb(0.0, 0.0, 255.0),
             GateType::Output => Color::srgb(255.0, 0.0, 255.0),
             // Default for any other type.
@@ -49,6 +46,35 @@ pub fn draw_gates_system(simulation: Res<Simulation>, mut commands: Commands) {
     }
 }
 
+pub fn update_input_colours_system(
+    simulation: Res<Simulation>,
+    mut query: Query<(&mut Sprite, &GateComponent)>,
+) {
+    for (mut sprite, gate_component) in query.iter_mut() {
+        // Get the gate from the simulation
+        if let Some(gate) = simulation.circuit.gates.get(gate_component.id.0) {
+            // Check if the gate is an input
+            if gate.gate_type == GateType::Input {
+                // Update the color based on the gate's input value
+                let color = if gate.inputs[0].unwrap_or(false) {
+                    Color::srgb(0.0, 255.0, 0.0)
+                } else {
+                    Color::srgb(255.0, 0.0, 0.0)
+                };
+                sprite.color = color;
+            } else if gate.gate_type == GateType::Output {
+                // Update the color based on the gate's output value
+                let color = if gate.output.unwrap_or(false) {
+                    Color::srgb(255.0, 255.0, 255.0)
+                } else {
+                    Color::srgb(0.0, 0.0, 0.0)
+                };
+                sprite.color = color;
+            }
+        }
+    }
+}
+
 pub fn interaction_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
@@ -61,7 +87,7 @@ pub fn interaction_system(
     let window = q_window.single();
 
     // Handle deselection first - if mouse released, remove all selections
-    if mouse_button_input.just_released(MouseButton::Left) {
+    if mouse_button_input.just_released(MouseButton::Right) {
         for entity in selected_query.iter() {
             commands.entity(entity).remove::<Selected>();
         }
@@ -69,7 +95,7 @@ pub fn interaction_system(
     }
 
     // Handle selection if mouse is clicked
-    if mouse_button_input.just_pressed(MouseButton::Left) {
+    if mouse_button_input.just_pressed(MouseButton::Right) {
         if let Some(screen_pos) = window.cursor_position() {
             // First remove any existing selections
             for entity in selected_query.iter() {
@@ -117,7 +143,7 @@ pub fn drag_selected_system(
     mouse_button_input: Res<ButtonInput<MouseButton>>,
 ) {
     // Only process if left mouse is still held down
-    if !mouse_button_input.pressed(MouseButton::Left) {
+    if !mouse_button_input.pressed(MouseButton::Right) {
         return;
     }
 
@@ -233,6 +259,60 @@ pub fn update_connections_system(
             transform.translation.z = CONNECTION_Z_LEVEL;
             transform.rotation = Quat::from_rotation_arc(Vec3::X, direction);
             sprite.custom_size = Some(Vec2::new(distance, 2.0));
+        }
+    }
+}
+
+pub fn update_inputs_on_left_click(
+    q_window: Query<&Window, With<PrimaryWindow>>,
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
+    q_camera: Query<(&Camera, &GlobalTransform)>,
+    mut simulation: ResMut<Simulation>,
+    mut query: Query<(Entity, &Transform, &GateComponent)>,
+    mut commands: Commands,
+) {
+    let (camera, camera_transform) = q_camera.single();
+    let window = q_window.single();
+
+    // Handle selection if mouse is clicked
+    if mouse_button_input.just_pressed(MouseButton::Left) {
+        if let Some(screen_pos) = window.cursor_position() {
+            // Then try to select a new entity
+            if let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) {
+                let distance = -ray.origin.z / ray.direction.z;
+                let world_pos = ray.origin + ray.direction * distance;
+
+                for (entity, transform, gate_component) in query.iter_mut() {
+                    let sprite_size = Vec2::new(50.0, 50.0);
+                    let half_extents = sprite_size / 2.0;
+
+                    let local_point = transform
+                        .compute_matrix()
+                        .inverse()
+                        .transform_point3(world_pos);
+                    let local_point_2d = Vec2::new(local_point.x, local_point.y);
+
+                    if local_point_2d.x >= -half_extents.x
+                        && local_point_2d.x <= half_extents.x
+                        && local_point_2d.y >= -half_extents.y
+                        && local_point_2d.y <= half_extents.y
+                    {
+                        // Get the gate ID from the component
+                        let gate_id = gate_component.id;
+
+                        // Check if the gate is an input
+                        if simulation.circuit.gates[gate_id.0].gate_type == GateType::Input {
+                            // Toggle the input value
+                            let current_value =
+                                simulation.circuit.gates[gate_id.0].inputs[0].unwrap_or(false);
+                            let new_value = !current_value;
+                            simulation.circuit.set_input(gate_id, new_value);
+                            info!("Toggled input gate entity to {}: {:?}", new_value, entity);
+                        }
+                        break; // Only select one entity
+                    }
+                }
+            }
         }
     }
 }
