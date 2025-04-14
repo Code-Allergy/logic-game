@@ -1,34 +1,24 @@
-use std::collections::HashMap;
+use sim_core::gates::GateId;
 
 fn main() {
-    println!("Hello, world!");
+    let mut circuit = sim_core::circuits::Circuit::new();
+    let gate1 = sim_core::gates::Gate::new_input(sim_core::gates::GateId(0), Some(true));
+    let gate2 = sim_core::gates::Gate::new_input(sim_core::gates::GateId(1), Some(false));
+    let gate3 = sim_core::gates::Gate::new_or(sim_core::gates::GateId(2));
+    let gate4 = sim_core::gates::Gate::new_output(sim_core::gates::GateId(3));
 
-    // let input_gate1 = sim_core::Gate::new_input(sim_core::GateId(0), false);
-    // let input_gate2 = sim_core::Gate::new_input(sim_core::GateId(1), false);
-    // let output_gate = sim_core::Gate::new_output(sim_core::GateId(2));
+    circuit.add_gate(gate1);
+    circuit.add_gate(gate2);
+    circuit.add_gate(gate3);
+    circuit.add_gate(gate4);
 
-    // let or_gate = sim_core::Gate::new_or(sim_core::GateId(3), input_gate1.id, input_gate2.id);
+    circuit.add_connection(sim_core::gates::GateId(0), sim_core::gates::GateId(2), 0);
+    circuit.add_connection(sim_core::gates::GateId(1), sim_core::gates::GateId(2), 1);
+    circuit.add_connection(sim_core::gates::GateId(2), sim_core::gates::GateId(3), 0);
 
-    // let mut circuit = sim_core::Circuit::new();
-    // // Store the IDs first
-    // let input_id1 = input_gate1.id;
-    // let input_id2 = input_gate2.id;
-    // let output_id = output_gate.id;
-    // let or_id = or_gate.id;
+    circuit.tick().expect("Tick failed");
+    assert!(circuit.gates[3].output == Some(true));
+    assert!(circuit.read_output(GateId(3)) == Some(true));
 
-    // // Move the gates
-    // circuit.add_gate(input_gate1);
-    // circuit.add_gate(input_gate2);
-    // circuit.add_gate(output_gate);
-    // circuit.add_gate(or_gate);
-
-    // circuit.add_connection(input_id1, or_id, 0);
-    // circuit.add_connection(input_id2, or_id, 1);
-    // circuit.add_connection(or_id, output_id, 0);
-
-    // let topo = circuit.topological_sort();
-    // dbg!(&topo);
-    // dbg!(&circuit);
-    // circuit.tick();
-    // dbg!(&circuit);
+    println!("Hello, world! Ticked once!");
 }

@@ -7,3 +7,8 @@ edition = "2024"
 bevy = "0.15.3"
 serde = { version = "1.0.219", features = ["derive"] }
 sim_core = { path = "crates/sim_core" }
+
+[workspace]
+members = [
+    "crates/sim_core"
+]

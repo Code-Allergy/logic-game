@@ -1,4 +1,5 @@
-use super::*;
+use super::circuits::*;
+use super::gates::*;
 
 #[test]
 fn test_compute_gate_logic_and() {
