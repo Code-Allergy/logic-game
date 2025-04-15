@@ -1,6 +1,6 @@
 use bevy::window::PrimaryWindow;
 use bevy::{prelude::*, sprite};
-use sim_core::gates::{GateId, GateType};
+use sim_core::{GateId, GateType};
 use std::collections::HashMap;
 
 use crate::{CONNECTION_Z_LEVEL, ConnectionLine, GateComponent, MainCamera, Selected, Simulation};
@@ -20,16 +20,16 @@ pub fn draw_gates_system(
     asset_server: Res<AssetServer>,
 ) {
     // Iterate over the gates in the circuit. (You might need to make gates field public or provide a getter.)
-    for gate in simulation.circuit.gates.iter() {
+    for (gate_id, gate) in simulation.circuit.components.iter() {
         let texture_handle: Handle<Image> = asset_server.load("sprites/gates/test-sprite-0.png");
         let inner_texture_handle: Handle<Image> = asset_server.load("sprites/gates/inner.png");
 
         // Procedurally position each gate based on its id (this is just a demo strategy).
-        let x = (gate.id.gate_id.0 as f32) * 50.0 - 300.0;
+        let x = 300.0;
         let y = 0.0;
 
         // Choose a color based on the gate type.
-        let color = match gate.gate_type {
+        let color = match gate.get_type() {
             GateType::And => Color::srgb(0.0, 0.6, 0.3),
             GateType::Or => Color::srgb(255.0, 255.0, 0.0),
             GateType::Not => Color::srgb(0.0, 0.1, 0.5),
@@ -52,7 +52,7 @@ pub fn draw_gates_system(
             sprite,
             Transform::from_xyz(x, y, 0.0),
             GateComponent {
-                id: gate.id.gate_id,
+                id: *gate_id,
                 position: Vec2::new(x, y),
             },
         ));
@@ -65,19 +65,19 @@ pub fn update_input_colours_system(
 ) {
     for (mut sprite, gate_component) in query.iter_mut() {
         // Get the gate from the simulation
-        if let Some(gate) = simulation.circuit.gates.get(gate_component.id.0) {
+        if let Some(component) = simulation.circuit.components.get(&gate_component.id) {
             // Check if the gate is an input
-            if gate.gate_type == GateType::Input {
+            if component.get_type() == GateType::Input {
                 // Update the color based on the gate's input value
-                let color = if gate.inputs[0].unwrap_or(false) {
+                let color = if component.get_input(0).unwrap_or(false) {
                     Color::srgb(0.0, 255.0, 0.0)
                 } else {
                     Color::srgb(255.0, 0.0, 0.0)
                 };
                 sprite.color = color;
-            } else if gate.gate_type == GateType::Output {
+            } else if component.get_type() == GateType::Output {
                 // Update the color based on the gate's output value
-                let color = if gate.output.unwrap_or(false) {
+                let color = if component.get_output(0).unwrap_or(false) {
                     Color::srgb(255.0, 255.0, 255.0)
                 } else {
                     Color::srgb(0.0, 0.0, 0.0)
@@ -204,8 +204,8 @@ pub fn draw_connections_system(
     // Second pass: create connection lines for each connection in the circuit
     for connection in simulation.circuit.connections.iter() {
         if let (Some(from_pos), Some(to_pos)) = (
-            gate_positions.get(&GateId(connection.source)),
-            gate_positions.get(&GateId(connection.target)),
+            gate_positions.get(&connection.source),
+            gate_positions.get(&connection.target),
         ) {
             // Calculate the mid point between the two gates
             let mid_point = (*from_pos + *to_pos) / 2.0;
@@ -237,8 +237,8 @@ pub fn draw_connections_system(
                     scale: Vec3::ONE,
                 },
                 ConnectionLine {
-                    from_gate: GateId(connection.source),
-                    to_gate: GateId(connection.target),
+                    from_gate: connection.source,
+                    to_gate: connection.target,
                 },
             ));
         }
@@ -321,14 +321,16 @@ pub fn update_inputs_on_left_click(
                         // Get the gate ID from the component
                         let gate_id = gate_component.id;
 
-                        // Check if the gate is an input
-                        if simulation.circuit.gates[gate_id.0].gate_type == GateType::Input {
-                            // Toggle the input value
-                            let current_value =
-                                simulation.circuit.gates[gate_id.0].inputs[0].unwrap_or(false);
-                            let new_value = !current_value;
-                            simulation.circuit.set_input(gate_id, new_value);
-                            info!("Toggled input gate entity to {}: {:?}", new_value, entity);
+                        // Get a mutable reference to the gate
+                        if let Some(gate) = simulation.circuit.components.get_mut(&gate_id) {
+                            // Check if the gate is an input
+                            if gate.get_type() == GateType::Input {
+                                // Toggle the input value
+                                let current_value = gate.get_input(0).unwrap_or(false);
+                                let new_value = !current_value;
+                                gate.set_input(0, Some(new_value));
+                                info!("Toggled input gate entity to {}: {:?}", new_value, entity);
+                            }
                         }
                         break; // Only select one entity
                     }

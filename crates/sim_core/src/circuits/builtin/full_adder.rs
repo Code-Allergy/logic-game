@@ -1,5 +1,4 @@
-use crate::circuits::GateTrait;
-use crate::circuits::{Circuit, CircuitTemplate};
+use crate::{Circuit, CircuitTemplate, GateTrait};
 
 // A full adder template that produces a circuit with three inputs (A, B, Cin)
 // and two outputs (Sum and Carry).

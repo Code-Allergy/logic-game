@@ -1,5 +1,4 @@
-use crate::circuits::GateTrait;
-use crate::circuits::{Circuit, CircuitTemplate};
+use crate::{Circuit, CircuitTemplate, GateTrait};
 
 /// A half-adder template.
 ///

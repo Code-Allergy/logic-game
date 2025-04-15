@@ -1,4 +1,4 @@
-use crate::circuits::{Circuit, CircuitTemplate, GateTrait};
+use crate::{Circuit, CircuitTemplate, GateTrait};
 
 /// A simple 2-to-1 multiplexer circuit template.
 /// This circuit takes two data inputs (D0 and D1) and a select input (S).

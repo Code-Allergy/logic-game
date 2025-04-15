@@ -1,44 +1,9 @@
 use uuid::Uuid;
 
-use crate::circuits::PortId;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum GateType {
-    // Special gates
-    Input,     // Input gate, constant value
-    InputPin,  // Input port, value is set externally via a connection
-    Output,    // Output gate, value is read internally
-    OutputPin, // Output port, value is read externally via a connection
-
-    // Binary gates
-    Or,
-    And,
-
-    // Unary gates
-    Not,
-    Identity,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GateId(pub usize);
-
-#[derive(Debug)]
-pub struct Gate {
-    pub id: PortId,
-    pub gate_type: GateType,
-    pub inputs: Vec<Option<bool>>,
-    pub output: Option<bool>,
-}
-
-#[derive(Debug)]
-pub struct Connection {
-    pub source: usize,
-    pub target: usize,
-    pub target_input: usize, // ID of the pin on the target gate
-}
+use crate::{ComponentId, Connection, Gate, GateType, PinId, PortId};
 
 impl Connection {
-    pub fn new(source: usize, target: usize, target_input: usize) -> Self {
+    pub fn new(source: ComponentId, target: ComponentId, target_input: PinId) -> Self {
         Connection {
             source,
             target,
@@ -50,7 +15,6 @@ impl Connection {
 impl Gate {
     pub fn new(
         circuit_id: Uuid,
-        gate_id: GateId,
         gate_type: GateType,
         inputs: Vec<Option<bool>>,
         output: Option<bool>,
@@ -58,7 +22,7 @@ impl Gate {
         Gate {
             id: PortId {
                 circuit_id,
-                gate_id,
+                gate_id: Uuid::new_v4(),
             },
             gate_type,
             inputs,
@@ -66,32 +30,32 @@ impl Gate {
         }
     }
 
-    pub fn new_input(circuit_id: Uuid, id: GateId, initial_value: Option<bool>) -> Self {
-        Gate::new(circuit_id, id, GateType::Input, vec![initial_value], None)
+    pub fn new_input(circuit_id: Uuid, initial_value: Option<bool>) -> Self {
+        Gate::new(circuit_id, GateType::Input, vec![initial_value], None)
     }
 
-    pub fn new_output(circuit_id: Uuid, id: GateId) -> Self {
-        Gate::new(circuit_id, id, GateType::Output, vec![None], None)
+    pub fn new_output(circuit_id: Uuid) -> Self {
+        Gate::new(circuit_id, GateType::Output, vec![None], None)
     }
 
-    pub fn new_or(circuit_id: Uuid, id: GateId) -> Self {
-        Gate::new(circuit_id, id, GateType::Or, vec![None, None], None)
+    pub fn new_or(circuit_id: Uuid) -> Self {
+        Gate::new(circuit_id, GateType::Or, vec![None, None], None)
     }
 
-    pub fn new_and(circuit_id: Uuid, id: GateId) -> Self {
-        Gate::new(circuit_id, id, GateType::And, vec![None, None], None)
+    pub fn new_and(circuit_id: Uuid) -> Self {
+        Gate::new(circuit_id, GateType::And, vec![None, None], None)
     }
 
-    pub fn new_not(circuit_id: Uuid, id: GateId) -> Self {
-        Gate::new(circuit_id, id, GateType::Not, vec![None], None)
+    pub fn new_not(circuit_id: Uuid) -> Self {
+        Gate::new(circuit_id, GateType::Not, vec![None], None)
     }
 
-    pub fn new_identity(circuit_id: Uuid, id: GateId) -> Self {
-        Gate::new(circuit_id, id, GateType::Identity, vec![None], None)
+    pub fn new_identity(circuit_id: Uuid) -> Self {
+        Gate::new(circuit_id, GateType::Identity, vec![None], None)
     }
 }
 
-pub fn compute_gate_logic(gate_type: GateType, inputs: Vec<bool>) -> bool {
+pub fn compute_gate_logic(gate_type: GateType, inputs: &Vec<bool>) -> bool {
     debug_assert!(!inputs.is_empty(), "Inputs should not be empty");
 
     match gate_type {
@@ -102,7 +66,7 @@ pub fn compute_gate_logic(gate_type: GateType, inputs: Vec<bool>) -> bool {
                 "AND gate requires exactly 2 inputs, found: {}",
                 inputs.len()
             );
-            inputs.into_iter().all(|value| value)
+            inputs.into_iter().all(|value| *value)
         }
         GateType::Or => {
             debug_assert_eq!(
@@ -111,7 +75,7 @@ pub fn compute_gate_logic(gate_type: GateType, inputs: Vec<bool>) -> bool {
                 "OR gate requires exactly 2 inputs, found: {}",
                 inputs.len()
             );
-            inputs.into_iter().any(|value| value)
+            inputs.into_iter().any(|value| *value)
         }
         GateType::Identity => {
             debug_assert_eq!(
@@ -150,5 +114,6 @@ pub fn compute_gate_logic(gate_type: GateType, inputs: Vec<bool>) -> bool {
         GateType::OutputPin => {
             todo!("Output port logic not implemented yet")
         }
+        GateType::Circuit => todo!("Multi circuit logic not implemented yet"),
     }
 }
