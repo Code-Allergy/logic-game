@@ -1,10 +1,14 @@
+use uuid::Uuid;
+
+use crate::circuits::PortId;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GateType {
     // Special gates
-    Input,      // Input gate, constant value
-    InputPort,  // Input port, value is set externally via a connection
-    Output,     // Output gate, value is read internally
-    OutputPort, // Output port, value is read externally via a connection
+    Input,     // Input gate, constant value
+    InputPin,  // Input port, value is set externally via a connection
+    Output,    // Output gate, value is read internally
+    OutputPin, // Output port, value is read externally via a connection
 
     // Binary gates
     Or,
@@ -20,7 +24,7 @@ pub struct GateId(pub usize);
 
 #[derive(Debug)]
 pub struct Gate {
-    pub id: GateId,
+    pub id: PortId,
     pub gate_type: GateType,
     pub inputs: Vec<Option<bool>>,
     pub output: Option<bool>,
@@ -45,41 +49,45 @@ impl Connection {
 
 impl Gate {
     pub fn new(
-        id: usize,
+        circuit_id: Uuid,
+        gate_id: GateId,
         gate_type: GateType,
         inputs: Vec<Option<bool>>,
         output: Option<bool>,
     ) -> Self {
         Gate {
-            id: GateId(id),
+            id: PortId {
+                circuit_id,
+                gate_id,
+            },
             gate_type,
             inputs,
             output,
         }
     }
 
-    pub fn new_input(id: GateId, initial_value: Option<bool>) -> Self {
-        Gate::new(id.0, GateType::Input, vec![initial_value], None)
+    pub fn new_input(circuit_id: Uuid, id: GateId, initial_value: Option<bool>) -> Self {
+        Gate::new(circuit_id, id, GateType::Input, vec![initial_value], None)
     }
 
-    pub fn new_output(id: GateId) -> Self {
-        Gate::new(id.0, GateType::Output, vec![None], None)
+    pub fn new_output(circuit_id: Uuid, id: GateId) -> Self {
+        Gate::new(circuit_id, id, GateType::Output, vec![None], None)
     }
 
-    pub fn new_or(id: GateId) -> Self {
-        Gate::new(id.0, GateType::Or, vec![None, None], None)
+    pub fn new_or(circuit_id: Uuid, id: GateId) -> Self {
+        Gate::new(circuit_id, id, GateType::Or, vec![None, None], None)
     }
 
-    pub fn new_and(id: GateId) -> Self {
-        Gate::new(id.0, GateType::And, vec![None, None], None)
+    pub fn new_and(circuit_id: Uuid, id: GateId) -> Self {
+        Gate::new(circuit_id, id, GateType::And, vec![None, None], None)
     }
 
-    pub fn new_not(id: GateId) -> Self {
-        Gate::new(id.0, GateType::Not, vec![None], None)
+    pub fn new_not(circuit_id: Uuid, id: GateId) -> Self {
+        Gate::new(circuit_id, id, GateType::Not, vec![None], None)
     }
 
-    pub fn new_identity(id: GateId) -> Self {
-        Gate::new(id.0, GateType::Identity, vec![None], None)
+    pub fn new_identity(circuit_id: Uuid, id: GateId) -> Self {
+        Gate::new(circuit_id, id, GateType::Identity, vec![None], None)
     }
 }
 
@@ -136,10 +144,10 @@ pub fn compute_gate_logic(gate_type: GateType, inputs: Vec<bool>) -> bool {
             debug_assert_eq!(inputs.len(), 1, "Output gate requires exactly 1 input");
             inputs[0]
         }
-        GateType::InputPort => {
+        GateType::InputPin => {
             todo!("Input port logic not implemented yet")
         }
-        GateType::OutputPort => {
+        GateType::OutputPin => {
             todo!("Output port logic not implemented yet")
         }
     }

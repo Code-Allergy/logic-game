@@ -1,8 +1,9 @@
 use bevy::input::mouse::MouseButtonInput;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::{egui, EguiContexts};
 use bevy_egui::{EguiContext, EguiPlugin};
+use bevy_egui::{EguiContexts, egui};
+use sim_core::circuits::builtin::{FullAdderTemplate, HalfAdderTemplate};
 use sim_core::circuits::*;
 use sim_core::gates::*;
 
@@ -48,56 +49,58 @@ struct Selected {
 
 impl Simulation {
     fn new() -> Self {
-        let mut circuit = Circuit::new();
+        let mut circuit = FullAdderTemplate::template();
+        circuit.set_input_pin(0, true);
+        circuit.set_input_pin(1, false);
+        circuit.set_input_pin(2, false);
+        // // Create input gates for data and select
+        // let d0_gate = Gate::new_input(GateId(0), Some(false)); // Data input D0
+        // let d1_gate = Gate::new_input(GateId(1), Some(false)); // Data input D1
+        // let s_gate = Gate::new_input(GateId(2), Some(false)); // Select input S
 
-        // Create input gates for data and select
-        let d0_gate = Gate::new_input(GateId(0), Some(false)); // Data input D0
-        let d1_gate = Gate::new_input(GateId(1), Some(false)); // Data input D1
-        let s_gate = Gate::new_input(GateId(2), Some(false)); // Select input S
+        // // Create a NOT gate to invert S
+        // let not_gate = Gate::new_not(GateId(3));
 
-        // Create a NOT gate to invert S
-        let not_gate = Gate::new_not(GateId(3));
+        // // Create two AND gates:
+        // // one for (NOT S AND D0) and one for (S AND D1)
+        // let and_gate_left = Gate::new_and(GateId(4)); // (NOT S) AND D0
+        // let and_gate_right = Gate::new_and(GateId(5)); // S AND D1
 
-        // Create two AND gates:
-        // one for (NOT S AND D0) and one for (S AND D1)
-        let and_gate_left = Gate::new_and(GateId(4)); // (NOT S) AND D0
-        let and_gate_right = Gate::new_and(GateId(5)); // S AND D1
+        // // Create an OR gate to combine the AND outputs
+        // let or_gate = Gate::new_or(GateId(6));
 
-        // Create an OR gate to combine the AND outputs
-        let or_gate = Gate::new_or(GateId(6));
+        // // Create an output gate to observe the final output.
+        // let output_gate = Gate::new_output(GateId(7));
 
-        // Create an output gate to observe the final output.
-        let output_gate = Gate::new_output(GateId(7));
+        // // Add all the gates to the circuit
+        // circuit.add_gate(d0_gate);
+        // circuit.add_gate(d1_gate);
+        // circuit.add_gate(s_gate);
+        // circuit.add_gate(not_gate);
+        // circuit.add_gate(and_gate_left);
+        // circuit.add_gate(and_gate_right);
+        // circuit.add_gate(or_gate);
+        // circuit.add_gate(output_gate);
 
-        // Add all the gates to the circuit
-        circuit.add_gate(d0_gate);
-        circuit.add_gate(d1_gate);
-        circuit.add_gate(s_gate);
-        circuit.add_gate(not_gate);
-        circuit.add_gate(and_gate_left);
-        circuit.add_gate(and_gate_right);
-        circuit.add_gate(or_gate);
-        circuit.add_gate(output_gate);
+        // // Build the multiplexer connections:
+        // //
+        // // Invert the select signal:
+        // circuit.add_connection(GateId(2), GateId(3), 0); // S -> NOT
 
-        // Build the multiplexer connections:
-        //
-        // Invert the select signal:
-        circuit.add_connection(GateId(2), GateId(3), 0); // S -> NOT
+        // // Left AND gate for (NOT S AND D0)
+        // circuit.add_connection(GateId(0), GateId(4), 0); // D0 -> left AND input 0
+        // circuit.add_connection(GateId(3), GateId(4), 1); // NOT S -> left AND input 1
 
-        // Left AND gate for (NOT S AND D0)
-        circuit.add_connection(GateId(0), GateId(4), 0); // D0 -> left AND input 0
-        circuit.add_connection(GateId(3), GateId(4), 1); // NOT S -> left AND input 1
+        // // Right AND gate for (S AND D1)
+        // circuit.add_connection(GateId(2), GateId(5), 0); // S -> right AND input 0
+        // circuit.add_connection(GateId(1), GateId(5), 1); // D1 -> right AND input 1
 
-        // Right AND gate for (S AND D1)
-        circuit.add_connection(GateId(2), GateId(5), 0); // S -> right AND input 0
-        circuit.add_connection(GateId(1), GateId(5), 1); // D1 -> right AND input 1
+        // // OR gate combines both AND outputs:
+        // circuit.add_connection(GateId(4), GateId(6), 0); // left AND -> OR input 0
+        // circuit.add_connection(GateId(5), GateId(6), 1); // right AND -> OR input 1
 
-        // OR gate combines both AND outputs:
-        circuit.add_connection(GateId(4), GateId(6), 0); // left AND -> OR input 0
-        circuit.add_connection(GateId(5), GateId(6), 1); // right AND -> OR input 1
-
-        // Connect OR output to the final output gate
-        circuit.add_connection(GateId(6), GateId(7), 0);
+        // // Connect OR output to the final output gate
+        // circuit.add_connection(GateId(6), GateId(7), 0);
         Simulation { circuit }
     }
 

@@ -25,7 +25,7 @@ pub fn draw_gates_system(
         let inner_texture_handle: Handle<Image> = asset_server.load("sprites/gates/inner.png");
 
         // Procedurally position each gate based on its id (this is just a demo strategy).
-        let x = (gate.id.0 as f32) * 50.0 - 300.0;
+        let x = (gate.id.gate_id.0 as f32) * 50.0 - 300.0;
         let y = 0.0;
 
         // Choose a color based on the gate type.
@@ -52,7 +52,7 @@ pub fn draw_gates_system(
             sprite,
             Transform::from_xyz(x, y, 0.0),
             GateComponent {
-                id: gate.id,
+                id: gate.id.gate_id,
                 position: Vec2::new(x, y),
             },
         ));
