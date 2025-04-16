@@ -24,11 +24,12 @@ pub fn draw_gates_system(simulation: Res<Simulation>, mut commands: Commands) {
         // Choose a color based on the gate type.
         let color = match gate.get_type() {
             GateType::And => Color::srgb(0.0, 0.6, 0.3),
-            GateType::Or => Color::srgb(255.0, 255.0, 0.0),
+            GateType::Or => Color::srgb(1.0, 1.0, 0.0),
             GateType::Not => Color::srgb(0.0, 0.1, 0.5),
             GateType::Input => Color::srgb(0.0, 0.0, 0.0),
             GateType::Output => Color::srgb(0.0, 0.0, 0.0),
             GateType::Circuit => Color::srgb(0.1, 0.5, 0.3),
+            GateType::Oscillator => Color::srgb(0.5, 0.1, 0.3),
             _ => Color::WHITE,
         };
 

@@ -97,6 +97,9 @@ pub enum GateType {
     Output,    // Output gate, value is read internally
     OutputPin, // Output port, value is read externally via a connection
 
+    // Oscillator
+    Oscillator,
+
     // Circuit gate (collection of gates)
     Circuit,
 
@@ -128,8 +131,15 @@ pub struct Circuit {
 pub struct Gate {
     pub id: PortId,
     pub gate_type: GateType,
+    pub gate_data: GateData,
     pub inputs: Vec<Option<bool>>,
     pub output: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum GateData {
+    Oscillator { frequency: usize, tick: usize },
+    None,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]

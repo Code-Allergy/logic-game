@@ -187,7 +187,8 @@ impl Circuit {
             let outputs = match component {
                 LogicComponent::Gate(gate) => {
                     let input_bools: Vec<bool> = inputs.iter().map(|&v| v.unwrap()).collect();
-                    let output = compute_gate_logic(gate.gate_type, &input_bools);
+                    let output =
+                        compute_gate_logic(gate.gate_type, &mut gate.gate_data, &input_bools);
                     gate.output = Some(output);
                     vec![Some(output)]
                 }
@@ -336,6 +337,13 @@ impl Circuit {
 
     pub fn add_and(&mut self) -> GateId {
         let gate = Gate::new_and(self.id);
+        let gate_id = gate.id.gate_id;
+        self.components.insert(gate_id, LogicComponent::Gate(gate));
+        gate_id
+    }
+
+    pub fn add_oscillator(&mut self, rate: usize) -> GateId {
+        let gate = Gate::new_oscillator(self.id, rate);
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, LogicComponent::Gate(gate));
         gate_id

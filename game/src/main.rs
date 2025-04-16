@@ -3,10 +3,11 @@ use bevy::prelude::*;
 use bevy::utils::HashMap;
 use bevy::winit::WinitSettings;
 use bevy_egui::EguiPlugin;
+use bevy_egui::egui::output;
 use bevy_egui::{EguiContexts, egui};
 use serde::{Deserialize, Serialize};
 use sim_core::CircuitTemplate;
-use sim_core::circuits::builtin::FullAdderTemplate;
+use sim_core::circuits::builtin::{FullAdderTemplate, InputOutputCircuitTemplate};
 use sim_core::{Circuit, GateId, LogicComponent};
 
 mod systems;
@@ -136,7 +137,15 @@ fn add_n_bit_adder(circuit: &mut Circuit, n: usize, input_offset: usize, output_
 impl Simulation {
     fn new() -> Self {
         let mut outer_circuit = Circuit::new();
-        add_n_bit_adder(&mut outer_circuit, 8, 0, 0);
+        let circuit = InputOutputCircuitTemplate::template();
+        let input_id = outer_circuit.add_oscillator(4);
+        let output_id = outer_circuit.add_output_pin(0);
+        let target = circuit.id();
+
+        outer_circuit.add_component(LogicComponent::Circuit(circuit));
+
+        outer_circuit.add_connection(input_id, target, 0, 0);
+        outer_circuit.add_connection(target, output_id, 0, 0);
         Simulation {
             circuit: outer_circuit,
         }
@@ -213,7 +222,6 @@ fn main() {
         // Setup our game state
         .init_state::<GameState>()
         // Run the game only when there is input
-        .insert_resource(WinitSettings::desktop_app())
         .insert_resource(SettingsMenuOpen(false))
         // Insert our simulation as a resource
         .insert_resource(Simulation::default())
