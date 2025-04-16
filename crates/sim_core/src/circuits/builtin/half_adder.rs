@@ -1,4 +1,4 @@
-use crate::{Circuit, CircuitTemplate, GateTrait};
+use crate::{Circuit, CircuitTemplate};
 
 /// A half-adder template.
 ///
@@ -53,26 +53,26 @@ impl CircuitTemplate for HalfAdderTemplate {
 
         // === Build the connections ===
         // Compute NOT A and NOT B:
-        circuit.add_connection(a_gate_id, not_a_gate_id, 0); // A -> NOT A
-        circuit.add_connection(b_gate_id, not_b_gate_id, 0); // B -> NOT B
+        circuit.add_connection(a_gate_id, not_a_gate_id, 0, 0); // A -> NOT A
+        circuit.add_connection(b_gate_id, not_b_gate_id, 0, 0); // B -> NOT B
 
         // Build AND branch for and1 = A AND (NOT B)
-        circuit.add_connection(a_gate_id, and1_gate_id, 0); // A -> and1 input 0
-        circuit.add_connection(not_b_gate_id, and1_gate_id, 1); // NOT B -> and1 input 1
+        circuit.add_connection(a_gate_id, and1_gate_id, 0, 0); // A -> and1 input 0
+        circuit.add_connection(not_b_gate_id, and1_gate_id, 1, 0); // NOT B -> and1 input 1
 
         // Build AND branch for and2 = (NOT A) AND B
-        circuit.add_connection(not_a_gate_id, and2_gate_id, 0); // NOT A -> and2 input 0
-        circuit.add_connection(b_gate_id, and2_gate_id, 1); // B -> and2 input 1
+        circuit.add_connection(not_a_gate_id, and2_gate_id, 0, 0); // NOT A -> and2 input 0
+        circuit.add_connection(b_gate_id, and2_gate_id, 1, 0); // B -> and2 input 1
 
         // Sum: (and1 OR and2)
-        circuit.add_connection(and1_gate_id, or_gate_id, 0); // and1 -> OR input 0
-        circuit.add_connection(and2_gate_id, or_gate_id, 1); // and2 -> OR input 1
-        circuit.add_connection(or_gate_id, sum_output_id, 0); // OR gate -> Sum output
+        circuit.add_connection(and1_gate_id, or_gate_id, 0, 0); // and1 -> OR input 0
+        circuit.add_connection(and2_gate_id, or_gate_id, 1, 0); // and2 -> OR input 1
+        circuit.add_connection(or_gate_id, sum_output_id, 0, 0); // OR gate -> Sum output
 
         // Carry: A AND B
-        circuit.add_connection(a_gate_id, carry_gate_id, 0); // A -> Carry AND input 0
-        circuit.add_connection(b_gate_id, carry_gate_id, 1); // B -> Carry AND input 1
-        circuit.add_connection(carry_gate_id, carry_output_id, 0); // Carry gate -> Carry output
+        circuit.add_connection(a_gate_id, carry_gate_id, 0, 0); // A -> Carry AND input 0
+        circuit.add_connection(b_gate_id, carry_gate_id, 1, 0); // B -> Carry AND input 1
+        circuit.add_connection(carry_gate_id, carry_output_id, 0, 0); // Carry gate -> Carry output
 
         circuit
     }

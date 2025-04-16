@@ -3,9 +3,15 @@ use uuid::Uuid;
 use crate::{ComponentId, Connection, Gate, GateType, PinId, PortId};
 
 impl Connection {
-    pub fn new(source: ComponentId, target: ComponentId, target_input: PinId) -> Self {
+    pub fn new(
+        source: ComponentId,
+        target: ComponentId,
+        target_input: PinId,
+        source_output: PinId,
+    ) -> Self {
         Connection {
             source,
+            source_output,
             target,
             target_input,
         }

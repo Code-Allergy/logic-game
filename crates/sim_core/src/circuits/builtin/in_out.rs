@@ -1,4 +1,4 @@
-use crate::{Circuit, CircuitTemplate, GateTrait};
+use crate::{Circuit, CircuitTemplate};
 
 /// A simple 2-to-1 multiplexer circuit template.
 /// This circuit takes two data inputs (D0 and D1) and a select input (S).
@@ -30,7 +30,7 @@ impl CircuitTemplate for InputOutputCircuitTemplate {
         let output_id = circuit.add_output_pin(0); // Output pin
 
         // connect input to output
-        circuit.add_connection(input_id, output_id, 0); // D0 -> output
+        circuit.add_connection(input_id, output_id, 0, 0); // D0 -> output
 
         circuit
     }

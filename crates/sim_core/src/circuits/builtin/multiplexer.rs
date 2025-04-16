@@ -1,4 +1,4 @@
-use crate::{Circuit, CircuitTemplate, GateTrait};
+use crate::{Circuit, CircuitTemplate};
 
 /// A simple 2-to-1 multiplexer circuit template.
 /// This circuit takes two data inputs (D0 and D1) and a select input (S).
@@ -48,22 +48,22 @@ impl CircuitTemplate for MultiplexerTemplate {
         // Build the multiplexer connections:
         //
         // Invert the select signal:
-        circuit.add_connection(s_gate_id, not_gate_id, 0); // S -> NOT
+        circuit.add_connection(s_gate_id, not_gate_id, 0, 0); // S -> NOT
 
         // Left AND gate for (NOT S AND D0)
-        circuit.add_connection(d0_gate_id, and_gate_left_id, 0); // D0 -> left AND input 0
-        circuit.add_connection(not_gate_id, and_gate_left_id, 1); // NOT S -> left AND input 1
+        circuit.add_connection(d0_gate_id, and_gate_left_id, 0, 0); // D0 -> left AND input 0
+        circuit.add_connection(not_gate_id, and_gate_left_id, 1, 0); // NOT S -> left AND input 1
 
         // Right AND gate for (S AND D1)
-        circuit.add_connection(s_gate_id, and_gate_right_id, 0); // S -> right AND input 0
-        circuit.add_connection(d1_gate_id, and_gate_right_id, 1); // D1 -> right AND input 1
+        circuit.add_connection(s_gate_id, and_gate_right_id, 0, 0); // S -> right AND input 0
+        circuit.add_connection(d1_gate_id, and_gate_right_id, 1, 0); // D1 -> right AND input 1
 
         // OR gate combines both AND outputs:
-        circuit.add_connection(and_gate_left_id, or_gate_id, 0); // left AND -> OR input 0
-        circuit.add_connection(and_gate_right_id, or_gate_id, 1); // right AND -> OR input 1
+        circuit.add_connection(and_gate_left_id, or_gate_id, 0, 0); // left AND -> OR input 0
+        circuit.add_connection(and_gate_right_id, or_gate_id, 1, 0); // right AND -> OR input 1
 
         // Connect OR output to the final output gate
-        circuit.add_connection(or_gate_id, output_gate_id, 0);
+        circuit.add_connection(or_gate_id, output_gate_id, 0, 0);
 
         circuit
     }

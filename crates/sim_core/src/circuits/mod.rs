@@ -2,12 +2,13 @@ pub mod builtin;
 
 use std::collections::HashMap;
 
+use ahash::AHashMap;
 use uuid::Uuid;
 
 use crate::gates::compute_gate_logic;
 use crate::{
-    Circuit, CircuitId, ComponentId, Connection, Gate, GateId, GateTrait, GateType, LogicComponent,
-    PortId, TickError,
+    Circuit, CircuitId, ComponentId, Connection, Gate, GateId, LogicComponent, PinId, PortId,
+    TickError,
 };
 
 impl PortId {
@@ -23,13 +24,13 @@ impl Circuit {
     pub fn new() -> Self {
         Circuit {
             id: Uuid::new_v4(),
-            components: HashMap::new(),
+            components: AHashMap::new(),
             // gates: Vec::new(),
             connections: Vec::new(),
             topological_order: None,
             topological_dirty: true,
-            input_gates: HashMap::new(),
-            output_gates: HashMap::new(),
+            input_gates: AHashMap::new(),
+            output_gates: AHashMap::new(),
         }
     }
 
@@ -38,11 +39,18 @@ impl Circuit {
         self.components.insert(component_id, component);
     }
 
-    pub fn connect(&mut self, source: &Gate, destination: &Gate, target_input: usize) {
+    pub fn connect(
+        &mut self,
+        source: &Gate,
+        destination: &Gate,
+        target_input: usize,
+        source_output: PinId,
+    ) {
         self.connections.push(Connection::new(
             source.id.gate_id,
             destination.id.gate_id,
             target_input,
+            source_output,
         ));
     }
 
@@ -50,10 +58,11 @@ impl Circuit {
         &mut self,
         source: ComponentId,
         target: ComponentId,
-        target_input: usize,
+        target_input: PinId,
+        source_output: PinId,
     ) {
         self.connections
-            .push(Connection::new(source, target, target_input));
+            .push(Connection::new(source, target, target_input, source_output));
     }
 
     pub fn get_topological_order(&mut self) -> Option<Vec<Uuid>> {
@@ -123,105 +132,65 @@ impl Circuit {
             // Validate that all inputs are available
             let inputs = component.get_inputs();
             if inputs.iter().any(|i| i.is_none()) {
-                panic!("Gate {:?} has uninitialized inputs!", gate_id);
+                panic!("Gate {:?} has uninitialized inputs: {:?}", gate_id, inputs);
             }
 
             // Downcast to check if it's a Circuit or a Gate
-            let output = if let Some(subcircuit) = component.as_any_mut().downcast_mut::<Circuit>()
+            let outputs = if let Some(subcircuit) = component.as_any_mut().downcast_mut::<Circuit>()
             {
                 // It's a subcircuit: tick it and get its output
                 subcircuit.tick()?;
                 // Assume output is on pin 0 (or adjust as needed)
-                subcircuit.get_output(0).unwrap_or(false)
+                subcircuit.get_outputs()
             } else {
                 // It's a gate: compute output as before
                 let input_bools: Vec<bool> = inputs.iter().map(|&v| v.unwrap()).collect();
-                compute_gate_logic(component.get_type(), &input_bools)
+                let result = compute_gate_logic(component.get_type(), &input_bools);
+                vec![Some(result)]
             };
 
-            component.set_output(0, Some(output));
-            let updates_needed: Vec<(ComponentId, usize)> = self
-                .connections
-                .iter()
-                .filter(|c| c.source == *gate_id)
-                .map(|c| (c.target, c.target_input))
-                .collect();
-
-            // Apply updates to all connected gates
-            for (target_id, target_input) in updates_needed {
-                if let Some(target_gate) = self.components.get_mut(&target_id) {
-                    target_gate.set_input(target_input, Some(output));
+            component.set_outputs(outputs.clone());
+            for connection in self.connections.iter().filter(|c| c.source == *gate_id) {
+                let output_value = outputs
+                    .get(connection.source_output)
+                    .copied()
+                    .unwrap_or(None);
+                if let Some(target_gate) = self.components.get_mut(&connection.target) {
+                    target_gate.set_input(connection.target_input, output_value);
                 }
             }
+            // let updates_needed: Vec<(ComponentId, usize)> = self
+            //     .connections
+            //     .iter()
+            //     .filter(|c| c.source == *gate_id)
+            //     .map(|c| (c.target, c.target_input))
+            //     .collect();
+
+            // // Apply updates to all connected gates
+            // for (target_id, target_input) in updates_needed {
+            //     if let Some(target_gate) = self.components.get_mut(&target_id) {
+            //         target_gate
+            //             .set_input(target_input, outputs.pop().expect("Output not available"));
+            //     }
+            // }
         }
 
         Ok(())
     }
 
-    // pub fn execute(&mut self, inputs: Vec<Option<bool>>) {
-    //     // Execute the circuit logic
-    //     for gate in self.components.values_mut() {
-    //         gate.execute();
-    //     }
-    // }
-
-    // pub fn set_input(&mut self, id: ComponentId, value: bool) {
-    //     if let Some(gate) = self.components.get_mut(&id) {
-    //         // debug_assert!(
-    //         //     gate.gate_type == GateType::Input,
-    //         //     "Attempted to set input on non-input gate"
-    //         // );
-    //         gate.inputs[0] = Some(value);
-    //     }
-    // }
-
-    // pub fn set_input_pin(&mut self, id: usize, value: bool) {
-    //     if let Some(gate_id) = self.input_gates.get_mut(&id) {
-    //         if let Some(gate) = self.gates.get_mut(gate_id.0) {
-    //             debug_assert!(
-    //                 gate.gate_type == GateType::Input,
-    //                 "Attempted to set input on non-input gate"
-    //             );
-    //             gate.inputs[0] = Some(value);
-    //         }
-    //     }
-    // }
-
-    // pub fn read_output(&self, id: GateId) -> Option<bool> {
-    //     if let Some(gate) = self.gates.get(id.0) {
-    //         debug_assert!(
-    //             gate.gate_type == GateType::Output,
-    //             "Attempted to read output from non-output gate"
-    //         );
-    //         gate.output
-    //     } else {
-    //         None
-    //     }
-    // }
-
-    // pub fn read_output_pin(&self, id: usize) -> Option<bool> {
-    //     if let Some(gate_id) = self.output_gates.get(&id) {
-    //         if let Some(gate) = self.gates.get(gate_id.0) {
-    //             debug_assert!(
-    //                 gate.gate_type == GateType::Output,
-    //                 "Attempted to read output from non-output gate"
-    //             );
-    //             return gate.output;
-    //         }
-    //     }
-    //     None
+    // pub fn execute(&mut self, inputs: Vec<Option<bool>>) -> Result<Vec<Option<bool>>, TickError> {
     // }
 }
 
-impl GateTrait for Circuit {
-    fn add_input(&mut self, initial: Option<bool>) -> GateId {
+impl Circuit {
+    pub fn add_input(&mut self, initial: Option<bool>) -> GateId {
         let gate = Gate::new_input(self.id, initial);
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, Box::new(gate));
         gate_id
     }
 
-    fn add_input_pin(&mut self, initial: Option<bool>, pin: usize) -> GateId {
+    pub fn add_input_pin(&mut self, initial: Option<bool>, pin: usize) -> GateId {
         let gate = Gate::new_input(self.id, initial);
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, Box::new(gate));
@@ -229,14 +198,14 @@ impl GateTrait for Circuit {
         gate_id
     }
 
-    fn add_output(&mut self) -> GateId {
+    pub fn add_output(&mut self) -> GateId {
         let gate = Gate::new_output(self.id);
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, Box::new(gate));
         gate_id
     }
 
-    fn add_output_pin(&mut self, pin: usize) -> GateId {
+    pub fn add_output_pin(&mut self, pin: usize) -> GateId {
         let gate = Gate::new_output(self.id);
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, Box::new(gate));
@@ -244,45 +213,31 @@ impl GateTrait for Circuit {
         gate_id
     }
 
-    fn add_identity(&mut self) -> GateId {
+    pub fn add_identity(&mut self) -> GateId {
         let gate = Gate::new_identity(self.id);
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, Box::new(gate));
         gate_id
     }
 
-    fn add_not(&mut self) -> GateId {
+    pub fn add_not(&mut self) -> GateId {
         let gate = Gate::new_not(self.id);
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, Box::new(gate));
         gate_id
     }
 
-    fn add_or(&mut self) -> GateId {
+    pub fn add_or(&mut self) -> GateId {
         let gate = Gate::new_or(self.id);
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, Box::new(gate));
         gate_id
     }
 
-    fn add_and(&mut self) -> GateId {
+    pub fn add_and(&mut self) -> GateId {
         let gate = Gate::new_and(self.id);
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, Box::new(gate));
         gate_id
     }
-
-    // fn set_input(&mut self, pin: usize, value: bool) {
-    //     if let Some(gate) = self.components.get_mut(pin) {
-    //         gate.inputs[0] = Some(value);
-    //     }
-    // }
-
-    // fn read_output(&self, pin: usize) -> Option<bool> {
-    //     if let Some(gate) = self.gates.get(pin) {
-    //         gate.output
-    //     } else {
-    //         None
-    //     }
-    // }
 }

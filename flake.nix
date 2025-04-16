@@ -31,6 +31,7 @@
       in {
         devShells.default = pkgs.mkShell {
           packages = [
+            pkgs.linuxPackages_latest.perf
             pkgs.clang
             pkgs.lld
             pkgs.pkg-config

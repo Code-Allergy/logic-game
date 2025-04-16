@@ -1,12 +1,11 @@
 use bevy::prelude::*;
 
 use bevy_egui::EguiPlugin;
+use bevy_egui::egui::output;
 use bevy_egui::{EguiContexts, egui};
-use sim_core::circuits::builtin::{
-    FullAdderTemplate, InputOutputCircuitTemplate, MultiplexerTemplate,
-};
+use sim_core::CircuitTemplate;
+use sim_core::circuits::builtin::{FullAdderTemplate, MultiplexerTemplate};
 use sim_core::{Circuit, GateId, LogicComponent};
-use sim_core::{CircuitTemplate, GateTrait};
 
 mod systems;
 use systems::*;
@@ -51,19 +50,22 @@ struct Selected {
 impl Simulation {
     fn new() -> Self {
         let mut outer_circuit = Circuit::new();
-        let circuit = MultiplexerTemplate::template();
+        let circuit = FullAdderTemplate::template();
         let circuit_id = circuit.id();
 
         let input0 = outer_circuit.add_input_pin(Some(false), 0);
         let input1 = outer_circuit.add_input_pin(Some(false), 1);
         let input2 = outer_circuit.add_input_pin(Some(false), 2);
+
         let output = outer_circuit.add_output_pin(0);
+        let output2 = outer_circuit.add_output_pin(1);
         outer_circuit.add_component(Box::new(circuit));
 
-        outer_circuit.add_connection(input0, circuit_id, 0);
-        outer_circuit.add_connection(input1, circuit_id, 1);
-        outer_circuit.add_connection(input2, circuit_id, 2);
-        outer_circuit.add_connection(circuit_id, output, 0);
+        outer_circuit.add_connection(input0, circuit_id, 0, 0);
+        outer_circuit.add_connection(input1, circuit_id, 1, 0);
+        outer_circuit.add_connection(input2, circuit_id, 2, 0);
+        outer_circuit.add_connection(circuit_id, output, 0, 0);
+        outer_circuit.add_connection(circuit_id, output2, 0, 1);
 
         Simulation {
             circuit: outer_circuit,
