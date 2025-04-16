@@ -1,4 +1,5 @@
 use ahash::AHashMap;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -9,44 +10,24 @@ pub mod gates;
 mod logic_component;
 pub use logic_component::*;
 
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum TickError {
-    CycleDetected,
-}
-
-#[derive(Debug)]
-pub struct Circuit {
-    pub id: Uuid,
-    // pub gate_indices: HashMap<GateId, usize>,
-    // pub gates: Vec<Box<dyn LogicComponent>>,
-    pub components: AHashMap<ComponentId, Box<dyn LogicComponent>>,
-    pub connections: Vec<Connection>,
-    topological_order: Option<Vec<ComponentId>>,
-    topological_dirty: bool,
-    input_gates: AHashMap<PinId, GateId>,
-    output_gates: AHashMap<PinId, GateId>,
-}
-
-pub trait CircuitTemplate {
-    fn template() -> Circuit;
-}
-
-pub trait Port {
-    fn port_id(&self) -> usize;
-}
-
 pub type ComponentId = Uuid;
 pub type GateId = ComponentId;
 pub type CircuitId = ComponentId;
 pub type PinId = usize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PortId {
-    pub circuit_id: Uuid,
-    pub gate_id: GateId,
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum TickError {
+    CycleDetected,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+// #[derive(Serialize, Deserialize)]
+// #[serde(tag = "type")]
+pub enum Component {
+    Gate(Gate),
+    Circuit(Circuit),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum GateType {
     // Special gates
     Input,     // Input gate, constant value
@@ -67,6 +48,21 @@ pub enum GateType {
 }
 
 #[derive(Debug)]
+pub struct Circuit {
+    pub id: Uuid,
+    pub components: AHashMap<ComponentId, Box<dyn LogicComponent>>,
+    pub connections: Vec<Connection>,
+
+    /* Topological sort for tick() and execute() */
+    topological_order: Option<Vec<ComponentId>>,
+    topological_dirty: bool,
+
+    /* Port Config */
+    input_gates: AHashMap<PinId, GateId>,
+    output_gates: AHashMap<PinId, GateId>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Gate {
     pub id: PortId,
     pub gate_type: GateType,
@@ -74,10 +70,20 @@ pub struct Gate {
     pub output: Option<bool>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Connection {
     pub source: ComponentId,
     pub target: ComponentId,
     pub target_input: PinId,
     pub source_output: PinId,
+}
+
+pub trait CircuitTemplate {
+    fn template() -> Circuit;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PortId {
+    pub circuit_id: Uuid,
+    pub gate_id: GateId,
 }
