@@ -114,6 +114,8 @@ pub fn compute_gate_logic(gate_type: GateType, inputs: &Vec<bool>) -> bool {
         GateType::OutputPin => {
             todo!("Output port logic not implemented yet")
         }
-        GateType::Circuit => todo!("Multi circuit logic not implemented yet"),
+        GateType::Circuit => panic!(
+            "GateType::Circuit should not be computed, use Circuit::execute() or Circuit::tick() to get the result"
+        ),
     }
 }

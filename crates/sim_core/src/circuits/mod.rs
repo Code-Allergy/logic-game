@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::gates::compute_gate_logic;
 use crate::{
-    Circuit, CircuitId, ComponentId, Connection, Gate, GateId, GateTrait, GateType, PortId,
-    TickError,
+    Circuit, CircuitId, ComponentId, Connection, Gate, GateId, GateTrait, GateType, LogicComponent,
+    PortId, TickError,
 };
 
 impl PortId {
@@ -31,6 +31,11 @@ impl Circuit {
             input_gates: HashMap::new(),
             output_gates: HashMap::new(),
         }
+    }
+
+    pub fn add_component(&mut self, component: Box<dyn LogicComponent>) {
+        let component_id = component.id();
+        self.components.insert(component_id, component);
     }
 
     pub fn connect(&mut self, source: &Gate, destination: &Gate, target_input: usize) {
@@ -121,8 +126,18 @@ impl Circuit {
                 panic!("Gate {:?} has uninitialized inputs!", gate_id);
             }
 
-            let input_bools: Vec<bool> = inputs.iter().map(|&v| v.unwrap()).collect();
-            let output = compute_gate_logic(component.get_type(), &input_bools);
+            // Downcast to check if it's a Circuit or a Gate
+            let output = if let Some(subcircuit) = component.as_any_mut().downcast_mut::<Circuit>()
+            {
+                // It's a subcircuit: tick it and get its output
+                subcircuit.tick()?;
+                // Assume output is on pin 0 (or adjust as needed)
+                subcircuit.get_output(0).unwrap_or(false)
+            } else {
+                // It's a gate: compute output as before
+                let input_bools: Vec<bool> = inputs.iter().map(|&v| v.unwrap()).collect();
+                compute_gate_logic(component.get_type(), &input_bools)
+            };
 
             component.set_output(0, Some(output));
             let updates_needed: Vec<(ComponentId, usize)> = self
@@ -142,6 +157,13 @@ impl Circuit {
 
         Ok(())
     }
+
+    // pub fn execute(&mut self, inputs: Vec<Option<bool>>) {
+    //     // Execute the circuit logic
+    //     for gate in self.components.values_mut() {
+    //         gate.execute();
+    //     }
+    // }
 
     // pub fn set_input(&mut self, id: ComponentId, value: bool) {
     //     if let Some(gate) = self.components.get_mut(&id) {

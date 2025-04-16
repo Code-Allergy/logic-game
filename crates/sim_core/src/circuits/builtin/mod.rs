@@ -1,5 +1,8 @@
 // Define the built-in circuits
 
+mod in_out;
+pub use in_out::*;
+
 mod multiplexer;
 pub use multiplexer::*;
 

@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -40,6 +41,10 @@ pub trait LogicComponent: std::fmt::Debug + Send + Sync {
     fn set_inputs(&mut self, values: Vec<Option<bool>>);
     fn set_output(&mut self, pin: PinId, value: Option<bool>);
     fn set_outputs(&mut self, values: Vec<Option<bool>>);
+
+    // Downcasting
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 pub trait CircuitTemplate {
@@ -214,6 +219,13 @@ impl LogicComponent for Circuit {
             }
         }
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 impl LogicComponent for Gate {
@@ -266,5 +278,12 @@ impl LogicComponent for Gate {
         } else {
             todo!("hit: Multi output pin support")
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

@@ -2,9 +2,11 @@ use bevy::prelude::*;
 
 use bevy_egui::EguiPlugin;
 use bevy_egui::{EguiContexts, egui};
-use sim_core::CircuitTemplate;
-use sim_core::circuits::builtin::FullAdderTemplate;
+use sim_core::circuits::builtin::{
+    FullAdderTemplate, InputOutputCircuitTemplate, MultiplexerTemplate,
+};
 use sim_core::{Circuit, GateId, LogicComponent};
+use sim_core::{CircuitTemplate, GateTrait};
 
 mod systems;
 use systems::*;
@@ -48,11 +50,24 @@ struct Selected {
 
 impl Simulation {
     fn new() -> Self {
-        let mut circuit = FullAdderTemplate::template();
-        circuit.set_input(0, Some(true));
-        circuit.set_input(1, Some(false));
-        circuit.set_input(2, Some(false));
-        Simulation { circuit }
+        let mut outer_circuit = Circuit::new();
+        let circuit = MultiplexerTemplate::template();
+        let circuit_id = circuit.id();
+
+        let input0 = outer_circuit.add_input_pin(Some(false), 0);
+        let input1 = outer_circuit.add_input_pin(Some(false), 1);
+        let input2 = outer_circuit.add_input_pin(Some(false), 2);
+        let output = outer_circuit.add_output_pin(0);
+        outer_circuit.add_component(Box::new(circuit));
+
+        outer_circuit.add_connection(input0, circuit_id, 0);
+        outer_circuit.add_connection(input1, circuit_id, 1);
+        outer_circuit.add_connection(input2, circuit_id, 2);
+        outer_circuit.add_connection(circuit_id, output, 0);
+
+        Simulation {
+            circuit: outer_circuit,
+        }
     }
 
     // might be good to delegate to async task if we can split stuff up, that way we can simulate multiple circuits at once

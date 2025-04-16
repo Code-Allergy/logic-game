@@ -1,6 +1,7 @@
 use crate::{
     Circuit, CircuitTemplate, GateId, GateTrait, GateType, LogicComponent, TickError,
-    circuits::builtin::MultiplexerTemplate, gates::compute_gate_logic,
+    circuits::builtin::{FullAdderTemplate, HalfAdderTemplate, MultiplexerTemplate},
+    gates::compute_gate_logic,
 };
 
 #[test]
@@ -583,4 +584,166 @@ fn test_simple_cycle() {
     circuit.add_connection(output_id, input_id, 0); // This creates a cycle
 
     assert_eq!(circuit.tick(), Err(TickError::CycleDetected));
+}
+
+#[test]
+fn test_nested_multiplexer() {
+    // Outer circuit
+    let mut outer = Circuit::new();
+
+    // Inner multiplexer circuit
+    let inner_mux = MultiplexerTemplate::template();
+    let inner_mux_id = inner_mux.id();
+
+    // Outer circuit IO
+    let in0 = outer.add_input_pin(Some(false), 0);
+    let in1 = outer.add_input_pin(Some(false), 1);
+    let in2 = outer.add_input_pin(Some(false), 2);
+    let out = outer.add_output_pin(0);
+
+    // Add inner multiplexer as a component
+    outer.add_component(Box::new(inner_mux));
+
+    // Connect outer inputs to inner multiplexer
+    outer.add_connection(in0, inner_mux_id, 0);
+    outer.add_connection(in1, inner_mux_id, 1);
+    outer.add_connection(in2, inner_mux_id, 2);
+
+    // Connect inner multiplexer output to outer output
+    outer.add_connection(inner_mux_id, out, 0);
+
+    // Test: S = false, output should equal D0
+    outer.set_input(0, Some(true));
+    outer.set_input(1, Some(false));
+    outer.set_input(2, Some(false));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(true));
+
+    // Test: S = true, output should equal D1
+    outer.set_input(0, Some(true));
+    outer.set_input(1, Some(false));
+    outer.set_input(2, Some(true));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(false));
+}
+
+#[test]
+fn test_nested_half_adder() {
+    let mut outer = Circuit::new();
+    let inner_ha = HalfAdderTemplate::template();
+    let inner_ha_id = inner_ha.id();
+
+    let in0 = outer.add_input_pin(Some(false), 0);
+    let in1 = outer.add_input_pin(Some(false), 1);
+    let out = outer.add_output_pin(0);
+
+    outer.add_component(Box::new(inner_ha));
+    outer.add_connection(in0, inner_ha_id, 0);
+    outer.add_connection(in1, inner_ha_id, 1);
+    outer.add_connection(inner_ha_id, out, 0);
+
+    // 0 + 0
+    outer.set_input(0, Some(false));
+    outer.set_input(1, Some(false));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(false));
+
+    // 1 + 0
+    outer.set_input(0, Some(true));
+    outer.set_input(1, Some(false));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(true));
+
+    // 1 + 1
+    outer.set_input(0, Some(true));
+    outer.set_input(1, Some(true));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(false));
+}
+
+#[test]
+fn test_nested_full_adder() {
+    let mut outer = Circuit::new();
+    let inner_fa = FullAdderTemplate::template();
+    let inner_fa_id = inner_fa.id();
+
+    let in0 = outer.add_input_pin(Some(false), 0);
+    let in1 = outer.add_input_pin(Some(false), 1);
+    let in2 = outer.add_input_pin(Some(false), 2);
+    let out = outer.add_output_pin(0);
+
+    outer.add_component(Box::new(inner_fa));
+    outer.add_connection(in0, inner_fa_id, 0);
+    outer.add_connection(in1, inner_fa_id, 1);
+    outer.add_connection(in2, inner_fa_id, 2);
+    outer.add_connection(inner_fa_id, out, 0);
+
+    // 0 + 0 + 0
+    outer.set_input(0, Some(false));
+    outer.set_input(1, Some(false));
+    outer.set_input(2, Some(false));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(false));
+
+    // 1 + 0 + 0
+    outer.set_input(0, Some(true));
+    outer.set_input(1, Some(false));
+    outer.set_input(2, Some(false));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(true));
+
+    // 1 + 1 + 0
+    outer.set_input(0, Some(true));
+    outer.set_input(1, Some(true));
+    outer.set_input(2, Some(false));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(false));
+
+    // 1 + 1 + 1
+    outer.set_input(0, Some(true));
+    outer.set_input(1, Some(true));
+    outer.set_input(2, Some(true));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(true));
+}
+
+#[test]
+fn test_deeply_nested_circuits() {
+    // Inner-most: a half adder
+    let inner = HalfAdderTemplate::template();
+    let inner_id = inner.id();
+
+    // Middle: wraps the half adder
+    let mut middle = Circuit::new();
+    let in0 = middle.add_input_pin(Some(false), 0);
+    let in1 = middle.add_input_pin(Some(false), 1);
+    let out = middle.add_output_pin(0);
+    middle.add_component(Box::new(inner));
+    middle.add_connection(in0, inner_id, 0);
+    middle.add_connection(in1, inner_id, 1);
+    middle.add_connection(inner_id, out, 0);
+
+    let middle_id = middle.id();
+
+    // Outer: wraps the middle circuit
+    let mut outer = Circuit::new();
+    let oin0 = outer.add_input_pin(Some(false), 0);
+    let oin1 = outer.add_input_pin(Some(false), 1);
+    let oout = outer.add_output_pin(0);
+    outer.add_component(Box::new(middle));
+    outer.add_connection(oin0, middle_id, 0);
+    outer.add_connection(oin1, middle_id, 1);
+    outer.add_connection(middle_id, oout, 0);
+
+    // 1 + 1
+    outer.set_input(0, Some(true));
+    outer.set_input(1, Some(true));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(false));
+
+    // 1 + 0
+    outer.set_input(0, Some(true));
+    outer.set_input(1, Some(false));
+    outer.tick().expect("Tick should succeed");
+    assert_eq!(outer.get_output(0), Some(true));
 }
