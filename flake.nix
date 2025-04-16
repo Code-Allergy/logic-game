@@ -26,8 +26,11 @@
           inherit system overlays;
         };
 
-        # Use the latest stable Rust
-        rustVersion = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        # Use the latest nightly Rust
+        rustVersion = pkgs.rust-bin.nightly.latest.default.override {
+          extensions = ["rust-std" "llvm-tools-preview"];
+          targets = ["x86_64-unknown-linux-gnu" "wasm32-unknown-unknown"];
+        };
       in {
         devShells.default = pkgs.mkShell {
           packages = [
