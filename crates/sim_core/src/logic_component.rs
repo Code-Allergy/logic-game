@@ -1,30 +1,28 @@
 use crate::{Circuit, CircuitId, ComponentId, Gate, GateId, GateType, PinId};
 use std::any::Any;
 
-pub trait LogicComponent: std::fmt::Debug + Send + Sync {
-    fn id(&self) -> ComponentId;
-    fn get_type(&self) -> GateType;
+// pub trait LogicComponent: std::fmt::Debug + Send + Sync {
+//     fn id(&self) -> ComponentId;
+//     fn get_type(&self) -> GateType;
 
-    fn get_input(&self, pin: PinId) -> Option<bool>;
-    fn get_inputs(&self) -> Vec<Option<bool>>;
+//     fn get_input(&self, pin: PinId) -> Option<bool>;
+//     fn get_inputs(&self) -> Vec<Option<bool>>;
 
-    fn get_output(&self, pin: PinId) -> Option<bool>;
-    fn get_outputs(&self) -> Vec<Option<bool>>;
+//     fn get_output(&self, pin: PinId) -> Option<bool>;
+//     fn get_outputs(&self) -> Vec<Option<bool>>;
 
-    fn set_input(&mut self, pin: PinId, value: Option<bool>);
-    fn set_inputs(&mut self, values: Vec<Option<bool>>);
-    fn set_output(&mut self, pin: PinId, value: Option<bool>);
-    fn set_outputs(&mut self, values: Vec<Option<bool>>);
+//     fn set_input(&mut self, pin: PinId, value: Option<bool>);
+//     fn set_inputs(&mut self, values: Vec<Option<bool>>);
+//     fn set_output(&mut self, pin: PinId, value: Option<bool>);
+//     fn set_outputs(&mut self, values: Vec<Option<bool>>);
 
-    // Downcasting
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-}
+//     // Downcasting
+//     fn as_any(&self) -> &dyn Any;
+//     fn as_any_mut(&mut self) -> &mut dyn Any;
+// }
 
+/*
 impl LogicComponent for Circuit {
-    fn id(&self) -> CircuitId {
-        self.id
-    }
     fn get_type(&self) -> GateType {
         GateType::Circuit
     }
@@ -65,26 +63,6 @@ impl LogicComponent for Circuit {
             }
         }
         None
-    }
-    fn get_outputs(&self) -> Vec<Option<bool>> {
-        let mut pins: Vec<(PinId, Option<bool>)> = self
-            .output_gates
-            .iter()
-            .filter_map(|(&pin, gate_id)| {
-                if let Some(component) = self.components.get(gate_id) {
-                    if component.get_type() == GateType::Output {
-                        return Some((pin, component.get_input(0)));
-                    }
-                }
-                None
-            })
-            .collect();
-
-        // Sort by pin number
-        pins.sort_by_key(|&(pin, _)| pin);
-
-        // Extract just the values
-        pins.into_iter().map(|(_, value)| value).collect()
     }
 
     fn set_input(&mut self, pin: PinId, value: Option<bool>) {
@@ -190,3 +168,4 @@ impl LogicComponent for Gate {
         self
     }
 }
+*/

@@ -93,6 +93,7 @@ dependencies = [
  "const-random",
  "getrandom 0.2.15",
  "once_cell",
+ "serde",
  "version_check",
  "zerocopy 0.7.35",
 ]
@@ -3212,6 +3213,8 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "serde",
+ "serde_json",
  "sim_core",
 ]
 
@@ -4589,6 +4592,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "criterion",
+ "serde",
  "uuid",
 ]
 

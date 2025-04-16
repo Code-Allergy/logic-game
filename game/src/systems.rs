@@ -1,11 +1,11 @@
+use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy::{prelude::*, sprite};
 use sim_core::{GateId, GateType};
 use std::collections::HashMap;
 
 use crate::{CONNECTION_Z_LEVEL, ConnectionLine, GateComponent, MainCamera, Selected, Simulation};
 
-pub fn setup_system(mut commands: Commands) {
+pub fn setup_camera(mut commands: Commands) {
     // Set up your 2D camera (if you’re making a 2D frontend)
     commands.spawn((Camera2d::default(), MainCamera));
 }
@@ -14,16 +14,9 @@ pub fn simulation_update_system(mut simulation: ResMut<Simulation>) {
     simulation.tick();
 }
 
-pub fn draw_gates_system(
-    simulation: Res<Simulation>,
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-) {
+pub fn draw_gates_system(simulation: Res<Simulation>, mut commands: Commands) {
     // Iterate over the gates in the circuit. (You might need to make gates field public or provide a getter.)
     for (gate_id, gate) in simulation.circuit.components.iter() {
-        let texture_handle: Handle<Image> = asset_server.load("sprites/gates/test-sprite-0.png");
-        let inner_texture_handle: Handle<Image> = asset_server.load("sprites/gates/inner.png");
-
         // Procedurally position each gate based on its id (this is just a demo strategy).
         let x = 300.0;
         let y = 0.0;
@@ -161,7 +154,7 @@ pub fn gate_selection_system(
 pub fn drag_selected_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-    mut query: Query<(&mut Transform, &Selected)>,
+    mut query: Query<(&mut Transform, &Selected, &mut GateComponent)>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
 ) {
     // Only process if left mouse is still held down
@@ -178,10 +171,12 @@ pub fn drag_selected_system(
             let world_pos = ray.origin + ray.direction * distance;
 
             // Update position of all selected entities
-            for (mut transform, selected) in query.iter_mut() {
+            for (mut transform, selected, mut gate) in query.iter_mut() {
                 // Apply the offset to make dragging feel natural
                 transform.translation.x = world_pos.x + selected.offset.x;
+                gate.position.x = transform.translation.x;
                 transform.translation.y = world_pos.y + selected.offset.y;
+                gate.position.y = transform.translation.y;
             }
         }
     }
@@ -320,10 +315,10 @@ pub fn update_inputs_on_left_click(
                         && local_point_2d.y <= half_extents.y
                     {
                         // Get the gate ID from the component
-                        let gate_id = gate_component.id;
+                        let gate_id: GateId = gate_component.id;
 
                         // Get a mutable reference to the gate
-                        if let Some(gate) = simulation.circuit.components.get_mut(&gate_id) {
+                        if let Some(gate) = simulation.circuit.components.get_mut(&mut &gate_id) {
                             // Check if the gate is an input
                             if gate.get_type() == GateType::Input {
                                 // Toggle the input value
@@ -424,7 +419,6 @@ pub fn update_spatial_grid_system(
 
 // System to initialize or rebuild the grid
 pub fn rebuild_spatial_grid_system(
-    mut commands: Commands,
     mut grid: ResMut<SpatialGrid>,
     query: Query<(Entity, &Transform, &GateComponent)>,
 ) {

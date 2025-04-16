@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::gates::compute_gate_logic;
 use crate::{
-    Circuit, CircuitId, ComponentId, Connection, Gate, GateId, LogicComponent, PinId, PortId,
-    TickError,
+    Circuit, CircuitId, ComponentId, Connection, Gate, GateId, GateType, LogicComponent, PinId,
+    PortId, TickError,
 };
 
 impl PortId {
@@ -34,8 +34,15 @@ impl Circuit {
         }
     }
 
-    pub fn add_component(&mut self, component: Box<dyn LogicComponent>) {
-        let component_id = component.id();
+    pub fn id(&self) -> CircuitId {
+        self.id
+    }
+
+    pub fn add_component(&mut self, component: LogicComponent) {
+        let component_id = match &component {
+            LogicComponent::Gate(gate) => gate.id.gate_id,
+            LogicComponent::Circuit(circuit) => circuit.id,
+        };
         self.components.insert(component_id, component);
     }
 
@@ -115,6 +122,42 @@ impl Circuit {
         }
     }
 
+    pub fn set_input(&mut self, pin: PinId, value: Option<bool>) {
+        if let Some(gate_id) = self.input_gates.get(&pin) {
+            if let Some(gate) = self.components.get_mut(gate_id) {
+                match gate {
+                    LogicComponent::Gate(gate) => {
+                        if gate.gate_type == GateType::Input {
+                            gate.inputs[0] = value;
+                        }
+                    }
+                    LogicComponent::Circuit(circuit) => {
+                        circuit.set_input(pin, value);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn get_output(&self, pin: PinId) -> Option<bool> {
+        if let Some(gate_id) = self.output_gates.get(&pin) {
+            if let Some(gate) = self.components.get(gate_id) {
+                match gate {
+                    LogicComponent::Gate(gate) => {
+                        if gate.gate_type == GateType::Output {
+                            return gate.inputs[0];
+                        }
+                    }
+                    LogicComponent::Circuit(circuit) => {
+                        // For circuits, we need to get the output from the circuit
+                        return circuit.get_output(pin);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub fn tick(&mut self) -> Result<(), TickError> {
         let result: Option<Vec<Uuid>> = self.get_topological_order();
         let order = match result {
@@ -130,49 +173,60 @@ impl Circuit {
             };
 
             // Validate that all inputs are available
-            let inputs = component.get_inputs();
+            let inputs = match component {
+                LogicComponent::Gate(gate) => gate.inputs.clone(),
+                LogicComponent::Circuit(circuit) => {
+                    // For circuits, we need to ensure all inputs are set
+                    circuit.get_inputs()
+                }
+            };
             if inputs.iter().any(|i| i.is_none()) {
                 panic!("Gate {:?} has uninitialized inputs: {:?}", gate_id, inputs);
             }
 
-            // Downcast to check if it's a Circuit or a Gate
-            let outputs = if let Some(subcircuit) = component.as_any_mut().downcast_mut::<Circuit>()
-            {
-                // It's a subcircuit: tick it and get its output
-                subcircuit.tick()?;
-                // Assume output is on pin 0 (or adjust as needed)
-                subcircuit.get_outputs()
-            } else {
-                // It's a gate: compute output as before
-                let input_bools: Vec<bool> = inputs.iter().map(|&v| v.unwrap()).collect();
-                let result = compute_gate_logic(component.get_type(), &input_bools);
-                vec![Some(result)]
+            let outputs = match component {
+                LogicComponent::Gate(gate) => {
+                    let input_bools: Vec<bool> = inputs.iter().map(|&v| v.unwrap()).collect();
+                    let output = compute_gate_logic(gate.gate_type, &input_bools);
+                    gate.output = Some(output);
+                    vec![Some(output)]
+                }
+                LogicComponent::Circuit(circuit) => {
+                    // For circuits, we need to tick the subcircuit
+                    circuit.tick()?;
+                    // Assume output is on pin 0 (or adjust as needed)
+                    let outputs = circuit.get_outputs();
+                    if outputs.len() != circuit.output_gates.len() {
+                        return Err(TickError::OutputGateMismatch);
+                    }
+                    for (pin, value) in self.output_gates.iter().zip(outputs.clone()) {
+                        if let Some(gate) = self.components.get_mut(pin.1) {
+                            if let LogicComponent::Gate(gate) = gate {
+                                gate.inputs[0] = value;
+                            }
+                        }
+                    }
+                    outputs
+                }
             };
 
-            component.set_outputs(outputs.clone());
             for connection in self.connections.iter().filter(|c| c.source == *gate_id) {
                 let output_value = outputs
                     .get(connection.source_output)
                     .copied()
                     .unwrap_or(None);
                 if let Some(target_gate) = self.components.get_mut(&connection.target) {
-                    target_gate.set_input(connection.target_input, output_value);
+                    match target_gate {
+                        LogicComponent::Gate(gate) => {
+                            gate.inputs[connection.target_input] = output_value;
+                        }
+                        LogicComponent::Circuit(circuit) => {
+                            // For circuits, we need to set the input directly
+                            circuit.set_input(connection.target_input, output_value);
+                        }
+                    }
                 }
             }
-            // let updates_needed: Vec<(ComponentId, usize)> = self
-            //     .connections
-            //     .iter()
-            //     .filter(|c| c.source == *gate_id)
-            //     .map(|c| (c.target, c.target_input))
-            //     .collect();
-
-            // // Apply updates to all connected gates
-            // for (target_id, target_input) in updates_needed {
-            //     if let Some(target_gate) = self.components.get_mut(&target_id) {
-            //         target_gate
-            //             .set_input(target_input, outputs.pop().expect("Output not available"));
-            //     }
-            // }
         }
 
         Ok(())
@@ -180,20 +234,66 @@ impl Circuit {
 
     // pub fn execute(&mut self, inputs: Vec<Option<bool>>) -> Result<Vec<Option<bool>>, TickError> {
     // }
+
+    fn get_inputs(&self) -> Vec<Option<bool>> {
+        let mut pins: Vec<(PinId, Option<bool>)> = self
+            .input_gates
+            .iter()
+            .filter_map(|(&pin, gate_id)| {
+                if let Some(component) = self.components.get(gate_id) {
+                    if let LogicComponent::Gate(gate) = component {
+                        if gate.gate_type == GateType::Input {
+                            return Some((pin, gate.inputs[0]));
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // Sort by pin number if needed
+        pins.sort_by_key(|&(pin, _)| pin);
+
+        // Extract just the values
+        pins.into_iter().map(|(_, value)| value).collect()
+    }
+
+    fn get_outputs(&self) -> Vec<Option<bool>> {
+        let mut pins: Vec<(PinId, Option<bool>)> = self
+            .output_gates
+            .iter()
+            .filter_map(|(&pin, gate_id)| {
+                if let Some(component) = self.components.get(gate_id) {
+                    if let LogicComponent::Gate(gate) = component {
+                        if gate.gate_type == GateType::Output {
+                            return Some((pin, gate.inputs[0]));
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // Sort by pin number
+        pins.sort_by_key(|&(pin, _)| pin);
+
+        // Extract just the values
+        pins.into_iter().map(|(_, value)| value).collect()
+    }
 }
 
 impl Circuit {
     pub fn add_input(&mut self, initial: Option<bool>) -> GateId {
         let gate = Gate::new_input(self.id, initial);
         let gate_id = gate.id.gate_id;
-        self.components.insert(gate_id, Box::new(gate));
+        self.components.insert(gate_id, LogicComponent::Gate(gate));
         gate_id
     }
 
     pub fn add_input_pin(&mut self, initial: Option<bool>, pin: usize) -> GateId {
         let gate = Gate::new_input(self.id, initial);
         let gate_id = gate.id.gate_id;
-        self.components.insert(gate_id, Box::new(gate));
+        self.components.insert(gate_id, LogicComponent::Gate(gate));
         self.input_gates.insert(pin, gate_id);
         gate_id
     }
@@ -201,14 +301,14 @@ impl Circuit {
     pub fn add_output(&mut self) -> GateId {
         let gate = Gate::new_output(self.id);
         let gate_id = gate.id.gate_id;
-        self.components.insert(gate_id, Box::new(gate));
+        self.components.insert(gate_id, LogicComponent::Gate(gate));
         gate_id
     }
 
     pub fn add_output_pin(&mut self, pin: usize) -> GateId {
         let gate = Gate::new_output(self.id);
         let gate_id = gate.id.gate_id;
-        self.components.insert(gate_id, Box::new(gate));
+        self.components.insert(gate_id, LogicComponent::Gate(gate));
         self.output_gates.insert(pin, gate_id);
         gate_id
     }
@@ -216,28 +316,28 @@ impl Circuit {
     pub fn add_identity(&mut self) -> GateId {
         let gate = Gate::new_identity(self.id);
         let gate_id = gate.id.gate_id;
-        self.components.insert(gate_id, Box::new(gate));
+        self.components.insert(gate_id, LogicComponent::Gate(gate));
         gate_id
     }
 
     pub fn add_not(&mut self) -> GateId {
         let gate = Gate::new_not(self.id);
         let gate_id = gate.id.gate_id;
-        self.components.insert(gate_id, Box::new(gate));
+        self.components.insert(gate_id, LogicComponent::Gate(gate));
         gate_id
     }
 
     pub fn add_or(&mut self) -> GateId {
         let gate = Gate::new_or(self.id);
         let gate_id = gate.id.gate_id;
-        self.components.insert(gate_id, Box::new(gate));
+        self.components.insert(gate_id, LogicComponent::Gate(gate));
         gate_id
     }
 
     pub fn add_and(&mut self) -> GateId {
         let gate = Gate::new_and(self.id);
         let gate_id = gate.id.gate_id;
-        self.components.insert(gate_id, Box::new(gate));
+        self.components.insert(gate_id, LogicComponent::Gate(gate));
         gate_id
     }
 }
