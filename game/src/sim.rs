@@ -1,7 +1,7 @@
 use bevy::{prelude::*, utils::HashMap};
 use bevy_egui::{EguiContexts, egui};
 use sim_core::{
-    Circuit, CircuitTemplate, GateId, LogicComponent,
+    Circuit, CircuitTemplate, GateId, GateType, LogicComponent,
     circuits::builtin::{FullAdderTemplate, InputOutputCircuitTemplate},
 };
 
@@ -9,15 +9,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::SAVE_FILE_NAME;
 
-#[derive(Resource)]
-pub struct SimulationConfig {
-    pub tick_rate: f64,
-}
-
+// Visual representation of the circuit component
 #[derive(Component, Debug, Clone, Copy)]
 pub struct GateComponent {
     pub id: GateId,
     pub position: Vec2,
+}
+
+impl GateComponent {
+    pub fn new(id: GateId, position: Vec2) -> Self {
+        GateComponent { id, position }
+    }
+}
+
+/// Returns a sprite for the given logic component type
+pub fn get_gate_sprite(lc: &LogicComponent) -> Sprite {
+    let color = match lc.get_type() {
+        GateType::And => Color::srgb(0.0, 0.6, 0.3),
+        GateType::Or => Color::srgb(1.0, 1.0, 0.0),
+        GateType::Not => Color::srgb(0.0, 0.1, 0.5),
+        GateType::Input => Color::srgb(0.0, 0.0, 0.0),
+        GateType::Output => Color::srgb(0.0, 0.0, 0.0),
+        GateType::Circuit => Color::srgb(0.1, 0.5, 0.3),
+        GateType::Oscillator => Color::srgb(0.5, 0.1, 0.3),
+        _ => Color::WHITE,
+    };
+
+    Sprite {
+        color,
+        custom_size: Some(Vec2::new(50.0, 50.0)),
+        ..Default::default()
+    }
 }
 
 #[derive(Component)]
@@ -93,6 +115,11 @@ pub struct Simulation {
     pub circuit: Circuit,
 }
 
+#[derive(Resource)]
+pub struct SimulationConfig {
+    pub tick_rate: f64,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SavedSimulation {
     pub circuit: Circuit,
@@ -145,9 +172,10 @@ pub fn simulation_config_ui_system(
     });
 }
 
-pub fn update_tickrate_system(sim_config: ResMut<SimulationConfig>, mut time: ResMut<Time<Fixed>>) {
-    // Update the tick rate of the simulation
-    time.set_timestep_seconds(sim_config.tick_rate);
+pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, mut time: ResMut<Time<Fixed>>) {
+    if sim_config.is_changed() {
+        time.set_timestep_seconds(sim_config.tick_rate);
+    }
 }
 
 pub fn save_on_exit_system(

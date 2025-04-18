@@ -1690,6 +1690,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
+name = "catppuccin-egui"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a93c74882fe7e6b16089cc70122af492e16b76016d3ed2af9b0c4b6a8bca0ab0"
+dependencies = [
+ "egui",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3545,6 +3554,7 @@ dependencies = [
  "bevy_egui",
  "bevy_mod_debugdump",
  "blake3",
+ "catppuccin-egui",
  "serde",
  "serde_json",
  "sim_core",

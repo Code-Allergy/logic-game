@@ -2,12 +2,11 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, egui};
 use sim_core::{GateId, GateType};
-use std::collections::HashMap;
 
 use crate::{
     CONNECTION_Z_LEVEL, ConnectionLine, GateComponent, GateComponentSelectionEvent, Simulation,
-    SimulationConfig,
-    sim::{Selected, SelectedGate},
+    sim::{Selected, SelectedGate, get_gate_sprite},
+    spatial_grid::SpatialGrid,
 };
 
 pub fn simulation_update_system(mut simulation: ResMut<Simulation>) {
@@ -16,32 +15,12 @@ pub fn simulation_update_system(mut simulation: ResMut<Simulation>) {
 
 pub fn draw_gates_system(simulation: Res<Simulation>, mut commands: Commands) {
     // Iterate over the gates in the circuit. (You might need to make gates field public or provide a getter.)
+    let mut offset = 0.0;
     for (gate_id, gate) in simulation.circuit.components.iter() {
-        // Procedurally position each gate based on its id (this is just a demo strategy).
-        let x = 300.0;
+        let x = 50.0 + offset * 100.0; // Adjust the x position based on the index
         let y = 0.0;
-
-        // Choose a color based on the gate type.
-        let color = match gate.get_type() {
-            GateType::And => Color::srgb(0.0, 0.6, 0.3),
-            GateType::Or => Color::srgb(1.0, 1.0, 0.0),
-            GateType::Not => Color::srgb(0.0, 0.1, 0.5),
-            GateType::Input => Color::srgb(0.0, 0.0, 0.0),
-            GateType::Output => Color::srgb(0.0, 0.0, 0.0),
-            GateType::Circuit => Color::srgb(0.1, 0.5, 0.3),
-            GateType::Oscillator => Color::srgb(0.5, 0.1, 0.3),
-            _ => Color::WHITE,
-        };
-
-        // let sprite = if GateType::Input == gate.gate_type {
-        //     Sprite::from_image(texture_handle)
-        // } else {
-        let sprite = Sprite {
-            color,
-            custom_size: Some(Vec2::new(50.0, 50.0)),
-            ..Default::default()
-        };
-        // };
+        let sprite = get_gate_sprite(gate);
+        offset += 1.0;
 
         commands.spawn((
             sprite,
@@ -89,8 +68,6 @@ fn find_entity_at_position(
     grid: &SpatialGrid,
     query: &Query<(Entity, &Transform), With<GateComponent>>,
 ) -> Option<(Entity, Vec2)> {
-    // Returns entity and offset from cursor
-    // Query spatial grid for potential entities
     let nearby_entities = grid.query_near(position, 50.0); // Search radius based on gate size
 
     for entity in nearby_entities {
@@ -216,7 +193,7 @@ pub fn draw_connections_system(
             // Calculate rotation to align the line with the direction
             let rotation = Quat::from_rotation_arc(Vec3::X, direction);
 
-            println!(
+            info!(
                 "Drawing connection from {:?} to {:?}",
                 connection.source, connection.target
             );
@@ -345,103 +322,33 @@ pub fn ui_for_selected_gate(
     mut sel: ResMut<SelectedGate>,
     mut simulation: ResMut<Simulation>,
 ) {
-    if let Some((entity, gate_id)) = sel.0 {
-        // Grab the gate so you can show/edit its data
-        if let Some(gate) = simulation.circuit.components.get_mut(&gate_id) {
-            egui::Window::new("Gate Properties")
-                .collapsible(false)
-                .show(contexts.ctx_mut(), |ui| {
-                    ui.label(format!("Gate ID: {:?}", gate_id));
-                    ui.label(format!("Gate Type: {:?}", gate.get_type()));
-                    // if it’s an input gate, show a toggle:
-                    if let GateType::Input = gate.get_type() {
-                        let mut value = gate.get_input(0).unwrap_or(false);
-                        if ui.checkbox(&mut value, "Input Value").clicked() {
-                            gate.set_input(0, Some(value));
+    if let Some(ctx) = contexts.try_ctx_mut() {
+        if let Some((_entity, gate_id)) = sel.0 {
+            // Grab the gate so you can show/edit its data
+            if let Some(gate) = simulation.circuit.components.get_mut(&gate_id) {
+                egui::Window::new("Gate Properties")
+                    .collapsible(false)
+                    .show(ctx, |ui| {
+                        ui.label(format!("Gate ID: {:?}", gate_id));
+                        ui.label(format!("Gate Type: {:?}", gate.get_type()));
+                        // if it’s an input gate, show a toggle:
+                        if let GateType::Input = gate.get_type() {
+                            let mut value = gate.get_input(0).unwrap_or(false);
+                            if ui.checkbox(&mut value, "Input Value").clicked() {
+                                gate.set_input(0, Some(value));
+                            }
                         }
-                    }
-                    // ... other gate fields, sliders, etc.
+                        // ... other gate fields, sliders, etc.
 
-                    if ui.button("Close").clicked() {
-                        sel.0 = None;
-                    }
-                });
-        } else {
-            // gate went away?
-            sel.0 = None;
-        }
-    }
-}
-
-// Define a 2D grid for spatial partitioning
-#[derive(Resource, Default)]
-pub struct SpatialGrid {
-    // Map from grid cell to entities in that cell
-    cells: HashMap<(i32, i32), Vec<Entity>>,
-    // Cell size for the grid
-    cell_size: f32,
-}
-
-impl SpatialGrid {
-    pub fn new(cell_size: f32) -> Self {
-        SpatialGrid {
-            cells: HashMap::new(),
-            cell_size,
-        }
-    }
-
-    // Convert world position to grid cell
-    fn get_cell(&self, position: Vec2) -> (i32, i32) {
-        (
-            (position.x / self.cell_size).floor() as i32,
-            (position.y / self.cell_size).floor() as i32,
-        )
-    }
-
-    // Add entity to the grid
-    pub fn insert(&mut self, entity: Entity, position: Vec2) {
-        let cell = self.get_cell(position);
-        self.cells.entry(cell).or_default().push(entity);
-    }
-
-    // Remove entity from the grid
-    pub fn remove(&mut self, entity: Entity, position: Vec2) {
-        let cell = self.get_cell(position);
-        if let Some(entities) = self.cells.get_mut(&cell) {
-            entities.retain(|&e| e != entity);
-        }
-    }
-
-    // Update entity position in the grid
-    pub fn update(&mut self, entity: Entity, old_pos: Vec2, new_pos: Vec2) {
-        self.remove(entity, old_pos);
-        self.insert(entity, new_pos);
-    }
-
-    // Query entities near a position
-    pub fn query_near(&self, position: Vec2, radius: f32) -> Vec<Entity> {
-        let mut result = Vec::new();
-        let cell = self.get_cell(position);
-
-        // Calculate how many cells we need to check based on radius
-        let cell_radius = (radius / self.cell_size).ceil() as i32;
-
-        // Check nearby cells
-        for i in -cell_radius..=cell_radius {
-            for j in -cell_radius..=cell_radius {
-                let query_cell = (cell.0 + i, cell.1 + j);
-                if let Some(entities) = self.cells.get(&query_cell) {
-                    result.extend(entities);
-                }
+                        if ui.button("Close").clicked() {
+                            sel.0 = None;
+                        }
+                    });
+            } else {
+                // gate went away?
+                sel.0 = None;
             }
         }
-
-        result
-    }
-
-    // Clear the grid
-    pub fn clear(&mut self) {
-        self.cells.clear();
     }
 }
 

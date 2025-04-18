@@ -1,20 +1,21 @@
 use bevy::prelude::*;
 use bevy::utils::HashMap;
-use bevy_egui::EguiPlugin;
-use bevy_egui::{EguiContexts, egui};
+use bevy_egui::{EguiContexts, EguiPlugin, EguiPreUpdateSet};
 use main_menu::MainMenuPlugin;
-use serde::{Deserialize, Serialize};
-use sim_core::CircuitTemplate;
-use sim_core::circuits::builtin::{FullAdderTemplate, InputOutputCircuitTemplate};
+
 mod systems;
 use systems::*;
 
 mod main_menu;
+
 mod sim;
 use sim::*;
 
 mod settings_overlay;
 use settings_overlay::*;
+
+mod spatial_grid;
+use spatial_grid::SpatialGrid;
 
 pub const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.15);
 pub const HOVERED_BUTTON: Color = Color::srgb(0.25, 0.25, 0.25);
@@ -65,9 +66,10 @@ pub struct GateComponentSelectionEvent {
 }
 
 /* First system run before any system state is ran */
-pub fn initial_startup_system(mut commands: Commands) {
+pub fn initial_startup_system(mut commands: Commands, mut ctx: EguiContexts) {
     // Set 2D camera
     commands.spawn((Camera2d::default(), MainCamera));
+    catppuccin_egui::set_theme(ctx.ctx_mut(), catppuccin_egui::MOCHA);
 }
 
 fn main() {
@@ -101,10 +103,9 @@ fn main() {
             OnEnter(GameState::Simulating),
             (
                 draw_gates_system,
-                draw_connections_system,
+                draw_connections_system.after(draw_gates_system),
                 rebuild_spatial_grid_system,
-            )
-                .chain(),
+            ),
         )
         .add_systems(
             FixedUpdate,
@@ -115,7 +116,8 @@ fn main() {
             Update,
             (
                 update_input_colours_system,
-                (gate_selection_system, drag_selected_system).chain(),
+                gate_selection_system.before(drag_selected_system),
+                drag_selected_system,
                 update_connections_system,
                 update_spatial_grid_system,
                 update_inputs_on_left_click,
@@ -126,9 +128,8 @@ fn main() {
             )
                 .run_if(in_state(GameState::Simulating)),
         )
-        // .add_systems(EguiContextPass, ui_for_selected_gate)
         // .add_systems(Last, save_on_exit_system)
         // RUN ALWAYS
-        // .add_systems(Update, (show_settings_menu, settings_menu_button_system))
+        .add_systems(Update, (show_settings_menu, settings_menu_button_system))
         .run();
 }
