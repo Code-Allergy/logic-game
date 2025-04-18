@@ -1,14 +1,14 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use bevy_egui::{EguiContexts, egui};
 use sim_core::{GateId, GateType};
 use std::collections::HashMap;
 
-use crate::{CONNECTION_Z_LEVEL, ConnectionLine, GateComponent, MainCamera, Selected, Simulation};
-
-pub fn setup_camera(mut commands: Commands) {
-    // Set up your 2D camera (if you’re making a 2D frontend)
-    commands.spawn((Camera2d::default(), MainCamera));
-}
+use crate::{
+    CONNECTION_Z_LEVEL, ConnectionLine, GateComponent, GateComponentSelectionEvent, Simulation,
+    SimulationConfig,
+    sim::{Selected, SelectedGate},
+};
 
 pub fn simulation_update_system(mut simulation: ResMut<Simulation>) {
     simulation.tick();
@@ -286,8 +286,8 @@ pub fn update_inputs_on_left_click(
     q_window: Query<&Window, With<PrimaryWindow>>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-    mut simulation: ResMut<Simulation>,
     mut query: Query<(Entity, &Transform, &GateComponent)>,
+    mut select_writer: EventWriter<GateComponentSelectionEvent>,
 ) {
     let (camera, camera_transform) = q_camera.single();
     let window = q_window.single();
@@ -315,24 +315,60 @@ pub fn update_inputs_on_left_click(
                         && local_point_2d.y >= -half_extents.y
                         && local_point_2d.y <= half_extents.y
                     {
-                        // Get the gate ID from the component
-                        let gate_id: GateId = gate_component.id;
-
-                        // Get a mutable reference to the gate
-                        if let Some(gate) = simulation.circuit.components.get_mut(&mut &gate_id) {
-                            // Check if the gate is an input
-                            if gate.get_type() == GateType::Input {
-                                // Toggle the input value
-                                let current_value = gate.get_input(0).unwrap_or(false);
-                                let new_value = !current_value;
-                                gate.set_input(0, Some(new_value));
-                                info!("Toggled input gate entity to {}: {:?}", new_value, entity);
-                            }
-                        }
+                        select_writer.send(GateComponentSelectionEvent {
+                            entity,
+                            component: gate_component.clone(),
+                        });
                         break; // Only select one entity
                     }
                 }
             }
+        }
+    }
+}
+
+pub fn update_selected_gate(
+    mut event_reader: EventReader<GateComponentSelectionEvent>,
+    mut selected_gate: ResMut<SelectedGate>,
+) {
+    // Check if the event is for a gate selection
+    for event in event_reader.read() {
+        // If the selected gate is different from the one in the event, update it
+        if selected_gate.0 != Some((event.entity, event.component.id)) {
+            selected_gate.0 = Some((event.entity, event.component.id));
+        }
+    }
+}
+
+pub fn ui_for_selected_gate(
+    mut contexts: EguiContexts,
+    mut sel: ResMut<SelectedGate>,
+    mut simulation: ResMut<Simulation>,
+) {
+    if let Some((entity, gate_id)) = sel.0 {
+        // Grab the gate so you can show/edit its data
+        if let Some(gate) = simulation.circuit.components.get_mut(&gate_id) {
+            egui::Window::new("Gate Properties")
+                .collapsible(false)
+                .show(contexts.ctx_mut(), |ui| {
+                    ui.label(format!("Gate ID: {:?}", gate_id));
+                    ui.label(format!("Gate Type: {:?}", gate.get_type()));
+                    // if it’s an input gate, show a toggle:
+                    if let GateType::Input = gate.get_type() {
+                        let mut value = gate.get_input(0).unwrap_or(false);
+                        if ui.checkbox(&mut value, "Input Value").clicked() {
+                            gate.set_input(0, Some(value));
+                        }
+                    }
+                    // ... other gate fields, sliders, etc.
+
+                    if ui.button("Close").clicked() {
+                        sel.0 = None;
+                    }
+                });
+        } else {
+            // gate went away?
+            sel.0 = None;
         }
     }
 }

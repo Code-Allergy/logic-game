@@ -29,12 +29,14 @@
         # Use the latest nightly Rust
         rustVersion = pkgs.rust-bin.nightly.latest.default.override {
           extensions = ["rust-std" "llvm-tools-preview"];
-          targets = ["x86_64-unknown-linux-gnu" "wasm32-unknown-unknown"];
+          targets = ["x86_64-unknown-linux-gnu" "x86_64-pc-windows-gnu" "wasm32-unknown-unknown"];
         };
       in {
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.linuxPackages_latest.perf
+            pkgs.pkgsCross.mingwW64.buildPackages.gcc
+            pkgs.pkgsCross.mingwW64.windows.pthreads
             pkgs.clang
             pkgs.lld
             pkgs.pkg-config
