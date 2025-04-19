@@ -28,8 +28,8 @@ impl CircuitTemplate for HalfAdderTemplate {
 
         // Create two input gates for A and B.
         // Use input pins with indices 0 and 1.
-        let a_gate_id = circuit.add_input_pin(None, 0);
-        let b_gate_id = circuit.add_input_pin(None, 1);
+        let a_gate_id = circuit.add_input_pin(0);
+        let b_gate_id = circuit.add_input_pin(1);
 
         // Create two NOT gates to compute NOT A and NOT B.
         let not_a_gate_id = circuit.add_not();

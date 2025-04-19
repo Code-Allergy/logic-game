@@ -26,7 +26,7 @@ impl CircuitTemplate for InputOutputCircuitTemplate {
     fn template() -> Circuit {
         let mut circuit = Circuit::new();
 
-        let input_id = circuit.add_input_pin(None, 0); // Data input D0
+        let input_id = circuit.add_input_pin(0); // Data input D0
         let output_id = circuit.add_output_pin(0); // Output pin
 
         // connect input to output

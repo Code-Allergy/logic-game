@@ -27,9 +27,9 @@ impl CircuitTemplate for MultiplexerTemplate {
         let mut circuit = Circuit::new();
 
         // Create input gates for data and select
-        let d0_gate_id = circuit.add_input_pin(None, 0); // Data input D0
-        let d1_gate_id = circuit.add_input_pin(None, 1); // Data input D1
-        let s_gate_id = circuit.add_input_pin(None, 2); // Select input S
+        let d0_gate_id = circuit.add_input_pin(0); // Data input D0
+        let d1_gate_id = circuit.add_input_pin(1); // Data input D1
+        let s_gate_id = circuit.add_input_pin(2); // Select input S
 
         // Create a NOT gate to invert S
         let not_gate_id = circuit.add_not();

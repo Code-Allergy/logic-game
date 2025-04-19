@@ -85,18 +85,19 @@ pub struct SavedSimulation {
 impl Simulation {
     pub fn new() -> Self {
         let mut outer_circuit = Circuit::new();
-        // let circuit = InputOutputCircuitTemplate::template();
+        let circuit = InputOutputCircuitTemplate::template();
         // let mut circuit = Circuit::new();
-        add_n_bit_adder(&mut outer_circuit, 2, 0, 0);
+        // add_n_bit_adder(&mut outer_circuit, 2, 0, 0);
         // // let input_id = outer_circuit.add_oscillator(10);
-        // let input_id = outer_circuit.add_input_pin(Some(false), 0);
-        // let output_id = outer_circuit.add_output_pin(0);
-        // let target = circuit.id();
+        let input_id = outer_circuit.add_input(false);
+        let output_id = outer_circuit.add_output_pin(0);
+        let target = circuit.id();
 
-        // outer_circuit.add_component(LogicComponent::Circuit(circuit));
+        outer_circuit.add_component(LogicComponent::Circuit(circuit));
 
-        // outer_circuit.add_connection(input_id, target, 0, 0);
-        // outer_circuit.add_connection(target, output_id, 0, 0);
+        outer_circuit.add_connection(input_id, target, 0, 0);
+        outer_circuit.add_connection(target, output_id, 0, 0);
+        dbg!(&outer_circuit);
         Simulation {
             circuit: outer_circuit,
         }
@@ -123,10 +124,10 @@ fn add_n_bit_adder(circuit: &mut Circuit, n: usize, input_offset: usize, output_
     let mut a = Vec::with_capacity(n);
     let mut b = Vec::with_capacity(n);
     for i in 0..n {
-        a.push(circuit.add_input_pin(Some(false), input_offset + i));
-        b.push(circuit.add_input_pin(Some(false), input_offset + n + i));
+        a.push(circuit.add_input_pin(input_offset + i));
+        b.push(circuit.add_input_pin(input_offset + n + i));
     }
-    let cin = circuit.add_input_pin(Some(false), input_offset + 2 * n);
+    let cin = circuit.add_input_pin(input_offset + 2 * n);
 
     // Outputs: S0..Sn-1, Cout
     let mut s = Vec::with_capacity(n);

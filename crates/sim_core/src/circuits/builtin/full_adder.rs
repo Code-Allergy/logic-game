@@ -11,9 +11,9 @@ impl CircuitTemplate for FullAdderTemplate {
         // --- Input Gates ---
         // Create three input gates for A, B, and Cin.
         // (We assume the 'add_input_pin' method assigns the port number for external mapping.)
-        let a_id = circuit.add_input_pin(None, 0); // Input A on port 0
-        let b_id = circuit.add_input_pin(None, 1); // Input B on port 1
-        let cin_id = circuit.add_input_pin(None, 2); // Carry-in on port 2
+        let a_id = circuit.add_input_pin(0); // Input A on port 0
+        let b_id = circuit.add_input_pin(1); // Input B on port 1
+        let cin_id = circuit.add_input_pin(2); // Carry-in on port 2
 
         // --- Half-Adder 1: Computes A XOR B and Carry1 = A AND B ---
         // To construct XOR, we use two NOTs, two ANDs, and one OR.

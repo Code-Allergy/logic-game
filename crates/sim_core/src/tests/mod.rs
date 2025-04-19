@@ -1,258 +1,460 @@
+use uuid::Uuid;
+
 use crate::{
-    Circuit, CircuitTemplate, GateData, GateId, GateType, LogicComponent, TickError,
+    AnyGate, Circuit, CircuitTemplate, GateData, GateId, GateType, LogicComponent, TickError,
     circuits::builtin::{FullAdderTemplate, HalfAdderTemplate, MultiplexerTemplate},
-    gates::compute_gate_logic,
+    gates::{
+        AndLogic, GenericGate, IdentityLogic, InputLogic, NotLogic, OrLogic, OscillatorLogic,
+        OutputLogic,
+    },
 };
 
+// #[test]
+// fn test_compute_gate_logic_and() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::And, &mut GateData::None, &vec![true, true]),
+//         true,
+//         "AND gate should return true when both inputs are true"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::And, &mut GateData::None, &vec![true, false]),
+//         false,
+//         "AND gate should return false when one input is false"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::And, &mut GateData::None, &vec![false, false]),
+//         false,
+//         "AND gate should return false when both inputs are false"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::And, &mut GateData::None, &vec![false, false]),
+//         false,
+//         "AND gate should return false when both inputs are false"
+//     );
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_and_empty() {
+//     compute_gate_logic(GateType::And, &mut GateData::None, &vec![]);
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_and_low() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::And, &mut GateData::None, &vec![true]),
+//         false,
+//         "AND gate should return false when only one input is provided"
+//     );
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_and_high() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::And, &mut GateData::None, &vec![true, true, true]),
+//         true,
+//         "AND gate should return true when all inputs are true"
+//     );
+// }
+
+// #[test]
+// fn test_compute_gate_logic_or() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::Or, &mut GateData::None, &vec![true, true]),
+//         true,
+//         "OR gate should return true when both inputs are true"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Or, &mut GateData::None, &vec![true, false]),
+//         true,
+//         "OR gate should return true when one input is true"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Or, &mut GateData::None, &vec![false, true]),
+//         true,
+//         "OR gate should return true when one input is true"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Or, &mut GateData::None, &vec![false, false]),
+//         false,
+//         "OR gate should return false when both inputs are false"
+//     );
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_or_empty() {
+//     compute_gate_logic(GateType::Or, &mut GateData::None, &vec![]);
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_or_low() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::Or, &mut GateData::None, &vec![true]),
+//         true,
+//         "OR gate should return true when only one input is provided"
+//     );
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_or_high() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::Or, &mut GateData::None, &vec![true, true, true]),
+//         true,
+//         "OR gate should return true when all inputs are true"
+//     );
+// }
+
+// #[test]
+// fn test_compute_gate_logic_not() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::Not, &mut GateData::None, &vec![true]),
+//         false,
+//         "NOT gate should return false when input is true"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Not, &mut GateData::None, &vec![false]),
+//         true,
+//         "NOT gate should return true when input is false"
+//     );
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_not_empty() {
+//     compute_gate_logic(GateType::Not, &mut GateData::None, &vec![]);
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_not_high() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::Not, &mut GateData::None, &vec![true, false]),
+//         false,
+//         "NOT gate should return the not of the first value provided"
+//     );
+// }
+
+// #[test]
+// fn test_compute_gate_logic_input() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::Input, &mut GateData::None, &vec![true]),
+//         true,
+//         "Input gate should return true when input is true"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Input, &mut GateData::None, &vec![false]),
+//         false,
+//         "Input gate should return false when input is false"
+//     );
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_input_empty() {
+//     compute_gate_logic(GateType::Input, &mut GateData::None, &vec![]);
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_input_high() {
+//     compute_gate_logic(GateType::Input, &mut GateData::None, &vec![true, false]); // should always panic
+// }
+
+// #[test]
+// fn test_compute_gate_logic_output() {
+//     assert_eq!(
+//         compute_gate_logic(GateType::Output, &mut GateData::None, &vec![true]),
+//         true,
+//         "Output gate should return true when input is true"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Output, &mut GateData::None, &vec![false]),
+//         false,
+//         "Output gate should return false when input is false"
+//     );
+// }
+
+// #[test]
+// fn test_compute_gate_logic_oscillate_2t() {
+//     let mut gate_data = GateData::Oscillator {
+//         frequency: 2,
+//         tick: 0,
+//     };
+
+//     assert_eq!(
+//         compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
+//         false,
+//         "Oscillator gate should return false for the first tick"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
+//         true,
+//         "Oscillator gate should return true on the 2nd tick"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
+//         false,
+//         "Oscillator gate should return false on the 3rd tick"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
+//         true,
+//         "Oscillator gate should return true on the 4th tick"
+//     );
+// }
+
+// #[test]
+// fn test_compute_gate_logic_oscillate_5t() {
+//     let mut gate_data = GateData::Oscillator {
+//         frequency: 5,
+//         tick: 0,
+//     };
+
+//     assert_eq!(
+//         compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
+//         false,
+//         "Oscillator gate should return false for the first tick"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
+//         false,
+//         "Oscillator gate should return true on the 2nd tick"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
+//         false,
+//         "Oscillator gate should return false on the 3rd tick"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
+//         false,
+//         "Oscillator gate should return true on the 4th tick"
+//     );
+//     assert_eq!(
+//         compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
+//         true,
+//         "Oscillator gate should return true on the 5th tick"
+//     );
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_output_empty() {
+//     compute_gate_logic(GateType::Output, &mut GateData::None, &vec![]);
+// }
+
+// #[test]
+// #[should_panic]
+// fn test_compute_gate_logic_output_high() {
+//     compute_gate_logic(GateType::Output, &mut GateData::None, &vec![true, false]); // should always panic
+// }
+
 #[test]
-fn test_compute_gate_logic_and() {
-    assert_eq!(
-        compute_gate_logic(GateType::And, &mut GateData::None, &vec![true, true]),
-        true,
-        "AND gate should return true when both inputs are true"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::And, &mut GateData::None, &vec![true, false]),
-        false,
-        "AND gate should return false when one input is false"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::And, &mut GateData::None, &vec![false, false]),
-        false,
-        "AND gate should return false when both inputs are false"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::And, &mut GateData::None, &vec![false, false]),
-        false,
-        "AND gate should return false when both inputs are false"
-    );
+fn test_and_logic() {
+    let c = Uuid::new_v4();
+    let mut gate = GenericGate::<AndLogic>::new(c);
+
+    gate.set_input(0, Some(true));
+    gate.set_input(1, Some(true));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
+
+    gate.set_input(0, Some(true));
+    gate.set_input(1, Some(false));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
+
+    gate.set_input(0, Some(false));
+    gate.set_input(1, Some(false));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
 }
 
 #[test]
-#[should_panic]
-fn test_compute_gate_logic_and_empty() {
-    compute_gate_logic(GateType::And, &mut GateData::None, &vec![]);
+fn test_or_logic() {
+    let c = Uuid::new_v4();
+    let mut gate = GenericGate::<OrLogic>::new(c);
+
+    gate.set_input(0, Some(false));
+    gate.set_input(1, Some(false));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
+
+    gate.set_input(0, Some(true));
+    gate.set_input(1, Some(false));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
+
+    gate.set_input(0, Some(false));
+    gate.set_input(1, Some(true));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
+
+    gate.set_input(0, Some(true));
+    gate.set_input(1, Some(true));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
 }
 
 #[test]
-#[should_panic]
-fn test_compute_gate_logic_and_low() {
-    assert_eq!(
-        compute_gate_logic(GateType::And, &mut GateData::None, &vec![true]),
-        false,
-        "AND gate should return false when only one input is provided"
-    );
+fn test_not_logic() {
+    let c = Uuid::new_v4();
+    let mut gate = GenericGate::<NotLogic>::new(c);
+
+    gate.set_input(0, Some(true));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
+
+    gate.set_input(0, Some(false));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
 }
 
 #[test]
-#[should_panic]
-fn test_compute_gate_logic_and_high() {
-    assert_eq!(
-        compute_gate_logic(GateType::And, &mut GateData::None, &vec![true, true, true]),
-        true,
-        "AND gate should return true when all inputs are true"
-    );
+fn test_identity_logic() {
+    let c = Uuid::new_v4();
+    let mut gate = GenericGate::<IdentityLogic>::new(c);
+
+    gate.set_input(0, Some(false));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
+
+    gate.set_input(0, Some(true));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
 }
 
 #[test]
-fn test_compute_gate_logic_or() {
-    assert_eq!(
-        compute_gate_logic(GateType::Or, &mut GateData::None, &vec![true, true]),
-        true,
-        "OR gate should return true when both inputs are true"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Or, &mut GateData::None, &vec![true, false]),
-        true,
-        "OR gate should return true when one input is true"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Or, &mut GateData::None, &vec![false, true]),
-        true,
-        "OR gate should return true when one input is true"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Or, &mut GateData::None, &vec![false, false]),
-        false,
-        "OR gate should return false when both inputs are false"
-    );
+fn test_input_with_initial() {
+    let c = Uuid::new_v4();
+    let mut gate = GenericGate::<InputLogic>::with_initial(c, true);
+    // since it's an input‐gate, compute just echoes the initial
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
+
+    // changing its "input slot" should change output
+    gate.set_input(0, Some(false));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
 }
 
 #[test]
-#[should_panic]
-fn test_compute_gate_logic_or_empty() {
-    compute_gate_logic(GateType::Or, &mut GateData::None, &vec![]);
+fn test_output_logic_pass_through() {
+    let c = Uuid::new_v4();
+    let mut gate = GenericGate::<OutputLogic>::new(c);
+
+    gate.set_input(0, Some(true));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
+
+    gate.set_input(0, Some(false));
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
 }
 
 #[test]
-#[should_panic]
-fn test_compute_gate_logic_or_low() {
-    assert_eq!(
-        compute_gate_logic(GateType::Or, &mut GateData::None, &vec![true]),
-        true,
-        "OR gate should return true when only one input is provided"
-    );
+fn test_oscillator_logic_default_frequency() {
+    let c = Uuid::new_v4();
+    // default frequency == 1, so every tick toggles
+    let mut gate = GenericGate::<OscillatorLogic>::new(c);
+    gate.set_input(0, Some(false));
+
+    // tick 1 → !false == true
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
+    // tick 2 → !false == true again (freq=1 so always toggle)
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
 }
 
 #[test]
-#[should_panic]
-fn test_compute_gate_logic_or_high() {
-    assert_eq!(
-        compute_gate_logic(GateType::Or, &mut GateData::None, &vec![true, true, true]),
-        true,
-        "OR gate should return true when all inputs are true"
-    );
+fn test_oscillator_logic_custom_frequency() {
+    let c = Uuid::new_v4();
+    let mut gate = GenericGate::<OscillatorLogic>::with_frequency(c, 2);
+    gate.set_input(0, Some(false));
+
+    // tick 0 → state.tick = 0 % 2 = 0 → output = inputs[0] = false
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
+
+    // tick 1 → state.tick = 2 % 2 = 0 → toggle → true
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
+
+    // tick 2 → 1 %2 = 1 → false
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
 }
 
 #[test]
-fn test_compute_gate_logic_not() {
-    assert_eq!(
-        compute_gate_logic(GateType::Not, &mut GateData::None, &vec![true]),
-        false,
-        "NOT gate should return false when input is true"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Not, &mut GateData::None, &vec![false]),
-        true,
-        "NOT gate should return true when input is false"
-    );
+fn test_oscillator_logic_custom_frequency_5t() {
+    let c = Uuid::new_v4();
+    let mut gate = GenericGate::<OscillatorLogic>::with_frequency(c, 5);
+    gate.set_input(0, Some(false));
+
+    // tick 0 → state.tick = 0 % 2 = 0 → output = inputs[0] = false
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
+
+    // tick 1 → state.tick = 2 % 2 = 0 → toggle → true
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
+
+    // tick 2 → 1 %2 = 1 → false
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
+
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(false));
+
+    gate.compute();
+    assert_eq!(gate.get_output(), Some(true));
+}
+
+//—— AnyGate tests ——————————————————————————————————————
+
+#[test]
+fn test_anygate_and_via_constructor() {
+    let c = Uuid::new_v4();
+    let mut any = AnyGate::new_and(c);
+    any.set_input(0, Some(true));
+    any.set_input(1, Some(false));
+    any.compute();
+    assert_eq!(any.get_output(), Some(false));
+    assert_eq!(any.get_gate_type(), GateType::And);
 }
 
 #[test]
-#[should_panic]
-fn test_compute_gate_logic_not_empty() {
-    compute_gate_logic(GateType::Not, &mut GateData::None, &vec![]);
+fn test_anygate_or_via_factory() {
+    let c = Uuid::new_v4();
+    // using the GateType → new(...) path
+    let mut any = AnyGate::new(GateType::Or, c);
+    assert_eq!(any.get_gate_type(), GateType::Or);
+
+    any.set_input(0, Some(false));
+    any.set_input(1, Some(true));
+    any.compute();
+    assert_eq!(any.get_output(), Some(true));
 }
 
 #[test]
-#[should_panic]
-fn test_compute_gate_logic_not_high() {
-    assert_eq!(
-        compute_gate_logic(GateType::Not, &mut GateData::None, &vec![true, false]),
-        false,
-        "NOT gate should return the not of the first value provided"
-    );
-}
-
-#[test]
-fn test_compute_gate_logic_input() {
-    assert_eq!(
-        compute_gate_logic(GateType::Input, &mut GateData::None, &vec![true]),
-        true,
-        "Input gate should return true when input is true"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Input, &mut GateData::None, &vec![false]),
-        false,
-        "Input gate should return false when input is false"
-    );
-}
-
-#[test]
-#[should_panic]
-fn test_compute_gate_logic_input_empty() {
-    compute_gate_logic(GateType::Input, &mut GateData::None, &vec![]);
-}
-
-#[test]
-#[should_panic]
-fn test_compute_gate_logic_input_high() {
-    compute_gate_logic(GateType::Input, &mut GateData::None, &vec![true, false]); // should always panic
-}
-
-#[test]
-fn test_compute_gate_logic_output() {
-    assert_eq!(
-        compute_gate_logic(GateType::Output, &mut GateData::None, &vec![true]),
-        true,
-        "Output gate should return true when input is true"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Output, &mut GateData::None, &vec![false]),
-        false,
-        "Output gate should return false when input is false"
-    );
-}
-
-#[test]
-fn test_compute_gate_logic_oscillate_2t() {
-    let mut gate_data = GateData::Oscillator {
-        frequency: 2,
-        tick: 0,
-    };
-
-    assert_eq!(
-        compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
-        false,
-        "Oscillator gate should return false for the first tick"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
-        true,
-        "Oscillator gate should return true on the 2nd tick"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
-        false,
-        "Oscillator gate should return false on the 3rd tick"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
-        true,
-        "Oscillator gate should return true on the 4th tick"
-    );
-}
-
-#[test]
-fn test_compute_gate_logic_oscillate_5t() {
-    let mut gate_data = GateData::Oscillator {
-        frequency: 5,
-        tick: 0,
-    };
-
-    assert_eq!(
-        compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
-        false,
-        "Oscillator gate should return false for the first tick"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
-        false,
-        "Oscillator gate should return true on the 2nd tick"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
-        false,
-        "Oscillator gate should return false on the 3rd tick"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
-        false,
-        "Oscillator gate should return true on the 4th tick"
-    );
-    assert_eq!(
-        compute_gate_logic(GateType::Oscillator, &mut gate_data, &vec![false]),
-        true,
-        "Oscillator gate should return true on the 5th tick"
-    );
-}
-
-#[test]
-#[should_panic]
-fn test_compute_gate_logic_output_empty() {
-    compute_gate_logic(GateType::Output, &mut GateData::None, &vec![]);
-}
-
-#[test]
-#[should_panic]
-fn test_compute_gate_logic_output_high() {
-    compute_gate_logic(GateType::Output, &mut GateData::None, &vec![true, false]); // should always panic
+#[should_panic(expected = "Pin index out of bounds")]
+fn test_anygate_bad_pin() {
+    let c = Uuid::new_v4();
+    let mut any = AnyGate::new_and(c);
+    // AndLogic has 2 inputs; index 2 is out of range
+    any.set_input(2, Some(true));
 }
 
 #[test]
 fn test_simple_circuit_input_output() {
     let mut circuit = Circuit::new();
-    let input_id = circuit.add_input_pin(None, 0);
+    let input_id = circuit.add_input_pin(0);
     let output_id = circuit.add_output_pin(0);
 
     circuit.add_connection(input_id, output_id, 0, 0);
@@ -280,7 +482,7 @@ fn test_simple_circuit_input_output() {
 fn test_simple_circuit_identity() {
     let mut circuit = Circuit::new();
 
-    let input_id = circuit.add_input_pin(None, 0);
+    let input_id = circuit.add_input_pin(0);
     let output_id = circuit.add_output_pin(0);
     let identity_id = circuit.add_identity();
 
@@ -309,7 +511,7 @@ fn test_simple_circuit_identity() {
 fn test_simple_circuit_not() {
     let mut circuit = Circuit::new();
 
-    let input_id = circuit.add_input_pin(None, 0);
+    let input_id = circuit.add_input_pin(0);
     let output_id: GateId = circuit.add_output_pin(0);
     let not_id = circuit.add_not();
 
@@ -338,16 +540,18 @@ fn test_simple_circuit_not() {
 fn test_simple_circuit_or() {
     let mut circuit = Circuit::new();
 
-    let input_id = circuit.add_input_pin(None, 0);
-    let input_id2 = circuit.add_input_pin(None, 1);
+    let input_id = circuit.add_input_pin(0);
+    let input_id2 = circuit.add_input_pin(1);
     let output_id = circuit.add_output_pin(0);
     let or_id = circuit.add_or();
 
     circuit.add_connection(input_id, or_id, 0, 0);
     circuit.add_connection(input_id2, or_id, 1, 0);
+
     circuit.add_connection(or_id, output_id, 0, 0);
     circuit.set_input(0, Some(true));
     circuit.set_input(1, Some(true));
+
     circuit.tick().expect("Tick should succeed");
 
     assert_eq!(
@@ -360,6 +564,7 @@ fn test_simple_circuit_or() {
     circuit.set_input(0, Some(false));
     circuit.set_input(1, Some(true));
     circuit.tick().expect("Tick should succeed");
+    dbg!(&circuit);
 
     assert_eq!(
         circuit.get_output(0),
@@ -382,6 +587,7 @@ fn test_simple_circuit_or() {
     circuit.set_input(0, Some(false));
     circuit.set_input(1, Some(false));
     circuit.tick().expect("Tick should succeed");
+    dbg!(&circuit);
 
     assert_eq!(
         circuit.get_output(0),
@@ -395,8 +601,8 @@ fn test_simple_circuit_or() {
 fn test_simple_circuit_and() {
     let mut circuit = Circuit::new();
 
-    let input_id = circuit.add_input_pin(None, 0);
-    let input_id2 = circuit.add_input_pin(None, 1);
+    let input_id = circuit.add_input_pin(0);
+    let input_id2 = circuit.add_input_pin(1);
     let output_id = circuit.add_output_pin(0);
     let and_id = circuit.add_and();
 
@@ -452,7 +658,7 @@ fn test_simple_circuit_and() {
 fn test_topological_sort() {
     let mut circuit = Circuit::new();
 
-    let input_id = circuit.add_input_pin(None, 0);
+    let input_id = circuit.add_input_pin(0);
     let output_id = circuit.add_output_pin(0);
     let and_id = circuit.add_and();
 
@@ -480,7 +686,7 @@ fn test_topological_sort() {
 fn test_simple_circuit_branching() {
     let mut circuit = Circuit::new();
 
-    let input_id = circuit.add_input_pin(None, 0);
+    let input_id = circuit.add_input_pin(0);
     let output_id = circuit.add_output_pin(0);
     let output_id2 = circuit.add_output_pin(1);
     let identity_id = circuit.add_identity();
@@ -520,8 +726,8 @@ fn test_simple_circuit_branching() {
 fn test_simple_circuit_deep_chain() {
     let mut circuit = Circuit::new();
 
-    let input_id = circuit.add_input_pin(None, 0);
-    let input_id2 = circuit.add_input_pin(None, 1);
+    let input_id = circuit.add_input_pin(0);
+    let input_id2 = circuit.add_input_pin(1);
     let output_id = circuit.add_output_pin(0);
     let and_id = circuit.add_and();
     let or_id = circuit.add_or();
@@ -638,7 +844,7 @@ fn test_multiplexer_template() {
 fn test_simple_cycle() {
     let mut circuit = Circuit::new();
 
-    let input_id = circuit.add_input(None);
+    let input_id = circuit.add_input(true);
     let output_id = circuit.add_output();
     let and_id = circuit.add_and();
 
@@ -659,9 +865,9 @@ fn test_nested_multiplexer() {
     let inner_mux_id = inner_mux.id();
 
     // Outer circuit IO
-    let in0 = outer.add_input_pin(Some(false), 0);
-    let in1 = outer.add_input_pin(Some(false), 1);
-    let in2 = outer.add_input_pin(Some(false), 2);
+    let in0 = outer.add_input_pin(0);
+    let in1 = outer.add_input_pin(1);
+    let in2 = outer.add_input_pin(2);
     let out = outer.add_output_pin(0);
 
     // Add inner multiplexer as a component
@@ -696,8 +902,8 @@ fn test_nested_half_adder() {
     let inner_ha = HalfAdderTemplate::template();
     let inner_ha_id = inner_ha.id();
 
-    let in0 = outer.add_input_pin(Some(false), 0);
-    let in1 = outer.add_input_pin(Some(false), 1);
+    let in0 = outer.add_input_pin(0);
+    let in1 = outer.add_input_pin(1);
     let out = outer.add_output_pin(0);
 
     outer.add_component(LogicComponent::Circuit(inner_ha));
@@ -730,9 +936,9 @@ fn test_nested_full_adder() {
     let inner_fa = FullAdderTemplate::template();
     let inner_fa_id = inner_fa.id();
 
-    let in0 = outer.add_input_pin(Some(false), 0);
-    let in1 = outer.add_input_pin(Some(false), 1);
-    let in2 = outer.add_input_pin(Some(false), 2);
+    let in0 = outer.add_input_pin(0);
+    let in1 = outer.add_input_pin(1);
+    let in2 = outer.add_input_pin(2);
     let out = outer.add_output_pin(0);
 
     outer.add_component(LogicComponent::Circuit(inner_fa));
@@ -778,8 +984,8 @@ fn test_deeply_nested_circuits() {
 
     // Middle: wraps the half adder
     let mut middle = Circuit::new();
-    let in0 = middle.add_input_pin(Some(false), 0);
-    let in1 = middle.add_input_pin(Some(false), 1);
+    let in0 = middle.add_input_pin(0);
+    let in1 = middle.add_input_pin(1);
     let out = middle.add_output_pin(0);
     middle.add_component(LogicComponent::Circuit(inner));
     middle.add_connection(in0, inner_id, 0, 0);
@@ -790,8 +996,8 @@ fn test_deeply_nested_circuits() {
 
     // Outer: wraps the middle circuit
     let mut outer = Circuit::new();
-    let oin0 = outer.add_input_pin(Some(false), 0);
-    let oin1 = outer.add_input_pin(Some(false), 1);
+    let oin0 = outer.add_input_pin(0);
+    let oin1 = outer.add_input_pin(1);
     let oout = outer.add_output_pin(0);
     outer.add_component(LogicComponent::Circuit(middle));
     outer.add_connection(oin0, middle_id, 0, 0);
