@@ -154,15 +154,15 @@ impl Circuit {
     pub fn tick(&mut self) -> Result<(), TickError> {
         let result: Option<Vec<Uuid>> = self.get_topological_order();
         let order = match result {
-            Some(order) => order,
-            None => return Err(TickError::CycleDetected),
+            Option::Some(order) => order,
+            Option::None => return Err(TickError::CycleDetected),
         };
 
         // Traverse the nodes in the defined order
         for gate_id in order.iter() {
             let component = match self.components.get_mut(gate_id) {
                 Some(g) => g,
-                None => continue,
+                Option::None => continue,
             };
 
             // Validate that all inputs are available

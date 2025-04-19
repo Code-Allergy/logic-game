@@ -21,7 +21,7 @@ pub const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.15);
 pub const HOVERED_BUTTON: Color = Color::srgb(0.25, 0.25, 0.25);
 pub const PRESSED_BUTTON: Color = Color::srgb(0.35, 0.75, 0.35);
 
-const SIMULATION_TICK_RATE: f64 = 0.1; // 1 s
+const SIMULATION_TICK_RATE: f64 = 10.0; // 10 ticks per second
 pub const CONNECTION_Z_LEVEL: f32 = 10.0;
 
 pub const SAVE_FILE_NAME: &str = "./simulation.json";

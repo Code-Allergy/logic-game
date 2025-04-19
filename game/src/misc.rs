@@ -3,10 +3,10 @@ fn add_n_bit_adder(circuit: &mut Circuit, n: usize, input_offset: usize, output_
     let mut a = Vec::with_capacity(n);
     let mut b = Vec::with_capacity(n);
     for i in 0..n {
-        a.push(circuit.add_input_pin(Some(false), input_offset + i));
-        b.push(circuit.add_input_pin(Some(false), input_offset + n + i));
+        a.push(circuit.add_input_pin(input_offset + i));
+        b.push(circuit.add_input_pin(input_offset + n + i));
     }
-    let cin = circuit.add_input_pin(Some(false), input_offset + 2 * n);
+    let cin = circuit.add_input_pin(input_offset + 2 * n);
 
     // Outputs: S0..Sn-1, Cout
     let mut s = Vec::with_capacity(n);
