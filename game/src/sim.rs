@@ -66,6 +66,58 @@ pub struct Selected {
 #[derive(Resource, Default)]
 pub struct SelectedGate(pub Option<(Entity, GateId)>);
 
+#[derive(Resource)]
+pub struct Simulation {
+    pub circuit: Circuit,
+}
+
+#[derive(Resource)]
+pub struct SimulationConfig {
+    pub tick_rate: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SavedSimulation {
+    pub circuit: Circuit,
+    pub gate_positions: HashMap<GateId, GatePosition>,
+}
+
+impl Simulation {
+    pub fn new() -> Self {
+        let mut outer_circuit = Circuit::new();
+        // let circuit = InputOutputCircuitTemplate::template();
+        // let mut circuit = Circuit::new();
+        add_n_bit_adder(&mut outer_circuit, 2, 0, 0);
+        // // let input_id = outer_circuit.add_oscillator(10);
+        // let input_id = outer_circuit.add_input_pin(Some(false), 0);
+        // let output_id = outer_circuit.add_output_pin(0);
+        // let target = circuit.id();
+
+        // outer_circuit.add_component(LogicComponent::Circuit(circuit));
+
+        // outer_circuit.add_connection(input_id, target, 0, 0);
+        // outer_circuit.add_connection(target, output_id, 0, 0);
+        Simulation {
+            circuit: outer_circuit,
+        }
+    }
+
+    // might be good to delegate to async task if we can split stuff up, that way we can simulate multiple circuits at once
+    pub fn tick(&mut self) {
+        self.circuit.tick().expect("Tick failed in main loop");
+    }
+}
+
+impl Default for Simulation {
+    fn default() -> Self {
+        // if std::path::Path::new(SAVE_FILE_NAME).exists() {
+        //     Simulation::from_file(SAVE_FILE_NAME)
+        // } else {
+        //     Simulation::new()
+        // }
+        Simulation::new()
+    }
+}
 fn add_n_bit_adder(circuit: &mut Circuit, n: usize, input_offset: usize, output_offset: usize) {
     // Inputs: A0..An-1, B0..Bn-1, Cin
     let mut a = Vec::with_capacity(n);
@@ -108,57 +160,6 @@ fn add_n_bit_adder(circuit: &mut Circuit, n: usize, input_offset: usize, output_
 
     // Final carry out
     circuit.add_connection(fa_ids[n - 1], cout, 0, 1); // FA(n-1).Cout -> Cout
-}
-
-#[derive(Resource)]
-pub struct Simulation {
-    pub circuit: Circuit,
-}
-
-#[derive(Resource)]
-pub struct SimulationConfig {
-    pub tick_rate: f64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SavedSimulation {
-    pub circuit: Circuit,
-    pub gate_positions: HashMap<GateId, GatePosition>,
-}
-
-impl Simulation {
-    pub fn new() -> Self {
-        let mut outer_circuit = Circuit::new();
-        let circuit = InputOutputCircuitTemplate::template();
-        // let input_id = outer_circuit.add_oscillator(10);
-        let input_id = outer_circuit.add_input_pin(Some(false), 0);
-        let output_id = outer_circuit.add_output_pin(0);
-        let target = circuit.id();
-
-        outer_circuit.add_component(LogicComponent::Circuit(circuit));
-
-        outer_circuit.add_connection(input_id, target, 0, 0);
-        outer_circuit.add_connection(target, output_id, 0, 0);
-        Simulation {
-            circuit: outer_circuit,
-        }
-    }
-
-    // might be good to delegate to async task if we can split stuff up, that way we can simulate multiple circuits at once
-    pub fn tick(&mut self) {
-        self.circuit.tick().expect("Tick failed in main loop");
-    }
-}
-
-impl Default for Simulation {
-    fn default() -> Self {
-        // if std::path::Path::new(SAVE_FILE_NAME).exists() {
-        //     Simulation::from_file(SAVE_FILE_NAME)
-        // } else {
-        //     Simulation::new()
-        // }
-        Simulation::new()
-    }
 }
 
 pub fn simulation_config_ui_system(

@@ -292,7 +292,7 @@ impl Circuit {
     }
 
     pub fn add_input_pin(&mut self, initial: Option<bool>, pin: usize) -> GateId {
-        let gate = Gate::new_input(self.id, initial);
+        let gate = Gate::new_input(self.id, initial); // TODO output pins
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, LogicComponent::Gate(gate));
         self.input_gates.insert(pin, gate_id);
@@ -307,7 +307,7 @@ impl Circuit {
     }
 
     pub fn add_output_pin(&mut self, pin: usize) -> GateId {
-        let gate = Gate::new_output(self.id);
+        let gate = Gate::new_output(self.id); // TODO output pins
         let gate_id = gate.id.gate_id;
         self.components.insert(gate_id, LogicComponent::Gate(gate));
         self.output_gates.insert(pin, gate_id);

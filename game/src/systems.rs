@@ -17,7 +17,8 @@ pub fn draw_gates_system(simulation: Res<Simulation>, mut commands: Commands) {
     // Iterate over the gates in the circuit. (You might need to make gates field public or provide a getter.)
     let mut offset = 0.0;
     for (gate_id, gate) in simulation.circuit.components.iter() {
-        let x = 50.0 + offset * 100.0; // Adjust the x position based on the index
+        // let x = 50.0 + offset * 100.0; // Adjust the x position based on the index
+        let x = 50.0;
         let y = 0.0;
         let sprite = get_gate_sprite(gate);
         offset += 1.0;

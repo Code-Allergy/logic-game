@@ -48,12 +48,32 @@ impl Gate {
         )
     }
 
+    pub fn new_input_pin(circuit_id: Uuid) -> Self {
+        Gate::new(
+            circuit_id,
+            GateType::InputPin,
+            GateData::None,
+            vec![Some(false)],
+            None,
+        )
+    }
+
     pub fn new_output(circuit_id: Uuid) -> Self {
         Gate::new(
             circuit_id,
             GateType::Output,
             GateData::None,
             vec![None],
+            None,
+        )
+    }
+
+    pub fn new_output_pin(circuit_id: Uuid) -> Self {
+        Gate::new(
+            circuit_id,
+            GateType::OutputPin,
+            GateData::None,
+            vec![Some(false)],
             None,
         )
     }

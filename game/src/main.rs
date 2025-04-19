@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::utils::HashMap;
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPreUpdateSet};
+use bevy_egui::{EguiContexts, EguiPlugin};
 use main_menu::MainMenuPlugin;
 
 mod systems;
@@ -33,6 +33,7 @@ pub struct MainCamera;
 pub enum GameState {
     #[default]
     MainMenu,
+    Loading,
     Simulating,
     Paused,
     Settings,
