@@ -177,11 +177,6 @@ fn main() {
         // .add_systems(Last, save_on_exit_system)
         // RUN ALWAYS
         .add_systems(Update, (show_settings_menu, settings_menu_button_system))
-        // .add_observer(down_handler)
-        // .add_observer(up_handler)
-        // .add_observer(drag_start_handler)
-        // .add_observer(drag_handler)
-        // .add_observer(drag_end_handler)
         .run();
 }
 
@@ -194,24 +189,4 @@ fn zoom_camera(
         // scale >1.0 zooms out; <1.0 zooms in
         proj.scale = (proj.scale * (1.0 - ev.y * 0.1)).clamp(0.1, 10.0);
     }
-}
-
-fn down_handler(_: Trigger<Pointer<Down>>) {
-    info!("Down");
-}
-
-fn up_handler(_: Trigger<Pointer<Up>>) {
-    info!("Up");
-}
-
-fn drag_start_handler(_: Trigger<Pointer<DragStart>>) {
-    info!("DragStart");
-}
-
-fn drag_handler(_: Trigger<Pointer<Drag>>) {
-    info!("Drag");
-}
-
-fn drag_end_handler(_: Trigger<Pointer<DragEnd>>) {
-    info!("DragEnd");
 }

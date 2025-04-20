@@ -188,10 +188,8 @@ impl Circuit {
                         return Err(TickError::OutputGateMismatch);
                     }
                     for (pin, value) in self.output_gates.iter().zip(outputs.clone()) {
-                        if let Some(gate) = self.components.get_mut(pin.1) {
-                            if let LogicComponent::Gate(gate) = gate {
-                                gate.set_input(0, value);
-                            }
+                        if let Some(LogicComponent::Gate(gate)) = self.components.get_mut(pin.1) {
+                            gate.set_input(0, value);
                         }
                     }
                     outputs
@@ -228,11 +226,12 @@ impl Circuit {
             .input_gates
             .iter()
             .filter_map(|(&pin, gate_id)| {
-                if let Some(component) = self.components.get(gate_id) {
-                    if let LogicComponent::Gate(AnyGate::Input(gate)) = component {
-                        return Some((pin, gate.get_input(0)));
-                    }
+                if let Some(LogicComponent::Gate(AnyGate::Input(gate))) =
+                    self.components.get(gate_id)
+                {
+                    return Some((pin, gate.get_input(0)));
                 }
+
                 None
             })
             .collect();
@@ -249,10 +248,10 @@ impl Circuit {
             .output_gates
             .iter()
             .filter_map(|(&pin, gate_id)| {
-                if let Some(component) = self.components.get(gate_id) {
-                    if let LogicComponent::Gate(AnyGate::Output(gate)) = component {
-                        return Some((pin, gate.get_input(0)));
-                    }
+                if let Some(LogicComponent::Gate(AnyGate::Output(gate))) =
+                    self.components.get(gate_id)
+                {
+                    return Some((pin, gate.get_input(0)));
                 }
                 None
             })
@@ -332,5 +331,11 @@ impl Circuit {
         let gate_id = gate.get_id().gate_id;
         self.components.insert(gate_id, LogicComponent::Gate(gate));
         gate_id
+    }
+}
+
+impl Default for Circuit {
+    fn default() -> Self {
+        Circuit::new()
     }
 }

@@ -15,13 +15,11 @@ pub fn simulation_update_system(mut simulation: ResMut<Simulation>) {
 
 pub fn draw_gates_system(simulation: Res<Simulation>, mut commands: Commands) {
     // Iterate over the gates in the circuit. (You might need to make gates field public or provide a getter.)
-    let mut offset = 0.0;
     for (gate_id, gate) in simulation.circuit.components.iter() {
         // let x = 50.0 + offset * 100.0; // Adjust the x position based on the index
         let x = 50.0;
         let y = 0.0;
         let sprite = get_gate_sprite(gate);
-        offset += 1.0;
 
         commands.spawn((
             sprite,
@@ -220,6 +218,7 @@ pub fn draw_connections_system(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub fn update_connections_system(
     mut param_set: ParamSet<(
         Query<(&Transform, &GateComponent)>,
@@ -295,7 +294,7 @@ pub fn update_inputs_on_left_click(
                     {
                         select_writer.send(GateComponentSelectionEvent {
                             entity,
-                            component: gate_component.clone(),
+                            component: *gate_component,
                         });
                         break; // Only select one entity
                     }
