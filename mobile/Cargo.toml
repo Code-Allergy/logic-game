@@ -1,0 +1,28 @@
+[package]
+name = "mobile"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "mobile"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+gate_quest = { path = ".." }
+bevy = { version = "0.15", default-features = false, features = ["android-native-activity"] }
+
+[package.metadata.android]
+package = "org.codeallergy.GateQuest"
+apk_name = "GateQuest"
+assets = "../assets"
+strip = "strip"
+resources = "../build-files/android/res"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+target_sdk_version = 33
+
+[package.metadata.android.application]
+icon = "@mipmap/icon"
+label = "Bevy Game"
