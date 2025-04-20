@@ -30,7 +30,7 @@ pub const CONNECTION_Z_LEVEL: f32 = 10.0;
 pub const SAVE_FILE_NAME: &str = "./simulation.json";
 
 pub const GAME_TITLE: &str = "GateQuest";
-pub const GAME_WEB_TAG: &str = "#gatequest";
+pub const GAME_WEB_TAG: &str = "#gatequest-canvas";
 
 #[derive(Component)]
 pub struct MainCamera;

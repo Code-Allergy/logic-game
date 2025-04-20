@@ -8,7 +8,6 @@
       url = "github:oxalica/rust-overlay";
       inputs = {
         nixpkgs.follows = "nixpkgs";
-        flake-utils.follows = "flake-utils";
       };
     };
   };
@@ -24,6 +23,10 @@
         overlays = [(import rust-overlay)];
         pkgs = import nixpkgs {
           inherit system overlays;
+          config = {
+            allowUnfree = true;
+            android_sdk.accept_license = true;
+          };
         };
 
         # Use the latest nightly Rust
@@ -31,12 +34,14 @@
           extensions = ["rust-std" "llvm-tools-preview"];
           targets = ["x86_64-unknown-linux-gnu" "x86_64-pc-windows-gnu" "wasm32-unknown-unknown"];
         };
+        androidPkgs = pkgs.androidenv.androidPkgs;
       in {
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.linuxPackages_latest.perf
             pkgs.pkgsCross.mingwW64.buildPackages.gcc
             pkgs.pkgsCross.mingwW64.windows.pthreads
+            pkgs.rust-bindgen
             pkgs.clang
             pkgs.lld
             pkgs.pkg-config
@@ -47,6 +52,13 @@
             pkgs.xorg.libXcursor
             pkgs.xorg.libXi
             pkgs.libxkbcommon
+            pkgs.trunk
+            pkgs.cargo-apk
+            pkgs.cargo-ndk
+            androidPkgs.androidsdk
+            # androidPkgs.platform-tools
+            # androidPkgs.tools
+            # androidPkgs.ndk-bundle
           ];
 
           nativeBuildInputs = [
@@ -76,6 +88,9 @@
           shellHook = ''
             echo "Rust development environment loaded!"
             echo "Rust version: $(rustc --version)"
+            export ANDROID_SDK_ROOT=${androidPkgs.androidsdk}/libexec/android-sdk
+            export ANDROID_NDK_ROOT=${androidPkgs.ndk-bundle}
+            export PATH=$PATH:${androidPkgs.platform-tools}/libexec/platform-tools
           '';
         };
       }
