@@ -314,6 +314,7 @@ pub fn update_selected_gate(
         // If the selected gate is different from the one in the event, update it
         if selected_gate.0 != Some((event.entity, event.component.id)) {
             selected_gate.0 = Some((event.entity, event.component.id));
+            info!("Selected gate: {:?}", event.component.id);
         }
     }
 }
