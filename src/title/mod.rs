@@ -3,9 +3,10 @@
 // Takes in a target state to be active in
 // Requires the 2dCamera to be setup in the main.rs file
 
+use crate::{settings_overlay::SettingsMenuOpen, HOVERED_BUTTON, NORMAL_BUTTON, PRESSED_BUTTON};
 use bevy::{color::palettes::css::RED, prelude::*};
 
-use crate::{GameState, HOVERED_BUTTON, NORMAL_BUTTON, PRESSED_BUTTON, SettingsMenuOpen};
+use crate::GameState;
 
 /* Main menu UI component */
 #[derive(Component)]

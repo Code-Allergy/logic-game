@@ -4,9 +4,9 @@ use bevy_egui::{EguiContexts, egui};
 use sim_core::{GateId, GateType};
 
 use crate::{
-    CONNECTION_Z_LEVEL, ConnectionLine, GateComponent, GateComponentSelectionEvent, Simulation,
-    sim::{Selected, SelectedGate, get_gate_sprite},
+    sim::{ConnectionLine, GateComponent, Selected, SelectedGate, Simulation, get_gate_sprite},
     spatial_grid::SpatialGrid,
+    temp::{CONNECTION_Z_LEVEL, GateComponentSelectionEvent},
 };
 
 pub fn simulation_update_system(mut simulation: ResMut<Simulation>) {

@@ -1,4 +1,6 @@
-fn add_n_bit_adder(circuit: &mut Circuit, n: usize, input_offset: usize, output_offset: usize) {
+use sim_core::{Circuit, CircuitTemplate, LogicComponent, circuits::builtin::FullAdderTemplate};
+
+pub fn add_n_bit_adder(circuit: &mut Circuit, n: usize, input_offset: usize, output_offset: usize) {
     // Inputs: A0..An-1, B0..Bn-1, Cin
     let mut a = Vec::with_capacity(n);
     let mut b = Vec::with_capacity(n);

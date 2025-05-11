@@ -1,1 +1,45 @@
 z layer check when clicking 
+Trigger / Observer instead of eventreader/writer
+
+0.1.0 target - -
+
+- Main point: Editor
+- Edit circuits, save them, 
+and add saved circuits back to be nested into other circuits
+- 0.1.0 version can omit any nice graphics and use egui windows
+- connections will be added in the gate properties windows
+- properties should include connections map
+
+
+-- Later notes
+Currently:
+
+drag_selected_system // directly mutates transforms
+
+Proposed:
+
+    Instead of mutating transforms directly, emit a GateMovedEvent { entity, new_position: Vec2 }.
+
+    Then a separate system applies the transform update and spatial grid update.
+
+💡 Why:
+
+    Makes movement testable.
+
+    Allows undo, snapping, constraints, or other systems to hook into gate movement.
+
+
+draw_connections_system // runs on startup
+update_connections_system // always runs
+
+Proposed:
+
+    Fire ConnectionCreatedEvent when a connection is added to the Simulation.
+
+    Fire ConnectionUpdatedEvent when gates move.
+
+💡 Why:
+
+    Reactively spawn or update lines only when needed.
+
+    Reduce computation per frame (don't always reprocess everything).
