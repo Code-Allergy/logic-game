@@ -4,8 +4,17 @@ use bevy_egui::EguiContexts;
 pub mod editor;
 pub mod misc;
 pub mod selection;
+pub mod settings;
 pub mod settings_overlay;
 pub mod sim;
+pub mod spatial_grid;
+pub mod systems;
+
+/// MAIN MENU 
+/// 
+/// This module contains the main menu for the game, which is displayed when the game is first launched.
+/// Takes in a target state to be active in
+/// Requires the 2dCamera to be setup in the main.rs file
 pub mod title;
 
 pub mod temp {
@@ -26,9 +35,7 @@ pub const SAVE_FILE_NAME: &str = "./simulation.json";
 pub const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.15);
 pub const HOVERED_BUTTON: Color = Color::srgb(0.25, 0.25, 0.25);
 pub const PRESSED_BUTTON: Color = Color::srgb(0.35, 0.75, 0.35);
-
 pub const SIMULATION_TICK_RATE: f64 = 10.0; // 10 ticks per second
-
 pub const GAME_TITLE: &str = "GateQuest";
 pub const GAME_WEB_TAG: &str = "#gatequest-canvas";
 
