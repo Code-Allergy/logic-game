@@ -1,6 +1,7 @@
 use bevy::{platform::collections::HashMap, prelude::*};
 use bevy_egui::EguiContexts;
 
+pub mod editor;
 pub mod misc;
 pub mod selection;
 pub mod settings_overlay;

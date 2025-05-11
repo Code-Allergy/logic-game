@@ -8,6 +8,9 @@
 //     pub drag_start: Option<Vec2>,
 //     pub drag_current: Option<Vec2>,
 // }
+
+// // pub struct
+
 // pub fn mouse_selection_input(
 //     mouse_input: Res<ButtonInput<MouseButton>>,
 //     mut cursor_moved: EventReader<CursorMoved>,
@@ -94,8 +97,8 @@
 
 // impl Plugin for SelectionPlugin {
 //     fn build(&self, _app: &mut App) {
-//         // app //.add_event::<ComponentsSelected>()
-//         //.add_event::<ComponentsUnselected>()
+//         app.add_event::<ComponentsSelected>()
+//         .add_event::<ComponentsUnselected>()
 //         // .init_resource();
 //         // .add_systems(Update)
 //         // .add_systems(Update);
