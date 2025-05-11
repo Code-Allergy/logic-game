@@ -10,7 +10,7 @@ use gate_quest::temp::GateComponentSelectionEvent;
 use gate_quest::title::MainMenuPlugin;
 use gate_quest::{
     GAME_TITLE, GAME_WEB_TAG, GameSettings, GameState, SIMULATION_TICK_RATE,
-    configure_camera_scaling, initial_startup_system, sim::*, systems::*, zoom_camera,
+    initial_startup_system, sim::*, systems::*,
 };
 
 // mod settings_overlay;
@@ -30,7 +30,9 @@ fn main() {
             ..default()
         }))
         // .add_plugins(bevy_mod_debugdump::CommandLineArgs)
-        .add_plugins(EguiPlugin)
+        .add_plugins(EguiPlugin {
+            enable_multipass_for_primary_context: true,
+        })
         // Extra debugging UI tools
         .add_plugins(WorldInspectorPlugin::new())
         .add_plugins(MainMenuPlugin {
@@ -56,8 +58,9 @@ fn main() {
         .add_systems(
             Startup,
             (
-                initial_startup_system.before(configure_camera_scaling),
-                configure_camera_scaling,
+                initial_startup_system
+                //.before(configure_camera_scaling),
+                // configure_camera_scaling,
             ),
         )
         /* GAME STATE */
@@ -87,7 +90,7 @@ fn main() {
                 simulation_config_ui_system,
                 // mouse_selection_input,
                 // finalize_selection,
-                zoom_camera,
+                // zoom_camera,
                 update_tickrate_system,
                 ui_for_selected_gate,
             )

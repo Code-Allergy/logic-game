@@ -110,8 +110,9 @@ pub fn gate_selection_system(
             commands.entity(selected_entity).remove::<Selected>();
         }
 
-        if let Some(screen_pos) = q_window.single().cursor_position() {
-            let (camera, global_transform) = q_camera.single();
+        // TODO 0.16
+        if let Some(screen_pos) = q_window.single().unwrap().cursor_position() {
+            let (camera, global_transform) = q_camera.single().unwrap();
             if let Ok(ray) = camera.viewport_to_world(global_transform, screen_pos) {
                 let distance = -ray.origin.z / ray.direction.z;
                 let world_pos = ray.origin + ray.direction * distance;
@@ -139,8 +140,10 @@ pub fn drag_selected_system(
         return;
     }
 
-    let (camera, camera_transform) = q_camera.single();
-    let window = q_window.single();
+    // TODO 0.16 BEVY
+    let (camera, camera_transform) = q_camera.single().unwrap();
+    // TODO 0.16 BEVY
+    let window = q_window.single().unwrap();
 
     if let Some(screen_pos) = window.cursor_position() {
         if let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) {
@@ -266,8 +269,10 @@ pub fn update_inputs_on_left_click(
     mut query: Query<(Entity, &Transform, &GateComponent)>,
     mut select_writer: EventWriter<GateComponentSelectionEvent>,
 ) {
-    let (camera, camera_transform) = q_camera.single();
-    let window = q_window.single();
+    // TODO 0.16 BEVY
+    let (camera, camera_transform) = q_camera.single().unwrap();
+    // TODO 0.16 BEVY
+    let window = q_window.single().unwrap();
 
     // Handle selection if mouse is clicked
     if mouse_button_input.just_pressed(MouseButton::Left) {

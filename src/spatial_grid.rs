@@ -1,4 +1,4 @@
-use bevy::{prelude::*, utils::HashMap};
+use bevy::{platform::collections::HashMap, prelude::*};
 
 // Define a 2D grid for spatial partitioning
 #[derive(Resource, Default)]

@@ -1,12 +1,10 @@
-use bevy::{prelude::*, utils::HashMap};
+use bevy::{platform::collections::HashMap, prelude::*};
 use bevy_egui::{EguiContexts, egui};
-use sim_core::{
-    Circuit, GateId, GateType, LogicComponent,
-};
+use sim_core::{Circuit, GateId, GateType, LogicComponent};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{misc::add_n_bit_adder, SAVE_FILE_NAME};
+use crate::{SAVE_FILE_NAME, misc::add_n_bit_adder};
 
 // Visual representation of the circuit component
 #[derive(Component, Debug, Clone, Copy)]
