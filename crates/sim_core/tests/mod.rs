@@ -1,11 +1,11 @@
 use uuid::Uuid;
 
-use crate::{
-    AnyGate, Circuit, CircuitTemplate, GateId, GateType, LogicComponent, TickError,
+use sim_core::{
+    Circuit, CircuitTemplate, GateId, GateType, LogicComponent, TickError,
     circuits::builtin::{FullAdderTemplate, HalfAdderTemplate, MultiplexerTemplate},
     gates::{
-        AndLogic, GenericGate, IdentityLogic, InputLogic, NotLogic, OrLogic, OscillatorLogic,
-        OutputLogic,
+        AndLogic, proto::AnyGate, GenericGate, IdentityLogic, InputLogic, NotLogic, OrLogic,
+        OscillatorLogic, OutputLogic,
     },
 };
 

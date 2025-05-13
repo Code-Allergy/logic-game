@@ -116,7 +116,7 @@ fn main_menu_button_system(
                     MainMenuButtonAction::Start => next_state.set(GameState::Simulating),
                     MainMenuButtonAction::Settings => settings_open.0 = !settings_open.0,
                     MainMenuButtonAction::Exit => {
-                        exit.send(AppExit::Success);
+                        exit.write(AppExit::Success);
                     }
                 };
             }
@@ -134,7 +134,7 @@ fn main_menu_button_system(
 
 fn cleanup_main_menu(mut commands: Commands, query: Query<Entity, With<MainMenu>>) {
     for entity in &query {
-        commands.entity(entity).despawn_recursive();
+        commands.entity(entity).despawn();
     }
 }
 

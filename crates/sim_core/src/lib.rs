@@ -4,15 +4,17 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use uuid::Uuid;
 
-#[cfg(test)]
-mod tests;
-
 pub mod circuits;
 pub mod gates;
 
+/// Unique identifier for a component in the simulation.
+/// Either a gate ID or a circuit ID.
 pub type ComponentId = Uuid;
+/// Unique identifier for a gate in the simulation.
 pub type GateId = ComponentId;
+/// Unique identifier for a circuit in the simulation.
 pub type CircuitId = ComponentId;
+/// Identifier for a pin in the simulation, unique to the particular circuit.
 pub type PinId = usize;
 
 #[derive(Debug, Copy, Clone, PartialEq)]

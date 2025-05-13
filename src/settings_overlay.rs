@@ -17,7 +17,7 @@ pub fn show_settings_menu(
     // Remove menu if closed
     if !settings_open.0 {
         for entity in &query {
-            commands.entity(entity).despawn_recursive();
+            commands.entity(entity).despawn();
         }
         return;
     }

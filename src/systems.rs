@@ -297,7 +297,7 @@ pub fn update_inputs_on_left_click(
                         && local_point_2d.y >= -half_extents.y
                         && local_point_2d.y <= half_extents.y
                     {
-                        select_writer.send(GateComponentSelectionEvent {
+                        select_writer.write(GateComponentSelectionEvent {
                             entity,
                             component: *gate_component,
                         });
@@ -344,6 +344,11 @@ pub fn ui_for_selected_gate(
                                 gate.set_input(0, Some(value));
                             }
                         }
+                        // connections
+                        ui.horizontal(|ui| {
+                            ui.label("Connections:");
+                            // ui.label(format!("{:?}", gate.get_connections()));
+                        });
                         // ... other gate fields, sliders, etc.
 
                         if ui.button("Close").clicked() {
