@@ -68,6 +68,6 @@ criterion_group!(
     bench_multiplexer_tick,
     bench_half_adder_tick,
     bench_full_adder_tick,
-    bench_nested_multiplexer_tick,
+    bench_nested_multiplexer_tick
 );
 criterion_main!(benches);

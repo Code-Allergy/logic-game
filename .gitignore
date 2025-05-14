@@ -1,6 +1,6 @@
 **/target
 .direnv/
 result/
-game/dist
+dist
 
 simulation.json

@@ -1,14 +1,10 @@
-use bevy::{
-    input::mouse::MouseWheel, platform::collections::HashMap, prelude::*, render::camera::ScalingMode, window::PrimaryWindow
-};
+use bevy::{platform::collections::HashMap, prelude::*,};
 use bevy_egui::EguiContexts;
 
 pub mod misc;
 pub mod selection;
 pub mod settings_overlay;
 pub mod sim;
-pub mod spatial_grid;
-pub mod systems;
 pub mod title;
 
 pub mod temp {

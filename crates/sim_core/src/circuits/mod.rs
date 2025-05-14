@@ -266,6 +266,15 @@ impl Circuit {
 }
 
 impl Circuit {
+    pub fn get_gate_count(&self) -> usize {
+        self.components.values().fold(0, |acc, component| {
+            acc + match component {
+                LogicComponent::Gate(_) => 1,
+                LogicComponent::Circuit(circuit) => circuit.get_gate_count(),
+            }
+        })
+    }
+    
     pub fn add_input(&mut self, initial: bool) -> GateId {
         let gate = AnyGate::new_input(self.id, initial);
         let gate_id = gate.get_id().gate_id;

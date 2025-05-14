@@ -3,7 +3,7 @@
 // Takes in a target state to be active in
 // Requires the 2dCamera to be setup in the main.rs file
 
-use crate::{settings_overlay::SettingsMenuOpen, HOVERED_BUTTON, NORMAL_BUTTON, PRESSED_BUTTON};
+use crate::{HOVERED_BUTTON, NORMAL_BUTTON, PRESSED_BUTTON, settings_overlay::SettingsMenuOpen};
 use bevy::{color::palettes::css::RED, prelude::*};
 
 use crate::GameState;
@@ -140,6 +140,12 @@ fn cleanup_main_menu(mut commands: Commands, query: Query<Entity, With<MainMenu>
 
 pub struct MainMenuPlugin {
     pub state: GameState, // The state that this plugin will be active in
+}
+
+impl MainMenuPlugin {
+    pub fn new(state: GameState) -> Self {
+        Self { state }
+    }
 }
 
 impl Plugin for MainMenuPlugin {
