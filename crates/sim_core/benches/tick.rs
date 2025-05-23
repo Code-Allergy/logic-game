@@ -50,7 +50,7 @@ fn create_n_bit_adder(n: usize) -> Circuit {
 }
 
 fn bench_n_bit_adder_tick(c: &mut Criterion) {
-    const N_BIT_SIZES: [usize; 7] = [8, 16, 32, 64, 128, 256, 512];
+    const N_BIT_SIZES: [usize; 8] = [8, 16, 32, 64, 128, 256, 512, 1024];
 
     for &n_bits in N_BIT_SIZES.iter() {
         let mut circuit = create_n_bit_adder(n_bits);
