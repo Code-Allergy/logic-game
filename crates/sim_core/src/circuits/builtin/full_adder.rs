@@ -1,4 +1,4 @@
-use crate::{Circuit, CircuitTemplate};
+use crate::{Circuit, CircuitTemplate, StaticCircuitPins}; // Added StaticCircuitPins
 
 // A full adder template that produces a circuit with three inputs (A, B, Cin)
 // and two outputs (Sum and Carry).
@@ -83,6 +83,13 @@ impl CircuitTemplate for FullAdderTemplate {
         // Connect the final Sum and Carry outputs.
         circuit.add_connection(or2, sum_out, 0, 0);
         circuit.add_connection(or3, carry_out, 0, 0);
+
+        // Define static pins
+        let static_pins = StaticCircuitPins {
+            input_pin_ids: vec![0, 1, 2], // A, B, Cin
+            output_pin_ids: vec![0, 1],  // Sum, CarryOut
+        };
+        circuit.static_pins = Some(static_pins);
 
         circuit
     }
