@@ -17,6 +17,13 @@ pub type CircuitId = ComponentId;
 /// Identifier for a pin in the simulation, unique to the particular circuit.
 pub type PinId = usize;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct StaticCircuitPins {
+    // PinIds here are the *external* pin IDs of the circuit.
+    pub input_pin_ids: Vec<PinId>,  // Sorted list of external input pin IDs
+    pub output_pin_ids: Vec<PinId>, // Sorted list of external output pin IDs
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TickError {
     CycleDetected,
@@ -136,6 +143,12 @@ pub struct Circuit {
     /* Port Config */
     input_gates: AHashMap<PinId, GateId>,
     output_gates: AHashMap<PinId, GateId>,
+    // Cache for sorted pin IDs to optimize get_inputs/get_outputs (Step 3 of overall plan / Part of "End of Step 4")
+    sorted_input_pin_ids: Option<Vec<PinId>>,
+    sorted_output_pin_ids: Option<Vec<PinId>>,
+    pins_dirty: bool,
+    // Static pin layout for optimized I/O (Step 3 of current plan)
+    pub static_pins: Option<StaticCircuitPins>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
