@@ -1,4 +1,4 @@
-use crate::{Circuit, CircuitTemplate};
+use crate::{Circuit, CircuitTemplate, StaticCircuitPins}; // Added StaticCircuitPins
 
 /// A simple 2-to-1 multiplexer circuit template.
 /// This circuit takes two data inputs (D0 and D1) and a select input (S).
@@ -64,6 +64,13 @@ impl CircuitTemplate for MultiplexerTemplate {
 
         // Connect OR output to the final output gate
         circuit.add_connection(or_gate_id, output_gate_id, 0, 0);
+
+        // Define static pins
+        let static_pins = StaticCircuitPins {
+            input_pin_ids: vec![0, 1, 2], // D0, D1, S
+            output_pin_ids: vec![0],    // Output
+        };
+        circuit.static_pins = Some(static_pins);
 
         circuit
     }

@@ -17,6 +17,38 @@ pub type CircuitId = ComponentId;
 /// Identifier for a pin in the simulation, unique to the particular circuit.
 pub type PinId = usize;
 
+// Renamed from HierarchicalComponentId for clarity in this context
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HierarchicalUuidId {
+    pub instance_path: Vec<ComponentId>, // ComponentId is Uuid
+    pub local_gate_id: ComponentId,
+}
+
+pub type InternalGateId = usize;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct FlatConnectionInternal {
+    // source_gate is implicit when this struct is a value in an AHashMap keyed by source InternalGateId
+    pub target_gate: InternalGateId,
+    pub target_input_pin: usize,
+    pub source_output_pin: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct FlatCircuitExecutionView {
+    pub topologically_sorted_gates: Vec<InternalGateId>, // Uses InternalGateId
+    // Key: source InternalGateId. Value: Vec of connections from this gate.
+    pub remapped_outgoing_connections: AHashMap<InternalGateId, Vec<FlatConnectionInternal>>,
+    pub internal_to_hierarchical_uuid_id: AHashMap<InternalGateId, HierarchicalUuidId>, // New mapping
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct StaticCircuitPins {
+    // PinIds here are the *external* pin IDs of the circuit.
+    pub input_pin_ids: Vec<PinId>,  // Sorted list of external input pin IDs
+    pub output_pin_ids: Vec<PinId>, // Sorted list of external output pin IDs
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TickError {
     CycleDetected,
@@ -136,6 +168,14 @@ pub struct Circuit {
     /* Port Config */
     input_gates: AHashMap<PinId, GateId>,
     output_gates: AHashMap<PinId, GateId>,
+    // Cache for sorted pin IDs to optimize get_inputs/get_outputs (Step 3 of overall plan / Part of "End of Step 4")
+    sorted_input_pin_ids: Option<Vec<PinId>>,
+    sorted_output_pin_ids: Option<Vec<PinId>>,
+    pins_dirty: bool,
+    // Static pin layout for optimized I/O (Step 3 of current plan)
+    pub static_pins: Option<StaticCircuitPins>,
+    // Flattened view for execution (Step 7 of current plan)
+    pub flat_view: Option<FlatCircuitExecutionView>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

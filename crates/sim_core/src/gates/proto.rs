@@ -123,17 +123,17 @@ impl AnyGate {
         }
     }
 
-    pub fn get_inputs(&self) -> Vec<Option<bool>> {
+    pub fn get_inputs(&self) -> &[Option<bool>] { // Changed return type
         match self {
-            AnyGate::Input(gate) => gate.inputs.clone(),
-            AnyGate::InputPin(gate) => gate.inputs.clone(),
-            AnyGate::Output(gate) => gate.inputs.clone(),
-            AnyGate::OutputPin(gate) => gate.inputs.clone(),
-            AnyGate::Identity(gate) => gate.inputs.clone(),
-            AnyGate::Or(gate) => gate.inputs.clone(),
-            AnyGate::Not(gate) => gate.inputs.clone(),
-            AnyGate::And(gate) => gate.inputs.clone(),
-            AnyGate::Oscillator(gate) => gate.inputs.clone(),
+            AnyGate::Input(gate) => &gate.inputs[..], // Return slice
+            AnyGate::InputPin(gate) => &gate.inputs[..],
+            AnyGate::Output(gate) => &gate.inputs[..],
+            AnyGate::OutputPin(gate) => &gate.inputs[..],
+            AnyGate::Identity(gate) => &gate.inputs[..],
+            AnyGate::Or(gate) => &gate.inputs[..],
+            AnyGate::Not(gate) => &gate.inputs[..],
+            AnyGate::And(gate) => &gate.inputs[..],
+            AnyGate::Oscillator(gate) => &gate.inputs[..],
         }
     }
 

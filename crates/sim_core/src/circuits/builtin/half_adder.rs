@@ -1,4 +1,4 @@
-use crate::{Circuit, CircuitTemplate};
+use crate::{Circuit, CircuitTemplate, StaticCircuitPins}; // Added StaticCircuitPins
 
 /// A half-adder template.
 ///
@@ -73,6 +73,13 @@ impl CircuitTemplate for HalfAdderTemplate {
         circuit.add_connection(a_gate_id, carry_gate_id, 0, 0); // A -> Carry AND input 0
         circuit.add_connection(b_gate_id, carry_gate_id, 1, 0); // B -> Carry AND input 1
         circuit.add_connection(carry_gate_id, carry_output_id, 0, 0); // Carry gate -> Carry output
+
+        // Define static pins
+        let static_pins = StaticCircuitPins {
+            input_pin_ids: vec![0, 1], // A, B
+            output_pin_ids: vec![0, 1], // Sum, CarryOut
+        };
+        circuit.static_pins = Some(static_pins);
 
         circuit
     }
