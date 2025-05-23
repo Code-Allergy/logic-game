@@ -6,6 +6,9 @@ use uuid::Uuid;
 
 pub mod circuits;
 pub mod gates;
+mod traits;
+
+pub use traits::Simulatable;
 
 /// Unique identifier for a component in the simulation.
 /// Either a gate ID or a circuit ID.
@@ -24,78 +27,80 @@ pub enum TickError {
     OutputGateMismatch,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum LogicComponent {
-    Gate(AnyGate),
-    Circuit(Circuit),
+// LogicComponent is now a struct holding a trait object.
+// Derives for Clone, Serialize, Deserialize are removed for now as they are complex for Box<dyn Simulatable>.
+// #[derive(Clone, Debug, Serialize, Deserialize)]
+// #[serde(tag = "type")]
+pub struct LogicComponent {
+    pub component: Box<dyn Simulatable>,
 }
 
-// Generic wrapper for a logic component
+// Manual Debug implementation for LogicComponent
+impl Debug for LogicComponent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogicComponent")
+            .field("id", &self.component.id()) // Assuming Simulatable has id()
+            .field("type", &self.component.get_type()) // Assuming Simulatable has get_type()
+            .finish()
+    }
+}
+
+// To make LogicComponent Cloneable, Simulatable trait would need a `clone_box(&self) -> Box<dyn Simulatable>` method,
+// and each implementor (AnyGate, Circuit) would need to implement it.
+// Example:
+// pub trait Simulatable {
+//     /* ... other methods ... */
+//     fn clone_box(&self) -> Box<dyn Simulatable>;
+// }
+// impl Clone for LogicComponent {
+//     fn clone(&self) -> Self {
+//         LogicComponent { component: self.component.clone_box() }
+//     }
+// }
+// Similar considerations apply for Serialize/Deserialize using libraries like `typetag`.
+
 impl LogicComponent {
+    pub fn new(component: Box<dyn Simulatable>) -> Self {
+        Self { component }
+    }
+
+    // Delegate all Simulatable methods to the contained component.
     pub fn id(&self) -> ComponentId {
-        match self {
-            LogicComponent::Gate(gate) => gate.get_id().gate_id,
-            LogicComponent::Circuit(circuit) => circuit.id,
-        }
+        self.component.id()
     }
 
     pub fn get_type(&self) -> GateType {
-        match self {
-            LogicComponent::Gate(gate) => gate.get_gate_type(),
-            LogicComponent::Circuit(_) => GateType::Circuit,
-        }
+        self.component.get_type()
     }
 
     pub fn set_input(&mut self, pin: PinId, value: Option<bool>) {
-        match self {
-            LogicComponent::Gate(AnyGate::Input(gate)) => gate.set_input(pin, value),
-            LogicComponent::Gate(_) => {
-                panic!("Cannot set input on non-input gate");
-            }
-            LogicComponent::Circuit(circuit) => {
-                if let Some(gate_id) = circuit.input_gates.get(&pin) {
-                    if let Some(gate) = circuit.components.get_mut(gate_id) {
-                        gate.set_input(0, value);
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn get_input(&self, pin: PinId) -> Option<bool> {
-        match self {
-            LogicComponent::Gate(AnyGate::Input(gate)) => gate.get_input(pin),
-            LogicComponent::Gate(_) => {
-                panic!("Cannot get input on non-input gate");
-            }
-            LogicComponent::Circuit(circuit) => {
-                if let Some(gate_id) = circuit.input_gates.get(&pin) {
-                    if let Some(gate) = circuit.components.get(gate_id) {
-                        return gate.get_input(0);
-                    }
-                }
-                None
-            }
-        }
+        self.component.set_input(pin, value)
     }
 
     pub fn get_output(&self, pin: PinId) -> Option<bool> {
-        match self {
-            LogicComponent::Gate(AnyGate::Output(gate)) => gate.output,
-            LogicComponent::Gate(_) => {
-                panic!("Cannot get output on non-output gate");
-            }
-            LogicComponent::Circuit(circuit) => {
-                if let Some(gate_id) = circuit.output_gates.get(&pin) {
-                    if let Some(gate) = circuit.components.get(gate_id) {
-                        return gate.get_output(0);
-                    }
-                }
-                None
-            }
-        }
+        self.component.get_output(pin)
     }
+
+    pub fn get_inputs(&self) -> Vec<Option<bool>> {
+        self.component.get_inputs()
+    }
+
+    pub fn run(&mut self) -> Result<(), TickError> {
+        self.component.run()
+    }
+
+    pub fn expected_inputs(&self) -> usize {
+        self.component.expected_inputs()
+    }
+
+    pub fn get_all_outputs(&self) -> Vec<Option<bool>> {
+        self.component.get_all_outputs()
+    }
+
+    // Methods like get_input that were specific to LogicComponent::Gate(AnyGate::Input(_))
+    // are removed. If such specific access is needed, it would require downcasting
+    // component.as_any().downcast_ref::<AnyGate>() and then matching on the AnyGate variant.
+    // Or, the functionality might be better exposed via the Simulatable trait if generally applicable.
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -123,7 +128,8 @@ pub enum GateType {
     Identity,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// #[derive(Debug, Clone, Serialize, Deserialize)] // Clone, Serialize, Deserialize removed due to LogicComponent holding Box<dyn Simulatable>
+#[derive(Debug)] // Keeping Debug for now
 pub struct Circuit {
     pub id: Uuid,
     pub components: AHashMap<ComponentId, LogicComponent>,

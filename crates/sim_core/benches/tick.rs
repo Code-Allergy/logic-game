@@ -50,7 +50,7 @@ fn bench_nested_multiplexer_tick(c: &mut Criterion) {
     let in2 = outer.add_input_pin(2);
     let out = outer.add_output_pin(0);
 
-    outer.add_component(LogicComponent::Circuit(inner_mux));
+    outer.add_component(LogicComponent::new(Box::new(inner_mux)));
     outer.add_connection(in0, inner_mux_id, 0, 0);
     outer.add_connection(in1, inner_mux_id, 1, 0);
     outer.add_connection(in2, inner_mux_id, 2, 0);

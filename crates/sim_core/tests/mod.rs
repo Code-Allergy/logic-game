@@ -626,7 +626,7 @@ fn test_nested_multiplexer() {
     let out = outer.add_output_pin(0);
 
     // Add inner multiplexer as a component
-    outer.add_component(LogicComponent::Circuit(inner_mux));
+    outer.add_component(LogicComponent::new(Box::new(inner_mux)));
 
     // Connect outer inputs to inner multiplexer
     outer.add_connection(in0, inner_mux_id, 0, 0);
@@ -661,7 +661,7 @@ fn test_nested_half_adder() {
     let in1 = outer.add_input_pin(1);
     let out = outer.add_output_pin(0);
 
-    outer.add_component(LogicComponent::Circuit(inner_ha));
+    outer.add_component(LogicComponent::new(Box::new(inner_ha)));
     outer.add_connection(in0, inner_ha_id, 0, 0);
     outer.add_connection(in1, inner_ha_id, 1, 0);
     outer.add_connection(inner_ha_id, out, 0, 0);
@@ -696,7 +696,7 @@ fn test_nested_full_adder() {
     let in2 = outer.add_input_pin(2);
     let out = outer.add_output_pin(0);
 
-    outer.add_component(LogicComponent::Circuit(inner_fa));
+    outer.add_component(LogicComponent::new(Box::new(inner_fa)));
     outer.add_connection(in0, inner_fa_id, 0, 0);
     outer.add_connection(in1, inner_fa_id, 1, 0);
     outer.add_connection(in2, inner_fa_id, 2, 0);
@@ -742,7 +742,7 @@ fn test_deeply_nested_circuits() {
     let in0 = middle.add_input_pin(0);
     let in1 = middle.add_input_pin(1);
     let out = middle.add_output_pin(0);
-    middle.add_component(LogicComponent::Circuit(inner));
+    middle.add_component(LogicComponent::new(Box::new(inner)));
     middle.add_connection(in0, inner_id, 0, 0);
     middle.add_connection(in1, inner_id, 1, 0);
     middle.add_connection(inner_id, out, 0, 0);
@@ -754,7 +754,7 @@ fn test_deeply_nested_circuits() {
     let oin0 = outer.add_input_pin(0);
     let oin1 = outer.add_input_pin(1);
     let oout = outer.add_output_pin(0);
-    outer.add_component(LogicComponent::Circuit(middle));
+    outer.add_component(LogicComponent::new(Box::new(middle)));
     outer.add_connection(oin0, middle_id, 0, 0);
     outer.add_connection(oin1, middle_id, 1, 0);
     outer.add_connection(middle_id, oout, 0, 0);

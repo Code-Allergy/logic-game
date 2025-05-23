@@ -29,7 +29,9 @@ impl AnyGate {
             GateType::Not => AnyGate::Not(GenericGate::<NotLogic>::new(circuit_id)),
             GateType::Identity => AnyGate::Identity(GenericGate::<IdentityLogic>::new(circuit_id)),
             GateType::Input => AnyGate::Input(GenericGate::<InputLogic>::new(circuit_id)),
+            GateType::InputPin => AnyGate::InputPin(GenericGate::<InputPinLogic>::new(circuit_id)),
             GateType::Output => AnyGate::Output(GenericGate::<OutputLogic>::new(circuit_id)),
+            GateType::OutputPin => AnyGate::OutputPin(GenericGate::<OutputPinLogic>::new(circuit_id)),
             GateType::Oscillator => {
                 AnyGate::Oscillator(GenericGate::<OscillatorLogic>::new(circuit_id))
             }
@@ -94,22 +96,76 @@ impl AnyGate {
             AnyGate::Oscillator(_) => GateType::Oscillator,
         }
     }
+}
 
-    pub fn get_id(&self) -> PortId {
-        match self {
-            AnyGate::Input(gate) => gate.id,
-            AnyGate::InputPin(gate) => gate.id,
-            AnyGate::Output(gate) => gate.id,
-            AnyGate::OutputPin(gate) => gate.id,
-            AnyGate::Identity(gate) => gate.id,
-            AnyGate::Or(gate) => gate.id,
-            AnyGate::Not(gate) => gate.id,
-            AnyGate::And(gate) => gate.id,
-            AnyGate::Oscillator(gate) => gate.id,
+macro_rules! impl_any_gate_methods {
+    ($($variant:ident),*) => {
+        impl AnyGate {
+            pub fn get_id(&self) -> PortId {
+                match self {
+                    $(AnyGate::$variant(gate) => gate.id,)*
+                }
+            }
+
+            pub fn set_input(&mut self, pin: PinId, value: Option<bool>) {
+                match self {
+                    $(AnyGate::$variant(gate) => gate.set_input(pin, value),)*
+                }
+            }
+
+            pub fn get_inputs(&self) -> Vec<Option<bool>> {
+                match self {
+                    $(AnyGate::$variant(gate) => gate.inputs.clone(),)*
+                }
+            }
+
+            pub fn get_output(&self) -> Option<bool> {
+                match self {
+                    $(AnyGate::$variant(gate) => gate.get_output(),)*
+                }
+            }
+
+            pub fn expected_inputs(&self) -> usize {
+                match self {
+                    $(AnyGate::$variant(gate) => gate.expected_inputs(),)*
+                }
+            }
+
+            pub fn compute(&mut self) {
+                debug_assert_eq!(self.get_inputs().len(), self.expected_inputs());
+                match self {
+                    $(AnyGate::$variant(gate) => gate.compute(),)*
+                }
+            }
         }
+    };
+}
+
+impl_any_gate_methods!(
+    Input,
+    InputPin,
+    Output,
+    OutputPin,
+    Identity,
+    Or,
+    Not,
+    And,
+    Oscillator
+);
+
+use crate::Simulatable;
+use crate::TickError;
+
+impl Simulatable for AnyGate {
+    fn id(&self) -> Uuid {
+        self.get_id().gate_id
     }
 
-    pub fn set_input(&mut self, pin: PinId, value: Option<bool>) {
+    fn get_type(&self) -> GateType {
+        self.get_gate_type()
+    }
+
+    fn set_input(&mut self, pin: PinId, value: Option<bool>) {
         match self {
             AnyGate::Input(gate) => gate.set_input(pin, value),
             AnyGate::InputPin(gate) => gate.set_input(pin, value),
@@ -123,21 +179,10 @@ impl AnyGate {
         }
     }
 
-    pub fn get_inputs(&self) -> Vec<Option<bool>> {
-        match self {
-            AnyGate::Input(gate) => gate.inputs.clone(),
-            AnyGate::InputPin(gate) => gate.inputs.clone(),
-            AnyGate::Output(gate) => gate.inputs.clone(),
-            AnyGate::OutputPin(gate) => gate.inputs.clone(),
-            AnyGate::Identity(gate) => gate.inputs.clone(),
-            AnyGate::Or(gate) => gate.inputs.clone(),
-            AnyGate::Not(gate) => gate.inputs.clone(),
-            AnyGate::And(gate) => gate.inputs.clone(),
-            AnyGate::Oscillator(gate) => gate.inputs.clone(),
-        }
-    }
-
-    pub fn get_output(&self) -> Option<bool> {
+    fn get_output(&self, _pin: PinId) -> Option<bool> {
+        // AnyGate typically has a single output, pin is ignored.
+        // If specific pin output is needed, this match needs to be more granular
+        // or GenericGate needs a get_output_by_pin method.
         match self {
             AnyGate::Input(gate) => gate.get_output(),
             AnyGate::InputPin(gate) => gate.get_output(),
@@ -151,7 +196,37 @@ impl AnyGate {
         }
     }
 
-    pub fn expected_inputs(&self) -> usize {
+    fn get_inputs(&self) -> Vec<Option<bool>> {
+        match self {
+            AnyGate::Input(gate) => gate.inputs.clone(),
+            AnyGate::InputPin(gate) => gate.inputs.clone(),
+            AnyGate::Output(gate) => gate.inputs.clone(),
+            AnyGate::OutputPin(gate) => gate.inputs.clone(),
+            AnyGate::Identity(gate) => gate.inputs.clone(),
+            AnyGate::Or(gate) => gate.inputs.clone(),
+            AnyGate::Not(gate) => gate.inputs.clone(),
+            AnyGate::And(gate) => gate.inputs.clone(),
+            AnyGate::Oscillator(gate) => gate.inputs.clone(),
+        }
+    }
+
+    fn run(&mut self) -> Result<(), TickError> {
+        debug_assert_eq!(self.get_inputs().len(), self.expected_inputs());
+        match self {
+            AnyGate::Input(gate) => gate.compute(),
+            AnyGate::InputPin(gate) => gate.compute(),
+            AnyGate::Output(gate) => gate.compute(),
+            AnyGate::OutputPin(gate) => gate.compute(),
+            AnyGate::Identity(gate) => gate.compute(),
+            AnyGate::Or(gate) => gate.compute(),
+            AnyGate::Not(gate) => gate.compute(),
+            AnyGate::And(gate) => gate.compute(),
+            AnyGate::Oscillator(gate) => gate.compute(),
+        }
+        Ok(())
+    }
+
+    fn expected_inputs(&self) -> usize {
         match self {
             AnyGate::Input(gate) => gate.expected_inputs(),
             AnyGate::InputPin(gate) => gate.expected_inputs(),
@@ -165,18 +240,22 @@ impl AnyGate {
         }
     }
 
-    pub fn compute(&mut self) {
-        debug_assert_eq!(self.get_inputs().len(), self.expected_inputs());
-        match self {
-            AnyGate::Input(gate) => gate.compute(),
-            AnyGate::InputPin(gate) => gate.compute(),
-            AnyGate::Output(gate) => gate.compute(),
-            AnyGate::OutputPin(gate) => gate.compute(),
-            AnyGate::Identity(gate) => gate.compute(),
-            AnyGate::Or(gate) => gate.compute(),
-            AnyGate::Not(gate) => gate.compute(),
-            AnyGate::And(gate) => gate.compute(),
-            AnyGate::Oscillator(gate) => gate.compute(),
-        }
+    fn get_all_outputs(&self) -> Vec<Option<bool>> {
+        // For AnyGate, which represents single-output gates,
+        // we return a vec containing the single output.
+        vec![self.get_output()] // get_output for AnyGate takes no arguments.
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    // If Simulatable had clone_box:
+    // fn clone_box(&self) -> Box<dyn Simulatable> {
+    //     Box::new(self.clone()) // Requires AnyGate to be Clone
+    // }
 }
