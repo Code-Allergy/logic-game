@@ -5,7 +5,9 @@ use sim_core::{GateId, GateType};
 use crate::temp::{CONNECTION_Z_LEVEL, GateComponentSelectionEvent};
 
 use super::{
-    calculate_connection_geometry, find_entity_at_position, get_gate_sprite, spatial_grid::SpatialGrid, ConnectionLine, GateComponent, Selected, SelectedGate, Simulation, SimulationConfig
+    ConnectionLine, GateComponent, Selected, SelectedGate, Simulation, SimulationConfig,
+    calculate_connection_geometry, find_entity_at_position, get_gate_sprite,
+    spatial_grid::SpatialGrid,
 };
 
 // Initialization
@@ -132,7 +134,7 @@ pub fn update_inputs_on_left_click(
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     mut query: Query<(Entity, &Transform, &GateComponent)>,
-    mut select_writer: EventWriter<GateComponentSelectionEvent>,
+    mut select_writer: MessageWriter<GateComponentSelectionEvent>,
 ) {
     // TODO 0.16 BEVY
     let (camera, camera_transform) = q_camera.single().unwrap();
@@ -151,10 +153,7 @@ pub fn update_inputs_on_left_click(
                     let sprite_size = Vec2::new(50.0, 50.0);
                     let half_extents = sprite_size / 2.0;
 
-                    let local_point = transform
-                        .compute_matrix()
-                        .inverse()
-                        .transform_point3(world_pos);
+                    let local_point = transform.to_matrix().inverse().transform_point3(world_pos);
                     let local_point_2d = Vec2::new(local_point.x, local_point.y);
 
                     if local_point_2d.x >= -half_extents.x
@@ -175,7 +174,7 @@ pub fn update_inputs_on_left_click(
 }
 
 pub fn update_selected_gate(
-    mut event_reader: EventReader<GateComponentSelectionEvent>,
+    mut event_reader: MessageReader<GateComponentSelectionEvent>,
     mut selected_gate: ResMut<SelectedGate>,
 ) {
     // Check if the event is for a gate selection
@@ -192,41 +191,42 @@ pub fn ui_for_selected_gate(
     mut contexts: EguiContexts,
     mut sel: ResMut<SelectedGate>,
     mut simulation: ResMut<Simulation>,
-) {
-    if let Some(ctx) = contexts.try_ctx_mut() {
-        if let Some((_entity, gate_id)) = sel.0 {
-            // Grab the gate so you can show/edit its data
-            if let Some(gate) = simulation.get_component_by_id_mut(&gate_id) {
-                // if let Some(gate) = simulation.circuit.components.get_mut(&gate_id) {
-                egui::Window::new("Gate Properties")
-                    .collapsible(false)
-                    .show(ctx, |ui| {
-                        ui.label(format!("Gate ID: {:?}", gate_id));
-                        ui.label(format!("Gate Type: {:?}", gate.get_type()));
-                        // if it’s an input gate, show a toggle:
-                        if let GateType::Input = gate.get_type() {
-                            let mut value = gate.get_input(0).unwrap_or(false);
-                            if ui.checkbox(&mut value, "Input Value").clicked() {
-                                gate.set_input(0, Some(value));
-                            }
-                        }
-                        // connections
-                        ui.horizontal(|ui| {
-                            ui.label("Connections:");
-                            // ui.label(format!("{:?}", gate.get_connections()));
-                        });
-                        // ... other gate fields, sliders, etc.
+) -> Result<(), BevyError> {
+    let ctx = contexts.ctx_mut()?;
 
-                        if ui.button("Close").clicked() {
-                            sel.0 = None;
+    if let Some((_entity, gate_id)) = sel.0 {
+        // Grab the gate so you can show/edit its data
+        if let Some(gate) = simulation.get_component_by_id_mut(&gate_id) {
+            // if let Some(gate) = simulation.circuit.components.get_mut(&gate_id) {
+            egui::Window::new("Gate Properties")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("Gate ID: {:?}", gate_id));
+                    ui.label(format!("Gate Type: {:?}", gate.get_type()));
+                    // if it’s an input gate, show a toggle:
+                    if let GateType::Input = gate.get_type() {
+                        let mut value = gate.get_input(0).unwrap_or(false);
+                        if ui.checkbox(&mut value, "Input Value").clicked() {
+                            gate.set_input(0, Some(value));
                         }
+                    }
+                    // connections
+                    ui.horizontal(|ui| {
+                        ui.label("Connections:");
+                        // ui.label(format!("{:?}", gate.get_connections()));
                     });
-            } else {
-                // gate went away?
-                sel.0 = None;
-            }
+                    // ... other gate fields, sliders, etc.
+
+                    if ui.button("Close").clicked() {
+                        sel.0 = None;
+                    }
+                });
+        } else {
+            // gate went away?
+            sel.0 = None;
         }
     }
+    Ok(())
 }
 
 pub fn update_spatial_grid_system(

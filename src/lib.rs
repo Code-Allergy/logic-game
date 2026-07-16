@@ -1,4 +1,4 @@
-use bevy::{platform::collections::HashMap, prelude::*,};
+use bevy::{platform::collections::HashMap, prelude::*};
 use bevy_egui::EguiContexts;
 
 pub mod misc;
@@ -14,7 +14,7 @@ pub mod temp {
     pub const CONNECTION_Z_LEVEL: f32 = 10.0;
 
     // TEMP - lib migration
-    #[derive(Event)]
+    #[derive(Message)]
     pub struct GateComponentSelectionEvent {
         pub entity: Entity,
         pub component: GateComponent,
@@ -66,14 +66,14 @@ impl Default for GameSettings {
 }
 
 /* First system run before any system state is ran */
-pub fn initial_startup_system(mut commands: Commands, mut ctx: EguiContexts) {
+pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
     // Set 2D camera
     commands.spawn((
         Camera2d,
         MainCamera,
         // Transform::from_xyz(0.0, 0.0, 500.0), // Z must be positive so it looks toward origin
     ));
-    catppuccin_egui::set_theme(ctx.ctx_mut(), catppuccin_egui::MOCHA);
+    // catppuccin_egui::set_theme(ctx.ctx_mut(), catppuccin_egui::MOCHA);
 }
 
 // TODO 0.16 update

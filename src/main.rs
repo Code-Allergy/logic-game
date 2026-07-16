@@ -27,9 +27,7 @@ fn main() {
         }),
         ..default()
     }))
-    .add_plugins(EguiPlugin {
-        enable_multipass_for_primary_context: false,
-    });
+    .add_plugins(EguiPlugin::default());
     // Extra debugging UI tools
     #[cfg(debug_assertions)]
     app.add_plugins(WorldInspectorPlugin::new());
@@ -47,12 +45,6 @@ fn main() {
         // Run the game only when there is input
         .init_resource::<SettingsMenuOpen>()
         .init_resource::<GameSettings>();
-
-    // TODO: bevy 0.16.0 workaround for crash when starting the game
-    app.sub_app_mut(RenderApp)
-        .insert_resource(GpuPreprocessingSupport {
-            max_supported_mode: GpuPreprocessingMode::None,
-        });
 
     app.run();
 }

@@ -1,5 +1,5 @@
 use bevy::{platform::collections::HashMap, prelude::*};
-use bevy_egui::{EguiContexts, egui};
+use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use serde::{Deserialize, Serialize};
 use sim_core::{Circuit, ComponentId, GateId, GateType, LogicComponent};
 use spatial_grid::SpatialGrid;
@@ -127,17 +127,18 @@ impl Default for Simulation {
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
     mut contexts: EguiContexts,
-) {
-    egui::Window::new("Simulation Config").show(contexts.ctx_mut(), |ui| {
+) -> Result<(), BevyError> {
+    egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (seconds per tick)");
         // Slider range from a small value to, say, 2 seconds per tick.
         ui.add(egui::Slider::new(&mut sim_config.tick_rate, 0.5..=1000.0).text("Tick Rate"));
     });
+    Ok(())
 }
 
 #[allow(dead_code)]
 pub fn save_on_exit_system(
-    mut exit_events: EventReader<AppExit>,
+    mut exit_events: MessageReader<AppExit>,
     simulation: Res<Simulation>,
     q_gate_components: Query<&GateComponent>,
 ) {
@@ -200,7 +201,7 @@ fn setup_simulation_resources(mut commands: Commands) {
     commands.insert_resource(SelectedGate(None));
     commands.insert_resource(SpatialGrid::new(100.0));
     commands.insert_resource(ClearColor(Color::srgba(0.050, 0.229, 0.793, 1.000)));
-    
+
     // commands.insert_resource(SimulationTimer {
     //     timer: Timer::from_seconds(SIMULATION_TICK_RATE as f32, TimerMode::Repeating),
     // });
@@ -229,7 +230,7 @@ fn cleanup_simulation_resources(
 
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_event::<GateComponentSelectionEvent>()
+        app.add_message::<GateComponentSelectionEvent>()
             // Insert our simulation as a resource
             // .init_resource::<Simulation>()
             // .insert_resource(SimulationConfig {
@@ -291,7 +292,7 @@ pub fn find_entity_at_position(
             let half_extents = sprite_size / 2.0;
 
             let local_point = transform
-                .compute_matrix()
+                .to_matrix()
                 .inverse()
                 .transform_point3(position.extend(0.0));
             let local_point_2d = Vec2::new(local_point.x, local_point.y);

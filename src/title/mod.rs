@@ -45,8 +45,8 @@ fn setup_main_menu(mut commands: Commands) {
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    BorderColor(Color::BLACK),
-                    BorderRadius::MAX,
+                    // BorderColor::all(Color::BLACK),
+                    // BorderRadius::MAX,
                     MainMenuButtonAction::Start,
                 ))
                 .with_children(|parent| {
@@ -62,8 +62,8 @@ fn setup_main_menu(mut commands: Commands) {
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    BorderColor(Color::BLACK),
-                    BorderRadius::MAX,
+                    // BorderColor(Color::BLACK),
+                    // BorderRadius::MAX,
                     MainMenuButtonAction::Settings,
                 ))
                 .with_children(|parent| {
@@ -79,8 +79,8 @@ fn setup_main_menu(mut commands: Commands) {
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    BorderColor(Color::BLACK),
-                    BorderRadius::MAX,
+                    // BorderColor(Color::BLACK),
+                    // BorderRadius::MAX,
                     MainMenuButtonAction::Exit,
                 ))
                 .with_children(|parent| {
@@ -101,7 +101,7 @@ fn main_menu_button_system(
     >,
     mut next_state: ResMut<NextState<GameState>>,
     mut settings_open: ResMut<SettingsMenuOpen>,
-    mut exit: EventWriter<AppExit>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     if settings_open.0 {
         return;
@@ -111,7 +111,7 @@ fn main_menu_button_system(
         match *interaction {
             Interaction::Pressed => {
                 *color = PRESSED_BUTTON.into();
-                border_color.0 = RED.into();
+                // border_color. = RED.into();
                 match action {
                     MainMenuButtonAction::Start => next_state.set(GameState::Simulating),
                     MainMenuButtonAction::Settings => settings_open.0 = !settings_open.0,
@@ -122,11 +122,11 @@ fn main_menu_button_system(
             }
             Interaction::Hovered => {
                 *color = HOVERED_BUTTON.into();
-                border_color.0 = Color::WHITE;
+                // border_color.0 = Color::WHITE;
             }
             Interaction::None => {
                 *color = NORMAL_BUTTON.into();
-                border_color.0 = Color::BLACK;
+                // border_color.0 = Color::BLACK;
             }
         }
     }

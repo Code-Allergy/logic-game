@@ -12,15 +12,17 @@
     };
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    flake-utils,
-    rust-overlay,
-  }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      rust-overlay,
+    }:
     flake-utils.lib.eachDefaultSystem (
-      system: let
-        overlays = [(import rust-overlay)];
+      system:
+      let
+        overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
           inherit system overlays;
           config = {
@@ -31,11 +33,19 @@
 
         # Use the latest nightly Rust
         rustVersion = pkgs.rust-bin.nightly.latest.default.override {
-          extensions = ["rust-std" "llvm-tools-preview"];
-          targets = ["x86_64-unknown-linux-gnu" "x86_64-pc-windows-gnu" "wasm32-unknown-unknown"];
+          extensions = [
+            "rust-std"
+            "llvm-tools-preview"
+          ];
+          targets = [
+            "x86_64-unknown-linux-gnu"
+            "x86_64-pc-windows-gnu"
+            "wasm32-unknown-unknown"
+          ];
         };
         androidPkgs = pkgs.androidenv.androidPkgs;
-      in {
+      in
+      {
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.perf
@@ -51,6 +61,8 @@
             pkgs.libXi
             pkgs.libxkbcommon
             pkgs.trunk
+            pkgs.wayland
+            pkgs.vulkan-loader
           ];
 
           nativeBuildInputs = [
@@ -72,6 +84,8 @@
             pkgs.xorg.libXi
             pkgs.libxkbcommon
             pkgs.libglvnd
+            pkgs.wayland
+            pkgs.vulkan-loader
           ];
 
           RUST_BACKTRACE = 1;
