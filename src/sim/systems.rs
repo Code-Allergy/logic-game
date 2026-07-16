@@ -24,7 +24,7 @@ pub fn rebuild_spatial_grid_system(
 }
 /// Initialize the simulation gate visual components
 pub fn draw_gates_system(mut simulation: ResMut<Simulation>, mut commands: Commands) {
-    for (_, gate) in simulation.circuit.components.iter_mut() {
+    for gate in simulation.circuit.components.values_mut() {
         // let x = 50.0 + offset * 100.0; // Adjust the x position based on the index
         let x = 50.0;
         let y = 0.0;
@@ -142,32 +142,30 @@ pub fn update_inputs_on_left_click(
     let window = q_window.single().unwrap();
 
     // Handle selection if mouse is clicked
-    if mouse_button_input.just_pressed(MouseButton::Left) {
-        if let Some(screen_pos) = window.cursor_position() {
-            // Then try to select a new entity
-            if let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) {
-                let distance = -ray.origin.z / ray.direction.z;
-                let world_pos = ray.origin + ray.direction * distance;
+    if mouse_button_input.just_pressed(MouseButton::Left)
+        && let Some(screen_pos) = window.cursor_position()
+        && let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos)
+    {
+        let distance = -ray.origin.z / ray.direction.z;
+        let world_pos = ray.origin + ray.direction * distance;
 
-                for (entity, transform, gate_component) in query.iter_mut() {
-                    let sprite_size = Vec2::new(50.0, 50.0);
-                    let half_extents = sprite_size / 2.0;
+        for (entity, transform, gate_component) in query.iter_mut() {
+            let sprite_size = Vec2::new(50.0, 50.0);
+            let half_extents = sprite_size / 2.0;
 
-                    let local_point = transform.to_matrix().inverse().transform_point3(world_pos);
-                    let local_point_2d = Vec2::new(local_point.x, local_point.y);
+            let local_point = transform.to_matrix().inverse().transform_point3(world_pos);
+            let local_point_2d = Vec2::new(local_point.x, local_point.y);
 
-                    if local_point_2d.x >= -half_extents.x
-                        && local_point_2d.x <= half_extents.x
-                        && local_point_2d.y >= -half_extents.y
-                        && local_point_2d.y <= half_extents.y
-                    {
-                        select_writer.write(GateComponentSelectionEvent {
-                            entity,
-                            component: gate_component.clone(),
-                        });
-                        break; // Only select one entity
-                    }
-                }
+            if local_point_2d.x >= -half_extents.x
+                && local_point_2d.x <= half_extents.x
+                && local_point_2d.y >= -half_extents.y
+                && local_point_2d.y <= half_extents.y
+            {
+                select_writer.write(GateComponentSelectionEvent {
+                    entity,
+                    component: gate_component.clone(),
+                });
+                break; // Only select one entity
             }
         }
     }
@@ -318,19 +316,19 @@ pub fn drag_selected_system(
     // TODO 0.16 BEVY
     let window = q_window.single().unwrap();
 
-    if let Some(screen_pos) = window.cursor_position() {
-        if let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) {
-            let distance = -ray.origin.z / ray.direction.z;
-            let world_pos = ray.origin + ray.direction * distance;
+    if let Some(screen_pos) = window.cursor_position()
+        && let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos)
+    {
+        let distance = -ray.origin.z / ray.direction.z;
+        let world_pos = ray.origin + ray.direction * distance;
 
-            // Update position of all selected entities
-            for (mut transform, selected, mut gate) in query.iter_mut() {
-                // Apply the offset to make dragging feel natural
-                transform.translation.x = world_pos.x + selected.offset.x;
-                gate.position.x = transform.translation.x;
-                transform.translation.y = world_pos.y + selected.offset.y;
-                gate.position.y = transform.translation.y;
-            }
+        // Update position of all selected entities
+        for (mut transform, selected, mut gate) in query.iter_mut() {
+            // Apply the offset to make dragging feel natural
+            transform.translation.x = world_pos.x + selected.offset.x;
+            gate.position.x = transform.translation.x;
+            transform.translation.y = world_pos.y + selected.offset.y;
+            gate.position.y = transform.translation.y;
         }
     }
 }

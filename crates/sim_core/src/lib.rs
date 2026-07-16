@@ -20,7 +20,7 @@ pub type PinId = usize;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StaticCircuitPins {
     // PinIds here are the *external* pin IDs of the circuit.
-    pub input_pin_ids: Vec<PinId>,  // Sorted list of external input pin IDs
+    pub input_pin_ids: Vec<PinId>, // Sorted list of external input pin IDs
     pub output_pin_ids: Vec<PinId>, // Sorted list of external output pin IDs
 }
 
@@ -61,10 +61,10 @@ impl LogicComponent {
                 panic!("Cannot set input on non-input gate");
             }
             LogicComponent::Circuit(circuit) => {
-                if let Some(gate_id) = circuit.input_gates.get(&pin) {
-                    if let Some(gate) = circuit.components.get_mut(gate_id) {
-                        gate.set_input(0, value);
-                    }
+                if let Some(gate_id) = circuit.input_gates.get(&pin)
+                    && let Some(gate) = circuit.components.get_mut(gate_id)
+                {
+                    gate.set_input(0, value);
                 }
             }
         }
@@ -77,10 +77,10 @@ impl LogicComponent {
                 panic!("Cannot get input on non-input gate");
             }
             LogicComponent::Circuit(circuit) => {
-                if let Some(gate_id) = circuit.input_gates.get(&pin) {
-                    if let Some(gate) = circuit.components.get(gate_id) {
-                        return gate.get_input(0);
-                    }
+                if let Some(gate_id) = circuit.input_gates.get(&pin)
+                    && let Some(gate) = circuit.components.get(gate_id)
+                {
+                    return gate.get_input(0);
                 }
                 None
             }
@@ -94,10 +94,10 @@ impl LogicComponent {
                 panic!("Cannot get output on non-output gate");
             }
             LogicComponent::Circuit(circuit) => {
-                if let Some(gate_id) = circuit.output_gates.get(&pin) {
-                    if let Some(gate) = circuit.components.get(gate_id) {
-                        return gate.get_output(0);
-                    }
+                if let Some(gate_id) = circuit.output_gates.get(&pin)
+                    && let Some(gate) = circuit.components.get(gate_id)
+                {
+                    return gate.get_output(0);
                 }
                 None
             }

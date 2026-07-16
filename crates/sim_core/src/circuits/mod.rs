@@ -69,7 +69,7 @@ impl Circuit {
             target_input,
             source_output,
         ));
-        self.topological_dirty = true; 
+        self.topological_dirty = true;
     }
 
     pub fn add_connection(
@@ -81,7 +81,7 @@ impl Circuit {
     ) {
         self.connections
             .push(Connection::new(source, target, target_input, source_output));
-        self.topological_dirty = true; 
+        self.topological_dirty = true;
     }
 
     pub fn get_topological_order(&mut self) -> Option<Vec<Uuid>> {
@@ -95,7 +95,7 @@ impl Circuit {
 
     pub fn topological_sort(&self) -> Option<Vec<ComponentId>> {
         use std::collections::VecDeque;
-        let mut in_degree = AHashMap::new(); 
+        let mut in_degree = AHashMap::new();
         for id in self.components.keys() {
             in_degree.insert(*id, 0);
         }
@@ -131,28 +131,28 @@ impl Circuit {
     }
 
     pub fn set_input(&mut self, pin: PinId, value: Option<bool>) {
-        if let Some(gate_id) = self.input_gates.get(&pin) {
-            if let Some(gate) = self.components.get_mut(gate_id) {
-                match gate {
-                    LogicComponent::Gate(gate) => {
-                        gate.set_input(0, value);
-                    }
-                    LogicComponent::Circuit(circuit) => {
-                        circuit.set_input(pin, value);
-                    }
+        if let Some(gate_id) = self.input_gates.get(&pin)
+            && let Some(gate) = self.components.get_mut(gate_id)
+        {
+            match gate {
+                LogicComponent::Gate(gate) => {
+                    gate.set_input(0, value);
+                }
+                LogicComponent::Circuit(circuit) => {
+                    circuit.set_input(pin, value);
                 }
             }
         }
     }
 
     pub fn get_output(&self, pin: PinId) -> Option<bool> {
-        if let Some(gate_id) = self.output_gates.get(&pin) {
-            if let Some(gate) = self.components.get(gate_id) {
-                match gate {
-                    LogicComponent::Gate(gate) => return gate.get_output(),
-                    LogicComponent::Circuit(circuit) => {
-                        return circuit.get_output(pin);
-                    }
+        if let Some(gate_id) = self.output_gates.get(&pin)
+            && let Some(gate) = self.components.get(gate_id)
+        {
+            match gate {
+                LogicComponent::Gate(gate) => return gate.get_output(),
+                LogicComponent::Circuit(circuit) => {
+                    return circuit.get_output(pin);
                 }
             }
         }
@@ -173,7 +173,7 @@ impl Circuit {
 
             let propagation_data = match component {
                 LogicComponent::Gate(gate) => {
-                    let inputs = gate.get_inputs(); 
+                    let inputs = gate.get_inputs();
                     if inputs.iter().any(|i| i.is_none()) {
                         panic!("Gate {:?} has uninitialized inputs: {:?}", gate_id, inputs);
                     }
@@ -183,12 +183,14 @@ impl Circuit {
                 LogicComponent::Circuit(circuit) => {
                     circuit.tick()?;
                     let circuit_outputs_for_propagation = circuit.get_outputs();
-                    let outputs_for_internal_pins = circuit_outputs_for_propagation.clone(); 
+                    let outputs_for_internal_pins = circuit_outputs_for_propagation.clone();
                     if outputs_for_internal_pins.len() != circuit.output_gates.len() {
                         return Err(TickError::OutputGateMismatch);
                     }
                     for (pin, value) in self.output_gates.iter().zip(outputs_for_internal_pins) {
-                        if let Some(LogicComponent::Gate(output_representing_gate)) = self.components.get_mut(pin.1) {
+                        if let Some(LogicComponent::Gate(output_representing_gate)) =
+                            self.components.get_mut(pin.1)
+                        {
                             output_representing_gate.set_input(0, value);
                         }
                     }
@@ -199,12 +201,16 @@ impl Circuit {
             for connection in self.connections.iter().filter(|c| c.source == *gate_id) {
                 let output_value = match propagation_data {
                     PropagationOutput::Single(out_opt) => {
-                        debug_assert_eq!(connection.source_output, 0, "Gate outputs assumed to be on pin 0");
+                        debug_assert_eq!(
+                            connection.source_output, 0,
+                            "Gate outputs assumed to be on pin 0"
+                        );
                         out_opt
                     }
-                    PropagationOutput::Multiple(ref outs_vec) => {
-                        outs_vec.get(connection.source_output).copied().unwrap_or(None)
-                    }
+                    PropagationOutput::Multiple(ref outs_vec) => outs_vec
+                        .get(connection.source_output)
+                        .copied()
+                        .unwrap_or(None),
                 };
                 if let Some(target_gate) = self.components.get_mut(&connection.target) {
                     match target_gate {
@@ -229,7 +235,8 @@ impl Circuit {
                 .map(|(&pin, &id)| (pin, id))
                 .collect();
             sorted_pins_vec.sort_by_key(|&(pin, _)| pin);
-            self.sorted_input_pin_ids = Some(sorted_pins_vec.into_iter().map(|(pin, _)| pin).collect());
+            self.sorted_input_pin_ids =
+                Some(sorted_pins_vec.into_iter().map(|(pin, _)| pin).collect());
             self.pins_dirty = false;
         }
         self.sorted_input_pin_ids
@@ -242,7 +249,9 @@ impl Circuit {
                     self.components.get(gate_id)
                 {
                     gate.get_input(0)
-                } else { None }
+                } else {
+                    None
+                }
             })
             .collect()
     }
@@ -255,7 +264,8 @@ impl Circuit {
                 .map(|(&pin, &id)| (pin, id))
                 .collect();
             sorted_pins_vec.sort_by_key(|&(pin, _)| pin);
-            self.sorted_output_pin_ids = Some(sorted_pins_vec.into_iter().map(|(pin, _)| pin).collect());
+            self.sorted_output_pin_ids =
+                Some(sorted_pins_vec.into_iter().map(|(pin, _)| pin).collect());
             self.pins_dirty = false;
         }
         self.sorted_output_pin_ids
@@ -267,8 +277,10 @@ impl Circuit {
                 if let Some(LogicComponent::Gate(AnyGate::Output(gate))) =
                     self.components.get(gate_id)
                 {
-                    gate.output 
-                } else { None }
+                    gate.output
+                } else {
+                    None
+                }
             })
             .collect()
     }
@@ -283,7 +295,7 @@ impl Circuit {
             }
         })
     }
-    
+
     pub fn add_input(&mut self, initial: bool) -> GateId {
         let gate = AnyGate::new_input(self.id, initial);
         let gate_id = gate.get_id().gate_id;
@@ -297,7 +309,7 @@ impl Circuit {
         let gate_id = gate.get_id().gate_id;
         self.components.insert(gate_id, LogicComponent::Gate(gate));
         self.input_gates.insert(pin, gate_id);
-        self.pins_dirty = true; 
+        self.pins_dirty = true;
         gate_id
     }
 
@@ -309,11 +321,11 @@ impl Circuit {
     }
 
     pub fn add_output_pin(&mut self, pin: usize) -> GateId {
-        let gate = AnyGate::new_output(self.id); 
+        let gate = AnyGate::new_output(self.id);
         let gate_id = gate.get_id().gate_id;
         self.components.insert(gate_id, LogicComponent::Gate(gate));
         self.output_gates.insert(pin, gate_id);
-        self.pins_dirty = true; 
+        self.pins_dirty = true;
         gate_id
     }
 

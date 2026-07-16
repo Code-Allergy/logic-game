@@ -4,7 +4,7 @@
 // Requires the 2dCamera to be setup in the main.rs file
 
 use crate::{HOVERED_BUTTON, NORMAL_BUTTON, PRESSED_BUTTON, settings_overlay::SettingsMenuOpen};
-use bevy::{color::palettes::css::RED, prelude::*};
+use bevy::prelude::*;
 
 use crate::GameState;
 
@@ -107,7 +107,7 @@ fn main_menu_button_system(
         return;
     }
 
-    for (interaction, mut color, mut border_color, action) in &mut interaction_query {
+    for (interaction, mut color, mut _border_color, action) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => {
                 *color = PRESSED_BUTTON.into();

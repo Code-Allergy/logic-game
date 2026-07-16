@@ -1,5 +1,5 @@
 use bevy::{platform::collections::HashMap, prelude::*};
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use bevy_egui::{EguiContexts, egui};
 use serde::{Deserialize, Serialize};
 use sim_core::{Circuit, ComponentId, GateId, GateType, LogicComponent};
 use spatial_grid::SpatialGrid;

@@ -1,6 +1,4 @@
 use bevy::prelude::*;
-use bevy::render::RenderApp;
-use bevy::render::batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport};
 use bevy_egui::EguiPlugin;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use gate_quest::settings_overlay::{
