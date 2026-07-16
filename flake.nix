@@ -39,8 +39,8 @@
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.linuxPackages_latest.perf
-            pkgs.pkgsCross.mingwW64.buildPackages.gcc
-            pkgs.pkgsCross.mingwW64.windows.pthreads
+            #pkgs.pkgsCross.mingwW64.buildPackages.gcc
+            #pkgs.pkgsCross.mingwW64.windows.pthreads
             pkgs.rust-bindgen
             pkgs.clang
             pkgs.lld
@@ -55,7 +55,7 @@
             pkgs.trunk
             pkgs.cargo-apk
             pkgs.cargo-ndk
-            androidPkgs.androidsdk
+            # androidPkgs.androidsdk
             # androidPkgs.platform-tools
             # androidPkgs.tools
             # androidPkgs.ndk-bundle
