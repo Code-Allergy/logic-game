@@ -2,7 +2,7 @@ mod components;
 mod plugin;
 
 use bevy::{platform::collections::HashMap, prelude::*};
-use bevy_egui::{EguiContexts, egui};
+use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use serde::{Deserialize, Serialize};
 use sim_core::{Circuit, ComponentId, GateId, GateType, LogicComponent};
 use spatial_grid::SpatialGrid;
@@ -235,14 +235,14 @@ impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<GateComponentSelectionEvent>()
             // Insert our simulation as a resource
-            // .init_resource::<Simulation>()
-            // .insert_resource(SimulationConfig {
-            // tick_rate: SIMULATION_TICK_RATE,
-            // })
-            // .init_resource::<SelectedGate>()
+            .init_resource::<Simulation>()
+            .insert_resource(SimulationConfig {
+                tick_rate: SIMULATION_TICK_RATE,
+            })
+            .init_resource::<SelectedGate>()
             // TIMESTEP
-            // .insert_resource(Time::<Fixed>::from_seconds(SIMULATION_TICK_RATE)) // Set the tick rate of the simulation
-            // .insert_resource(SpatialGrid::new(100.0))
+            .insert_resource(Time::<Fixed>::from_seconds(SIMULATION_TICK_RATE)) // Set the tick rate of the simulation
+            .insert_resource(SpatialGrid::new(100.0))
             /* GAME STATE */
             .add_systems(
                 OnEnter(self.state.clone()),
@@ -252,6 +252,10 @@ impl Plugin for SimulationPlugin {
                     draw_connections_system.after(draw_gates_system),
                     rebuild_spatial_grid_system.after(setup_simulation_resources),
                 ),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                simulation_config_ui_system.run_if(in_state(self.state.clone())),
             )
             // Update systems
             .add_systems(
@@ -264,7 +268,6 @@ impl Plugin for SimulationPlugin {
                     update_spatial_grid_system,
                     update_inputs_on_left_click,
                     update_selected_gate,
-                    simulation_config_ui_system,
                     // mouse_selection_input,
                     // finalize_selection,
                     // zoom_camera,

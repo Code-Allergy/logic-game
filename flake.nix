@@ -35,6 +35,7 @@
         rustVersion = pkgs.rust-bin.nightly.latest.default.override {
           extensions = [
             "rust-std"
+            "rust-src"
             "llvm-tools-preview"
           ];
           targets = [

@@ -1,4 +1,7 @@
-use bevy::{platform::collections::HashMap, prelude::*};
+use bevy::{
+    camera::ScalingMode, input::mouse::MouseWheel, platform::collections::HashMap, prelude::*,
+    window::PrimaryWindow,
+};
 use bevy_egui::EguiContexts;
 
 pub mod editor;
@@ -87,26 +90,34 @@ pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
 // Areas:Rendering.
 // PRs:#17063
 // Read the primary window’s logical height (in pixels) and make 1 world unit == 1 px
-// pub fn configure_camera_scaling(
-//     windows: Query<&Window, With<PrimaryWindow>>, // ← query the window component :contentReference[oaicite:2]{index=2}
-//     mut cameras: Query<&mut OrthographicProjection, With<MainCamera>>,
-// ) {
-//     let window = windows.single(); // should exist exactly once
-//     let height = window.height(); // logical height in pixels :contentReference[oaicite:3]{index=3}
+pub fn configure_camera_scaling(
+    windows: Query<&Window, With<PrimaryWindow>>, // ← query the window component :contentReference[oaicite:2]{index=2}
+    mut cameras: Query<&mut Projection, With<MainCamera>>,
+) -> Result {
+    let window = windows.single()?; // should exist exactly once
+    let height = window.height(); // logical height in pixels :contentReference[oaicite:3]{index=3}
+    let mut projection = cameras.single_mut()?;
 
-//     let mut proj = cameras.single_mut();
-//     proj.scaling_mode = ScalingMode::FixedVertical {
-//         viewport_height: height, // map 1 world unit → 1 px
-//     };
-// }
+    if let Projection::Orthographic(ortho) = projection.as_mut() {
+        ortho.scaling_mode = ScalingMode::FixedVertical {
+            viewport_height: height,
+        };
+    }
+    Ok(())
+}
 
-// pub fn zoom_camera(
-//     mut scroll_evr: EventReader<MouseWheel>,
-//     mut cameras: Query<&mut OrthographicProjection, With<MainCamera>>,
-// ) {
-//     let mut proj = cameras.single_mut();
-//     for ev in scroll_evr.read() {
-//         // scale >1.0 zooms out; <1.0 zooms in
-//         proj.scale = (proj.scale * (1.0 - ev.y * 0.1)).clamp(0.1, 10.0);
-//     }
-// }
+pub fn zoom_camera(
+    mut scroll_evr: MessageReader<MouseWheel>,
+    mut cameras: Query<&mut Projection, With<MainCamera>>,
+) -> Result {
+    let mut proj = cameras.single_mut()?;
+
+    if let Projection::Orthographic(ortho) = proj.as_mut() {
+        for ev in scroll_evr.read() {
+            // scale >1.0 zooms out; <1.0 zooms in
+            ortho.scale = (ortho.scale * (1.0 - ev.y * 0.1)).clamp(0.1, 10.0);
+        }
+    }
+
+    Ok(())
+}

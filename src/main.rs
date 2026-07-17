@@ -4,6 +4,7 @@ use bevy_egui::EguiPlugin;
 #[cfg(debug_assertions)]
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
+use gate_quest::configure_camera_scaling;
 use gate_quest::editor::EditorPlugin;
 use gate_quest::selection::SelectionPlugin;
 use gate_quest::settings_overlay::{
@@ -45,7 +46,7 @@ fn main() {
         })
         .add_plugins(EditorPlugin)
         .add_plugins(SelectionPlugin)
-        // .add_plugins(SimulationPlugin) // Core simulation logic
+        .add_plugins(SimulationPlugin::new(GameState::MainMenu)) // Core simulation logic
         // Setup game state
         .init_state::<GameState>()
         .add_message::<GateComponentSelectionEvent>()
@@ -59,9 +60,8 @@ fn main() {
         .add_systems(
             Startup,
             (
-                initial_startup_system
-                //.before(configure_camera_scaling),
-                //configure_camera_scaling,
+                initial_startup_system.before(configure_camera_scaling),
+                configure_camera_scaling,
             ),
         )
         // Spatial grid system
