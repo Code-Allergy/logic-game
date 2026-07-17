@@ -2,7 +2,6 @@ use crate::sim::GateComponent;
 use crate::sim::Selected;
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 
 #[derive(Resource, Default)]
 pub struct SelectionState {
@@ -202,8 +201,8 @@ impl Plugin for SelectionPlugin {
                     mouse_selection_input,
                     draw_selection_box,
                     finalize_selection,
-                    // apply_selection,
-                    // remove_selection,
+                    apply_selection,
+                    remove_selection,
                 ),
             );
     }

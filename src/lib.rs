@@ -85,17 +85,16 @@ pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
     // catppuccin_egui::set_theme(ctx.ctx_mut(), catppuccin_egui::MOCHA);
 }
 
-// TODO 0.16 update
 // Refactor and simplify custom projections #
 // Areas:Rendering.
 // PRs:#17063
 // Read the primary window’s logical height (in pixels) and make 1 world unit == 1 px
 pub fn configure_camera_scaling(
-    windows: Query<&Window, With<PrimaryWindow>>, // ← query the window component :contentReference[oaicite:2]{index=2}
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<&mut Projection, With<MainCamera>>,
 ) -> Result {
     let window = windows.single()?; // should exist exactly once
-    let height = window.height(); // logical height in pixels :contentReference[oaicite:3]{index=3}
+    let height = window.height(); // logical height in pixels
     let mut projection = cameras.single_mut()?;
 
     if let Projection::Orthographic(ortho) = projection.as_mut() {

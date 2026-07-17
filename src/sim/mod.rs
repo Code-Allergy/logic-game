@@ -16,6 +16,7 @@ use systems::{
 use crate::{
     GameState, SAVE_FILE_NAME, SIMULATION_TICK_RATE, misc::add_n_bit_adder,
     temp::GateComponentSelectionEvent,
+    zoom_camera,
 };
 
 pub mod spatial_grid;
@@ -270,7 +271,7 @@ impl Plugin for SimulationPlugin {
                     update_selected_gate,
                     // mouse_selection_input,
                     // finalize_selection,
-                    // zoom_camera,
+                    zoom_camera,
                     update_tickrate_system,
                     ui_for_selected_gate,
                 )

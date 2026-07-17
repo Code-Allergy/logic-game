@@ -168,15 +168,12 @@ pub fn editor_ui_system(
     if let Some(gate_type) = editor_state.selected_gate_type {
         if button_input.just_pressed(MouseButton::Left) {
             if let Some(screen_pos) = window.cursor_position() {
-                if let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) {
-                    let distance = -ray.origin.z / ray.direction.z;
-                    let world_pos = ray.origin + ray.direction * distance;
-
+                if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, screen_pos) {
                     // Only place gates if we're clicking in the world, not on UI
                     if !ctx.is_pointer_over_egui() {
                         create_gate_events.write(CreateGateEvent {
                             gate_type,
-                            position: world_pos.truncate(),
+                            position: world_pos,
                         });
                     }
                 }

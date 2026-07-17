@@ -46,7 +46,7 @@ fn main() {
         })
         .add_plugins(EditorPlugin)
         .add_plugins(SelectionPlugin)
-        .add_plugins(SimulationPlugin::new(GameState::MainMenu)) // Core simulation logic
+        .add_plugins(SimulationPlugin::new(GameState::Simulating)) // Core simulation logic
         // Setup game state
         .init_state::<GameState>()
         .add_message::<GateComponentSelectionEvent>()
@@ -64,22 +64,6 @@ fn main() {
                 configure_camera_scaling,
             ),
         )
-        // Spatial grid system
-        // .add_systems(OnEnter(GameState::Simulating), rebuild_spatial_grid_system)
-        // Systems that need to run during simulation
-        // .add_systems(
-        //     Update,
-        //     (
-        //         // Selection and interaction systems
-        //         gate_selection_system.before(drag_selected_system),
-        //         drag_selected_system,
-        //         update_spatial_grid_system,
-        //         update_inputs_on_left_click,
-        //         // Camera control
-        //         zoom_camera,
-        //     )
-        //         .run_if(in_state(GameState::Simulating)),
-        // )
         // Always-running UI systems
         .add_systems(Update, (show_settings_menu, settings_menu_button_system))
         .run();

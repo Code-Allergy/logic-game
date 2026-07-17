@@ -144,16 +144,13 @@ pub fn update_inputs_on_left_click(
     // Handle selection if mouse is clicked
     if mouse_button_input.just_pressed(MouseButton::Left)
         && let Some(screen_pos) = window.cursor_position()
-        && let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos)
+        && let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, screen_pos)
     {
-        let distance = -ray.origin.z / ray.direction.z;
-        let world_pos = ray.origin + ray.direction * distance;
-
         for (entity, transform, gate_component) in query.iter_mut() {
             let sprite_size = Vec2::new(50.0, 50.0);
             let half_extents = sprite_size / 2.0;
 
-            let local_point = transform.to_matrix().inverse().transform_point3(world_pos);
+            let local_point = transform.to_matrix().inverse().transform_point3(world_pos.extend(0.0));
             let local_point_2d = Vec2::new(local_point.x, local_point.y);
 
             if local_point_2d.x >= -half_extents.x
@@ -284,13 +281,10 @@ pub fn gate_selection_system(
         // TODO 0.16
         if let Some(screen_pos) = q_window.single().unwrap().cursor_position() {
             let (camera, global_transform) = q_camera.single().unwrap();
-            if let Ok(ray) = camera.viewport_to_world(global_transform, screen_pos) {
-                let distance = -ray.origin.z / ray.direction.z;
-                let world_pos = ray.origin + ray.direction * distance;
-
+            if let Ok(world_pos) = camera.viewport_to_world_2d(global_transform, screen_pos) {
                 // Check for entity under cursor
                 if let Some((entity, offset)) =
-                    find_entity_at_position(world_pos.truncate(), &grid, &query)
+                    find_entity_at_position(world_pos, &grid, &query)
                 {
                     commands.entity(entity).insert(Selected { offset });
                     info!("Selected gate entity: {:?}", entity);
@@ -317,11 +311,8 @@ pub fn drag_selected_system(
     let window = q_window.single().unwrap();
 
     if let Some(screen_pos) = window.cursor_position()
-        && let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos)
+        && let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, screen_pos)
     {
-        let distance = -ray.origin.z / ray.direction.z;
-        let world_pos = ray.origin + ray.direction * distance;
-
         // Update position of all selected entities
         for (mut transform, selected, mut gate) in query.iter_mut() {
             // Apply the offset to make dragging feel natural
