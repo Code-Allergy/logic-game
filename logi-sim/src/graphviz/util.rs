@@ -17,6 +17,8 @@ pub fn escape(text: &str) -> String {
 
 pub fn kind_label(kind: &NodeKind) -> &'static str {
     match kind {
+        NodeKind::Input => "INPUT",
+        NodeKind::Output => "OUTPUT",
         NodeKind::And => "AND",
         NodeKind::Or => "OR",
         NodeKind::Not => "NOT",

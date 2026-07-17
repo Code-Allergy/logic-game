@@ -9,6 +9,9 @@ new_key_type! {
 }
 
 pub enum NodeKind {
+    Input,
+    Output,
+
     And,
     Or,
     Not,

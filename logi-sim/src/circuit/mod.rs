@@ -45,6 +45,14 @@ impl Circuit {
         })
     }
 
+    pub fn input(&mut self) -> NodeId {
+        self.add_node(NodeKind::Input, 0, 1)
+    }
+
+    pub fn output(&mut self) -> NodeId {
+        self.add_node(NodeKind::Output, 1, 0)
+    }
+
     pub fn and(&mut self) -> NodeId {
         self.add_node(NodeKind::And, 2, 1)
     }
