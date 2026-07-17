@@ -1,7 +1,8 @@
-use bevy::{prelude::*, utils::HashMap};
+use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use serde::{Deserialize, Serialize};
 use sim_core::{Circuit, GateId, GateType, LogicComponent};
+use std::collections::HashMap;
 
 use crate::{SAVE_FILE_NAME, misc::add_n_bit_adder};
 
@@ -112,8 +113,8 @@ impl Default for Simulation {
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
     mut contexts: EguiContexts,
-) {
-    egui::Window::new("Simulation Config").show(contexts.ctx_mut(), |ui| {
+) -> Result {
+    egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (Hz)");
         // Slider range from 0.1 to 1000 Hz, preventing zero or negative values
         ui.add(egui::Slider::new(&mut sim_config.tick_rate, 0.1..=1000.0).text("Tick Rate"));
@@ -121,6 +122,7 @@ pub fn simulation_config_ui_system(
         // Add some helpful explanation
         ui.label("Higher values = faster simulation");
     });
+    Ok(())
 }
 
 pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, mut time: ResMut<Time<Fixed>>) {
@@ -134,7 +136,7 @@ pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, mut time: ResMu
 
 #[allow(dead_code)]
 pub fn save_on_exit_system(
-    mut exit_events: EventReader<AppExit>,
+    mut exit_events: MessageReader<AppExit>,
     simulation: Res<Simulation>,
     q_gate_components: Query<&GateComponent>,
 ) {

@@ -7,11 +7,9 @@ pub mod selection;
 pub mod settings;
 pub mod settings_overlay;
 pub mod sim;
-pub mod spatial_grid;
-pub mod systems;
 
-/// MAIN MENU 
-/// 
+/// MAIN MENU
+///
 /// This module contains the main menu for the game, which is displayed when the game is first launched.
 /// Takes in a target state to be active in
 /// Requires the 2dCamera to be setup in the main.rs file

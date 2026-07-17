@@ -10,12 +10,12 @@ pub struct SelectionState {
     pub drag_current: Option<Vec2>,
 }
 
-#[derive(Event, Debug)]
+#[derive(Message, Debug)]
 pub struct ComponentsSelected {
     pub entities: Vec<Entity>,
 }
 
-#[derive(Event, Debug)]
+#[derive(Message, Debug)]
 pub struct ComponentsUnselected {
     pub entities: Vec<Entity>,
 }
@@ -25,7 +25,7 @@ pub struct SelectionBox;
 
 pub fn mouse_selection_input(
     mouse_input: Res<ButtonInput<MouseButton>>,
-    mut cursor_moved: EventReader<CursorMoved>,
+    mut cursor_moved: MessageReader<CursorMoved>,
     mut sel: ResMut<SelectionState>,
 ) {
     // 1) Update the latest cursor position every frame
@@ -89,19 +89,19 @@ pub fn draw_selection_box(
 pub fn finalize_selection(
     mut sel: ResMut<SelectionState>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
-    mut select_writer: EventWriter<ComponentsSelected>,
-    mut unselect_writer: EventWriter<ComponentsUnselected>,
+    mut select_writer: MessageWriter<ComponentsSelected>,
+    mut unselect_writer: MessageWriter<ComponentsUnselected>,
     query: Query<(Entity, &GlobalTransform), With<GateComponent>>,
     selection_box_query: Query<Entity, With<SelectionBox>>,
     mut commands: Commands,
     selected_query: Query<Entity, With<Selected>>,
-) {
+) -> Result {
     // Only act on release
     if sel.drag_start.is_none() || sel.drag_current.is_none() {
-        return;
+        return Ok(());
     }
 
-    let (camera, cam_tf) = camera_q.single();
+    let (camera, cam_tf) = camera_q.single()?;
 
     // Build screen-space rectangle
     let a = sel.drag_start.unwrap();
@@ -114,7 +114,7 @@ pub fn finalize_selection(
     if selection_size.length() < 5.0 {
         sel.drag_start = None;
         sel.drag_current = None;
-        return;
+        return Ok(());
     }
 
     // Gather entities inside the rectangle
@@ -143,11 +143,11 @@ pub fn finalize_selection(
     // Emit selection events
     if !selected.is_empty() {
         info!("Selected entities: {:?}", selected);
-        select_writer.send(ComponentsSelected { entities: selected });
+        select_writer.write(ComponentsSelected { entities: selected });
     }
 
     if !unselected.is_empty() {
-        unselect_writer.send(ComponentsUnselected {
+        unselect_writer.write(ComponentsUnselected {
             entities: unselected,
         });
     }
@@ -160,12 +160,13 @@ pub fn finalize_selection(
     // Clear the drag state
     sel.drag_start = None;
     sel.drag_current = None;
+    Ok(())
 }
 
 // System to apply selection to entities
 pub fn apply_selection(
     mut commands: Commands,
-    mut selection_event: EventReader<ComponentsSelected>,
+    mut selection_event: MessageReader<ComponentsSelected>,
 ) {
     for event in selection_event.read() {
         for &entity in &event.entities {
@@ -179,7 +180,7 @@ pub fn apply_selection(
 // System to remove selection from entities
 pub fn remove_selection(
     mut commands: Commands,
-    mut unselection_event: EventReader<ComponentsUnselected>,
+    mut unselection_event: MessageReader<ComponentsUnselected>,
 ) {
     for event in unselection_event.read() {
         for &entity in &event.entities {
@@ -193,8 +194,8 @@ pub struct SelectionPlugin;
 impl Plugin for SelectionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SelectionState>()
-            .add_event::<ComponentsSelected>()
-            .add_event::<ComponentsUnselected>()
+            .add_message::<ComponentsSelected>()
+            .add_message::<ComponentsUnselected>()
             .add_systems(
                 Update,
                 (

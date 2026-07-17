@@ -5,8 +5,8 @@ use sim_core::{GateId, GateType};
 
 use crate::{
     GameState,
+    sim::spatial_grid::SpatialGrid,
     sim::{GateComponent, Simulation, get_gate_sprite},
-    spatial_grid::SpatialGrid,
     temp::GateComponentSelectionEvent,
 };
 
@@ -38,14 +38,14 @@ impl Default for EditorState {
 }
 
 /// Event for creating a new gate
-#[derive(Event)]
+#[derive(Message)]
 pub struct CreateGateEvent {
     pub gate_type: GateType,
     pub position: Vec2,
 }
 
 /// Event for creating a new connection
-#[derive(Event)]
+#[derive(Message)]
 pub struct CreateConnectionEvent {
     pub source_gate: GateId,
     pub target_gate: GateId,
@@ -57,15 +57,16 @@ pub struct EditorPlugin;
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>()
-            .add_event::<CreateGateEvent>()
-            .add_event::<CreateConnectionEvent>()
+            .add_message::<CreateGateEvent>()
+            .add_message::<CreateConnectionEvent>()
             .add_systems(
                 Update,
                 (
                     editor_ui_system,
-                    process_gate_placement,
-                    handle_connection_creation,
-                ).run_if(in_state(GameState::Simulating)),
+                    // process_gate_placement,
+                    // handle_connection_creation,
+                )
+                    .run_if(in_state(GameState::Simulating)),
             );
     }
 }
@@ -74,23 +75,31 @@ impl Plugin for EditorPlugin {
 pub fn editor_ui_system(
     mut contexts: EguiContexts,
     mut editor_state: ResMut<EditorState>,
-    mut create_gate_events: EventWriter<CreateGateEvent>,
+    mut create_gate_events: MessageWriter<CreateGateEvent>,
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     button_input: Res<ButtonInput<MouseButton>>,
-) {
-    let ctx = contexts.ctx_mut();
+) -> Result {
+    let ctx = contexts.ctx_mut()?;
+    let window = q_window.single()?;
+    let (camera, camera_transform) = q_camera.single()?;
 
     // Editor panel
-    egui::SidePanel::left("editor_panel")
+    egui::Panel::left("editor_panel")
         .resizable(true)
         .show(ctx, |ui| {
             ui.heading("Component Editor");
             ui.separator();
 
             // Create a toggle button for connection mode
-            if ui.button(if editor_state.connection_mode { "✓ Connection Mode" } else { "Connection Mode" })
-                .clicked() {
+            if ui
+                .button(if editor_state.connection_mode {
+                    "✓ Connection Mode"
+                } else {
+                    "Connection Mode"
+                })
+                .clicked()
+            {
                 editor_state.connection_mode = !editor_state.connection_mode;
                 if editor_state.connection_mode {
                     editor_state.selected_gate_type = None;
@@ -156,18 +165,16 @@ pub fn editor_ui_system(
             ui.label("- Connect outputs to inputs with Connection Mode");
         });
 
-    // Handle mouse clicks for gate placement
     if let Some(gate_type) = editor_state.selected_gate_type {
         if button_input.just_pressed(MouseButton::Left) {
-            if let Some(screen_pos) = q_window.single().cursor_position() {
-                let (camera, camera_transform) = q_camera.single();
+            if let Some(screen_pos) = window.cursor_position() {
                 if let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) {
                     let distance = -ray.origin.z / ray.direction.z;
                     let world_pos = ray.origin + ray.direction * distance;
-                    
+
                     // Only place gates if we're clicking in the world, not on UI
-                    if !ctx.is_pointer_over_area() {
-                        create_gate_events.send(CreateGateEvent {
+                    if !ctx.is_pointer_over_egui() {
+                        create_gate_events.write(CreateGateEvent {
                             gate_type,
                             position: world_pos.truncate(),
                         });
@@ -176,6 +183,7 @@ pub fn editor_ui_system(
             }
         }
     }
+    Ok(())
 }
 
 /// System to process gate placement
@@ -183,7 +191,7 @@ pub fn process_gate_placement(
     mut commands: Commands,
     mut simulation: ResMut<Simulation>,
     mut grid: ResMut<SpatialGrid>,
-    mut create_gate_events: EventReader<CreateGateEvent>,
+    mut create_gate_events: MessageReader<CreateGateEvent>,
 ) {
     for event in create_gate_events.read() {
         // Add the gate to the simulation
@@ -199,16 +207,18 @@ pub fn process_gate_placement(
 
         // Get the component from simulation to create its visual representation
         if let Some(component) = simulation.circuit.components.get(&gate_id) {
-            let sprite = get_gate_sprite(component);
+            let sprite = get_gate_sprite(&event.gate_type);
             let position = event.position;
-            
+
             // Spawn the visual entity for the gate
-            let entity = commands.spawn((
-                sprite,
-                Transform::from_xyz(position.x, position.y, 0.0),
-                GateComponent::new(gate_id, position),
-            )).id();
-            
+            let entity = commands
+                .spawn((
+                    sprite,
+                    Transform::from_xyz(position.x, position.y, 0.0),
+                    GateComponent::new(gate_id, position),
+                ))
+                .id();
+
             // Add to spatial grid for selection
             grid.insert(entity, position);
         }
@@ -219,8 +229,8 @@ pub fn process_gate_placement(
 pub fn handle_connection_creation(
     mut editor_state: ResMut<EditorState>,
     mut simulation: ResMut<Simulation>,
-    mut create_connection_events: EventWriter<CreateConnectionEvent>,
-    mut selection_events: EventReader<GateComponentSelectionEvent>,
+    mut create_connection_events: MessageWriter<CreateConnectionEvent>,
+    mut selection_events: MessageReader<GateComponentSelectionEvent>,
 ) {
     // Only process in connection mode
     if !editor_state.connection_mode {
@@ -240,13 +250,13 @@ pub fn handle_connection_creation(
                     0, // Default to first input
                     0, // Default to first output
                 );
-                
+
                 // Send event for other systems
-                create_connection_events.send(CreateConnectionEvent {
+                create_connection_events.write(CreateConnectionEvent {
                     source_gate: source_id,
                     target_gate: event.component.id,
                 });
-                
+
                 // Reset connection state
                 editor_state.connection_source = None;
             }

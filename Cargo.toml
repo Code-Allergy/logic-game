@@ -11,8 +11,10 @@ name = "gate_quest"
 
 [dependencies]
 sim_core = { path = "crates/sim_core" }
+
+# egui
 bevy = { version = "0.19.0", features = ["dynamic_linking", "wayland"] }
-bevy_egui = "0.41"
+bevy_egui = "0.40"
 bevy_mod_debugdump = "0.16"
 bevy-inspector-egui = "0.37"
 

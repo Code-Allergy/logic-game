@@ -1,3 +1,6 @@
+mod components;
+mod plugin;
+
 use bevy::{platform::collections::HashMap, prelude::*};
 use bevy_egui::{EguiContexts, egui};
 use serde::{Deserialize, Serialize};
@@ -310,8 +313,3 @@ pub fn find_entity_at_position(
 
     None
 }
-mod plugin;
-mod components;
-
-pub use components::*;
-pub use plugin::SimulationPlugin;
