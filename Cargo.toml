@@ -30,7 +30,7 @@ embed-resource = "1"
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 [workspace]
 resolver = "3"
-members = ["crates/sim_core", "mobile"]
+members = ["crates/sim_core", "logi-sim", "mobile"]
 
 [profile.dev]
 opt-level = 1
