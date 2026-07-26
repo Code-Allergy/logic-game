@@ -13,3 +13,11 @@ bevy = { version = "0.19.0", optional = true, default-features = false }
 default = []
 bevy = ["dep:bevy"]
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "runners"
+harness = false
+
+

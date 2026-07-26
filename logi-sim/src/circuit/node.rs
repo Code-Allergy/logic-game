@@ -16,7 +16,9 @@ pub enum NodeKind {
     And,
     Or,
     Not,
+    Xor,
 }
+
 
 #[derive(Clone, Debug)]
 pub struct Node {

@@ -69,7 +69,12 @@ impl Circuit {
     pub fn not(&mut self) -> NodeId {
         self.add_node(NodeKind::Not, 1, 1)
     }
+
+    pub fn xor(&mut self) -> NodeId {
+        self.add_node(NodeKind::Xor, 2, 1)
+    }
 }
+
 
 // connections
 impl Circuit {

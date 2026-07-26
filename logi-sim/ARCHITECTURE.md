@@ -209,23 +209,119 @@ fn verify_runner_equivalence<R: Runner>(circuit: &Circuit, runner: &mut R) {
 
 ---
 
-## 5. Directory Layout
+---
+
+## 5. Structural Optimization & Compiler Pass Architecture (`logi_sim::compiler`)
+
+Before a circuit graph is passed to lower-level execution models (`EventDrivenCircuit`, `BitPackedCircuit`, `FlattenedCircuit`), it passes through structural optimization passes in `logi_sim::compiler`:
 
 ```
-logi-sim/
-├── Cargo.toml          # Workspace crate manifest (with optional "bevy" feature)
-├── ARCHITECTURE.md     # Architecture & Multi-Layer Pipeline documentation
-├── src/
-│   ├── lib.rs          # Module exports & prelude
-│   ├── circuit/        # Level 0 Circuit graph, Node, Wire, SlotMap keys
-│   ├── compiler/       # Circuit transformation passes (Level 0 -> Level 1 -> Level N)
-│   ├── runner/         # Runner trait, NaiveRunner, EventDriven, SIMD, JIT runners
-│   ├── engine/         # SimulationEngine & SharedState atomic snapshot
-│   ├── bevy_integration.rs # Bevy Resource & LogiSimPlugin (feature = "bevy")
-│   ├── graphviz/       # DOT format exporter
-│   └── fixtures/       # Helper test circuit builders
-└── tests/
-    ├── engine.rs       # Multi-threaded engine & atomic state tests
-    └── runner/         # Logic tests for adders, gates, complex circuits
+                 +-------------------------------------+
+                 |       Level 0: Raw Circuit          |
+                 | (Dynamic Graph from UI / Editor)    |
+                 +-------------------------------------+
+                                    |
+                                    v
+                 +-------------------------------------+
+                 |         Compiler Pipeline           |
+                 |  (Compiler::optimize(&raw_circuit)) |
+                 +-------------------------------------+
+                                    |
+            +-----------------------+-----------------------+
+            |                       |                       |
+            v                       v                       v
+  +--------------------+  +--------------------+  +--------------------+
+  | Pass 1: Dead-Code  |  | Pass 2: Constant   |  | Pass 3: Pattern    |
+  | & Node Culling     |  | Folding            |  | Substitution       |
+  | (cull_dead_nodes)  |  | (AND(x,0) -> 0)    |  | (5-gate XOR -> Xor)|
+  +--------------------+  +--------------------+  +--------------------+
+                                    |
+                                    v
+                 +-------------------------------------+
+                 |         Optimized Circuit           |
+                 +-------------------------------------+
+                                    |
+                                    v
+                 +-------------------------------------+
+                 | Target Execution Layer / Runner     |
+                 | (Flattened, Event-Driven, SIMD, JIT)|
+                 +-------------------------------------+
 ```
+
+---
+
+### 5.1 Optimization Passes
+
+#### 1. Dead-Code & Unconnected Node Culling (`cull_dead_nodes`)
+- **Mechanism**: Performs a reverse reachability traversal (BFS/DFS) starting from all `NodeKind::Output` nodes.
+- **Benefit**: Any floating node placed during UI editing or any sub-circuit branch not connected to an output is completely eliminated, reducing graph size and runtime tick overhead.
+
+#### 2. Constant Logic Folding
+- **Mechanism**: Simplifies known constant logic combinations:
+  - `AND(A, false) -> false`
+  - `OR(A, true) -> true`
+  - `NOT(NOT(A)) -> A`
+- **Benefit**: Short-circuits invariant signals.
+
+#### 3. Pattern Matching & Macro Gate Substitution
+- **Mechanism**: Scans the graph for known multi-gate sub-graph patterns (e.g. 5 gates forming an XOR: `(A OR B) AND NOT (A AND B)`).
+- **Substitution**: Replaces the entire multi-gate cluster with a single native macro node (`NodeKind::Xor`, `NodeKind::Mux`, `NodeKind::FullAdder`).
+- **Benefit**: Converts multi-tick cascading evaluations across multiple gates into a single 1-tick CPU operation, providing substantial speedup and making netlists much easier for SIMD and Event-Driven runners to process.
+
+---
+
+## 6. Benchmarking Suite Architecture
+
+
+`logi-sim` features a **trait-based benchmark harness** (`logi-sim/benches/runners.rs`) powered by [Criterion](file:///home/ryan/code/logi-game/logi-sim/benches/runners.rs). 
+
+Just as unit testing uses `RunnerFactory` to test logic parity across runners, the benchmark suite uses `BenchmarkRunnerFactory` to evaluate throughput and latency for any runner implementation.
+
+### 6.1 `BenchmarkRunnerFactory` Trait Abstraction
+
+```rust
+pub trait BenchmarkRunnerFactory {
+    fn name() -> &'static str;
+    type Runner<'a>: Runner where Self: 'a;
+    fn create<'a>(circuit: &'a Circuit) -> Self::Runner<'a>;
+}
+```
+
+### 6.2 Standardized Benchmark Suites
+
+Each factory automatically runs through standardized benchmark circuits:
+- **`and_gate_tick`**: Micro-benchmark evaluating single-gate evaluation overhead.
+- **`full_adder_tick`**: Mid-scale benchmark evaluating multi-gate cascading logic.
+- **`d_flip_flop_tick`**: Sequential circuit benchmark evaluating feedback loop latency.
+
+### 6.3 Benchmarking Any New Runner
+
+To add a new runner (e.g. `EventDrivenRunner`, `SimdRunner`, `JitRunner`) to the benchmark suite:
+
+1. Implement `BenchmarkRunnerFactory` for the runner in `benches/runners.rs`:
+   ```rust
+   pub struct SimdBenchFactory;
+   
+   impl BenchmarkRunnerFactory for SimdBenchFactory {
+       fn name() -> &'static str { "SimdRunner" }
+       type Runner<'a> = SimdRunnerWrapper;
+       fn create<'a>(circuit: &'a Circuit) -> Self::Runner<'a> {
+           SimdRunnerWrapper(SimdRunner::new(BitPackedCircuit::compile(circuit)))
+       }
+   }
+   ```
+2. Add your factory to `runner_benchmarks`:
+   ```rust
+   fn runner_benchmarks(c: &mut Criterion) {
+       bench_factory::<NaiveBenchFactory>(c);
+       bench_factory::<FlatBenchFactory>(c);
+       bench_factory::<SimdBenchFactory>(c);
+   }
+   ```
+
+3. Run benchmarks:
+   ```bash
+   cargo bench -p logi-sim
+   ```
+
 

@@ -1,5 +1,5 @@
+use super::common::{FlatFactory, NaiveFactory, RunnerFactory};
 use logi_sim::fixtures;
-use super::common::{Factory, RunnerFactory};
 use logi_sim::runner::Runner;
 
 // AND gate runner test
@@ -93,6 +93,12 @@ where
 }
 
 #[test]
-fn gate_suite() {
-    run_gate_suite::<Factory>();
+fn gate_suite_naive() {
+    run_gate_suite::<NaiveFactory>();
 }
+
+#[test]
+fn gate_suite_flat() {
+    run_gate_suite::<FlatFactory>();
+}
+

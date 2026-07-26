@@ -35,15 +35,13 @@ impl FlatRunner {
 
 impl Runner for FlatRunner {
     fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
-        if let Some(&w_idx) = self
-            .circuit
-            .node_output_pins
-            .get(&(node, pin))
-            .and_then(|v| v.first())
-        {
-            self.wire_values[w_idx] = value;
+        if let Some(w_indices) = self.circuit.node_output_pins.get(&(node, pin)) {
+            for &w_idx in w_indices {
+                self.wire_values[w_idx] = value;
+            }
         }
     }
+
 
     fn tick(&mut self) {
         for n_idx in 0..self.circuit.nodes.len() {
@@ -53,7 +51,9 @@ impl Runner for FlatRunner {
                 NodeKind::And => self.input_value(n_idx, 0) && self.input_value(n_idx, 1),
                 NodeKind::Or => self.input_value(n_idx, 0) || self.input_value(n_idx, 1),
                 NodeKind::Not => !self.input_value(n_idx, 0),
+                NodeKind::Xor => self.input_value(n_idx, 0) ^ self.input_value(n_idx, 1),
             };
+
             self.set_output(n_idx, output);
         }
     }

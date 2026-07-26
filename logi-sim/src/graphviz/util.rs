@@ -22,5 +22,7 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::And => "AND",
         NodeKind::Or => "OR",
         NodeKind::Not => "NOT",
+        NodeKind::Xor => "XOR",
     }
 }
+

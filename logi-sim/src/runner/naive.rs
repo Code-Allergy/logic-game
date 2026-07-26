@@ -37,7 +37,9 @@ impl<'a> NaiveRunner<'a> {
             NodeKind::And => self.input_value(node, 0) && self.input_value(node, 1),
             NodeKind::Or => self.input_value(node, 0) || self.input_value(node, 1),
             NodeKind::Not => !self.input_value(node, 0),
+            NodeKind::Xor => self.input_value(node, 0) ^ self.input_value(node, 1),
         };
+
 
         self.set_output(node, 0, output);
     }
