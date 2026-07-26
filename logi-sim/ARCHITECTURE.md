@@ -272,10 +272,9 @@ Before a circuit graph is passed to lower-level execution models (`EventDrivenCi
 
 ## 6. Benchmarking Suite Architecture
 
-
 `logi-sim` features a **trait-based benchmark harness** (`logi-sim/benches/runners.rs`) powered by [Criterion](file:///home/ryan/code/logi-game/logi-sim/benches/runners.rs). 
 
-Just as unit testing uses `RunnerFactory` to test logic parity across runners, the benchmark suite uses `BenchmarkRunnerFactory` to evaluate throughput and latency for any runner implementation.
+Just as unit testing uses `RunnerFactory` to test logic parity across runners, the benchmark suite uses `BenchmarkRunnerFactory` to evaluate execution throughput and measure exact optimization pass speedups (`unoptimized` vs `optimized`) across all runner implementations.
 
 ### 6.1 `BenchmarkRunnerFactory` Trait Abstraction
 
@@ -283,45 +282,33 @@ Just as unit testing uses `RunnerFactory` to test logic parity across runners, t
 pub trait BenchmarkRunnerFactory {
     fn name() -> &'static str;
     type Runner<'a>: Runner where Self: 'a;
-    fn create<'a>(circuit: &'a Circuit) -> Self::Runner<'a>;
+    fn create<'a>(circuit: &'a Circuit, opt_circuit: &'a Circuit) -> Self::Runner<'a>;
 }
 ```
 
-### 6.2 Standardized Benchmark Suites
+### 6.2 Pre-Configured Benchmark Factories
 
-Each factory automatically runs through standardized benchmark circuits:
-- **`and_gate_tick`**: Micro-benchmark evaluating single-gate evaluation overhead.
-- **`full_adder_tick`**: Mid-scale benchmark evaluating multi-gate cascading logic.
-- **`d_flip_flop_tick`**: Sequential circuit benchmark evaluating feedback loop latency.
+The suite compares 4 primary configurations:
+1. **`NaiveRunner-unoptimized`**: Raw `Circuit` executed via `NaiveRunner`.
+2. **`NaiveRunner-optimized`**: Structural `Compiler::optimize` output executed via `NaiveRunner`.
+3. **`FlatRunner-unoptimized`**: Raw `FlattenedCircuit` executed via `FlatRunner`.
+4. **`FlatRunner-optimized`**: `FlattenedCircuit` compiled from `Compiler::optimize` output executed via `FlatRunner`.
 
-### 6.3 Benchmarking Any New Runner
+### 6.3 Standardized Benchmark Circuits
 
-To add a new runner (e.g. `EventDrivenRunner`, `SimdRunner`, `JitRunner`) to the benchmark suite:
+Each factory runs through:
+- **`and_gate_tick`**: Single gate evaluation overhead.
+- **`full_adder_tick`**: Mid-scale cascading logic benchmark.
+- **`d_flip_flop_tick`**: Sequential feedback loop benchmark.
+- **`dead_code_circuit_tick`**: Circuit containing 50 dead floating gates + active adder to measure exact compiler culling speedup.
 
-1. Implement `BenchmarkRunnerFactory` for the runner in `benches/runners.rs`:
-   ```rust
-   pub struct SimdBenchFactory;
-   
-   impl BenchmarkRunnerFactory for SimdBenchFactory {
-       fn name() -> &'static str { "SimdRunner" }
-       type Runner<'a> = SimdRunnerWrapper;
-       fn create<'a>(circuit: &'a Circuit) -> Self::Runner<'a> {
-           SimdRunnerWrapper(SimdRunner::new(BitPackedCircuit::compile(circuit)))
-       }
-   }
-   ```
-2. Add your factory to `runner_benchmarks`:
-   ```rust
-   fn runner_benchmarks(c: &mut Criterion) {
-       bench_factory::<NaiveBenchFactory>(c);
-       bench_factory::<FlatBenchFactory>(c);
-       bench_factory::<SimdBenchFactory>(c);
-   }
-   ```
+### 6.4 Running Benchmarks
 
-3. Run benchmarks:
-   ```bash
-   cargo bench -p logi-sim
-   ```
+To execute the benchmark suite and generate Criterion HTML reports:
+
+```bash
+cargo bench -p logi-sim
+```
+
 
 
