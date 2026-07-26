@@ -43,6 +43,9 @@ fn test_threaded_simulation_engine_atomic_queries() {
     // Start uncapped worker thread
     engine.start_worker();
 
+    // Set tick rate high enough to exceed 100 in 20ms (e.g. 10000 Hz)
+    engine.set_tick_rate(10000.0);
+
     // Give worker time to run a few thousand ticks
     sleep(Duration::from_millis(20));
 

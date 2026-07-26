@@ -96,14 +96,14 @@ pub fn rebuild_spatial_grid_system(
 // Per-frame update systems
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Update `Time<Fixed>` timestep when `SimulationConfig` tick rate changes.
+/// Update worker tickrate when `SimulationConfig` changes.
 pub fn update_tickrate_system(
     sim_config: Res<SimulationConfig>,
-    mut time: ResMut<Time<Fixed>>,
+    bridge: Res<SimBridge>,
 ) {
     if sim_config.is_changed() {
-        let tick_rate = sim_config.tick_rate.max(0.001);
-        time.set_timestep_seconds(1.0 / tick_rate);
+        let tick_rate = sim_config.tick_rate.max(0.1);
+        bridge.set_tick_rate(tick_rate);
     }
 }
 

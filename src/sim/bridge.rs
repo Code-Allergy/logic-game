@@ -340,6 +340,10 @@ impl SimBridge {
         self.inner().engine.stop_worker();
     }
 
+    pub fn set_tick_rate(&self, tick_rate: f64) {
+        self.send_cmd(SimCommand::SetTickRate(tick_rate));
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Atomic state reads (lock-free, per-frame)
     // ─────────────────────────────────────────────────────────────────────
