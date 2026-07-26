@@ -127,7 +127,7 @@ pub fn update_input_colours_system(
             }
             GameNodeKind::Output => {
                 // Output nodes have one input wire; read it.
-                let on = bridge.node_output(gc.id, 0);
+                let on = bridge.node_input(gc.id, 0);
                 sprite.color = if on {
                     Color::srgb(1.0, 1.0, 1.0)
                 } else {
@@ -139,11 +139,12 @@ pub fn update_input_colours_system(
     }
 }
 
-/// Update connection-line transform when gates move.
+/// Update connection-line transform when gates move and change color when state changes.
 #[allow(clippy::type_complexity)]
 pub fn update_connections_system(
     gate_query: Query<(&Transform, &GateComponent)>,
     mut line_query: Query<(&mut Transform, &mut Sprite, &ConnectionLine), Without<GateComponent>>,
+    bridge: Res<SimBridge>,
 ) {
     let positions: std::collections::HashMap<_, _> = gate_query
         .iter()
@@ -161,6 +162,13 @@ pub fn update_connections_system(
         transform.translation = mid;
         transform.rotation = rot;
         sprite.custom_size = Some(Vec2::new(dist, 2.0));
+
+        let on = bridge.wire_value(line.id);
+        sprite.color = if on {
+            Color::srgb(0.0, 1.0, 0.0)
+        } else {
+            Color::WHITE
+        };
     }
 }
 

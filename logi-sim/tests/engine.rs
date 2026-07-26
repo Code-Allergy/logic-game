@@ -52,18 +52,18 @@ fn test_threaded_simulation_engine_atomic_queries() {
     engine.set_input(in_a, 0, true);
     sleep(Duration::from_millis(10));
     // Output should still be false because B is false
-    assert_eq!(engine.get_output(out, 0), false);
+    assert_eq!(engine.get_input(out, 0), false);
 
     // Set input B to true
     engine.set_input(in_b, 0, true);
     sleep(Duration::from_millis(10));
     // Now Output should be true (AND gate: true AND true = true)
-    assert_eq!(engine.get_output(out, 0), true);
+    assert_eq!(engine.get_input(out, 0), true);
 
     // Turn A back to false
     engine.set_input(in_a, 0, false);
     sleep(Duration::from_millis(10));
-    assert_eq!(engine.get_output(out, 0), false);
+    assert_eq!(engine.get_input(out, 0), false);
 
     // Stop worker cleanly
     engine.stop_worker();

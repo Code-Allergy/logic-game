@@ -252,8 +252,20 @@ impl SimulationEngine {
         }
     }
 
-    /// Atomically read the output state of a node's pin.
+    /// Atomically read the output state of a node's output pin.
     pub fn get_output(&self, node: NodeId, pin: u8) -> bool {
+        if let Some(node_ref) = self.circuit.nodes.get(node) {
+            if (pin as usize) < node_ref.outputs.len() {
+                if let Some(wire) = node_ref.outputs[pin as usize].wires.first() {
+                    return self.shared_state.get_wire(*wire);
+                }
+            }
+        }
+        false
+    }
+
+    /// Atomically read the input state of a node's input pin.
+    pub fn get_input(&self, node: NodeId, pin: u8) -> bool {
         if let Some(node_ref) = self.circuit.nodes.get(node) {
             if (pin as usize) < node_ref.inputs.len() {
                 if let Some(wire) = node_ref.inputs[pin as usize].wire {
