@@ -1,6 +1,7 @@
-use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory};
+use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory, SimdFactory};
 use logi_sim::fixtures;
 use logi_sim::runner::Runner;
+
 
 
 pub fn run_complex_suite<F>()
@@ -192,4 +193,7 @@ fn complex_suite_event_driven() {
     run_complex_suite::<EventDrivenFactory>();
 }
 
-
+#[test]
+fn complex_suite_simd() {
+    run_complex_suite::<SimdFactory>();
+}

@@ -199,6 +199,46 @@ impl BenchmarkRunnerFactory for EventDrivenOptimizedBenchFactory {
     }
 }
 
+pub struct SimdRunnerBenchWrapper(SimdRunner);
+
+impl Runner for SimdRunnerBenchWrapper {
+    fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
+        self.0.set_input(node, pin, value);
+    }
+    fn tick(&mut self) {
+        self.0.tick();
+    }
+    fn output(&self, node: NodeId, pin: u8) -> bool {
+        self.0.output(node, pin)
+    }
+}
+
+// 7. SimdRunner - Unoptimized
+pub struct SimdUnoptimizedBenchFactory;
+impl BenchmarkRunnerFactory for SimdUnoptimizedBenchFactory {
+    fn name() -> &'static str {
+        "SimdRunner-unoptimized"
+    }
+    type Runner<'a> = SimdRunnerBenchWrapper;
+    fn create<'a>(circuit: &'a Circuit, _opt_circuit: &'a Circuit) -> Self::Runner<'a> {
+        let bit_packed = BitPackedCircuit::compile(circuit);
+        SimdRunnerBenchWrapper(SimdRunner::new(bit_packed))
+    }
+}
+
+// 8. SimdRunner - Optimized
+pub struct SimdOptimizedBenchFactory;
+impl BenchmarkRunnerFactory for SimdOptimizedBenchFactory {
+    fn name() -> &'static str {
+        "SimdRunner-optimized"
+    }
+    type Runner<'a> = SimdRunnerBenchWrapper;
+    fn create<'a>(_circuit: &'a Circuit, opt_circuit: &'a Circuit) -> Self::Runner<'a> {
+        let bit_packed = BitPackedCircuit::compile(opt_circuit);
+        SimdRunnerBenchWrapper(SimdRunner::new(bit_packed))
+    }
+}
+
 fn runner_benchmarks(c: &mut Criterion) {
     bench_factory::<NaiveUnoptimizedBenchFactory>(c);
     bench_factory::<NaiveOptimizedBenchFactory>(c);
@@ -206,9 +246,12 @@ fn runner_benchmarks(c: &mut Criterion) {
     bench_factory::<FlatOptimizedBenchFactory>(c);
     bench_factory::<EventDrivenUnoptimizedBenchFactory>(c);
     bench_factory::<EventDrivenOptimizedBenchFactory>(c);
+    bench_factory::<SimdUnoptimizedBenchFactory>(c);
+    bench_factory::<SimdOptimizedBenchFactory>(c);
 }
 
 criterion_group!(benches, runner_benchmarks);
 criterion_main!(benches);
+
 
 

@@ -1,3 +1,4 @@
+pub mod bit_packed;
 pub mod event_driven;
 pub mod flattened;
 pub mod node;
@@ -6,12 +7,14 @@ pub mod utils;
 pub mod wire;
 
 pub use {
+    bit_packed::{BitPackedCircuit, SimdGateInstruction, SimdOp},
     event_driven::EventDrivenCircuit,
     flattened::FlattenedCircuit,
     node::{Node, NodeId, NodeKind},
     pin::{InputPin, OutputPin},
     wire::{InputRef, OutputRef, Wire, WireId},
 };
+
 
 
 

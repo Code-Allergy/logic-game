@@ -72,5 +72,33 @@ impl RunnerFactory for EventDrivenFactory {
     }
 }
 
+pub struct SimdFactory;
+
+pub struct SimdRunnerWrapper(SimdRunner);
+
+impl Runner for SimdRunnerWrapper {
+    fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
+        self.0.set_input(node, pin, value);
+    }
+
+    fn tick(&mut self) {
+        self.0.tick();
+    }
+
+    fn output(&self, node: NodeId, pin: u8) -> bool {
+        self.0.output(node, pin)
+    }
+}
+
+impl RunnerFactory for SimdFactory {
+    type Runner<'a> = SimdRunnerWrapper;
+
+    fn create<'a>(circuit: &'a Circuit) -> Self::Runner<'a> {
+        let bit_packed = BitPackedCircuit::compile(circuit);
+        SimdRunnerWrapper(SimdRunner::new(bit_packed))
+    }
+}
+
+
 
 

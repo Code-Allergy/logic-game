@@ -1,6 +1,7 @@
-use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory};
+use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory, SimdFactory};
 use logi_sim::fixtures;
 use logi_sim::runner::Runner;
+
 
 
 pub fn run_sequential_suite<F>()
@@ -115,4 +116,7 @@ fn sequential_suite_event_driven() {
     run_sequential_suite::<EventDrivenFactory>();
 }
 
-
+#[test]
+fn sequential_suite_simd() {
+    run_sequential_suite::<SimdFactory>();
+}

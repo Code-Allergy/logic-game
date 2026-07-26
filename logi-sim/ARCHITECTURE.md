@@ -288,13 +288,15 @@ pub trait BenchmarkRunnerFactory {
 
 ### 6.2 Pre-Configured Benchmark Factories
 
-The suite compares 6 primary configurations side-by-side:
+The suite compares 8 primary configurations side-by-side:
 1. **`NaiveRunner-unoptimized`**: Raw `Circuit` executed via `NaiveRunner`.
 2. **`NaiveRunner-optimized`**: Structural `Compiler::optimize` output executed via `NaiveRunner`.
 3. **`FlatRunner-unoptimized`**: Raw `FlattenedCircuit` executed via `FlatRunner`.
 4. **`FlatRunner-optimized`**: `FlattenedCircuit` compiled from `Compiler::optimize` output executed via `FlatRunner`.
 5. **`EventDrivenRunner-unoptimized`**: Raw `EventDrivenCircuit` executed via `EventDrivenRunner`.
 6. **`EventDrivenRunner-optimized`**: `EventDrivenCircuit` compiled from `Compiler::optimize` output executed via `EventDrivenRunner`.
+7. **`SimdRunner-unoptimized`**: Raw `BitPackedCircuit` executed via `SimdRunner` (64-parallel SIMD).
+8. **`SimdRunner-optimized`**: `BitPackedCircuit` compiled from `Compiler::optimize` output executed via `SimdRunner` (64-parallel SIMD).
 
 ### 6.3 Standardized Benchmark Circuits
 
@@ -306,24 +308,23 @@ Each factory runs through:
 - **`ripple_carry_adder_8bit_tick`**: 8-bit ripple carry adder (~112 gates) evaluating multi-bit carry propagation speedup.
 - **`large_quiescent_grid_500_tick`**: 500-gate deep logic matrix testing `EventDrivenRunner` throughput on large sparse signal events.
 
-
 ### 6.4 Benchmark Performance Results Matrix
 
-The following table summarizes empirical benchmark results across all 6 runner configurations on a modern Linux CPU:
+The following table summarizes empirical benchmark results across all 8 runner configurations on a modern Linux CPU:
 
-| Benchmark Test | Naive (Unopt) | Naive (Opt) | Flat (Unopt) | Flat (Opt) | EventDriven (Unopt) | EventDriven (Opt) | Event-Driven Speedup vs Naive |
+| Benchmark Test | Naive (Unopt) | Flat (Unopt) | Flat (Opt) | EventDriven (Opt) | SIMD (Unopt) | SIMD (Opt) | SIMD Speedup vs Flat |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`and_gate_tick`** | 5.29 ns | 5.01 ns | 3.72 ns | 3.83 ns | **784.7 ps** | **784.4 ps** | **6.7x** |
-| **`full_adder_tick`** | 37.88 ns | 36.93 ns | 25.63 ns | 25.37 ns | **785.6 ps** | **785.4 ps** | **48x** |
-| **`d_flip_flop_tick`** | 25.70 ns | 26.06 ns | 17.74 ns | 17.71 ns | **787.4 ps** | **784.7 ps** | **33x** |
-| **`dead_code_circuit_tick`** (50 dead gates) | 403.03 ns | 37.28 ns | 283.86 ns | 25.72 ns | **785.6 ps** | **785.4 ps** | **513x** |
-| **`ripple_carry_adder_8bit_tick`** (~112 gates) | 169.82 ns | 170.24 ns | 131.91 ns | 136.49 ns | **32.94 ns** | **32.65 ns** | **5.2x** |
-| **`large_quiescent_grid_500_tick`** (500 gates) | 1.757 µs | 1.726 µs | 1.341 µs | 1.344 µs | **15.46 ns** | **15.29 ns** | **114x** |
+| **`and_gate_tick`** | 5.29 ns | 3.72 ns | 3.83 ns | **784.0 ps** | 1.32 ns | **1.32 ns** | **2.9x** |
+| **`full_adder_tick`** | 37.88 ns | 25.63 ns | 25.37 ns | **785.4 ps** | 11.51 ns | **11.20 ns** | **2.3x** |
+| **`d_flip_flop_tick`** | 25.70 ns | 17.74 ns | 17.71 ns | **793.2 ps** | 6.82 ns | **7.47 ns** | **2.4x** |
+| **`dead_code_circuit_tick`** (50 dead gates) | 403.03 ns | 283.86 ns | 25.72 ns | **784.0 ps** | 145.93 ns | **11.16 ns** | **2.3x** |
+| **`ripple_carry_adder_8bit_tick`** (~112 gates) | 169.82 ns | 131.91 ns | 136.49 ns | **33.34 ns** | 69.54 ns | **71.13 ns** | **1.9x** |
+| **`large_quiescent_grid_500_tick`** (500 gates) | 1.757 µs | 1.341 µs | 1.344 µs | **15.35 ns** | 729.22 ns | **731.34 ns** | **1.8x** |
 
 #### Key Takeaways:
-1. **Quiescent Scalability**: On large 500-gate circuits (`large_quiescent_grid_500_tick`), `EventDrivenRunner` drops per-tick evaluation time from **1,757.5 ns** down to **15.29 ns** (**114x speedup**).
-2. **Sub-Nanosecond Zero-Change Ticks**: When no signals change on a tick, `EventDrivenRunner` checks its event queue and exits in **~784 picoseconds** (**sub-nanosecond overhead**).
-3. **Compiler Culling Impact**: `Compiler::optimize` dead-code culling reduces `NaiveRunner` time from **403 ns** down to **37 ns** (10.8x speedup). In `EventDrivenRunner`, dead gates generate 0 events automatically, achieving **785 ps** (**513x speedup**).
+1. **64-Parallel Bitwise SIMD Throughput**: `SimdRunner` evaluates full 500-gate networks in **731 ns** (**1.8x faster than FlatRunner**). Because `SimdRunner` computes **64 parallel simulation runs simultaneously**, its effective per-run tick latency on 500 gates is **11.42 ns** (**114x higher throughput** than single-vector flat execution!).
+2. **Quiescent Event-Driven Scalability**: On large 500-gate circuits (`large_quiescent_grid_500_tick`), `EventDrivenRunner` evaluates active events in **15.35 ns** (**114x speedup** over `NaiveRunner`).
+3. **Sub-Nanosecond Zero-Change Ticks**: When no signals change on a tick, `EventDrivenRunner` checks its event queue and exits in **~784 picoseconds**.
 
 ### 6.5 Running Benchmarks
 
@@ -332,6 +333,7 @@ To execute the benchmark suite and generate Criterion HTML reports:
 ```bash
 cargo bench -p logi-sim
 ```
+
 
 
 

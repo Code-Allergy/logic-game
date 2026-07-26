@@ -1,6 +1,7 @@
-use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory};
+use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory, SimdFactory};
 use logi_sim::fixtures;
 use logi_sim::runner::Runner;
+
 
 // AND gate runner test
 
@@ -105,4 +106,9 @@ fn gate_suite_flat() {
 #[test]
 fn gate_suite_event_driven() {
     run_gate_suite::<EventDrivenFactory>();
+}
+
+#[test]
+fn gate_suite_simd() {
+    run_gate_suite::<SimdFactory>();
 }
