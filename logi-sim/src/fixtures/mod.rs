@@ -344,3 +344,94 @@ pub fn d_flip_flop() -> Fixture {
 
     b.build()
 }
+
+pub fn ripple_carry_adder_8bit() -> Fixture {
+    let mut b = FixtureBuilder::new();
+
+    let cin = b.input("Cin");
+    let mut prev_carry = cin;
+
+    for bit in 0..8 {
+        let a = b.input(Box::leak(format!("A_{}", bit).into_boxed_str()));
+        let b_in = b.input(Box::leak(format!("B_{}", bit).into_boxed_str()));
+
+        // Half adder 1: A, B -> Sum1, Carry1
+        let xor1 = b.circuit.xor();
+        let carry1 = b.and();
+        b.circuit.connect((a, 0), (xor1, 0));
+        b.circuit.connect((b_in, 0), (xor1, 1));
+        b.circuit.connect((a, 0), (carry1, 0));
+        b.circuit.connect((b_in, 0), (carry1, 1));
+
+        // Half adder 2: Sum1, prev_carry -> Sum, Carry2
+        let xor2 = b.circuit.xor();
+        let carry2 = b.and();
+        b.circuit.connect((xor1, 0), (xor2, 0));
+        b.circuit.connect((prev_carry, 0), (xor2, 1));
+        b.circuit.connect((xor1, 0), (carry2, 0));
+        b.circuit.connect((prev_carry, 0), (carry2, 1));
+
+        // Cout = Carry1 OR Carry2
+        let cout_or = b.or();
+        b.circuit.connect((carry1, 0), (cout_or, 0));
+        b.circuit.connect((carry2, 0), (cout_or, 1));
+
+        let sum_out = b.output(Box::leak(format!("Sum_{}", bit).into_boxed_str()));
+        b.circuit.connect((xor2, 0), (sum_out, 0));
+
+        prev_carry = cout_or;
+    }
+
+    let final_cout = b.output("Cout");
+    b.circuit.connect((prev_carry, 0), (final_cout, 0));
+
+    b.build()
+}
+
+pub fn large_quiescent_grid_500() -> Fixture {
+    let mut b = FixtureBuilder::new();
+
+    let mut inputs = Vec::new();
+    for i in 0..16 {
+        inputs.push(b.input(Box::leak(format!("In_{}", i).into_boxed_str())));
+    }
+
+    let mut current_layer = inputs;
+    let mut gate_count = 0;
+
+    while gate_count < 500 {
+        let mut next_layer = Vec::new();
+        let len = current_layer.len();
+        for i in (0..len).step_by(2) {
+            let n1 = current_layer[i];
+            let n2 = if i + 1 < len { current_layer[i + 1] } else { current_layer[0] };
+
+            let gate = match gate_count % 3 {
+                0 => b.and(),
+                1 => b.or(),
+                _ => b.circuit.xor(),
+            };
+
+            b.circuit.connect((n1, 0), (gate, 0));
+            b.circuit.connect((n2, 0), (gate, 1));
+            next_layer.push(gate);
+            gate_count += 1;
+
+            if gate_count >= 500 {
+                break;
+            }
+        }
+        if next_layer.is_empty() {
+            break;
+        }
+        current_layer = next_layer;
+    }
+
+    let out = b.output("Out");
+    if let Some(&last_node) = current_layer.last() {
+        b.circuit.connect((last_node, 0), (out, 0));
+    }
+
+    b.build()
+}
+

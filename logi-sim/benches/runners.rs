@@ -128,7 +128,36 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
             dead_runner.tick();
         });
     });
+
+    // 5. Large 8-bit Ripple-Carry Adder benchmark
+    let adder8_fixture = fixtures::ripple_carry_adder_8bit();
+    let opt_adder8 = Compiler::optimize(&adder8_fixture.circuit);
+    let mut adder8_runner = F::create(&adder8_fixture.circuit, &opt_adder8);
+    let a0_node = adder8_fixture.nodes["A_0"];
+    let mut toggle = false;
+    c.bench_function(&format!("{}/ripple_carry_adder_8bit_tick", factory_name), |b| {
+        b.iter(|| {
+            toggle = !toggle;
+            adder8_runner.set_input(a0_node, 0, toggle);
+            adder8_runner.tick();
+        });
+    });
+
+    // 6. Large 500-gate Quiescent Grid benchmark (tests event-driven speedup on large sparse events)
+    let grid500_fixture = fixtures::large_quiescent_grid_500();
+    let opt_grid500 = Compiler::optimize(&grid500_fixture.circuit);
+    let mut grid500_runner = F::create(&grid500_fixture.circuit, &opt_grid500);
+    let in0_node = grid500_fixture.nodes["In_0"];
+    let mut grid_toggle = false;
+    c.bench_function(&format!("{}/large_quiescent_grid_500_tick", factory_name), |b| {
+        b.iter(|| {
+            grid_toggle = !grid_toggle;
+            grid500_runner.set_input(in0_node, 0, grid_toggle);
+            grid500_runner.tick();
+        });
+    });
 }
+
 
 pub struct EventDrivenRunnerBenchWrapper(EventDrivenRunner);
 

@@ -303,6 +303,9 @@ Each factory runs through:
 - **`full_adder_tick`**: Mid-scale cascading logic benchmark.
 - **`d_flip_flop_tick`**: Sequential feedback loop benchmark.
 - **`dead_code_circuit_tick`**: Circuit containing 50 dead floating gates + active adder to measure exact compiler culling speedup.
+- **`ripple_carry_adder_8bit_tick`**: 8-bit ripple carry adder (~112 gates) evaluating multi-bit carry propagation speedup.
+- **`large_quiescent_grid_500_tick`**: 500-gate deep logic matrix testing `EventDrivenRunner` throughput on large sparse signal events.
+
 
 ### 6.4 Running Benchmarks
 
