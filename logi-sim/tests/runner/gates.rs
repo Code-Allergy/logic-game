@@ -93,12 +93,12 @@ where
 }
 
 #[test]
-fn gate_suite_naive() {
+fn naive_gate_suite() {
     run_gate_suite::<NaiveFactory>();
 }
 
 #[test]
-fn gate_suite_flat() {
+fn flat_gate_suite() {
     run_gate_suite::<FlatFactory>();
 }
 

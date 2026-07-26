@@ -91,12 +91,12 @@ where
 }
 
 #[test]
-fn adders_suite_naive() {
+fn naive_adders_suite() {
     run_adders_suite::<NaiveFactory>();
 }
 
 #[test]
-fn adders_suite_flat() {
+fn flat_adders_suite() {
     run_adders_suite::<FlatFactory>();
 }
 

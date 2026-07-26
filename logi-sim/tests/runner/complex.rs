@@ -176,12 +176,12 @@ where
 }
 
 #[test]
-fn complex_suite_naive() {
+fn naive_complex_suite() {
     run_complex_suite::<NaiveFactory>();
 }
 
 #[test]
-fn complex_suite_flat() {
+fn flat_complex_suite() {
     run_complex_suite::<FlatFactory>();
 }
 

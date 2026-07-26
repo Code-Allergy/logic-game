@@ -99,12 +99,12 @@ where
 }
 
 #[test]
-fn sequential_suite_naive() {
+fn naive_sequential_suite() {
     run_sequential_suite::<NaiveFactory>();
 }
 
 #[test]
-fn sequential_suite_flat() {
+fn flat_sequential_suite() {
     run_sequential_suite::<FlatFactory>();
 }
 
