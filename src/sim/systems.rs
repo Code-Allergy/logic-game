@@ -204,9 +204,11 @@ pub fn ui_for_selected_gate(
                     // if it’s an input gate, show a toggle:
                     if let GateType::Input = gate.get_type() {
                         let mut value = gate.get_input(0).unwrap_or(false);
-                        if ui.checkbox(&mut value, "Input Value").clicked() {
+                        let resp = ui.checkbox(&mut value, "Input Value");
+                        if resp.changed() {
                             gate.set_input(0, Some(value));
                         }
+                    } else if gate.get_type() == GateType::Output {
                     }
                     // connections
                     ui.horizontal(|ui| {

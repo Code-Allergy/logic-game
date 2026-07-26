@@ -255,7 +255,8 @@ impl Plugin for SimulationPlugin {
             )
             .add_systems(
                 EguiPrimaryContextPass,
-                simulation_config_ui_system.run_if(in_state(self.state.clone())),
+                (simulation_config_ui_system, ui_for_selected_gate)
+                    .run_if(in_state(self.state.clone())),
             )
             // Update systems
             .add_systems(
@@ -272,7 +273,6 @@ impl Plugin for SimulationPlugin {
                     // finalize_selection,
                     // zoom_camera,
                     update_tickrate_system,
-                    ui_for_selected_gate,
                 )
                     .run_if(in_state(self.state.clone())),
             )

@@ -60,11 +60,11 @@ impl Plugin for EditorPlugin {
             .add_message::<CreateGateEvent>()
             .add_message::<CreateConnectionEvent>()
             .add_systems(
-                Update,
+                bevy_egui::EguiPrimaryContextPass,
                 (
                     editor_ui_system,
-                    // process_gate_placement,
-                    // handle_connection_creation,
+                    process_gate_placement,
+                    handle_connection_creation,
                 )
                     .run_if(in_state(GameState::Simulating)),
             );

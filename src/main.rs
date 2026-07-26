@@ -13,7 +13,12 @@ use gate_quest::settings_overlay::{
 
 use gate_quest::sim::SimulationPlugin;
 use gate_quest::sim::spatial_grid::SpatialGrid;
+use gate_quest::sim::systems::{
+    drag_selected_system, gate_selection_system, rebuild_spatial_grid_system,
+    update_inputs_on_left_click, update_spatial_grid_system,
+};
 use gate_quest::temp::GateComponentSelectionEvent;
+use gate_quest::zoom_camera;
 
 use gate_quest::title::MainMenuPlugin;
 use gate_quest::{GAME_TITLE, GAME_WEB_TAG, GameSettings, GameState, initial_startup_system};
@@ -46,7 +51,7 @@ fn main() {
         })
         .add_plugins(EditorPlugin)
         .add_plugins(SelectionPlugin)
-        .add_plugins(SimulationPlugin::new(GameState::MainMenu)) // Core simulation logic
+        .add_plugins(SimulationPlugin::new(GameState::Simulating)) // Core simulation logic
         // Setup game state
         .init_state::<GameState>()
         .add_message::<GateComponentSelectionEvent>()
@@ -55,7 +60,7 @@ fn main() {
         .insert_resource(SettingsMenuOpen(false))
         .insert_resource(GameSettings::default())
         // Spatial grid for optimized queries
-        .insert_resource(SpatialGrid::new(100.0))
+        // .insert_resource(SpatialGrid::new(100.0))
         // Camera setup
         .add_systems(
             Startup,
@@ -64,22 +69,21 @@ fn main() {
                 configure_camera_scaling,
             ),
         )
-        // Spatial grid system
         // .add_systems(OnEnter(GameState::Simulating), rebuild_spatial_grid_system)
         // Systems that need to run during simulation
-        // .add_systems(
-        //     Update,
-        //     (
-        //         // Selection and interaction systems
-        //         gate_selection_system.before(drag_selected_system),
-        //         drag_selected_system,
-        //         update_spatial_grid_system,
-        //         update_inputs_on_left_click,
-        //         // Camera control
-        //         zoom_camera,
-        //     )
-        //         .run_if(in_state(GameState::Simulating)),
-        // )
+        .add_systems(
+            Update,
+            (
+                // Selection and interaction systems
+                // gate_selection_system.before(drag_selected_system),
+                // drag_selected_system,
+                // update_spatial_grid_system,
+                update_inputs_on_left_click,
+                // // Camera control
+                zoom_camera,
+            )
+                .run_if(in_state(GameState::Simulating)),
+        )
         // Always-running UI systems
         .add_systems(Update, (show_settings_menu, settings_menu_button_system))
         .run();
