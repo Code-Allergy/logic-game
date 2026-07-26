@@ -9,10 +9,12 @@ use bevy_egui::{EguiContexts, egui};
 
 use crate::{SAVE_FILE_NAME, temp::GateComponentSelectionEvent};
 
+use logi_sim::prelude::SimEvent;
+
 use super::{
     ConnectionLine, GameCircuit, GameNodeKind, GateComponent, SavedSimulation, Selected,
-    SelectedGate, SimBridge, SimulationConfig, calculate_connection_geometry, get_gate_sprite,
-    spatial_grid::SpatialGrid,
+    SelectedGate, SimBridge, SimStateCache, SimulationConfig, calculate_connection_geometry,
+    get_gate_sprite, spatial_grid::SpatialGrid,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,8 +23,24 @@ use super::{
 
 /// Drain pending `AddNode`/`AddWire` responses from the worker thread so that
 /// ID mappings are fully populated before any rendering system runs.
-pub fn bridge_flush_system(mut bridge: ResMut<SimBridge>) {
+pub fn bridge_flush_system(mut bridge: ResMut<SimBridge>, mut cache: ResMut<SimStateCache>) {
     bridge.flush_pending();
+
+    for event in bridge.drain_events() {
+        match event {
+            SimEvent::WireStateChanged(changes) => {
+                for (wire_id, value) in changes {
+                    if let Some(uuid) = bridge.wire_uuid(wire_id) {
+                        cache.wires.insert(uuid, value);
+                    }
+                }
+            }
+            SimEvent::TickStarted { .. } | SimEvent::TickCompleted { .. } => {}
+            SimEvent::StatusChanged { is_running } => {
+                bridge.is_running = is_running;
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,9 +125,9 @@ pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, bridge: Res<Sim
     }
 }
 
-/// Recolour Input/Output gate sprites based on live wire state from [`SimBridge`].
+/// Recolour Input/Output gate sprites based on live wire state from [`SimStateCache`].
 pub fn update_input_colours_system(
-    bridge: Res<SimBridge>,
+    cache: Res<SimStateCache>,
     game_circuit: Res<GameCircuit>,
     mut query: Query<(&mut Sprite, &GateComponent)>,
 ) {
@@ -120,7 +138,14 @@ pub fn update_input_colours_system(
         match &node.kind {
             GameNodeKind::Input => {
                 // For an Input node read output pin 0 (its only pin).
-                let on = bridge.node_output(gc.id, 0);
+                // Search wires for any connected to this pin.
+                let mut on = false;
+                for wire in game_circuit.wires.values() {
+                    if wire.source_node == gc.id && wire.source_pin == 0 {
+                        on = cache.wires.get(&wire.id).copied().unwrap_or(false);
+                        break;
+                    }
+                }
                 sprite.color = if on {
                     Color::srgb(0.0, 1.0, 0.0)
                 } else {
@@ -129,7 +154,13 @@ pub fn update_input_colours_system(
             }
             GameNodeKind::Output => {
                 // Output nodes have one input wire; read it.
-                let on = bridge.node_input(gc.id, 0);
+                let mut on = false;
+                for wire in game_circuit.wires.values() {
+                    if wire.sink_node == gc.id && wire.sink_pin == 0 {
+                        on = cache.wires.get(&wire.id).copied().unwrap_or(false);
+                        break;
+                    }
+                }
                 sprite.color = if on {
                     Color::srgb(1.0, 1.0, 1.0)
                 } else {
@@ -146,7 +177,7 @@ pub fn update_input_colours_system(
 pub fn update_connections_system(
     gate_query: Query<(&Transform, &GateComponent)>,
     mut line_query: Query<(&mut Transform, &mut Sprite, &ConnectionLine), Without<GateComponent>>,
-    bridge: Res<SimBridge>,
+    cache: Res<SimStateCache>,
 ) {
     let positions: std::collections::HashMap<_, _> = gate_query
         .iter()
@@ -165,7 +196,7 @@ pub fn update_connections_system(
         transform.rotation = rot;
         sprite.custom_size = Some(Vec2::new(dist, 2.0));
 
-        let on = bridge.wire_value(line.id);
+        let on = cache.wires.get(&line.id).copied().unwrap_or(false);
         sprite.color = if on {
             Color::srgb(0.0, 1.0, 0.0)
         } else {

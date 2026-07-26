@@ -29,6 +29,17 @@ use logi_sim::prelude::{InputRef, NodeId, OutputRef, SharedState, WireId};
 use super::model::{GameCircuit, GameNode, GameWire};
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SimStateCache
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Caches the current state of game-side wires to avoid atomic lock contention
+/// when Bevy systems need to read wire states for rendering or logic.
+#[derive(Resource, Default)]
+pub struct SimStateCache {
+    pub wires: HashMap<Uuid, bool>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Inner mutable state (wrapped in Mutex so SimBridge is Sync)
 //
 // `SimulationEngine` contains `Option<Receiver<SimEvent>>` which is `!Sync`.

@@ -15,7 +15,7 @@ pub mod model;
 pub mod spatial_grid;
 pub mod systems;
 
-pub use bridge::SimBridge;
+pub use bridge::{SimBridge, SimStateCache};
 pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation};
 pub use plugin::SimulationPlugin;
 

@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use crate::GameState;
 use crate::sim::{
-    GameCircuit, SelectedGate, SimBridge, SimulationConfig,
+    GameCircuit, SelectedGate, SimBridge, SimStateCache, SimulationConfig,
     systems::{
         bridge_flush_system, drag_selected_system, draw_connections_system, draw_gates_system,
         gate_selection_system, rebuild_spatial_grid_system, simulation_config_ui_system,
@@ -40,6 +40,7 @@ impl Plugin for SimulationPlugin {
             // ── Core resources (always present) ─────────────────────────────
             .insert_resource(game_circuit)
             .insert_resource(sim_bridge)
+            .init_resource::<SimStateCache>()
             .init_resource::<SimulationConfig>()
             .init_resource::<SelectedGate>()
             .insert_resource(SpatialGrid::new(100.0))
