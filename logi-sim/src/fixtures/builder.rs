@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::circuit::{Circuit, NodeId};
 
-
 pub struct Fixture {
     pub circuit: Circuit,
     pub nodes: HashMap<&'static str, NodeId>,

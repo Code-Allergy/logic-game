@@ -2,8 +2,6 @@ use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory
 use logi_sim::fixtures;
 use logi_sim::runner::Runner;
 
-
-
 pub fn run_sequential_suite<F>()
 where
     F: RunnerFactory,
@@ -26,35 +24,45 @@ where
     // Initial state: Set
     runner.set_input(s, 0, true);
     runner.set_input(r, 0, false);
-    for _ in 0..5 { runner.tick(); } // Need multiple ticks for feedback loop to stabilize
+    for _ in 0..5 {
+        runner.tick();
+    } // Need multiple ticks for feedback loop to stabilize
     assert_eq!(runner.output(q, 0), true);
     assert_eq!(runner.output(qn, 0), false);
 
     // Hold state
     runner.set_input(s, 0, false);
     runner.set_input(r, 0, false);
-    for _ in 0..5 { runner.tick(); }
+    for _ in 0..5 {
+        runner.tick();
+    }
     assert_eq!(runner.output(q, 0), true);
     assert_eq!(runner.output(qn, 0), false);
 
     // Reset state
     runner.set_input(s, 0, false);
     runner.set_input(r, 0, true);
-    for _ in 0..5 { runner.tick(); }
+    for _ in 0..5 {
+        runner.tick();
+    }
     assert_eq!(runner.output(q, 0), false);
     assert_eq!(runner.output(qn, 0), true);
 
     // Hold state
     runner.set_input(s, 0, false);
     runner.set_input(r, 0, false);
-    for _ in 0..5 { runner.tick(); }
+    for _ in 0..5 {
+        runner.tick();
+    }
     assert_eq!(runner.output(q, 0), false);
     assert_eq!(runner.output(qn, 0), true);
 
     // Invalid state (both S and R true)
     runner.set_input(s, 0, true);
     runner.set_input(r, 0, true);
-    for _ in 0..5 { runner.tick(); }
+    for _ in 0..5 {
+        runner.tick();
+    }
     assert_eq!(runner.output(q, 0), false);
     assert_eq!(runner.output(qn, 0), false);
 }
@@ -73,36 +81,45 @@ where
     // Initial value
     runner.set_input(d, 0, true);
     runner.set_input(e, 0, false);
-    for _ in 0..10 { runner.tick(); } // Stable output may initially be invalid if not initialized, but let's see.
+    for _ in 0..10 {
+        runner.tick();
+    } // Stable output may initially be invalid if not initialized, but let's see.
 
     // Enable is high, D=1 -> Q=1
     runner.set_input(e, 0, true);
-    for _ in 0..5 { runner.tick(); }
+    for _ in 0..5 {
+        runner.tick();
+    }
     assert_eq!(runner.output(q, 0), true);
     assert_eq!(runner.output(qn, 0), false);
 
     // Latch value (Enable goes low)
     runner.set_input(e, 0, false);
-    for _ in 0..5 { runner.tick(); }
+    for _ in 0..5 {
+        runner.tick();
+    }
     assert_eq!(runner.output(q, 0), true);
     assert_eq!(runner.output(qn, 0), false);
 
     // Change D while Enable is low (should not change Q)
     runner.set_input(d, 0, false);
-    for _ in 0..5 { runner.tick(); }
+    for _ in 0..5 {
+        runner.tick();
+    }
     assert_eq!(runner.output(q, 0), true); // Still holding 1
     assert_eq!(runner.output(qn, 0), false);
 
     // Enable goes high, D=0 -> Q=0
     runner.set_input(e, 0, true);
-    for _ in 0..5 { runner.tick(); }
+    for _ in 0..5 {
+        runner.tick();
+    }
     assert_eq!(runner.output(q, 0), false);
     assert_eq!(runner.output(qn, 0), true);
 }
 
 #[test]
 fn sequential_suite_naive() {
-
     run_sequential_suite::<NaiveFactory>();
 }
 

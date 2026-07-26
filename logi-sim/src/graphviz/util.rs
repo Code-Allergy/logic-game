@@ -34,6 +34,3 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::SubCircuit(_) => "SUBCIRCUIT",
     }
 }
-
-
-

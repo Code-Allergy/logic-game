@@ -154,7 +154,8 @@ impl SimulationEngine {
                         SimCommand::SetTickRate(rate) => {
                             tick_rate = rate;
                             if let Some(r) = rate {
-                                tick_duration = std::time::Duration::from_secs_f64(1.0 / r.max(0.001));
+                                tick_duration =
+                                    std::time::Duration::from_secs_f64(1.0 / r.max(0.001));
                             }
                             next_tick_time = std::time::Instant::now();
                         }

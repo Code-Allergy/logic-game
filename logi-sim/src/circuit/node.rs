@@ -65,7 +65,6 @@ impl PartialEq for NodeKind {
     }
 }
 
-
 impl Eq for NodeKind {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,4 +74,3 @@ pub struct Node {
     pub inputs: SmallVec<[InputPin; 4]>,
     pub outputs: SmallVec<[OutputPin; 2]>,
 }
-

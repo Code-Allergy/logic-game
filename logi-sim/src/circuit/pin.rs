@@ -13,5 +13,3 @@ pub struct OutputPin {
     pub name: String,
     pub wires: SmallVec<[WireId; 4]>,
 }
-
-

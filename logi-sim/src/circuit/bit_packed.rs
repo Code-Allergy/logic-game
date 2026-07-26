@@ -132,8 +132,6 @@ impl BitPackedCircuit {
             });
         }
 
-
-
         Self {
             instructions,
             wire_count,

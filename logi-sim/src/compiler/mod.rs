@@ -13,8 +13,12 @@ impl Compiler {
     }
 
     /// Runs optimization passes and returns a mapping from raw NodeIds to optimized NodeIds.
-    pub fn optimize_with_map(circuit: &Circuit) -> (Circuit, std::collections::HashMap<crate::circuit::NodeId, crate::circuit::NodeId>) {
+    pub fn optimize_with_map(
+        circuit: &Circuit,
+    ) -> (
+        Circuit,
+        std::collections::HashMap<crate::circuit::NodeId, crate::circuit::NodeId>,
+    ) {
         dead_code::cull_dead_nodes_with_map(circuit)
     }
 }
-

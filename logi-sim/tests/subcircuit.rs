@@ -45,7 +45,13 @@ fn build_parent_with_subcircuit() -> (Circuit, NodeId, NodeId, NodeId, NodeId) {
     (parent, in0, in1, out_sum, out_carry)
 }
 
-fn verify_subcircuit_runner<R: Runner>(mut runner: R, in0: NodeId, in1: NodeId, sum: NodeId, carry: NodeId) {
+fn verify_subcircuit_runner<R: Runner>(
+    mut runner: R,
+    in0: NodeId,
+    in1: NodeId,
+    sum: NodeId,
+    carry: NodeId,
+) {
     let truth_table = [
         (false, false, false, false),
         (false, true, true, false),
@@ -122,7 +128,11 @@ fn test_recursive_16bit_adder_all_runners() {
     let b0 = fixture.nodes["B_0"];
     let s0 = fixture.nodes["Sum_0"];
 
-    for runner in [&mut flat_runner as &mut dyn Runner, &mut event_runner, &mut simd_runner] {
+    for runner in [
+        &mut flat_runner as &mut dyn Runner,
+        &mut event_runner,
+        &mut simd_runner,
+    ] {
         runner.set_input(a0, 0, true);
         runner.set_input(b0, 0, true);
 
@@ -133,4 +143,3 @@ fn test_recursive_16bit_adder_all_runners() {
         assert_eq!(runner.output(s0, 0), false);
     }
 }
-
