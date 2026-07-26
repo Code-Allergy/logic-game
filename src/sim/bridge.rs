@@ -358,6 +358,13 @@ impl SimBridge {
         self.inner().engine.get_output(node_id, pin)
     }
 
+    pub fn node_input(&self, uuid: Uuid, pin: u8) -> bool {
+        let Some(&node_id) = self.node_by_uuid.get(&uuid) else {
+            return false;
+        };
+        self.inner().engine.get_input(node_id, pin)
+    }
+
     pub fn tick_count(&self) -> u64 {
         self.shared_state.tick_count()
     }
