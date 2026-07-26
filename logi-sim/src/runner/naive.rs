@@ -35,9 +35,7 @@ impl<'a> NaiveRunner<'a> {
         let output = match node.kind {
             NodeKind::Input | NodeKind::Output => return, // no evaluation needed
             NodeKind::And => self.input_value(node, 0) && self.input_value(node, 1),
-
             NodeKind::Or => self.input_value(node, 0) || self.input_value(node, 1),
-
             NodeKind::Not => !self.input_value(node, 0),
         };
 
@@ -73,4 +71,15 @@ impl<'a> Runner for NaiveRunner<'a> {
         // We just read the wire connected to its input.
         self.input_value(node, pin as usize)
     }
+
+    fn wire_value(&self, wire: WireId) -> bool {
+        self.wire_values.get(wire).copied().unwrap_or(false)
+    }
+
+    fn for_each_wire(&self, f: &mut dyn FnMut(WireId, bool)) {
+        for (wire, &val) in &self.wire_values {
+            f(wire, val);
+        }
+    }
 }
+

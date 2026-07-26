@@ -8,6 +8,7 @@ new_key_type! {
     pub struct NodeId;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeKind {
     Input,
     Output,
@@ -17,9 +18,11 @@ pub enum NodeKind {
     Not,
 }
 
+#[derive(Clone, Debug)]
 pub struct Node {
     pub kind: NodeKind,
 
     pub inputs: SmallVec<[InputPin; 4]>,
     pub outputs: SmallVec<[OutputPin; 2]>,
 }
+

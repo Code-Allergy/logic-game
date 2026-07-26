@@ -14,10 +14,12 @@ use utils::{get_in_pin_name, get_out_pin_name};
 use slotmap::SlotMap;
 use smallvec::{SmallVec, smallvec};
 
+#[derive(Clone, Debug, Default)]
 pub struct Circuit {
     pub nodes: SlotMap<NodeId, Node>,
     pub wires: SlotMap<WireId, Wire>,
 }
+
 
 impl Circuit {
     pub fn new() -> Self {

@@ -8,18 +8,22 @@ new_key_type! {
     pub struct WireId;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputRef {
     pub node: NodeId,
     pub pin: u8,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputRef {
     pub node: NodeId,
     pub pin: u8,
 }
 
+#[derive(Clone, Debug)]
 pub struct Wire {
     pub source: OutputRef,
 
     pub sinks: SmallVec<[InputRef; 4]>,
 }
+
