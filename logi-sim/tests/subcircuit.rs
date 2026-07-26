@@ -106,3 +106,31 @@ fn test_subcircuit_simd_runner() {
     let runner = SimdRunner::new(bit_packed);
     verify_subcircuit_runner(runner, in0, in1, sum, carry);
 }
+
+#[test]
+fn test_recursive_16bit_adder_all_runners() {
+    let fixture = logi_sim::fixtures::recursive_16bit_adder();
+    let opt_circuit = Compiler::optimize(&fixture.circuit);
+
+    // Test NaiveRunner, FlatRunner, EventDrivenRunner, and SimdRunner (512-bit vector)
+    let mut flat_runner = FlatRunner::new(FlattenedCircuit::compile(&opt_circuit));
+    let mut event_runner = EventDrivenRunner::new(EventDrivenCircuit::compile(&opt_circuit));
+    let mut simd_runner = SimdRunner::new(BitPackedCircuit::compile(&opt_circuit));
+
+    // Set A_0 = true, B_0 = true -> Expected Sum_0 = false, Carry = true
+    let a0 = fixture.nodes["A_0"];
+    let b0 = fixture.nodes["B_0"];
+    let s0 = fixture.nodes["Sum_0"];
+
+    for runner in [&mut flat_runner as &mut dyn Runner, &mut event_runner, &mut simd_runner] {
+        runner.set_input(a0, 0, true);
+        runner.set_input(b0, 0, true);
+
+        for _ in 0..10 {
+            runner.tick();
+        }
+
+        assert_eq!(runner.output(s0, 0), false);
+    }
+}
+

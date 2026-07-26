@@ -1,7 +1,9 @@
+use crate::circuit::Circuit;
 use crate::fixtures::builder::{Fixture, FixtureBuilder};
 
 mod builder;
 pub mod harness;
+
 
 pub fn and_gate() -> Fixture {
     let mut b = FixtureBuilder::new();
@@ -434,4 +436,124 @@ pub fn large_quiescent_grid_500() -> Fixture {
 
     b.build()
 }
+
+pub fn recursive_16bit_adder() -> Fixture {
+
+    let mut b = FixtureBuilder::new();
+
+    // Level 1: Half Adder sub-circuit + 10 dead floating gates
+    let mut half_adder = Circuit::new();
+    let ha_a = half_adder.input();
+    let ha_b = half_adder.input();
+    let ha_sum = half_adder.xor();
+    let ha_carry = half_adder.and();
+
+    half_adder.connect((ha_a, 0), (ha_sum, 0));
+    half_adder.connect((ha_b, 0), (ha_sum, 1));
+    half_adder.connect((ha_a, 0), (ha_carry, 0));
+    half_adder.connect((ha_b, 0), (ha_carry, 1));
+
+    let ha_out_sum = half_adder.output();
+    let ha_out_carry = half_adder.output();
+    half_adder.connect((ha_sum, 0), (ha_out_sum, 0));
+    half_adder.connect((ha_carry, 0), (ha_out_carry, 0));
+
+    // Floating dead code inside Level 1
+    for _ in 0..10 {
+        let d_and = half_adder.and();
+        let d_or = half_adder.or();
+        half_adder.connect((d_and, 0), (d_or, 0));
+    }
+
+    // Level 2: Full Adder sub-circuit (2x Half Adder + OR)
+    let mut full_adder = Circuit::new();
+    let fa_a = full_adder.input();
+    let fa_b = full_adder.input();
+    let fa_cin = full_adder.input();
+
+    let ha1 = full_adder.add_subcircuit(half_adder.clone());
+    full_adder.connect((fa_a, 0), (ha1, 0));
+    full_adder.connect((fa_b, 0), (ha1, 1));
+
+    let ha2 = full_adder.add_subcircuit(half_adder.clone());
+    full_adder.connect((ha1, 0), (ha2, 0)); // HA1 Sum -> HA2 Input 0
+    full_adder.connect((fa_cin, 0), (ha2, 1)); // Cin -> HA2 Input 1
+
+    let fa_or = full_adder.or();
+    full_adder.connect((ha1, 1), (fa_or, 0)); // HA1 Carry -> OR 0
+    full_adder.connect((ha2, 1), (fa_or, 1)); // HA2 Carry -> OR 1
+
+    let fa_out_sum = full_adder.output();
+    let fa_out_cout = full_adder.output();
+    full_adder.connect((ha2, 0), (fa_out_sum, 0));
+    full_adder.connect((fa_or, 0), (fa_out_cout, 0));
+
+    // Level 3: 4-Bit Adder sub-circuit (4x Full Adder)
+    let mut adder_4bit = Circuit::new();
+    let mut a_4bit_in = Vec::new();
+    let mut b_4bit_in = Vec::new();
+    for _ in 0..4 {
+        a_4bit_in.push(adder_4bit.input());
+    }
+    for _ in 0..4 {
+        b_4bit_in.push(adder_4bit.input());
+    }
+    let cin_4bit = adder_4bit.input();
+
+    let mut fas = Vec::new();
+    for i in 0..4 {
+        let fa = adder_4bit.add_subcircuit(full_adder.clone());
+        adder_4bit.connect((a_4bit_in[i], 0), (fa, 0));
+        adder_4bit.connect((b_4bit_in[i], 0), (fa, 1));
+
+        let sum_out = adder_4bit.output();
+        adder_4bit.connect((fa, 0), (sum_out, 0));
+        fas.push(fa);
+    }
+
+    // Connect carry chain across 4-bit adder
+    adder_4bit.connect((cin_4bit, 0), (fas[0], 2));
+    adder_4bit.connect((fas[0], 1), (fas[1], 2));
+    adder_4bit.connect((fas[1], 1), (fas[2], 2));
+    adder_4bit.connect((fas[2], 1), (fas[3], 2));
+
+    let cout_4bit = adder_4bit.output();
+    adder_4bit.connect((fas[3], 1), (cout_4bit, 0));
+
+
+    // Level 4: 16-Bit Adder Root Circuit (4x 4-Bit Adder)
+    let cin = b.input("Cin");
+    let mut a_inputs = Vec::new();
+    let mut b_inputs = Vec::new();
+    for bit in 0..16 {
+        a_inputs.push(b.input(Box::leak(format!("A_{}", bit).into_boxed_str())));
+    }
+    for bit in 0..16 {
+        b_inputs.push(b.input(Box::leak(format!("B_{}", bit).into_boxed_str())));
+    }
+
+    let mut prev_carry_pin = (cin, 0);
+
+    for block in 0..4 {
+        let b4 = b.circuit.add_subcircuit(adder_4bit.clone());
+
+        for bit in 0..4 {
+            let global_bit = block * 4 + bit;
+            b.circuit.connect((a_inputs[global_bit], 0), (b4, bit as u8));
+            b.circuit.connect((b_inputs[global_bit], 0), (b4, (4 + bit) as u8));
+
+            let s_out = b.output(Box::leak(format!("Sum_{}", global_bit).into_boxed_str()));
+            b.circuit.connect((b4, bit as u8), (s_out, 0));
+        }
+
+        b.circuit.connect(prev_carry_pin, (b4, 8));
+        prev_carry_pin = (b4, 4);
+    }
+
+    let final_cout = b.output("Cout");
+    b.circuit.connect(prev_carry_pin, (final_cout, 0));
+
+    b.build()
+}
+
 

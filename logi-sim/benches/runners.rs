@@ -194,7 +194,28 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
             start.elapsed() / BATCH_TICKS
         });
     });
+
+    // 7. 4-Level Recursive 16-Bit Adder benchmark
+    let adder16_fixture = fixtures::recursive_16bit_adder();
+    let opt_adder16 = Compiler::optimize(&adder16_fixture.circuit);
+    let mut adder16_runner = F::create(&adder16_fixture.circuit, &opt_adder16);
+    let a0_16 = adder16_fixture.nodes["A_0"];
+    let mut toggle16 = false;
+    c.bench_function(&format!("{}/recursive_16bit_adder_tick", factory_name), |b| {
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BATCH_TICKS {
+                    toggle16 = !toggle16;
+                    adder16_runner.set_input(a0_16, 0, toggle16);
+                    adder16_runner.tick();
+                }
+            }
+            start.elapsed() / BATCH_TICKS
+        });
+    });
 }
+
 
 // ... runner factories ...
 
