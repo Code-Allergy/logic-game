@@ -2,43 +2,111 @@ pub mod atomic_state;
 
 pub use atomic_state::SharedState;
 
-use crate::circuit::{Circuit, NodeId, WireId};
+use crate::circuit::{Circuit, InputRef, NodeId, NodeKind, OutputRef, WireId};
 use crate::runner::{InspectableRunner, NaiveRunner, Runner};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{JoinHandle, spawn};
 
-/// Messages sent to the simulation worker thread.
+/// Commands sent to the simulation worker thread.
 pub enum SimCommand {
-    SetInput { node: NodeId, pin: u8, value: bool },
+    SetInput {
+        node: NodeId,
+        pin: u8,
+        value: bool,
+    },
+    AddNode {
+        temp_id: u64,
+        kind: NodeKind,
+        inputs: usize,
+        outputs: usize,
+        response_tx: Sender<(u64, NodeId)>,
+    },
+    AddWire {
+        temp_id: u64,
+        source: OutputRef,
+        sink: InputRef,
+        response_tx: Sender<(u64, WireId)>,
+    },
+    RemoveNode {
+        node: NodeId,
+    },
+    RemoveWire {
+        wire: WireId,
+    },
+    RebuildCircuit {
+        circuit: Circuit,
+        response_tx: Sender<()>,
+    },
     Pause,
     Resume,
     Step,
     Stop,
 }
 
+/// Events emitted from the simulation worker thread.
+#[derive(Debug, Clone)]
+pub enum SimEvent {
+    WireStateChanged { wire: WireId, value: bool },
+    TickStarted { tick_count: u64 },
+    TickCompleted { tick_count: u64 },
+    StatusChanged { is_running: bool },
+}
+
 /// Top-level owned Simulation Engine.
 ///
 /// Manages circuit layout, runtime state, and an optional background thread that continuously
 /// simulates the circuit logic as fast as possible while updating a shared atomic state.
-#[cfg_attr(feature = "bevy", derive(bevy::prelude::Resource))]
 pub struct SimulationEngine {
     pub circuit: Circuit,
     pub shared_state: Arc<SharedState>,
     command_tx: Option<Sender<SimCommand>>,
+    /// Internal event receiver when the caller hasn't provided an external Sender.
+    event_rx: Option<Receiver<SimEvent>>,
+    /// External event sender provided by the caller (e.g. SimBridge).
+    external_event_tx: Option<Sender<SimEvent>>,
     worker_handle: Option<JoinHandle<()>>,
 }
 
 impl SimulationEngine {
+    /// Create an engine whose event `Receiver` is held internally.
+    /// Callers can take the `Receiver` via [`take_event_receiver`].
     pub fn new(circuit: Circuit) -> Self {
         Self {
             circuit,
             shared_state: Arc::new(SharedState::new()),
             command_tx: None,
+            event_rx: None,
+            external_event_tx: None,
             worker_handle: None,
         }
+    }
+
+    /// Create an engine that forwards all [`SimEvent`]s to the given `Sender`.
+    ///
+    /// This is the preferred constructor when the caller (e.g. [`SimBridge`])
+    /// owns the matching `Receiver` and wants to poll it independently.
+    pub fn new_with_event_channel(circuit: Circuit, event_tx: Sender<SimEvent>) -> Self {
+        Self {
+            circuit,
+            shared_state: Arc::new(SharedState::new()),
+            command_tx: None,
+            event_rx: None,
+            external_event_tx: Some(event_tx),
+            worker_handle: None,
+        }
+    }
+
+    /// Take the internal event `Receiver` (only valid when using [`new`]).
+    pub fn take_event_receiver(&mut self) -> Option<Receiver<SimEvent>> {
+        self.event_rx.take()
+    }
+
+    /// Returns the command sender channel to send commands to the worker thread.
+    pub fn command_sender(&self) -> Option<Sender<SimCommand>> {
+        self.command_tx.clone()
     }
 
     /// Spawns a background thread that continuously ticks the simulation as fast as possible.
@@ -47,15 +115,23 @@ impl SimulationEngine {
             return; // Worker thread already running
         }
 
-        let (tx, rx) = channel::<SimCommand>();
-        self.command_tx = Some(tx);
+        let (tx_cmd, rx_cmd) = channel::<SimCommand>();
+        // If the caller provided an external Sender use that; otherwise create
+        // an internal channel and stash the Receiver.
+        let tx_evt = if let Some(ext_tx) = self.external_event_tx.take() {
+            ext_tx
+        } else {
+            let (tx, rx) = channel::<SimEvent>();
+            self.event_rx = Some(rx);
+            tx
+        };
+        self.command_tx = Some(tx_cmd);
         self.shared_state.is_running.store(true, Ordering::Relaxed);
 
         let shared = Arc::clone(&self.shared_state);
-        let circuit_clone = self.circuit.clone();
+        let mut circuit = self.circuit.clone();
 
         let handle = spawn(move || {
-            let circuit = circuit_clone;
             let mut runner = NaiveRunner::new(&circuit);
             let mut running = true;
 
@@ -67,39 +143,84 @@ impl SimulationEngine {
             }
 
             loop {
-                // Process all queued commands from main/Bevy thread
-                while let Ok(cmd) = rx.try_recv() {
+                // Process all queued commands from main thread
+                while let Ok(cmd) = rx_cmd.try_recv() {
                     match cmd {
                         SimCommand::SetInput { node, pin, value } => {
                             runner.set_input(node, pin, value);
                         }
+                        SimCommand::AddNode {
+                            temp_id,
+                            kind,
+                            inputs,
+                            outputs,
+                            response_tx,
+                        } => {
+                            let node_id = circuit.add_node(kind, inputs, outputs);
+                            runner = NaiveRunner::new(&circuit);
+                            let _ = response_tx.send((temp_id, node_id));
+                        }
+                        SimCommand::AddWire {
+                            temp_id,
+                            source,
+                            sink,
+                            response_tx,
+                        } => {
+                            let wire_id =
+                                circuit.connect((source.node, source.pin), (sink.node, sink.pin));
+                            runner = NaiveRunner::new(&circuit);
+                            let _ = response_tx.send((temp_id, wire_id));
+                        }
+                        SimCommand::RemoveNode { node } => {
+                            circuit.nodes.remove(node);
+                            runner = NaiveRunner::new(&circuit);
+                        }
+                        SimCommand::RemoveWire { wire } => {
+                            circuit.wires.remove(wire);
+                            runner = NaiveRunner::new(&circuit);
+                        }
+                        SimCommand::RebuildCircuit {
+                            circuit: new_circuit,
+                            response_tx,
+                        } => {
+                            circuit = new_circuit;
+                            runner = NaiveRunner::new(&circuit);
+                            let _ = response_tx.send(());
+                        }
                         SimCommand::Pause => {
                             running = false;
                             shared.is_running.store(false, Ordering::Relaxed);
+                            let _ = tx_evt.send(SimEvent::StatusChanged { is_running: false });
                         }
                         SimCommand::Resume => {
                             running = true;
                             shared.is_running.store(true, Ordering::Relaxed);
+                            let _ = tx_evt.send(SimEvent::StatusChanged { is_running: true });
                         }
                         SimCommand::Step => {
                             runner.tick();
-                            shared.tick_count.fetch_add(1, Ordering::Relaxed);
+                            let tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
                             if let Ok(mut lock) = shared.wire_states.write() {
                                 runner.for_each_wire(&mut |wire, val| {
                                     lock.insert(wire, val);
                                 });
                             }
+                            let _ = tx_evt.send(SimEvent::TickCompleted { tick_count: tc });
                         }
                         SimCommand::Stop => {
                             shared.is_running.store(false, Ordering::Relaxed);
+                            let _ = tx_evt.send(SimEvent::StatusChanged { is_running: false });
                             return;
                         }
                     }
                 }
 
                 if running {
+                    let _ = tx_evt.send(SimEvent::TickStarted {
+                        tick_count: shared.tick_count.load(Ordering::Relaxed),
+                    });
                     runner.tick();
-                    shared.tick_count.fetch_add(1, Ordering::Relaxed);
+                    let _tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
                     if let Ok(mut lock) = shared.wire_states.write() {
                         runner.for_each_wire(&mut |wire, val| {
                             lock.insert(wire, val);
@@ -133,10 +254,11 @@ impl SimulationEngine {
 
     /// Atomically read the output state of a node's pin.
     pub fn get_output(&self, node: NodeId, pin: u8) -> bool {
-        let node_ref = &self.circuit.nodes[node];
-        if (pin as usize) < node_ref.inputs.len() {
-            if let Some(wire) = node_ref.inputs[pin as usize].wire {
-                return self.shared_state.get_wire(wire);
+        if let Some(node_ref) = self.circuit.nodes.get(node) {
+            if (pin as usize) < node_ref.inputs.len() {
+                if let Some(wire) = node_ref.inputs[pin as usize].wire {
+                    return self.shared_state.get_wire(wire);
+                }
             }
         }
         false

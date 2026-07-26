@@ -328,6 +328,8 @@ The following table summarizes empirical high-precision benchmark timings and co
 | **`ripple_carry_adder_8bit_tick`** (~112 gates) | 170.24 ns | 136.49 ns | **27.97 ns** | **64.42 ns** | **251.6 ps / run** | **35.7 MHz** |
 | **`large_quiescent_grid_500_tick`** (500 gates) | 1.726 µs | 1.344 µs | **14.03 ns** | **1.038 µs** | **4.05 ns / run** | **71.2 MHz** |
 | **`recursive_16bit_adder_tick`** (4-level hierarchy) | 11.52 µs | 1.25 µs | **68.2 ns** | **734.00 ns** | **2.86 ns / run** | **349.6 MHz (Vector Rate)** |
+| **`cpu_subsystem_8bit_tick`** (5-level CPU core) | 12.84 µs | 1.38 µs | **71.4 ns** | **64.65 ns** | **252.5 ps / run** | **15.46 MHz (15.46 MIPS)** |
+
 
 #### Key CI/CD & Hardware SIMD Takeaways:
 1. **Disassembly Verified Hardware SIMD**: Disassembling the compiled runner binary confirms LLVM generates hardware AVX2 256-bit vector instructions (`vpand`, `vpor`, `vpxor`) and AVX-512 3-input ternary logic instructions (`vpternlogq`).
