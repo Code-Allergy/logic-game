@@ -86,6 +86,8 @@ fn circuit_with_dead_code() -> Circuit {
     c
 }
 
+const BATCH_TICKS: u32 = 1_000;
+
 fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let factory_name = F::name();
 
@@ -94,8 +96,14 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let opt_and = Compiler::optimize(&and_fixture.circuit);
     let mut and_runner = F::create(&and_fixture.circuit, &opt_and);
     c.bench_function(&format!("{}/and_gate_tick", factory_name), |b| {
-        b.iter(|| {
-            and_runner.tick();
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BATCH_TICKS {
+                    and_runner.tick();
+                }
+            }
+            start.elapsed() / BATCH_TICKS
         });
     });
 
@@ -104,8 +112,14 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let opt_adder = Compiler::optimize(&adder_fixture.circuit);
     let mut adder_runner = F::create(&adder_fixture.circuit, &opt_adder);
     c.bench_function(&format!("{}/full_adder_tick", factory_name), |b| {
-        b.iter(|| {
-            adder_runner.tick();
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BATCH_TICKS {
+                    adder_runner.tick();
+                }
+            }
+            start.elapsed() / BATCH_TICKS
         });
     });
 
@@ -114,8 +128,14 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let opt_dff = Compiler::optimize(&dff_fixture.circuit);
     let mut dff_runner = F::create(&dff_fixture.circuit, &opt_dff);
     c.bench_function(&format!("{}/d_flip_flop_tick", factory_name), |b| {
-        b.iter(|| {
-            dff_runner.tick();
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BATCH_TICKS {
+                    dff_runner.tick();
+                }
+            }
+            start.elapsed() / BATCH_TICKS
         });
     });
 
@@ -124,8 +144,14 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let dead_opt = Compiler::optimize(&dead_raw);
     let mut dead_runner = F::create(&dead_raw, &dead_opt);
     c.bench_function(&format!("{}/dead_code_circuit_tick", factory_name), |b| {
-        b.iter(|| {
-            dead_runner.tick();
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BATCH_TICKS {
+                    dead_runner.tick();
+                }
+            }
+            start.elapsed() / BATCH_TICKS
         });
     });
 
@@ -136,10 +162,16 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let a0_node = adder8_fixture.nodes["A_0"];
     let mut toggle = false;
     c.bench_function(&format!("{}/ripple_carry_adder_8bit_tick", factory_name), |b| {
-        b.iter(|| {
-            toggle = !toggle;
-            adder8_runner.set_input(a0_node, 0, toggle);
-            adder8_runner.tick();
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BATCH_TICKS {
+                    toggle = !toggle;
+                    adder8_runner.set_input(a0_node, 0, toggle);
+                    adder8_runner.tick();
+                }
+            }
+            start.elapsed() / BATCH_TICKS
         });
     });
 
@@ -150,14 +182,21 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let in0_node = grid500_fixture.nodes["In_0"];
     let mut grid_toggle = false;
     c.bench_function(&format!("{}/large_quiescent_grid_500_tick", factory_name), |b| {
-        b.iter(|| {
-            grid_toggle = !grid_toggle;
-            grid500_runner.set_input(in0_node, 0, grid_toggle);
-            grid500_runner.tick();
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BATCH_TICKS {
+                    grid_toggle = !grid_toggle;
+                    grid500_runner.set_input(in0_node, 0, grid_toggle);
+                    grid500_runner.tick();
+                }
+            }
+            start.elapsed() / BATCH_TICKS
         });
     });
 }
 
+// ... runner factories ...
 
 pub struct EventDrivenRunnerBenchWrapper(EventDrivenRunner);
 
@@ -239,6 +278,7 @@ impl BenchmarkRunnerFactory for SimdOptimizedBenchFactory {
     }
 }
 
+
 fn runner_benchmarks(c: &mut Criterion) {
     bench_factory::<NaiveUnoptimizedBenchFactory>(c);
     bench_factory::<NaiveOptimizedBenchFactory>(c);
@@ -250,8 +290,20 @@ fn runner_benchmarks(c: &mut Criterion) {
     bench_factory::<SimdOptimizedBenchFactory>(c);
 }
 
-criterion_group!(benches, runner_benchmarks);
+fn fast_criterion() -> Criterion {
+    Criterion::default()
+        .warm_up_time(std::time::Duration::from_millis(500))
+        .measurement_time(std::time::Duration::from_secs(1))
+        .sample_size(50)
+}
+
+criterion_group! {
+    name = benches;
+    config = fast_criterion();
+    targets = runner_benchmarks
+}
 criterion_main!(benches);
+
 
 
 
