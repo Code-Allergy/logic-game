@@ -13,7 +13,8 @@ pub mod prelude {
         OutputRef, Wire, WireId,
     };
     pub use crate::engine::{SharedState, SimulationEngine};
-    pub use crate::runner::{FlatRunner, NaiveRunner, Runner};
+    pub use crate::runner::{FlatRunner, InspectableRunner, NaiveRunner, Runner};
+
 
     #[cfg(feature = "bevy")]
     pub use crate::bevy_integration::LogiSimPlugin;

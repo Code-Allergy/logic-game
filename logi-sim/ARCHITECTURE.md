@@ -52,14 +52,20 @@ The circuit graph represents the topology of digital components and connections.
 The `Runner` trait abstracts simulation execution models from graph topology:
 
 ```rust
+/// Core simulation runner contract for all execution models (Interpreter, Event-Driven, SIMD, JIT).
 pub trait Runner {
     fn set_input(&mut self, node: NodeId, pin: u8, value: bool);
     fn tick(&mut self);
     fn output(&self, node: NodeId, pin: u8) -> bool;
+}
+
+/// Optional extension trait for runners that support detailed wire-level state inspection (e.g., UI debug visualization).
+pub trait InspectableRunner: Runner {
     fn wire_value(&self, wire: WireId) -> bool;
     fn for_each_wire(&self, f: &mut dyn FnMut(WireId, bool));
 }
 ```
+
 
 #### Implementations:
 - **`NaiveRunner`**: Evaluates circuit nodes iteratively by checking input wire states and propagating boolean results across wires.

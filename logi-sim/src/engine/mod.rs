@@ -3,7 +3,8 @@ pub mod atomic_state;
 pub use atomic_state::SharedState;
 
 use crate::circuit::{Circuit, NodeId, WireId};
-use crate::runner::{NaiveRunner, Runner};
+use crate::runner::{InspectableRunner, NaiveRunner, Runner};
+
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Sender, channel};

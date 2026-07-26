@@ -65,7 +65,9 @@ impl Runner for FlatRunner {
             false
         }
     }
+}
 
+impl crate::runner::InspectableRunner for FlatRunner {
     fn wire_value(&self, wire: WireId) -> bool {
         if let Some(&w_idx) = self.circuit.wire_to_idx.get(&wire) {
             self.wire_values[w_idx]
@@ -80,3 +82,4 @@ impl Runner for FlatRunner {
         }
     }
 }
+

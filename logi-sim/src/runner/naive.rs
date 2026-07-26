@@ -71,7 +71,9 @@ impl<'a> Runner for NaiveRunner<'a> {
         // We just read the wire connected to its input.
         self.input_value(node, pin as usize)
     }
+}
 
+impl<'a> crate::runner::InspectableRunner for NaiveRunner<'a> {
     fn wire_value(&self, wire: WireId) -> bool {
         self.wire_values.get(wire).copied().unwrap_or(false)
     }
@@ -82,4 +84,5 @@ impl<'a> Runner for NaiveRunner<'a> {
         }
     }
 }
+
 
