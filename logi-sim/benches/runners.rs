@@ -214,7 +214,28 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
             start.elapsed() / BATCH_TICKS
         });
     });
+
+    // 8. 5-Level Deep 8-Bit CPU Core Subsystem benchmark
+    let cpu_fixture = fixtures::cpu_subsystem_8bit();
+    let opt_cpu = Compiler::optimize(&cpu_fixture.circuit);
+    let mut cpu_runner = F::create(&cpu_fixture.circuit, &opt_cpu);
+    let cpu_a0 = cpu_fixture.nodes["A_0"];
+    let mut cpu_toggle = false;
+    c.bench_function(&format!("{}/cpu_subsystem_8bit_tick", factory_name), |b| {
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BATCH_TICKS {
+                    cpu_toggle = !cpu_toggle;
+                    cpu_runner.set_input(cpu_a0, 0, cpu_toggle);
+                    cpu_runner.tick();
+                }
+            }
+            start.elapsed() / BATCH_TICKS
+        });
+    });
 }
+
 
 
 // ... runner factories ...

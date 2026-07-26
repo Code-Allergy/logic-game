@@ -9,13 +9,12 @@ pub struct Compiler;
 impl Compiler {
     /// Runs optimization passes on a circuit before passing it to execution runners.
     pub fn optimize(circuit: &Circuit) -> Circuit {
-        // Pass 1: Cull dead nodes and unconnected wires
-        let culled = cull_dead_nodes(circuit);
+        Self::optimize_with_map(circuit).0
+    }
 
-        // Future optimization passes:
-        // Pass 2: Constant folding & logic simplification
-        // Pass 3: Pattern matching & macro-gate substitution (e.g. 5-gate XOR -> NodeKind::Xor)
-
-        culled
+    /// Runs optimization passes and returns a mapping from raw NodeIds to optimized NodeIds.
+    pub fn optimize_with_map(circuit: &Circuit) -> (Circuit, std::collections::HashMap<crate::circuit::NodeId, crate::circuit::NodeId>) {
+        dead_code::cull_dead_nodes_with_map(circuit)
     }
 }
+

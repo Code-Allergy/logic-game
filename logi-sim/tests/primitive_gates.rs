@@ -1,148 +1,183 @@
 use logi_sim::circuit::Circuit;
 use logi_sim::prelude::*;
 
-fn test_primitive_equivalence<F: FnOnce(&mut Circuit) -> (Vec<(logi_sim::circuit::NodeId, bool)>, Vec<(logi_sim::circuit::NodeId, bool)>)>(build: F) {
-    let mut circuit = Circuit::new();
-    let (inputs, expected_outputs) = build(&mut circuit);
+fn run_runner_test<R: Runner>(mut runner: R, inputs: &[(logi_sim::circuit::NodeId, u8, bool)], outputs: &[(logi_sim::circuit::NodeId, u8, bool)]) {
+    for &(node, pin, val) in inputs {
+        runner.set_input(node, pin, val);
+    }
+    runner.tick();
+    for &(node, pin, expected) in outputs {
+        assert_eq!(
+            runner.output(node, pin),
+            expected,
+            "Runner output mismatch on pin {}",
+            pin
+        );
+    }
+}
 
-    // 1. NaiveRunner
-    let mut naive = NaiveRunner::new(&circuit);
-    for (node, val) in &inputs {
-        naive.set_input(*node, 0, *val);
-    }
-    naive.tick();
-    for (node, expected) in &expected_outputs {
-        assert_eq!(naive.output(*node, 0), *expected, "NaiveRunner output mismatch");
-    }
+fn verify_all_runners_truth_table(
+    circuit: &Circuit,
+    test_cases: Vec<(Vec<(logi_sim::circuit::NodeId, u8, bool)>, Vec<(logi_sim::circuit::NodeId, u8, bool)>)>,
+) {
+    for (inputs, outputs) in test_cases {
+        let naive = NaiveRunner::new(circuit);
+        run_runner_test(naive, &inputs, &outputs);
 
-    // 2. FlatRunner
-    let flat_circuit = FlattenedCircuit::compile(&circuit);
-    let mut flat = FlatRunner::new(flat_circuit);
-    for (node, val) in &inputs {
-        flat.set_input(*node, 0, *val);
-    }
-    flat.tick();
-    for (node, expected) in &expected_outputs {
-        assert_eq!(flat.output(*node, 0), *expected, "FlatRunner output mismatch");
-    }
+        let flat = FlatRunner::new(FlattenedCircuit::compile(circuit));
+        run_runner_test(flat, &inputs, &outputs);
 
-    // 3. EventDrivenRunner
-    let event_circuit = EventDrivenCircuit::compile(&circuit);
-    let mut event = EventDrivenRunner::new(event_circuit);
-    for (node, val) in &inputs {
-        event.set_input(*node, 0, *val);
-    }
-    event.tick();
-    for (node, expected) in &expected_outputs {
-        assert_eq!(event.output(*node, 0), *expected, "EventDrivenRunner output mismatch");
-    }
+        let event = EventDrivenRunner::new(EventDrivenCircuit::compile(circuit));
+        run_runner_test(event, &inputs, &outputs);
 
-    // 4. SimdRunner (256-bit SIMD)
-    let bit_packed = BitPackedCircuit::compile(&circuit);
-    let mut simd = SimdRunner::new(bit_packed);
-    for (node, val) in &inputs {
-        simd.set_input(*node, 0, *val);
-    }
-    simd.tick();
-    for (node, expected) in &expected_outputs {
-        assert_eq!(simd.output(*node, 0), *expected, "SimdRunner output mismatch");
+        let simd = SimdRunner::new(BitPackedCircuit::compile(circuit));
+        run_runner_test(simd, &inputs, &outputs);
     }
 }
 
 #[test]
-fn test_nand_gate_primitives() {
-    test_primitive_equivalence(|c| {
-        let a = c.input();
-        let b = c.input();
-        let nand = c.nand();
-        let out = c.output();
+fn test_nand_full_truth_table() {
+    let mut c = Circuit::new();
+    let a = c.input();
+    let b = c.input();
+    let nand = c.nand();
+    let out = c.output();
 
-        c.connect((a, 0), (nand, 0));
-        c.connect((b, 0), (nand, 1));
-        c.connect((nand, 0), (out, 0));
+    c.connect((a, 0), (nand, 0));
+    c.connect((b, 0), (nand, 1));
+    c.connect((nand, 0), (out, 0));
 
-        (vec![(a, true), (b, true)], vec![(out, false)])
-    });
+    let cases = vec![
+        (vec![(a, 0, false), (b, 0, false)], vec![(out, 0, true)]),
+        (vec![(a, 0, false), (b, 0, true)], vec![(out, 0, true)]),
+        (vec![(a, 0, true), (b, 0, false)], vec![(out, 0, true)]),
+        (vec![(a, 0, true), (b, 0, true)], vec![(out, 0, false)]),
+    ];
+
+    verify_all_runners_truth_table(&c, cases);
 }
 
 #[test]
-fn test_nor_gate_primitives() {
-    test_primitive_equivalence(|c| {
-        let a = c.input();
-        let b = c.input();
-        let nor = c.nor();
-        let out = c.output();
+fn test_nor_full_truth_table() {
+    let mut c = Circuit::new();
+    let a = c.input();
+    let b = c.input();
+    let nor = c.nor();
+    let out = c.output();
 
-        c.connect((a, 0), (nor, 0));
-        c.connect((b, 0), (nor, 1));
-        c.connect((nor, 0), (out, 0));
+    c.connect((a, 0), (nor, 0));
+    c.connect((b, 0), (nor, 1));
+    c.connect((nor, 0), (out, 0));
 
-        (vec![(a, false), (b, false)], vec![(out, true)])
-    });
+    let cases = vec![
+        (vec![(a, 0, false), (b, 0, false)], vec![(out, 0, true)]),
+        (vec![(a, 0, false), (b, 0, true)], vec![(out, 0, false)]),
+        (vec![(a, 0, true), (b, 0, false)], vec![(out, 0, false)]),
+        (vec![(a, 0, true), (b, 0, true)], vec![(out, 0, false)]),
+    ];
+
+    verify_all_runners_truth_table(&c, cases);
 }
 
 #[test]
-fn test_xnor_gate_primitives() {
-    test_primitive_equivalence(|c| {
-        let a = c.input();
-        let b = c.input();
-        let xnor = c.xnor();
-        let out = c.output();
+fn test_xnor_full_truth_table() {
+    let mut c = Circuit::new();
+    let a = c.input();
+    let b = c.input();
+    let xnor = c.xnor();
+    let out = c.output();
 
-        c.connect((a, 0), (xnor, 0));
-        c.connect((b, 0), (xnor, 1));
-        c.connect((xnor, 0), (out, 0));
+    c.connect((a, 0), (xnor, 0));
+    c.connect((b, 0), (xnor, 1));
+    c.connect((xnor, 0), (out, 0));
 
-        (vec![(a, true), (b, true)], vec![(out, true)])
-    });
+    let cases = vec![
+        (vec![(a, 0, false), (b, 0, false)], vec![(out, 0, true)]),
+        (vec![(a, 0, false), (b, 0, true)], vec![(out, 0, false)]),
+        (vec![(a, 0, true), (b, 0, false)], vec![(out, 0, false)]),
+        (vec![(a, 0, true), (b, 0, true)], vec![(out, 0, true)]),
+    ];
+
+    verify_all_runners_truth_table(&c, cases);
 }
 
 #[test]
-fn test_buffer_gate_primitives() {
-    test_primitive_equivalence(|c| {
-        let a = c.input();
-        let buf = c.buffer();
-        let out = c.output();
+fn test_mux_full_truth_table() {
+    let mut c = Circuit::new();
+    let d0 = c.input();
+    let d1 = c.input();
+    let sel = c.input();
+    let mux = c.mux();
+    let out = c.output();
 
-        c.connect((a, 0), (buf, 0));
-        c.connect((buf, 0), (out, 0));
+    c.connect((d0, 0), (mux, 0));
+    c.connect((d1, 0), (mux, 1));
+    c.connect((sel, 0), (mux, 2));
+    c.connect((mux, 0), (out, 0));
 
-        (vec![(a, true)], vec![(out, true)])
-    });
+    // Testing all 8 combinations of D0, D1, Sel
+    let cases = vec![
+        // Sel = 0 -> Output = D0
+        (vec![(d0, 0, false), (d1, 0, false), (sel, 0, false)], vec![(out, 0, false)]),
+        (vec![(d0, 0, false), (d1, 0, true),  (sel, 0, false)], vec![(out, 0, false)]),
+        (vec![(d0, 0, true),  (d1, 0, false), (sel, 0, false)], vec![(out, 0, true)]),
+        (vec![(d0, 0, true),  (d1, 0, true),  (sel, 0, false)], vec![(out, 0, true)]),
+        // Sel = 1 -> Output = D1
+        (vec![(d0, 0, false), (d1, 0, false), (sel, 0, true)], vec![(out, 0, false)]),
+        (vec![(d0, 0, false), (d1, 0, true),  (sel, 0, true)], vec![(out, 0, true)]),
+        (vec![(d0, 0, true),  (d1, 0, false), (sel, 0, true)], vec![(out, 0, false)]),
+        (vec![(d0, 0, true),  (d1, 0, true),  (sel, 0, true)], vec![(out, 0, true)]),
+    ];
+
+    verify_all_runners_truth_table(&c, cases);
 }
 
 #[test]
-fn test_mux_gate_primitives() {
-    test_primitive_equivalence(|c| {
-        let d0 = c.input();
-        let d1 = c.input();
-        let sel = c.input();
-        let mux = c.mux();
-        let out = c.output();
+fn test_demux_full_truth_table() {
+    let mut c = Circuit::new();
+    let sig = c.input();
+    let sel = c.input();
+    let demux = c.demux();
+    let out0 = c.output();
+    let out1 = c.output();
 
-        c.connect((d0, 0), (mux, 0));
-        c.connect((d1, 0), (mux, 1));
-        c.connect((sel, 0), (mux, 2));
-        c.connect((mux, 0), (out, 0));
+    c.connect((sig, 0), (demux, 0));
+    c.connect((sel, 0), (demux, 1));
+    c.connect((demux, 0), (out0, 0));
+    c.connect((demux, 1), (out1, 0));
 
-        // When Sel = 1, Output = D1 (true)
-        (vec![(d0, false), (d1, true), (sel, true)], vec![(out, true)])
-    });
+    let cases = vec![
+        // Sel = 0 -> Out0 = Sig, Out1 = false
+        (vec![(sig, 0, false), (sel, 0, false)], vec![(out0, 0, false), (out1, 0, false)]),
+        (vec![(sig, 0, true),  (sel, 0, false)], vec![(out0, 0, true),  (out1, 0, false)]),
+        // Sel = 1 -> Out0 = false, Out1 = Sig
+        (vec![(sig, 0, false), (sel, 0, true)],  vec![(out0, 0, false), (out1, 0, false)]),
+        (vec![(sig, 0, true),  (sel, 0, true)],  vec![(out0, 0, false), (out1, 0, true)]),
+    ];
+
+    verify_all_runners_truth_table(&c, cases);
 }
 
 #[test]
-fn test_tristate_buffer_primitives() {
-    test_primitive_equivalence(|c| {
-        let data = c.input();
-        let enable = c.input();
-        let tri = c.tristate();
-        let out = c.output();
+fn test_tristate_buffer_full_truth_table() {
+    let mut c = Circuit::new();
+    let sig = c.input();
+    let enable = c.input();
+    let tri = c.tristate();
+    let out = c.output();
 
-        c.connect((data, 0), (tri, 0));
-        c.connect((enable, 0), (tri, 1));
-        c.connect((tri, 0), (out, 0));
+    c.connect((sig, 0), (tri, 0));
+    c.connect((enable, 0), (tri, 1));
+    c.connect((tri, 0), (out, 0));
 
-        // When Enable = 1, Output = Data (true)
-        (vec![(data, true), (enable, true)], vec![(out, true)])
-    });
+    let cases = vec![
+        // Enable = 0 -> Output = false (Z)
+        (vec![(sig, 0, false), (enable, 0, false)], vec![(out, 0, false)]),
+        (vec![(sig, 0, true),  (enable, 0, false)], vec![(out, 0, false)]),
+        // Enable = 1 -> Output = Signal
+        (vec![(sig, 0, false), (enable, 0, true)],  vec![(out, 0, false)]),
+        (vec![(sig, 0, true),  (enable, 0, true)],  vec![(out, 0, true)]),
+    ];
+
+    verify_all_runners_truth_table(&c, cases);
 }

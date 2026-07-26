@@ -2,16 +2,18 @@ use crate::circuit::{Circuit, NodeId, NodeKind, WireId};
 use std::collections::{HashSet, VecDeque};
 
 /// Optimization Pass: Prunes dead nodes and wires not transitively connected to any `Output` node.
-pub fn cull_dead_nodes(circuit: &Circuit) -> Circuit {
+pub fn cull_dead_nodes_with_map(circuit: &Circuit) -> (Circuit, std::collections::HashMap<NodeId, NodeId>) {
     let mut live_nodes = HashSet::<NodeId>::new();
     let mut live_wires = HashSet::<WireId>::new();
     let mut queue = VecDeque::<NodeId>::new();
 
-    // Find all Output nodes as starting points for backward reachability
+    // Find all Output and Input nodes as starting points for reachability and interface preservation
     for (node_id, node) in &circuit.nodes {
-        if matches!(node.kind, NodeKind::Output) {
+        if matches!(node.kind, NodeKind::Output | NodeKind::Input) {
             live_nodes.insert(node_id);
-            queue.push_back(node_id);
+            if matches!(node.kind, NodeKind::Output) {
+                queue.push_back(node_id);
+            }
         }
     }
 
@@ -45,15 +47,20 @@ pub fn cull_dead_nodes(circuit: &Circuit) -> Circuit {
 
     for (wire_id, wire) in &circuit.wires {
         if live_wires.contains(&wire_id) {
-            if let (Some(&new_source), Some(&new_sink)) = (
-                node_map.get(&wire.source.node),
-                wire.sinks.first().and_then(|s| node_map.get(&s.node)),
-            ) {
-                let sink_pin = wire.sinks[0].pin;
-                optimized.connect((new_source, wire.source.pin), (new_sink, sink_pin));
+            if let Some(&new_source) = node_map.get(&wire.source.node) {
+                for sink in &wire.sinks {
+                    if let Some(&new_sink) = node_map.get(&sink.node) {
+                        optimized.connect((new_source, wire.source.pin), (new_sink, sink.pin));
+                    }
+                }
             }
         }
     }
 
-    optimized
+    (optimized, node_map)
 }
+
+pub fn cull_dead_nodes(circuit: &Circuit) -> Circuit {
+    cull_dead_nodes_with_map(circuit).0
+}
+

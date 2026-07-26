@@ -1,8 +1,11 @@
 use crate::circuit::Circuit;
-use crate::fixtures::builder::{Fixture, FixtureBuilder};
+use crate::fixtures::builder::FixtureBuilder;
+pub use builder::Fixture;
 
 mod builder;
 pub mod harness;
+
+
 
 
 pub fn and_gate() -> Fixture {
@@ -555,5 +558,169 @@ pub fn recursive_16bit_adder() -> Fixture {
 
     b.build()
 }
+
+pub fn cpu_subsystem_8bit() -> Fixture {
+    let mut b = FixtureBuilder::new();
+
+    // Level 1: 1-Bit ALU Slice (AND, OR, XOR, MUX)
+    let mut alu_slice = Circuit::new();
+    let slice_a = alu_slice.input();
+    let slice_b = alu_slice.input();
+    let slice_op = alu_slice.input(); // OpSel (0 = AND, 1 = OR)
+
+    let and_gate = alu_slice.and();
+    alu_slice.connect((slice_a, 0), (and_gate, 0));
+    alu_slice.connect((slice_b, 0), (and_gate, 1));
+
+    let or_gate = alu_slice.or();
+    alu_slice.connect((slice_a, 0), (or_gate, 0));
+    alu_slice.connect((slice_b, 0), (or_gate, 1));
+
+    let mux_op = alu_slice.mux();
+    alu_slice.connect((and_gate, 0), (mux_op, 0));
+    alu_slice.connect((or_gate, 0), (mux_op, 1));
+    alu_slice.connect((slice_op, 0), (mux_op, 2));
+
+    let slice_out = alu_slice.output();
+    alu_slice.connect((mux_op, 0), (slice_out, 0));
+
+    // Level 2: 8-Bit ALU Sub-Circuit (8x 1-Bit ALU Slices + XNOR Equal Flag)
+    let mut alu_8bit = Circuit::new();
+    let mut alu_a_inputs = Vec::new();
+    let mut alu_b_inputs = Vec::new();
+    for _ in 0..8 {
+        alu_a_inputs.push(alu_8bit.input());
+    }
+    for _ in 0..8 {
+        alu_b_inputs.push(alu_8bit.input());
+    }
+    let alu_op_in = alu_8bit.input();
+
+    let mut alu_slice_nodes = Vec::new();
+    for bit in 0..8 {
+        let slice_node = alu_8bit.add_subcircuit(alu_slice.clone());
+        alu_8bit.connect((alu_a_inputs[bit], 0), (slice_node, 0));
+        alu_8bit.connect((alu_b_inputs[bit], 0), (slice_node, 1));
+        alu_8bit.connect((alu_op_in, 0), (slice_node, 2));
+
+        let s_out = alu_8bit.output();
+        alu_8bit.connect((slice_node, 0), (s_out, 0));
+        alu_slice_nodes.push(slice_node);
+    }
+
+    // XNOR Equal Flag: check if A_0..7 == B_0..7
+    let mut xnor_nodes = Vec::new();
+    for bit in 0..8 {
+        let xn = alu_8bit.xnor();
+        alu_8bit.connect((alu_a_inputs[bit], 0), (xn, 0));
+        alu_8bit.connect((alu_b_inputs[bit], 0), (xn, 1));
+        xnor_nodes.push(xn);
+    }
+
+    let mut current_flag_node = xnor_nodes[0];
+    for bit in 1..8 {
+        let and_flag = alu_8bit.and();
+        alu_8bit.connect((current_flag_node, 0), (and_flag, 0));
+        alu_8bit.connect((xnor_nodes[bit], 0), (and_flag, 1));
+        current_flag_node = and_flag;
+    }
+    let equal_flag_out = alu_8bit.output();
+    alu_8bit.connect((current_flag_node, 0), (equal_flag_out, 0));
+
+    // Level 3: 8-Bit Register Sub-Circuit
+    let mut reg_8bit = Circuit::new();
+    let mut reg_d_in = Vec::new();
+    for _ in 0..8 {
+        reg_d_in.push(reg_8bit.input());
+    }
+    let reg_enable = reg_8bit.input();
+
+    let mut reg_q_out = Vec::new();
+    for bit in 0..8 {
+        let tri = reg_8bit.tristate();
+        reg_8bit.connect((reg_d_in[bit], 0), (tri, 0));
+        reg_8bit.connect((reg_enable, 0), (tri, 1));
+
+        let q_out = reg_8bit.output();
+        reg_8bit.connect((tri, 0), (q_out, 0));
+        reg_q_out.push(q_out);
+    }
+
+    // Level 4: 4x 8-Bit Register File Sub-Circuit (4 Registers + Demux Decoder)
+    let mut reg_file = Circuit::new();
+    let mut rf_data_in = Vec::new();
+    for _ in 0..8 {
+        rf_data_in.push(reg_file.input());
+    }
+    let rf_write_sel = reg_file.input();
+
+    let demux_decoder = reg_file.demux();
+    let rf_global_write_en = reg_file.input();
+    reg_file.connect((rf_global_write_en, 0), (demux_decoder, 0));
+    reg_file.connect((rf_write_sel, 0), (demux_decoder, 1));
+
+    let r0_sub = reg_file.add_subcircuit(reg_8bit.clone());
+    for bit in 0..8 {
+        reg_file.connect((rf_data_in[bit], 0), (r0_sub, bit as u8));
+    }
+    reg_file.connect((demux_decoder, 0), (r0_sub, 8));
+
+    let r1_sub = reg_file.add_subcircuit(reg_8bit.clone());
+    for bit in 0..8 {
+        reg_file.connect((rf_data_in[bit], 0), (r1_sub, bit as u8));
+    }
+    reg_file.connect((demux_decoder, 1), (r1_sub, 8));
+
+    let mut rf_out_nodes = Vec::new();
+    for bit in 0..8 {
+        let mux_read = reg_file.mux();
+        reg_file.connect((r0_sub, bit as u8), (mux_read, 0));
+        reg_file.connect((r1_sub, bit as u8), (mux_read, 1));
+        reg_file.connect((rf_write_sel, 0), (mux_read, 2));
+
+        let rf_out = reg_file.output();
+        reg_file.connect((mux_read, 0), (rf_out, 0));
+        rf_out_nodes.push(rf_out);
+    }
+
+    // Level 5 (Root): 8-Bit CPU Core Subsystem
+    let _clk_node = b.circuit.clock(2);
+    let alu_op = b.input("ALU_OpSel");
+
+    let mut cpu_a_in = Vec::new();
+    let mut cpu_b_in = Vec::new();
+    for bit in 0..8 {
+        cpu_a_in.push(b.input(Box::leak(format!("A_{}", bit).into_boxed_str())));
+    }
+    for bit in 0..8 {
+        cpu_b_in.push(b.input(Box::leak(format!("B_{}", bit).into_boxed_str())));
+    }
+
+    let alu_sub_node = b.circuit.add_subcircuit(alu_8bit.clone());
+    for bit in 0..8 {
+        b.circuit.connect((cpu_a_in[bit], 0), (alu_sub_node, bit as u8));
+        b.circuit.connect((cpu_b_in[bit], 0), (alu_sub_node, (8 + bit) as u8));
+    }
+    b.circuit.connect((alu_op, 0), (alu_sub_node, 16));
+
+    let bus_enable = b.input("Bus_Enable");
+    let mut data_bus_outputs = Vec::new();
+
+    for bit in 0..8 {
+        let tri_driver = b.circuit.tristate();
+        b.circuit.connect((alu_sub_node, bit as u8), (tri_driver, 0));
+        b.circuit.connect((bus_enable, 0), (tri_driver, 1));
+
+        let bus_out = b.output(Box::leak(format!("Bus_{}", bit).into_boxed_str()));
+        b.circuit.connect((tri_driver, 0), (bus_out, 0));
+        data_bus_outputs.push(bus_out);
+    }
+
+    let zero_flag_out = b.output("ZeroFlag");
+    b.circuit.connect((alu_sub_node, 8), (zero_flag_out, 0));
+
+    b.build()
+}
+
 
 
