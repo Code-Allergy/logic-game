@@ -135,6 +135,13 @@ impl SimulationEngine {
             let mut runner = NaiveRunner::new(&circuit);
             let mut running = true;
 
+            // Restore any persistent input states
+            if let Ok(lock) = shared.driven_inputs.read() {
+                for (&node_id, &val) in lock.iter() {
+                    runner.set_input(node_id, 0, val);
+                }
+            }
+
             // Perform initial wire state sync
             if let Ok(mut lock) = shared.wire_states.write() {
                 runner.for_each_wire(&mut |wire, val| {
@@ -144,9 +151,14 @@ impl SimulationEngine {
 
             loop {
                 // Process all queued commands from main thread
+                let mut commands_processed = false;
                 while let Ok(cmd) = rx_cmd.try_recv() {
+                    commands_processed = true;
                     match cmd {
                         SimCommand::SetInput { node, pin, value } => {
+                            if let Ok(mut lock) = shared.driven_inputs.write() {
+                                lock.insert(node, value);
+                            }
                             runner.set_input(node, pin, value);
                         }
                         SimCommand::AddNode {
@@ -158,6 +170,11 @@ impl SimulationEngine {
                         } => {
                             let node_id = circuit.add_node(kind, inputs, outputs);
                             runner = NaiveRunner::new(&circuit);
+                            if let Ok(lock) = shared.driven_inputs.read() {
+                                for (&n_id, &val) in lock.iter() {
+                                    runner.set_input(n_id, 0, val);
+                                }
+                            }
                             let _ = response_tx.send((temp_id, node_id));
                         }
                         SimCommand::AddWire {
@@ -169,22 +186,48 @@ impl SimulationEngine {
                             let wire_id =
                                 circuit.connect((source.node, source.pin), (sink.node, sink.pin));
                             runner = NaiveRunner::new(&circuit);
+                            if let Ok(lock) = shared.driven_inputs.read() {
+                                for (&n_id, &val) in lock.iter() {
+                                    runner.set_input(n_id, 0, val);
+                                }
+                            }
                             let _ = response_tx.send((temp_id, wire_id));
                         }
                         SimCommand::RemoveNode { node } => {
+                            if let Ok(mut lock) = shared.driven_inputs.write() {
+                                lock.remove(&node);
+                            }
                             circuit.nodes.remove(node);
                             runner = NaiveRunner::new(&circuit);
+                            if let Ok(lock) = shared.driven_inputs.read() {
+                                for (&n_id, &val) in lock.iter() {
+                                    runner.set_input(n_id, 0, val);
+                                }
+                            }
                         }
                         SimCommand::RemoveWire { wire } => {
                             circuit.wires.remove(wire);
                             runner = NaiveRunner::new(&circuit);
+                            if let Ok(lock) = shared.driven_inputs.read() {
+                                for (&n_id, &val) in lock.iter() {
+                                    runner.set_input(n_id, 0, val);
+                                }
+                            }
                         }
                         SimCommand::RebuildCircuit {
                             circuit: new_circuit,
                             response_tx,
                         } => {
+                            if let Ok(mut lock) = shared.driven_inputs.write() {
+                                lock.clear();
+                            }
                             circuit = new_circuit;
                             runner = NaiveRunner::new(&circuit);
+                            if let Ok(lock) = shared.driven_inputs.read() {
+                                for (&n_id, &val) in lock.iter() {
+                                    runner.set_input(n_id, 0, val);
+                                }
+                            }
                             let _ = response_tx.send(());
                         }
                         SimCommand::Pause => {
@@ -212,6 +255,14 @@ impl SimulationEngine {
                             let _ = tx_evt.send(SimEvent::StatusChanged { is_running: false });
                             return;
                         }
+                    }
+                }
+
+                if commands_processed && !running {
+                    if let Ok(mut lock) = shared.wire_states.write() {
+                        runner.for_each_wire(&mut |wire, val| {
+                            lock.insert(wire, val);
+                        });
                     }
                 }
 

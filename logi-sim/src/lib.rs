@@ -16,4 +16,3 @@ pub mod prelude {
         EventDrivenRunner, FlatRunner, InspectableRunner, NaiveRunner, Runner, SimdRunner,
     };
 }
-

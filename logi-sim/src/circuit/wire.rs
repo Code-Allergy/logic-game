@@ -26,5 +26,3 @@ pub struct Wire {
 
     pub sinks: SmallVec<[InputRef; 4]>,
 }
-
-

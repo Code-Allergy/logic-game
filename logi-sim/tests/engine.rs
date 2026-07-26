@@ -97,4 +97,3 @@ fn test_flat_runner_equivalence() {
     assert_eq!(naive.output(out, 0), flat.output(out, 0));
     assert_eq!(flat.output(out, 0), true);
 }
-

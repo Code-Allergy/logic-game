@@ -5,9 +5,6 @@ pub use builder::Fixture;
 mod builder;
 pub mod harness;
 
-
-
-
 pub fn and_gate() -> Fixture {
     let mut b = FixtureBuilder::new();
     let a = b.input("A");
@@ -409,7 +406,11 @@ pub fn large_quiescent_grid_500() -> Fixture {
         let len = current_layer.len();
         for i in (0..len).step_by(2) {
             let n1 = current_layer[i];
-            let n2 = if i + 1 < len { current_layer[i + 1] } else { current_layer[0] };
+            let n2 = if i + 1 < len {
+                current_layer[i + 1]
+            } else {
+                current_layer[0]
+            };
 
             let gate = match gate_count % 3 {
                 0 => b.and(),
@@ -441,7 +442,6 @@ pub fn large_quiescent_grid_500() -> Fixture {
 }
 
 pub fn recursive_16bit_adder() -> Fixture {
-
     let mut b = FixtureBuilder::new();
 
     // Level 1: Half Adder sub-circuit + 10 dead floating gates
@@ -523,7 +523,6 @@ pub fn recursive_16bit_adder() -> Fixture {
     let cout_4bit = adder_4bit.output();
     adder_4bit.connect((fas[3], 1), (cout_4bit, 0));
 
-
     // Level 4: 16-Bit Adder Root Circuit (4x 4-Bit Adder)
     let cin = b.input("Cin");
     let mut a_inputs = Vec::new();
@@ -542,8 +541,10 @@ pub fn recursive_16bit_adder() -> Fixture {
 
         for bit in 0..4 {
             let global_bit = block * 4 + bit;
-            b.circuit.connect((a_inputs[global_bit], 0), (b4, bit as u8));
-            b.circuit.connect((b_inputs[global_bit], 0), (b4, (4 + bit) as u8));
+            b.circuit
+                .connect((a_inputs[global_bit], 0), (b4, bit as u8));
+            b.circuit
+                .connect((b_inputs[global_bit], 0), (b4, (4 + bit) as u8));
 
             let s_out = b.output(Box::leak(format!("Sum_{}", global_bit).into_boxed_str()));
             b.circuit.connect((b4, bit as u8), (s_out, 0));
@@ -698,8 +699,10 @@ pub fn cpu_subsystem_8bit() -> Fixture {
 
     let alu_sub_node = b.circuit.add_subcircuit(alu_8bit.clone());
     for bit in 0..8 {
-        b.circuit.connect((cpu_a_in[bit], 0), (alu_sub_node, bit as u8));
-        b.circuit.connect((cpu_b_in[bit], 0), (alu_sub_node, (8 + bit) as u8));
+        b.circuit
+            .connect((cpu_a_in[bit], 0), (alu_sub_node, bit as u8));
+        b.circuit
+            .connect((cpu_b_in[bit], 0), (alu_sub_node, (8 + bit) as u8));
     }
     b.circuit.connect((alu_op, 0), (alu_sub_node, 16));
 
@@ -708,7 +711,8 @@ pub fn cpu_subsystem_8bit() -> Fixture {
 
     for bit in 0..8 {
         let tri_driver = b.circuit.tristate();
-        b.circuit.connect((alu_sub_node, bit as u8), (tri_driver, 0));
+        b.circuit
+            .connect((alu_sub_node, bit as u8), (tri_driver, 0));
         b.circuit.connect((bus_enable, 0), (tri_driver, 1));
 
         let bus_out = b.output(Box::leak(format!("Bus_{}", bit).into_boxed_str()));
@@ -721,6 +725,3 @@ pub fn cpu_subsystem_8bit() -> Fixture {
 
     b.build()
 }
-
-
-

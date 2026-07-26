@@ -9,7 +9,9 @@ fn run_cpu_test<R: Runner>(
 ) {
     let get_node = |name: &'static str| -> logi_sim::circuit::NodeId {
         let raw_id = fixture.nodes[name];
-        node_map.and_then(|m| m.get(&raw_id).copied()).unwrap_or(raw_id)
+        node_map
+            .and_then(|m| m.get(&raw_id).copied())
+            .unwrap_or(raw_id)
     };
 
     let bus_enable = get_node("Bus_Enable");
@@ -49,7 +51,12 @@ fn run_cpu_test<R: Runner>(
     }
 
     // Assert ZeroFlag (Equal) = false because A != B
-    assert_eq!(runner.output(zero_flag, 0), false, "[{}] ZeroFlag mismatch for A != B", runner_name);
+    assert_eq!(
+        runner.output(zero_flag, 0),
+        false,
+        "[{}] ZeroFlag mismatch for A != B",
+        runner_name
+    );
 
     // Now set A = B = 0b10101010 -> ZeroFlag should be true!
     for bit in 0..8 {
@@ -63,7 +70,12 @@ fn run_cpu_test<R: Runner>(
         runner.tick();
     }
 
-    assert_eq!(runner.output(zero_flag, 0), true, "[{}] ZeroFlag mismatch for A == B", runner_name);
+    assert_eq!(
+        runner.output(zero_flag, 0),
+        true,
+        "[{}] ZeroFlag mismatch for A == B",
+        runner_name
+    );
 }
 
 #[test]
@@ -74,18 +86,33 @@ fn test_large_8bit_cpu_subsystem_flat_runner() {
 
     let (opt_circuit, node_map) = Compiler::optimize_with_map(&fixture.circuit);
     let opt_flat_runner = FlatRunner::new(FlattenedCircuit::compile(&opt_circuit));
-    run_cpu_test("FlatRunner-optimized", opt_flat_runner, &fixture, Some(&node_map));
+    run_cpu_test(
+        "FlatRunner-optimized",
+        opt_flat_runner,
+        &fixture,
+        Some(&node_map),
+    );
 }
 
 #[test]
 fn test_large_8bit_cpu_subsystem_event_driven_runner() {
     let fixture = logi_sim::fixtures::cpu_subsystem_8bit();
     let event_runner = EventDrivenRunner::new(EventDrivenCircuit::compile(&fixture.circuit));
-    run_cpu_test("EventDrivenRunner-unoptimized", event_runner, &fixture, None);
+    run_cpu_test(
+        "EventDrivenRunner-unoptimized",
+        event_runner,
+        &fixture,
+        None,
+    );
 
     let (opt_circuit, node_map) = Compiler::optimize_with_map(&fixture.circuit);
     let opt_event_runner = EventDrivenRunner::new(EventDrivenCircuit::compile(&opt_circuit));
-    run_cpu_test("EventDrivenRunner-optimized", opt_event_runner, &fixture, Some(&node_map));
+    run_cpu_test(
+        "EventDrivenRunner-optimized",
+        opt_event_runner,
+        &fixture,
+        Some(&node_map),
+    );
 }
 
 #[test]
@@ -96,7 +123,12 @@ fn test_large_8bit_cpu_subsystem_simd_runner() {
 
     let (opt_circuit, node_map) = Compiler::optimize_with_map(&fixture.circuit);
     let opt_simd_runner = SimdRunner::new(BitPackedCircuit::compile(&opt_circuit));
-    run_cpu_test("SimdRunner-optimized", opt_simd_runner, &fixture, Some(&node_map));
+    run_cpu_test(
+        "SimdRunner-optimized",
+        opt_simd_runner,
+        &fixture,
+        Some(&node_map),
+    );
 }
 
 #[test]
@@ -107,5 +139,10 @@ fn test_large_8bit_cpu_subsystem_naive_runner() {
 
     let (opt_circuit, node_map) = Compiler::optimize_with_map(&fixture.circuit);
     let opt_naive_runner = NaiveRunner::new(&opt_circuit);
-    run_cpu_test("NaiveRunner-optimized", opt_naive_runner, &fixture, Some(&node_map));
+    run_cpu_test(
+        "NaiveRunner-optimized",
+        opt_naive_runner,
+        &fixture,
+        Some(&node_map),
+    );
 }

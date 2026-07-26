@@ -1,5 +1,6 @@
-use crate::circuit::WireId;
+use crate::circuit::{NodeId, WireId};
 use slotmap::SecondaryMap;
+use std::collections::HashMap;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -10,6 +11,7 @@ pub struct SharedState {
     pub tick_count: AtomicU64,
     pub is_running: AtomicBool,
     pub wire_states: RwLock<SecondaryMap<WireId, bool>>,
+    pub driven_inputs: RwLock<HashMap<NodeId, bool>>,
 }
 
 impl SharedState {
@@ -18,6 +20,7 @@ impl SharedState {
             tick_count: AtomicU64::new(0),
             is_running: AtomicBool::new(false),
             wire_states: RwLock::new(SecondaryMap::new()),
+            driven_inputs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -38,6 +41,15 @@ impl SharedState {
     /// Checks if the worker thread simulation is currently active.
     pub fn is_running(&self) -> bool {
         self.is_running.load(Ordering::Relaxed)
+    }
+
+    /// Atomically reads the value of a specific driven input node.
+    pub fn get_driven_input(&self, node: NodeId) -> bool {
+        if let Ok(lock) = self.driven_inputs.read() {
+            lock.get(&node).copied().unwrap_or(false)
+        } else {
+            false
+        }
     }
 }
 
