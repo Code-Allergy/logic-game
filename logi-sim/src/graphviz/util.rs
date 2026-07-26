@@ -23,6 +23,8 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Or => "OR",
         NodeKind::Not => "NOT",
         NodeKind::Xor => "XOR",
+        NodeKind::SubCircuit(_) => "SUBCIRCUIT",
     }
 }
+
 

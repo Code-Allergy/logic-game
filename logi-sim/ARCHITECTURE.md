@@ -148,13 +148,16 @@ Each layer transforms the circuit data model into a lower-level, more execution-
 #### Level 0: Dynamic Graph (`Circuit`)
 - **Data Model**: `SlotMap<NodeId, Node>` & `SlotMap<WireId, Wire>`.
 - **Purpose**: Interactive UI editing in Bevy, real-time node insertion/deletion, dynamic rewiring.
-- **Runner**: `NaiveRunner` / `InterpreterRunner`. Interprets node logic directly via wire slot map lookups.
+- **Nested Sub-Circuits**: Supports modular composition via `NodeKind::SubCircuit(Box<Circuit>)` and `circuit.add_subcircuit(sub)`. Input/output pins are mapped dynamically to inner `Input` and `Output` nodes.
+- **Runner**: `NaiveRunner` / `InterpreterRunner`. Evaluates node logic recursively via inner runner instances for `SubCircuit` nodes.
 
 #### Level 1: Flattened Direct Index Circuit (`FlattenedCircuit`)
 - **Data Model**: Contiguous `Vec<FlatNode>` and `Vec<u32>` direct index lookup arrays.
 - **Transformation**: Resolves `NodeId` and `WireId` indirection into zero-offset array indices.
-- **Purpose**: Eliminates map overhead and improves CPU cache line utilization.
+- **Sub-Circuit Inlining**: `FlattenedCircuit::compile` recursively inlines and unrolls all `NodeKind::SubCircuit` nodes, aliasing child input/output wires directly to parent wires and completely stripping sub-circuit boundaries into primitive gates.
+- **Purpose**: Eliminates map overhead, eliminates sub-circuit function call overhead, and improves CPU cache line utilization.
 - **Runner**: `FlatInterpreterRunner`. Evaluates nodes using tight array loops.
+
 
 #### Level 2: Event-Driven Netlist (`EventDrivenCircuit`)
 - **Data Model**: Topological dependency graph with an active evaluation queue (`VecDeque<NodeIdx>`).

@@ -32,17 +32,62 @@ impl<'a> NaiveRunner<'a> {
         }
     }
     fn evaluate_node(&mut self, node: &Node) {
-        let output = match node.kind {
+        match &node.kind {
             NodeKind::Input | NodeKind::Output => return, // no evaluation needed
-            NodeKind::And => self.input_value(node, 0) && self.input_value(node, 1),
-            NodeKind::Or => self.input_value(node, 0) || self.input_value(node, 1),
-            NodeKind::Not => !self.input_value(node, 0),
-            NodeKind::Xor => self.input_value(node, 0) ^ self.input_value(node, 1),
-        };
+            NodeKind::And => {
+                let val = self.input_value(node, 0) && self.input_value(node, 1);
+                self.set_output(node, 0, val);
+            }
+            NodeKind::Or => {
+                let val = self.input_value(node, 0) || self.input_value(node, 1);
+                self.set_output(node, 0, val);
+            }
+            NodeKind::Not => {
+                let val = !self.input_value(node, 0);
+                self.set_output(node, 0, val);
+            }
+            NodeKind::Xor => {
+                let val = self.input_value(node, 0) ^ self.input_value(node, 1);
+                self.set_output(node, 0, val);
+            }
+            NodeKind::SubCircuit(sub) => {
+                let mut sub_runner = NaiveRunner::new(sub);
 
+                // Map parent input pins to child Input nodes
+                let input_nodes: Vec<NodeId> = sub
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| matches!(n.kind, NodeKind::Input))
+                    .map(|(id, _)| id)
+                    .collect();
 
-        self.set_output(node, 0, output);
+                for (pin_idx, &in_node_id) in input_nodes.iter().enumerate() {
+                    if pin_idx < node.inputs.len() {
+                        let val = self.input_value(node, pin_idx);
+                        sub_runner.set_input(in_node_id, 0, val);
+                    }
+                }
+
+                sub_runner.tick();
+
+                // Map child Output nodes to parent output pins
+                let output_nodes: Vec<NodeId> = sub
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| matches!(n.kind, NodeKind::Output))
+                    .map(|(id, _)| id)
+                    .collect();
+
+                for (pin_idx, &out_node_id) in output_nodes.iter().enumerate() {
+                    if pin_idx < node.outputs.len() {
+                        let val = sub_runner.output(out_node_id, 0);
+                        self.set_output(node, pin_idx, val);
+                    }
+                }
+            }
+        }
     }
+
 
     pub fn set_wire(&mut self, wire: WireId, value: bool) {
         self.wire_values[wire] = value;

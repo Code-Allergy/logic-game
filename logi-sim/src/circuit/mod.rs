@@ -30,6 +30,7 @@ pub struct Circuit {
 }
 
 
+
 impl Circuit {
     pub fn new() -> Self {
         Self {
@@ -79,7 +80,22 @@ impl Circuit {
     pub fn xor(&mut self) -> NodeId {
         self.add_node(NodeKind::Xor, 2, 1)
     }
+
+    pub fn add_subcircuit(&mut self, sub: Circuit) -> NodeId {
+        let num_inputs = sub
+            .nodes
+            .values()
+            .filter(|n| matches!(n.kind, NodeKind::Input))
+            .count();
+        let num_outputs = sub
+            .nodes
+            .values()
+            .filter(|n| matches!(n.kind, NodeKind::Output))
+            .count();
+        self.add_node(NodeKind::SubCircuit(Box::new(sub)), num_inputs, num_outputs)
+    }
 }
+
 
 
 // connections

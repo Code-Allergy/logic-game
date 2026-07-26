@@ -59,12 +59,13 @@ impl EventDrivenRunner {
     fn evaluate_node(&self, node_idx: usize) -> bool {
         let kind = &self.circuit.nodes[node_idx].kind;
         match kind {
-            NodeKind::Input | NodeKind::Output => false,
+            NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => false,
             NodeKind::And => self.input_value(node_idx, 0) && self.input_value(node_idx, 1),
             NodeKind::Or => self.input_value(node_idx, 0) || self.input_value(node_idx, 1),
             NodeKind::Not => !self.input_value(node_idx, 0),
             NodeKind::Xor => self.input_value(node_idx, 0) ^ self.input_value(node_idx, 1),
         }
+
     }
 }
 

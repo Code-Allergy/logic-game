@@ -22,64 +22,245 @@ pub struct FlattenedCircuit {
     pub node_output_pins: HashMap<(NodeId, u8), SmallVec<[usize; 2]>>,
 }
 
+struct FlattenCtx {
+    is_root: bool,
+    nodes: Vec<FlatNode>,
+    wire_count: usize,
+    node_to_idx: HashMap<NodeId, usize>,
+    wire_to_idx: HashMap<WireId, usize>,
+    idx_to_wire: Vec<WireId>,
+    node_input_pins: HashMap<(NodeId, u8), usize>,
+    node_output_pins: HashMap<(NodeId, u8), SmallVec<[usize; 2]>>,
+}
+
+impl FlattenCtx {
+    fn new() -> Self {
+        Self {
+            is_root: true,
+            nodes: Vec::new(),
+            wire_count: 0,
+            node_to_idx: HashMap::new(),
+            wire_to_idx: HashMap::new(),
+            idx_to_wire: Vec::new(),
+            node_input_pins: HashMap::new(),
+            node_output_pins: HashMap::new(),
+        }
+    }
+
+    fn inline_circuit(
+        &mut self,
+        circuit: &Circuit,
+        external_inputs: &[usize],
+        external_outputs: &[SmallVec<[usize; 2]>],
+    ) {
+        let mut local_wire_map: HashMap<WireId, usize> = HashMap::new();
+
+        for (wire_id, _) in &circuit.wires {
+            let global_w_idx = self.wire_count;
+            self.wire_count += 1;
+            local_wire_map.insert(wire_id, global_w_idx);
+
+            if self.is_root {
+                self.wire_to_idx.insert(wire_id, global_w_idx);
+                self.idx_to_wire.push(wire_id);
+            }
+        }
+
+        let child_input_nodes: Vec<NodeId> = circuit
+            .nodes
+            .iter()
+            .filter(|(_, n)| matches!(n.kind, NodeKind::Input))
+            .map(|(id, _)| id)
+            .collect();
+
+        let child_output_nodes: Vec<NodeId> = circuit
+            .nodes
+            .iter()
+            .filter(|(_, n)| matches!(n.kind, NodeKind::Output))
+            .map(|(id, _)| id)
+            .collect();
+
+        // 1. Process Input nodes first to map external input wires
+        for (node_id, node) in &circuit.nodes {
+            if matches!(node.kind, NodeKind::Input) {
+                if !self.is_root {
+                    if let Some(input_idx) = child_input_nodes.iter().position(|&id| id == node_id) {
+                        if let Some(&ext_w_idx) = external_inputs.get(input_idx) {
+                            for pin in &node.outputs {
+                                for w in &pin.wires {
+                                    local_wire_map.insert(*w, ext_w_idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1.5 Process Output nodes first to map external output wires
+        for (node_id, node) in &circuit.nodes {
+            if matches!(node.kind, NodeKind::Output) {
+                if !self.is_root {
+                    if let Some(output_idx) = child_output_nodes.iter().position(|&id| id == node_id) {
+                        if let Some(ext_out_wires) = external_outputs.get(output_idx) {
+                            for pin in &node.inputs {
+                                if let Some(w) = pin.wire {
+                                    for &ext_w_idx in ext_out_wires {
+                                        local_wire_map.insert(w, ext_w_idx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Process all other nodes
+        for (node_id, node) in &circuit.nodes {
+            match &node.kind {
+                NodeKind::Input => {
+                    if self.is_root {
+                        let n_idx = self.nodes.len();
+                        self.node_to_idx.insert(node_id, n_idx);
+
+                        let mut outputs = SmallVec::new();
+                        for (pin_idx, pin) in node.outputs.iter().enumerate() {
+                            let mut out_wires = SmallVec::new();
+                            for w in &pin.wires {
+                                if let Some(&w_idx) = local_wire_map.get(w) {
+                                    outputs.push(w_idx);
+                                    out_wires.push(w_idx);
+                                }
+                            }
+                            self.node_output_pins
+                                .insert((node_id, pin_idx as u8), out_wires);
+                        }
+
+                        self.nodes.push(FlatNode {
+                            kind: NodeKind::Input,
+                            inputs: SmallVec::new(),
+                            outputs,
+                        });
+                    }
+                }
+                NodeKind::Output => {
+                    if self.is_root {
+                        let n_idx = self.nodes.len();
+                        self.node_to_idx.insert(node_id, n_idx);
+
+                        let mut inputs = SmallVec::new();
+                        for (pin_idx, pin) in node.inputs.iter().enumerate() {
+                            if let Some(w) = pin.wire {
+                                if let Some(&w_idx) = local_wire_map.get(&w) {
+                                    inputs.push(w_idx);
+                                    self.node_input_pins
+                                        .insert((node_id, pin_idx as u8), w_idx);
+                                }
+                            }
+                        }
+
+                        self.nodes.push(FlatNode {
+                            kind: NodeKind::Output,
+                            inputs,
+                            outputs: SmallVec::new(),
+                        });
+                    }
+                }
+
+                NodeKind::SubCircuit(sub) => {
+                    let mut sub_ext_inputs: SmallVec<[usize; 4]> = SmallVec::new();
+
+                    for (pin_idx, pin) in node.inputs.iter().enumerate() {
+                        if let Some(w) = pin.wire {
+                            if let Some(&w_idx) = local_wire_map.get(&w) {
+                                sub_ext_inputs.push(w_idx);
+                                if self.is_root {
+                                    self.node_input_pins.insert((node_id, pin_idx as u8), w_idx);
+                                }
+                            }
+                        }
+                    }
+
+                    let mut sub_ext_outputs: SmallVec<[SmallVec<[usize; 2]>; 2]> = SmallVec::new();
+
+                    for (pin_idx, pin) in node.outputs.iter().enumerate() {
+                        let mut out_wires = SmallVec::new();
+                        for w in &pin.wires {
+                            if let Some(&w_idx) = local_wire_map.get(w) {
+                                out_wires.push(w_idx);
+                            }
+                        }
+                        if self.is_root {
+                            self.node_output_pins
+                                .insert((node_id, pin_idx as u8), out_wires.clone());
+                        }
+                        sub_ext_outputs.push(out_wires);
+                    }
+
+                    let prev_is_root = self.is_root;
+                    self.is_root = false;
+                    self.inline_circuit(sub, &sub_ext_inputs, &sub_ext_outputs);
+                    self.is_root = prev_is_root;
+                }
+                _ => {
+                    let n_idx = self.nodes.len();
+                    if self.is_root {
+                        self.node_to_idx.insert(node_id, n_idx);
+                    }
+
+                    let mut inputs = SmallVec::new();
+                    for (pin_idx, pin) in node.inputs.iter().enumerate() {
+                        if let Some(w) = pin.wire {
+                            if let Some(&w_idx) = local_wire_map.get(&w) {
+                                inputs.push(w_idx);
+                                if self.is_root {
+                                    self.node_input_pins.insert((node_id, pin_idx as u8), w_idx);
+                                }
+                            }
+                        }
+                    }
+
+                    let mut outputs = SmallVec::new();
+                    for (pin_idx, pin) in node.outputs.iter().enumerate() {
+                        let mut out_wires = SmallVec::new();
+                        for w in &pin.wires {
+                            if let Some(&w_idx) = local_wire_map.get(w) {
+                                outputs.push(w_idx);
+                                out_wires.push(w_idx);
+                            }
+                        }
+                        if self.is_root {
+                            self.node_output_pins
+                                .insert((node_id, pin_idx as u8), out_wires);
+                        }
+                    }
+
+                    self.nodes.push(FlatNode {
+                        kind: node.kind.clone(),
+                        inputs,
+                        outputs,
+                    });
+                }
+            }
+        }
+    }
+}
+
 impl FlattenedCircuit {
     /// Compiles a Level 0 `Circuit` into a Level 1 `FlattenedCircuit`.
     pub fn compile(circuit: &Circuit) -> Self {
-        let mut wire_to_idx = HashMap::new();
-        let mut idx_to_wire = Vec::new();
-
-        for (wire_id, _) in &circuit.wires {
-            let idx = idx_to_wire.len();
-            wire_to_idx.insert(wire_id, idx);
-            idx_to_wire.push(wire_id);
-        }
-
-        let mut node_to_idx = HashMap::new();
-        let mut nodes = Vec::new();
-        let mut node_input_pins = HashMap::new();
-        let mut node_output_pins = HashMap::new();
-
-        for (node_id, node) in &circuit.nodes {
-            let n_idx = nodes.len();
-            node_to_idx.insert(node_id, n_idx);
-
-            let mut inputs = SmallVec::new();
-            for (pin_idx, pin) in node.inputs.iter().enumerate() {
-                if let Some(w) = pin.wire {
-                    if let Some(&w_idx) = wire_to_idx.get(&w) {
-                        inputs.push(w_idx);
-                        node_input_pins.insert((node_id, pin_idx as u8), w_idx);
-                    }
-                }
-            }
-
-            let mut outputs = SmallVec::new();
-            for (pin_idx, pin) in node.outputs.iter().enumerate() {
-                let mut out_wires = SmallVec::new();
-                for w in &pin.wires {
-                    if let Some(&w_idx) = wire_to_idx.get(w) {
-                        outputs.push(w_idx);
-                        out_wires.push(w_idx);
-                    }
-                }
-                node_output_pins.insert((node_id, pin_idx as u8), out_wires);
-            }
-
-            nodes.push(FlatNode {
-                kind: node.kind.clone(),
-                inputs,
-                outputs,
-            });
-        }
+        let mut ctx = FlattenCtx::new();
+        ctx.inline_circuit(circuit, &[], &[]);
 
         Self {
-            nodes,
-            wire_count: idx_to_wire.len(),
-            node_to_idx,
-            wire_to_idx,
-            idx_to_wire,
-            node_input_pins,
-            node_output_pins,
+            nodes: ctx.nodes,
+            wire_count: ctx.wire_count,
+            node_to_idx: ctx.node_to_idx,
+            wire_to_idx: ctx.wire_to_idx,
+            idx_to_wire: ctx.idx_to_wire,
+            node_input_pins: ctx.node_input_pins,
+            node_output_pins: ctx.node_output_pins,
         }
     }
 }

@@ -8,7 +8,9 @@ new_key_type! {
     pub struct NodeId;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+use crate::circuit::Circuit;
+
+#[derive(Clone, Debug)]
 pub enum NodeKind {
     Input,
     Output,
@@ -17,10 +19,30 @@ pub enum NodeKind {
     Or,
     Not,
     Xor,
+
+    SubCircuit(Box<Circuit>),
 }
 
+impl PartialEq for NodeKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (NodeKind::Input, NodeKind::Input) => true,
+            (NodeKind::Output, NodeKind::Output) => true,
+            (NodeKind::And, NodeKind::And) => true,
+            (NodeKind::Or, NodeKind::Or) => true,
+            (NodeKind::Not, NodeKind::Not) => true,
+            (NodeKind::Xor, NodeKind::Xor) => true,
+            (NodeKind::SubCircuit(a), NodeKind::SubCircuit(b)) => {
+                std::ptr::eq(a.as_ref(), b.as_ref())
+            }
+            _ => false,
+        }
+    }
+}
 
-#[derive(Clone, Debug)]
+impl Eq for NodeKind {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
     pub kind: NodeKind,
 

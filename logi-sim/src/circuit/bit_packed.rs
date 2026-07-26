@@ -95,12 +95,13 @@ impl BitPackedCircuit {
         for &n_idx in &topo_order {
             let f_node = &flat.nodes[n_idx];
             let op = match f_node.kind {
-                NodeKind::Input | NodeKind::Output => continue,
+                NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => continue,
                 NodeKind::And => SimdOp::And,
                 NodeKind::Or => SimdOp::Or,
                 NodeKind::Not => SimdOp::Not,
                 NodeKind::Xor => SimdOp::Xor,
             };
+
 
             let in0 = f_node.inputs.first().copied().unwrap_or(0) as u32;
             let in1 = f_node.inputs.get(1).copied().unwrap_or(0) as u32;

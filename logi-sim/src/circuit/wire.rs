@@ -20,10 +20,11 @@ pub struct InputRef {
     pub pin: u8,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wire {
     pub source: OutputRef,
 
     pub sinks: SmallVec<[InputRef; 4]>,
 }
+
 
