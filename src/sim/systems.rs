@@ -1,18 +1,87 @@
+//! Bevy systems for the simulation editor view.
+//!
+//! All systems in this file operate exclusively on the game-side model
+//! ([`GameCircuit`], [`GameNode`], [`GameWire`]) and the [`SimBridge`]
+//! translation layer. They never import `logi-sim` types directly.
+
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
-use sim_core::{GateId, GateType};
 
-use crate::temp::{CONNECTION_Z_LEVEL, GateComponentSelectionEvent};
-
-use super::{
-    ConnectionLine, GateComponent, Selected, SelectedGate, Simulation, SimulationConfig,
-    calculate_connection_geometry, find_entity_at_position, get_gate_sprite,
-    spatial_grid::SpatialGrid,
+use crate::{
+    SAVE_FILE_NAME,
+    temp::GateComponentSelectionEvent,
 };
 
-// Initialization
+use super::{
+    ConnectionLine, GameCircuit, GameNodeKind, GateComponent, SavedSimulation, Selected,
+    SelectedGate, SimBridge, SimulationConfig,
+    calculate_connection_geometry,
+    spatial_grid::SpatialGrid,
+    get_gate_sprite,
+};
 
-// System to initialize or rebuild the grid
+// ─────────────────────────────────────────────────────────────────────────────
+// Bridge flush (PreUpdate)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Drain pending `AddNode`/`AddWire` responses from the worker thread so that
+/// ID mappings are fully populated before any rendering system runs.
+pub fn bridge_flush_system(mut bridge: ResMut<SimBridge>) {
+    bridge.flush_pending();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Initialization
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Spawn Bevy sprite entities for every node in the current [`GameCircuit`].
+pub fn draw_gates_system(game_circuit: Res<GameCircuit>, mut commands: Commands) {
+    for node in game_circuit.nodes.values() {
+        let sprite = get_gate_sprite(&node.kind);
+        commands.spawn((
+            sprite,
+            Transform::from_xyz(node.position.x, node.position.y, 0.0),
+            GateComponent::new(node.id, node.position),
+        ));
+    }
+}
+
+/// Spawn line-sprite entities for every wire in the current [`GameCircuit`].
+pub fn draw_connections_system(
+    game_circuit: Res<GameCircuit>,
+    gate_query: Query<(&Transform, &GateComponent)>,
+    mut commands: Commands,
+) {
+    let positions: std::collections::HashMap<_, _> = gate_query
+        .iter()
+        .map(|(t, gc)| (gc.id, t.translation))
+        .collect();
+
+    for wire in game_circuit.wires.values() {
+        let (Some(&from), Some(&to)) = (
+            positions.get(&wire.source_node),
+            positions.get(&wire.sink_node),
+        ) else {
+            continue;
+        };
+        let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
+        commands.spawn((
+            Sprite {
+                color: Color::WHITE,
+                custom_size: Some(Vec2::new(dist, 2.0)),
+                ..Default::default()
+            },
+            Transform { translation: mid, rotation: rot, scale: Vec3::ONE },
+            ConnectionLine {
+                id: wire.id,
+                source_node: wire.source_node,
+                sink_node: wire.sink_node,
+            },
+        ));
+    }
+}
+
+/// Rebuild the spatial grid from current gate positions.
 pub fn rebuild_spatial_grid_system(
     mut grid: ResMut<SpatialGrid>,
     query: Query<(Entity, &Transform, &GateComponent)>,
@@ -22,213 +91,80 @@ pub fn rebuild_spatial_grid_system(
         grid.insert(entity, transform.translation.truncate());
     }
 }
-/// Initialize the simulation gate visual components
-pub fn draw_gates_system(mut simulation: ResMut<Simulation>, mut commands: Commands) {
-    for gate in simulation.circuit.components.values_mut() {
-        // let x = 50.0 + offset * 100.0; // Adjust the x position based on the index
-        let x = 50.0;
-        let y = 0.0;
-        let sprite = get_gate_sprite(&gate.get_type());
 
-        commands.spawn((
-            sprite,
-            Transform::from_xyz(x, y, 0.0),
-            GateComponent::new(gate.id(), Vec2::new(x, y)),
-        ));
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-frame update systems
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Update `Time<Fixed>` timestep when `SimulationConfig` tick rate changes.
+pub fn update_tickrate_system(
+    sim_config: Res<SimulationConfig>,
+    mut time: ResMut<Time<Fixed>>,
+) {
+    if sim_config.is_changed() {
+        let tick_rate = sim_config.tick_rate.max(0.001);
+        time.set_timestep_seconds(1.0 / tick_rate);
     }
 }
 
-// This system runs at startup to create the initial connection lines
-pub fn draw_connections_system(
-    simulation: Res<Simulation>,
-    gate_query: Query<(&Transform, &GateComponent)>,
-    mut commands: Commands,
+/// Recolour Input/Output gate sprites based on live wire state from [`SimBridge`].
+pub fn update_input_colours_system(
+    bridge: Res<SimBridge>,
+    game_circuit: Res<GameCircuit>,
+    mut query: Query<(&mut Sprite, &GateComponent)>,
 ) {
-    // Create a mapping of GateId to world position
-    let mut gate_positions: std::collections::HashMap<GateId, Vec3> =
-        std::collections::HashMap::new();
-
-    // First pass: collect all gate positions
-    for (transform, gate_component) in gate_query.iter() {
-        gate_positions.insert(gate_component.id, transform.translation);
-    }
-
-    // Second pass: create connection lines for each connection in the circuit
-    for connection in simulation.circuit.connections.iter() {
-        if let (Some(from_pos), Some(to_pos)) = (
-            gate_positions.get(&connection.source),
-            gate_positions.get(&connection.target),
-        ) {
-            let (mid_point, rotation, distance) = calculate_connection_geometry(from_pos, to_pos);
-
-            // Create a line entity
-            commands.spawn((
-                Sprite {
-                    color: Color::WHITE,
-                    custom_size: Some(Vec2::new(distance, 2.0)), // Line with thickness of 2 pixels
-                    ..Default::default()
-                },
-                Transform {
-                    translation: mid_point,
-                    rotation,
-                    scale: Vec3::ONE,
-                },
-                ConnectionLine {
-                    from_gate: connection.source,
-                    to_gate: connection.target,
-                },
-            ));
+    for (mut sprite, gc) in query.iter_mut() {
+        let Some(node) = game_circuit.nodes.get(&gc.id) else { continue };
+        match &node.kind {
+            GameNodeKind::Input => {
+                // For an Input node read output pin 0 (its only pin).
+                let on = bridge.node_output(gc.id, 0);
+                sprite.color = if on {
+                    Color::srgb(0.0, 1.0, 0.0)
+                } else {
+                    Color::srgb(0.8, 0.0, 0.0)
+                };
+            }
+            GameNodeKind::Output => {
+                // Output nodes have one input wire; read it.
+                let on = bridge.node_output(gc.id, 0);
+                sprite.color = if on {
+                    Color::srgb(1.0, 1.0, 1.0)
+                } else {
+                    Color::srgb(0.1, 0.1, 0.1)
+                };
+            }
+            _ => {}
         }
     }
 }
 
-pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, mut time: ResMut<Time<Fixed>>) {
-    if sim_config.is_changed() {
-        time.set_timestep_seconds(1.0 / sim_config.tick_rate);
-    }
-}
-
+/// Update connection-line transform when gates move.
 #[allow(clippy::type_complexity)]
 pub fn update_connections_system(
-    mut param_set: ParamSet<(
-        Query<(&Transform, &GateComponent)>,
-        Query<(&mut Transform, &mut Sprite, &ConnectionLine)>,
-    )>,
+    gate_query: Query<(&Transform, &GateComponent)>,
+    mut line_query: Query<(&mut Transform, &mut Sprite, &ConnectionLine), Without<GateComponent>>,
 ) {
-    // Create a mapping of GateId to world position
-    let mut gate_positions: std::collections::HashMap<GateId, Vec3> =
-        std::collections::HashMap::new();
+    let positions: std::collections::HashMap<_, _> = gate_query
+        .iter()
+        .map(|(t, gc)| (gc.id, t.translation))
+        .collect();
 
-    // Collect all gate positions using the first query in the param set
-    for (transform, gate_component) in param_set.p0().iter() {
-        gate_positions.insert(gate_component.id, transform.translation);
-    }
-
-    // Update each connection line using the second query in the param set
-    for (mut transform, mut sprite, connection) in param_set.p1().iter_mut() {
-        if let (Some(from_pos), Some(to_pos)) = (
-            gate_positions.get(&connection.from_gate),
-            gate_positions.get(&connection.to_gate),
-        ) {
-            // Calculate the mid point between the two gates
-            let mid_point = (*from_pos + *to_pos) / 2.0;
-
-            // Calculate the direction vector
-            let direction = (*to_pos - *from_pos).normalize();
-
-            // Calculate the distance between gates
-            let distance = (*to_pos - *from_pos).length();
-
-            // Update line position, rotation, and size
-            transform.translation.x = mid_point.x;
-            transform.translation.y = mid_point.y;
-            transform.translation.z = CONNECTION_Z_LEVEL;
-            transform.rotation = Quat::from_rotation_arc(Vec3::X, direction);
-            sprite.custom_size = Some(Vec2::new(distance, 2.0));
-        }
+    for (mut transform, mut sprite, line) in line_query.iter_mut() {
+        let (Some(&from), Some(&to)) = (
+            positions.get(&line.source_node),
+            positions.get(&line.sink_node),
+        ) else {
+            continue;
+        };
+        let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
+        transform.translation = mid;
+        transform.rotation = rot;
+        sprite.custom_size = Some(Vec2::new(dist, 2.0));
     }
 }
 
-pub fn update_inputs_on_left_click(
-    q_window: Query<&Window, With<PrimaryWindow>>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-    q_camera: Query<(&Camera, &GlobalTransform)>,
-    mut query: Query<(Entity, &Transform, &GateComponent)>,
-    mut select_writer: MessageWriter<GateComponentSelectionEvent>,
-) {
-    // TODO 0.16 BEVY
-    let (camera, camera_transform) = q_camera.single().unwrap();
-    // TODO 0.16 BEVY
-    let window = q_window.single().unwrap();
-
-    // Handle selection if mouse is clicked
-    if mouse_button_input.just_pressed(MouseButton::Left)
-        && let Some(screen_pos) = window.cursor_position()
-        && let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos)
-    {
-        let distance = -ray.origin.z / ray.direction.z;
-        let world_pos = ray.origin + ray.direction * distance;
-
-        for (entity, transform, gate_component) in query.iter_mut() {
-            let sprite_size = Vec2::new(50.0, 50.0);
-            let half_extents = sprite_size / 2.0;
-
-            let local_point = transform.to_matrix().inverse().transform_point3(world_pos);
-            let local_point_2d = Vec2::new(local_point.x, local_point.y);
-
-            if local_point_2d.x >= -half_extents.x
-                && local_point_2d.x <= half_extents.x
-                && local_point_2d.y >= -half_extents.y
-                && local_point_2d.y <= half_extents.y
-            {
-                select_writer.write(GateComponentSelectionEvent {
-                    entity,
-                    component: gate_component.clone(),
-                });
-                break; // Only select one entity
-            }
-        }
-    }
-}
-
-pub fn update_selected_gate(
-    mut event_reader: MessageReader<GateComponentSelectionEvent>,
-    mut selected_gate: ResMut<SelectedGate>,
-) {
-    // Check if the event is for a gate selection
-    for event in event_reader.read() {
-        // If the selected gate is different from the one in the event, update it
-        if selected_gate.0 != Some((event.entity, event.component.id)) {
-            selected_gate.0 = Some((event.entity, event.component.id));
-            info!("Selected gate: {:?}", event.component.id);
-        }
-    }
-}
-
-pub fn ui_for_selected_gate(
-    mut contexts: EguiContexts,
-    mut sel: ResMut<SelectedGate>,
-    mut simulation: ResMut<Simulation>,
-) -> Result<(), BevyError> {
-    let ctx = contexts.ctx_mut()?;
-
-    if let Some((_entity, gate_id)) = sel.0 {
-        // Grab the gate so you can show/edit its data
-        if let Some(gate) = simulation.get_component_by_id_mut(&gate_id) {
-            // if let Some(gate) = simulation.circuit.components.get_mut(&gate_id) {
-            egui::Window::new("Gate Properties")
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    ui.label(format!("Gate ID: {:?}", gate_id));
-                    ui.label(format!("Gate Type: {:?}", gate.get_type()));
-                    // if it’s an input gate, show a toggle:
-                    if let GateType::Input = gate.get_type() {
-                        let mut value = gate.get_input(0).unwrap_or(false);
-                        let resp = ui.checkbox(&mut value, "Input Value");
-                        if resp.changed() {
-                            gate.set_input(0, Some(value));
-                        }
-                    } else if gate.get_type() == GateType::Output {
-                    }
-                    // connections
-                    ui.horizontal(|ui| {
-                        ui.label("Connections:");
-                        // ui.label(format!("{:?}", gate.get_connections()));
-                    });
-                    // ... other gate fields, sliders, etc.
-
-                    if ui.button("Close").clicked() {
-                        sel.0 = None;
-                    }
-                });
-        } else {
-            // gate went away?
-            sel.0 = None;
-        }
-    }
-    Ok(())
-}
-
+/// Update the spatial grid when gate transforms change.
 pub fn update_spatial_grid_system(
     mut grid: ResMut<SpatialGrid>,
     query: Query<(Entity, &Transform, &GateComponent), Changed<Transform>>,
@@ -238,103 +174,213 @@ pub fn update_spatial_grid_system(
     }
 }
 
-pub fn update_input_colours_system(
-    simulation: Res<Simulation>,
-    mut query: Query<(&mut Sprite, &GateComponent)>,
+// ─────────────────────────────────────────────────────────────────────────────
+// User interaction
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Toggle an Input gate's value on left-click.
+pub fn update_inputs_on_left_click(
+    q_window: Query<&Window, With<PrimaryWindow>>,
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
+    q_camera: Query<(&Camera, &GlobalTransform)>,
+    query: Query<(Entity, &Transform, &GateComponent)>,
+    mut select_writer: MessageWriter<GateComponentSelectionEvent>,
 ) {
-    for (mut sprite, gate_component) in query.iter_mut() {
-        // Get the gate from the simulation
-        if let Some(component) = simulation.circuit.components.get(&gate_component.id) {
-            // Check if the gate is an input
-            if component.get_type() == GateType::Input {
-                // Update the color based on the gate's input value
-                let color = if component.get_input(0).unwrap_or(false) {
-                    Color::srgb(0.0, 255.0, 0.0)
-                } else {
-                    Color::srgb(255.0, 0.0, 0.0)
-                };
-                sprite.color = color;
-            } else if component.get_type() == GateType::Output {
-                // Update the color based on the gate's output value
-                let color = if component.get_output(0).unwrap_or(false) {
-                    Color::srgb(255.0, 255.0, 255.0)
-                } else {
-                    Color::srgb(0.0, 0.0, 0.0)
-                };
-                sprite.color = color;
+    let Ok((camera, camera_transform)) = q_camera.single() else { return };
+    let Ok(window) = q_window.single() else { return };
+
+    if mouse_button_input.just_pressed(MouseButton::Left) {
+        let Some(screen_pos) = window.cursor_position() else { return };
+        let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) else { return };
+        let distance = -ray.origin.z / ray.direction.z;
+        let world_pos = ray.origin + ray.direction * distance;
+
+        for (entity, transform, gate) in query.iter() {
+            let half = Vec2::splat(25.0);
+            let local = transform
+                .to_matrix()
+                .inverse()
+                .transform_point3(world_pos)
+                .truncate();
+            if local.x >= -half.x && local.x <= half.x && local.y >= -half.y && local.y <= half.y
+            {
+                select_writer.write(GateComponentSelectionEvent {
+                    entity,
+                    component: *gate,
+                });
+                break;
             }
         }
     }
 }
 
+/// Update [`SelectedGate`] resource when a selection event fires.
+pub fn update_selected_gate(
+    mut event_reader: MessageReader<GateComponentSelectionEvent>,
+    mut selected_gate: ResMut<SelectedGate>,
+) {
+    for event in event_reader.read() {
+        let entry = (event.entity, event.component.id);
+        if selected_gate.0 != Some(entry) {
+            selected_gate.0 = Some(entry);
+            info!("Selected gate: {:?}", event.component.id);
+        }
+    }
+}
+
+/// Right-click to select and drag gates.
 pub fn gate_selection_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-
     grid: Res<SpatialGrid>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     query: Query<(Entity, &Transform), With<GateComponent>>,
     mut commands: Commands,
     selected_query: Query<Entity, With<Selected>>,
 ) {
-    if mouse_button_input.just_pressed(MouseButton::Right) {
-        // Remove any existing selections as right click was pressed
-        for selected_entity in selected_query.iter() {
-            commands.entity(selected_entity).remove::<Selected>();
-        }
+    if !mouse_button_input.just_pressed(MouseButton::Right) {
+        return;
+    }
+    for e in selected_query.iter() {
+        commands.entity(e).remove::<Selected>();
+    }
 
-        // TODO 0.16
-        if let Some(screen_pos) = q_window.single().unwrap().cursor_position() {
-            let (camera, global_transform) = q_camera.single().unwrap();
-            if let Ok(ray) = camera.viewport_to_world(global_transform, screen_pos) {
-                let distance = -ray.origin.z / ray.direction.z;
-                let world_pos = ray.origin + ray.direction * distance;
+    let Ok(window) = q_window.single() else { return };
+    let Ok((camera, global_transform)) = q_camera.single() else { return };
+    let Some(screen_pos) = window.cursor_position() else { return };
+    let Ok(ray) = camera.viewport_to_world(global_transform, screen_pos) else { return };
+    let distance = -ray.origin.z / ray.direction.z;
+    let world_pos = ray.origin + ray.direction * distance;
 
-                // Check for entity under cursor
-                if let Some((entity, offset)) =
-                    find_entity_at_position(world_pos.truncate(), &grid, &query)
-                {
-                    commands.entity(entity).insert(Selected { offset });
-                    info!("Selected gate entity: {:?}", entity);
-                }
+    let nearby = grid.query_near(world_pos.truncate(), 50.0);
+    for entity in nearby {
+        if let Ok((ent, transform)) = query.get(entity) {
+            let half = Vec2::splat(25.0);
+            let local = transform
+                .to_matrix()
+                .inverse()
+                .transform_point3(world_pos)
+                .truncate();
+            if local.x >= -half.x && local.x <= half.x && local.y >= -half.y && local.y <= half.y
+            {
+                let offset = transform.translation.truncate() - world_pos.truncate();
+                commands.entity(ent).insert(Selected { offset });
+                break;
             }
         }
     }
 }
 
+/// Move selected gate while right mouse button is held.
 pub fn drag_selected_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     mut query: Query<(&mut Transform, &Selected, &mut GateComponent)>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
+    mut game_circuit: ResMut<GameCircuit>,
 ) {
-    // Only process if left mouse is still held down
     if !mouse_button_input.pressed(MouseButton::Right) {
         return;
     }
+    let Ok((camera, camera_transform)) = q_camera.single() else { return };
+    let Ok(window) = q_window.single() else { return };
+    let Some(screen_pos) = window.cursor_position() else { return };
+    let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) else { return };
+    let distance = -ray.origin.z / ray.direction.z;
+    let world_pos = (ray.origin + ray.direction * distance).truncate();
 
-    // TODO 0.16 BEVY
-    let (camera, camera_transform) = q_camera.single().unwrap();
-    // TODO 0.16 BEVY
-    let window = q_window.single().unwrap();
-
-    if let Some(screen_pos) = window.cursor_position()
-        && let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos)
-    {
-        let distance = -ray.origin.z / ray.direction.z;
-        let world_pos = ray.origin + ray.direction * distance;
-
-        // Update position of all selected entities
-        for (mut transform, selected, mut gate) in query.iter_mut() {
-            // Apply the offset to make dragging feel natural
-            transform.translation.x = world_pos.x + selected.offset.x;
-            gate.position.x = transform.translation.x;
-            transform.translation.y = world_pos.y + selected.offset.y;
-            gate.position.y = transform.translation.y;
+    for (mut transform, selected, mut gate) in query.iter_mut() {
+        let new_pos = world_pos + selected.offset;
+        transform.translation.x = new_pos.x;
+        transform.translation.y = new_pos.y;
+        gate.position = new_pos;
+        // Persist position back into the game model.
+        if let Some(node) = game_circuit.nodes.get_mut(&gate.id) {
+            node.position = new_pos;
         }
     }
 }
 
-pub fn simulation_update_system(mut simulation: ResMut<Simulation>) {
-    simulation.tick();
+// ─────────────────────────────────────────────────────────────────────────────
+// Egui panels
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn simulation_config_ui_system(
+    mut sim_config: ResMut<SimulationConfig>,
+    mut contexts: EguiContexts,
+    bridge: Res<SimBridge>,
+) -> Result<(), BevyError> {
+    egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
+        ui.label("Tick Rate (Hz)");
+        ui.add(
+            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=1000.0).text("Tick Rate"),
+        );
+        ui.separator();
+        ui.label(format!("Sim ticks: {}", bridge.tick_count()));
+        ui.label(format!("Running: {}", bridge.is_running));
+    });
+    Ok(())
+}
+
+pub fn ui_for_selected_gate(
+    mut contexts: EguiContexts,
+    mut sel: ResMut<SelectedGate>,
+    game_circuit: ResMut<GameCircuit>,
+    bridge: Res<SimBridge>,
+) -> Result<(), BevyError> {
+    let ctx = contexts.ctx_mut()?;
+    if let Some((_entity, node_id)) = sel.0 {
+        // Clone what we need to avoid borrow conflicts in the closure.
+        let node = game_circuit.nodes.get(&node_id).cloned();
+        if let Some(node) = node {
+            egui::Window::new("Gate Properties")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("UUID: {}", node.id));
+                    ui.label(format!("Kind: {}", node.kind.display_name()));
+
+                    if let GameNodeKind::Input = &node.kind {
+                        // Read current driven value via bridge.
+                        let current_val = bridge.node_output(node.id, 0);
+                        let mut value = current_val;
+                        let resp = ui.checkbox(&mut value, "Driven Value");
+                        if resp.changed() {
+                            bridge.set_input(node.id, 0, value);
+                        }
+                    }
+
+                    if let Some(label) = &node.label {
+                        ui.label(format!("Label: {label}"));
+                    }
+
+                    if ui.button("Close").clicked() {
+                        sel.0 = None;
+                    }
+                });
+        } else {
+            sel.0 = None;
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Save / Load
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+pub fn save_on_exit_system(
+    mut exit_events: MessageReader<AppExit>,
+    game_circuit: Res<GameCircuit>,
+) {
+    if exit_events.read().next().is_some() {
+        if let Ok(file) = std::fs::File::create(SAVE_FILE_NAME) {
+            let saved = SavedSimulation::new(game_circuit.clone());
+            if let Err(e) = serde_json::to_writer_pretty(file, &saved) {
+                eprintln!("Failed to save simulation: {e}");
+            } else {
+                info!("Saved simulation to {SAVE_FILE_NAME}");
+            }
+        }
+    }
 }

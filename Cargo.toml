@@ -10,7 +10,8 @@ exclude = ["build", "assets"]
 name = "gate_quest"
 
 [dependencies]
-sim_core = { path = "crates/sim_core" }
+logi-sim = { path = "logi-sim" }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # egui
 bevy = { version = "0.19.0", features = ["dynamic_linking", "wayland"] }
@@ -30,7 +31,7 @@ embed-resource = "1"
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 [workspace]
 resolver = "3"
-members = ["crates/sim_core", "logi-sim", "mobile"]
+members = ["logi-sim", "mobile"]
 
 [profile.dev]
 opt-level = 1

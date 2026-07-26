@@ -103,7 +103,6 @@ dependencies = [
  "cfg-if",
  "getrandom 0.3.4",
  "once_cell",
- "serde",
  "version_check",
  "zerocopy",
 ]
@@ -3069,9 +3068,10 @@ dependencies = [
  "bevy_mod_debugdump",
  "blake3",
  "embed-resource",
+ "logi-sim",
  "serde",
  "serde_json",
- "sim_core",
+ "uuid",
 ]
 
 [[package]]
@@ -3867,7 +3867,6 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 name = "logi-sim"
 version = "0.1.0"
 dependencies = [
- "bevy",
  "criterion",
  "slotmap",
  "smallvec",
@@ -5252,16 +5251,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "sim_core"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "criterion",
- "serde",
- "uuid",
-]
 
 [[package]]
 name = "simd-adler32"

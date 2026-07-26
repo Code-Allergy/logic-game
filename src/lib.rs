@@ -1,3 +1,7 @@
+//! `gate_quest` library root.
+//!
+//! Exposes all public modules and shared constants used by `main.rs`.
+
 use bevy::{
     camera::ScalingMode, input::mouse::MouseWheel, platform::collections::HashMap, prelude::*,
     window::PrimaryWindow,
@@ -5,27 +9,20 @@ use bevy::{
 use bevy_egui::EguiContexts;
 
 pub mod editor;
-pub mod misc;
 pub mod selection;
 pub mod settings;
 pub mod settings_overlay;
 pub mod sim;
-
-/// MAIN MENU
-///
-/// This module contains the main menu for the game, which is displayed when the game is first launched.
-/// Takes in a target state to be active in
-/// Requires the 2dCamera to be setup in the main.rs file
 pub mod title;
 
 pub mod temp {
     use bevy::prelude::*;
 
     use crate::sim::GateComponent;
+
     pub const CONNECTION_Z_LEVEL: f32 = 10.0;
 
-    // TEMP - lib migration
-    #[derive(Message)]
+    #[derive(Message, Clone)]
     pub struct GateComponentSelectionEvent {
         pub entity: Entity,
         pub component: GateComponent,
@@ -36,7 +33,7 @@ pub const SAVE_FILE_NAME: &str = "./simulation.json";
 pub const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.15);
 pub const HOVERED_BUTTON: Color = Color::srgb(0.25, 0.25, 0.25);
 pub const PRESSED_BUTTON: Color = Color::srgb(0.35, 0.75, 0.35);
-pub const SIMULATION_TICK_RATE: f64 = 10.0; // 10 ticks per second
+pub const SIMULATION_TICK_RATE: f64 = 10.0;
 pub const GAME_TITLE: &str = "GateQuest";
 pub const GAME_WEB_TAG: &str = "#gatequest-canvas";
 
@@ -74,28 +71,16 @@ impl Default for GameSettings {
     }
 }
 
-/* First system run before any system state is ran */
 pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
-    // Set 2D camera
-    commands.spawn((
-        Camera2d,
-        MainCamera,
-        // Transform::from_xyz(0.0, 0.0, 500.0), // Z must be positive so it looks toward origin
-    ));
-    // catppuccin_egui::set_theme(ctx.ctx_mut(), catppuccin_egui::MOCHA);
+    commands.spawn((Camera2d, MainCamera));
 }
 
-// TODO 0.16 update
-// Refactor and simplify custom projections #
-// Areas:Rendering.
-// PRs:#17063
-// Read the primary window’s logical height (in pixels) and make 1 world unit == 1 px
 pub fn configure_camera_scaling(
-    windows: Query<&Window, With<PrimaryWindow>>, // ← query the window component :contentReference[oaicite:2]{index=2}
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<&mut Projection, With<MainCamera>>,
 ) -> Result {
-    let window = windows.single()?; // should exist exactly once
-    let height = window.height(); // logical height in pixels :contentReference[oaicite:3]{index=3}
+    let window = windows.single()?;
+    let height = window.height();
     let mut projection = cameras.single_mut()?;
 
     if let Projection::Orthographic(ortho) = projection.as_mut() {
@@ -111,13 +96,10 @@ pub fn zoom_camera(
     mut cameras: Query<&mut Projection, With<MainCamera>>,
 ) -> Result {
     let mut proj = cameras.single_mut()?;
-
     if let Projection::Orthographic(ortho) = proj.as_mut() {
         for ev in scroll_evr.read() {
-            // scale >1.0 zooms out; <1.0 zooms in
             ortho.scale = (ortho.scale * (1.0 - ev.y * 0.1)).clamp(0.1, 10.0);
         }
     }
-
     Ok(())
 }
