@@ -22,10 +22,7 @@ pub enum SimCommand {
 ///
 /// Manages circuit layout, runtime state, and an optional background thread that continuously
 /// simulates the circuit logic as fast as possible while updating a shared atomic state.
-#[cfg_attr(
-    feature = "bevy",
-    derive(bevy::prelude::Component, bevy::prelude::Resource)
-)]
+#[cfg_attr(feature = "bevy", derive(bevy::prelude::Resource))]
 pub struct SimulationEngine {
     pub circuit: Circuit,
     pub shared_state: Arc<SharedState>,

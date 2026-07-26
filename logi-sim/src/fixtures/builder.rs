@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::circuit::{Circuit, NodeId};
-use smallvec::SmallVec;
+
 
 pub struct Fixture {
     pub circuit: Circuit,
