@@ -44,6 +44,7 @@ pub enum SimCommand {
     Resume,
     Step,
     Stop,
+    SetTickRate(Option<f64>),
 }
 
 /// Events emitted from the simulation worker thread.
@@ -135,6 +136,10 @@ impl SimulationEngine {
             let mut runner = NaiveRunner::new(&circuit);
             let mut running = true;
 
+            let mut tick_rate = Some(10.0);
+            let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
+            let mut next_tick_time = std::time::Instant::now();
+
             // Perform initial wire state sync
             if let Ok(mut lock) = shared.wire_states.write() {
                 runner.for_each_wire(&mut |wire, val| {
@@ -146,6 +151,13 @@ impl SimulationEngine {
                 // Process all queued commands from main thread
                 while let Ok(cmd) = rx_cmd.try_recv() {
                     match cmd {
+                        SimCommand::SetTickRate(rate) => {
+                            tick_rate = rate;
+                            if let Some(r) = rate {
+                                tick_duration = std::time::Duration::from_secs_f64(1.0 / r.max(0.001));
+                            }
+                            next_tick_time = std::time::Instant::now();
+                        }
                         SimCommand::SetInput { node, pin, value } => {
                             runner.set_input(node, pin, value);
                         }
@@ -194,6 +206,7 @@ impl SimulationEngine {
                         }
                         SimCommand::Resume => {
                             running = true;
+                            next_tick_time = std::time::Instant::now();
                             shared.is_running.store(true, Ordering::Relaxed);
                             let _ = tx_evt.send(SimEvent::StatusChanged { is_running: true });
                         }
@@ -216,15 +229,41 @@ impl SimulationEngine {
                 }
 
                 if running {
-                    let _ = tx_evt.send(SimEvent::TickStarted {
-                        tick_count: shared.tick_count.load(Ordering::Relaxed),
-                    });
-                    runner.tick();
-                    let _tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    if let Ok(mut lock) = shared.wire_states.write() {
-                        runner.for_each_wire(&mut |wire, val| {
-                            lock.insert(wire, val);
+                    let mut should_tick = false;
+
+                    if let Some(_) = tick_rate {
+                        let now = std::time::Instant::now();
+                        if now >= next_tick_time {
+                            if now > next_tick_time + tick_duration * 2 {
+                                log::warn!("Simulation running too slowly! Skipping ticks.");
+                                next_tick_time = now;
+                            }
+                            next_tick_time += tick_duration;
+                            should_tick = true;
+                        } else {
+                            let remaining = next_tick_time.saturating_duration_since(now);
+                            if remaining > std::time::Duration::from_millis(2) {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            } else {
+                                std::thread::yield_now();
+                            }
+                        }
+                    } else {
+                        should_tick = true;
+                        std::thread::yield_now(); // Yield to prevent completely starving other threads in unlimited mode
+                    }
+
+                    if should_tick {
+                        let _ = tx_evt.send(SimEvent::TickStarted {
+                            tick_count: shared.tick_count.load(Ordering::Relaxed),
                         });
+                        runner.tick();
+                        let _tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Ok(mut lock) = shared.wire_states.write() {
+                            runner.for_each_wire(&mut |wire, val| {
+                                lock.insert(wire, val);
+                            });
+                        }
                     }
                 } else {
                     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -304,6 +343,13 @@ impl SimulationEngine {
     pub fn step(&self) {
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(SimCommand::Step);
+        }
+    }
+
+    /// Set the simulation tick rate (Hz) for the worker thread, or None for unlimited.
+    pub fn set_tick_rate(&self, tick_rate: Option<f64>) {
+        if let Some(tx) = &self.command_tx {
+            let _ = tx.send(SimCommand::SetTickRate(tick_rate));
         }
     }
 

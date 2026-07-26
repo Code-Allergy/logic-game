@@ -67,12 +67,14 @@ pub struct Simulation {
 #[derive(Resource, Debug)]
 pub struct SimulationConfig {
     pub tick_rate: f64,
+    pub unlimited_tick_rate: bool,
 }
 
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
             tick_rate: 10.0, // 10 Hz by default
+            unlimited_tick_rate: false,
         }
     }
 }
