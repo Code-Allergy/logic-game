@@ -5,6 +5,7 @@ use slotmap::SecondaryMap;
 pub struct NaiveRunner<'a> {
     circuit: &'a Circuit,
     wire_values: SecondaryMap<WireId, bool>,
+    tick_count: u64,
 }
 
 impl<'a> NaiveRunner<'a> {
@@ -18,6 +19,7 @@ impl<'a> NaiveRunner<'a> {
         Self {
             circuit,
             wire_values,
+            tick_count: 0,
         }
     }
     fn input_value(&self, node: &Node, pin: usize) -> bool {
@@ -93,8 +95,13 @@ impl<'a> NaiveRunner<'a> {
                     self.set_output(node, 0, false);
                 }
             }
-            NodeKind::Clock { period_ticks, phase } => {
-                let val = (phase % period_ticks) < (period_ticks / 2);
+            NodeKind::Clock {
+                period_ticks,
+                phase,
+            } => {
+                let period = (*period_ticks).max(1) as u64;
+                let elapsed = self.tick_count.wrapping_add(*phase as u64) % period;
+                let val = elapsed < period / 2;
                 self.set_output(node, 0, val);
             }
 
@@ -136,7 +143,6 @@ impl<'a> NaiveRunner<'a> {
         }
     }
 
-
     pub fn set_wire(&mut self, wire: WireId, value: bool) {
         self.wire_values[wire] = value;
     }
@@ -158,6 +164,7 @@ impl<'a> Runner for NaiveRunner<'a> {
         for (_, node) in &self.circuit.nodes {
             self.evaluate_node(node);
         }
+        self.tick_count += 1;
     }
 
     fn output(&self, node: NodeId, pin: u8) -> bool {
@@ -165,6 +172,10 @@ impl<'a> Runner for NaiveRunner<'a> {
         // An Output node has 1 input and 0 outputs.
         // We just read the wire connected to its input.
         self.input_value(node, pin as usize)
+    }
+
+    fn current_tick(&self) -> u64 {
+        self.tick_count
     }
 }
 
@@ -179,5 +190,3 @@ impl<'a> crate::runner::InspectableRunner for NaiveRunner<'a> {
         }
     }
 }
-
-

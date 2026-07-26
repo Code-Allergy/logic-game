@@ -34,6 +34,10 @@ impl Runner for FlatRunnerWrapper {
     fn output(&self, node: NodeId, pin: u8) -> bool {
         self.0.output(node, pin)
     }
+
+    fn current_tick(&self) -> u64 {
+        self.0.current_tick()
+    }
 }
 
 impl RunnerFactory for FlatFactory {
@@ -60,6 +64,10 @@ impl Runner for EventDrivenRunnerWrapper {
 
     fn output(&self, node: NodeId, pin: u8) -> bool {
         self.0.output(node, pin)
+    }
+
+    fn current_tick(&self) -> u64 {
+        self.0.current_tick()
     }
 }
 
@@ -88,6 +96,10 @@ impl Runner for SimdRunnerWrapper {
     fn output(&self, node: NodeId, pin: u8) -> bool {
         self.0.output(node, pin)
     }
+
+    fn current_tick(&self) -> u64 {
+        self.0.current_tick()
+    }
 }
 
 impl RunnerFactory for SimdFactory {
@@ -98,7 +110,3 @@ impl RunnerFactory for SimdFactory {
         SimdRunnerWrapper(SimdRunner::new(bit_packed))
     }
 }
-
-
-
-

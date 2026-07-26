@@ -8,6 +8,14 @@ pub trait Runner {
     fn set_input(&mut self, node: NodeId, pin: u8, value: bool);
     fn tick(&mut self);
     fn output(&self, node: NodeId, pin: u8) -> bool;
+
+    /// Returns the number of ticks that have elapsed since the runner was created.
+    ///
+    /// This is incremented once per `tick()` call and is the canonical source of
+    /// simulation time used to drive time-based nodes (e.g. `NodeKind::Clock`).
+    /// Because it only depends on how many ticks have been processed, stepping a
+    /// runner deterministically (e.g. in tests) reproduces identical results.
+    fn current_tick(&self) -> u64;
 }
 
 /// Optional extension trait for runners that support detailed wire-level state inspection
@@ -16,5 +24,3 @@ pub trait InspectableRunner: Runner {
     fn wire_value(&self, wire: WireId) -> bool;
     fn for_each_wire(&self, f: &mut dyn FnMut(WireId, bool));
 }
-
-

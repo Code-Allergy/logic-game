@@ -5,6 +5,7 @@ use crate::runner::Runner;
 pub struct FlatRunner {
     circuit: FlattenedCircuit,
     wire_values: Vec<bool>,
+    tick_count: u64,
 }
 
 impl FlatRunner {
@@ -13,6 +14,7 @@ impl FlatRunner {
         Self {
             circuit,
             wire_values: vec![false; wire_count],
+            tick_count: 0,
         }
     }
 
@@ -42,7 +44,6 @@ impl FlatRunner {
 
 impl Runner for FlatRunner {
     fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
-
         if let Some(w_indices) = self.circuit.node_output_pins.get(&(node, pin)) {
             for &w_idx in w_indices {
                 self.wire_values[w_idx] = value;
@@ -51,7 +52,6 @@ impl Runner for FlatRunner {
     }
 
     fn tick(&mut self) {
-
         for n_idx in 0..self.circuit.nodes.len() {
             let kind = &self.circuit.nodes[n_idx].kind;
             match kind {
@@ -107,14 +107,20 @@ impl Runner for FlatRunner {
                     let out = if enable { sig } else { false };
                     self.set_output(n_idx, out);
                 }
-                NodeKind::Clock { period_ticks, phase } => {
-                    let out = (phase % period_ticks) < (period_ticks / 2);
+                NodeKind::Clock {
+                    period_ticks,
+                    phase,
+                } => {
+                    let period = (*period_ticks).max(1) as u64;
+                    let elapsed = self.tick_count.wrapping_add(*phase as u64) % period;
+                    let out = elapsed < period / 2;
                     self.set_output(n_idx, out);
                 }
             }
         }
-    }
 
+        self.tick_count += 1;
+    }
 
     fn output(&self, node: NodeId, pin: u8) -> bool {
         if let Some(&w_idx) = self.circuit.node_input_pins.get(&(node, pin)) {
@@ -122,6 +128,10 @@ impl Runner for FlatRunner {
         } else {
             false
         }
+    }
+
+    fn current_tick(&self) -> u64 {
+        self.tick_count
     }
 }
 
@@ -140,4 +150,3 @@ impl crate::runner::InspectableRunner for FlatRunner {
         }
     }
 }
-

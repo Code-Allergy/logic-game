@@ -6,6 +6,7 @@ use wide::u64x4;
 pub struct SimdRunner {
     circuit: BitPackedCircuit,
     wire_values: Vec<u64x4>,
+    tick_count: u64,
 }
 
 impl SimdRunner {
@@ -14,6 +15,7 @@ impl SimdRunner {
         Self {
             circuit,
             wire_values: vec![u64x4::ZERO; wire_count],
+            tick_count: 0,
         }
     }
 
@@ -96,12 +98,16 @@ impl Runner for SimdRunner {
                 self.wire_values[out_w_idx as usize] = out;
             }
         }
+        self.tick_count += 1;
     }
-
 
     fn output(&self, node: NodeId, pin: u8) -> bool {
         let arr: [u64; 4] = self.output_u64x4(node, pin).into();
         (arr[0] & 1) != 0
+    }
+
+    fn current_tick(&self) -> u64 {
+        self.tick_count
     }
 }
 

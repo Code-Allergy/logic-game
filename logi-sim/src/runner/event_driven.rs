@@ -8,6 +8,10 @@ pub struct EventDrivenRunner {
     wire_values: Vec<bool>,
     dirty_queue: VecDeque<usize>,
     in_queue: Vec<bool>,
+    /// Node indices for `NodeKind::Clock` nodes, which are time-driven rather than
+    /// purely event-driven and must be re-evaluated every tick.
+    clock_nodes: Vec<usize>,
+    tick_count: u64,
 }
 
 impl EventDrivenRunner {
@@ -27,15 +31,26 @@ impl EventDrivenRunner {
             }
         }
 
+        let clock_nodes: Vec<usize> = circuit
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| matches!(node.kind, NodeKind::Clock { .. }))
+            .map(|(n_idx, _)| n_idx)
+            .collect();
+
         let mut runner = Self {
             circuit,
             wire_values: vec![false; wire_count],
             dirty_queue,
             in_queue,
+            clock_nodes,
+            tick_count: 0,
         };
 
-        // Run initial tick to establish steady-state logic level outputs
-        runner.tick();
+        // Run initial drain to establish steady-state logic level outputs. This does not
+        // count as an elapsed tick.
+        runner.drain_queue();
         runner
     }
 
@@ -144,13 +159,32 @@ impl EventDrivenRunner {
                 let val = if enable { sig } else { false };
                 self.set_node_outputs(n_idx, val);
             }
-            NodeKind::Clock { period_ticks, phase } => {
-                let val = (phase % period_ticks) < (period_ticks / 2);
+            NodeKind::Clock {
+                period_ticks,
+                phase,
+            } => {
+                let period = (*period_ticks).max(1) as u64;
+                let elapsed = self.tick_count.wrapping_add(*phase as u64) % period;
+                let val = elapsed < period / 2;
                 self.set_node_outputs(n_idx, val);
             }
         }
     }
 
+    /// Drains the dirty queue, propagating changes until it settles (or a safety cap is hit).
+    /// Does not advance `tick_count`.
+    fn drain_queue(&mut self) {
+        let mut iterations = 0;
+        while let Some(n_idx) = self.dirty_queue.pop_front() {
+            self.in_queue[n_idx] = false;
+            self.process_node_outputs(n_idx);
+
+            iterations += 1;
+            if iterations > 10_000 {
+                break;
+            }
+        }
+    }
 }
 
 impl Runner for EventDrivenRunner {
@@ -172,20 +206,15 @@ impl Runner for EventDrivenRunner {
     }
 
     fn tick(&mut self) {
-        let mut iterations = 0;
-        while let Some(n_idx) = self.dirty_queue.pop_front() {
-            self.in_queue[n_idx] = false;
-            self.process_node_outputs(n_idx);
-
-            iterations += 1;
-            if iterations > 10_000 {
-                break;
-            }
+        // Clock/time-driven nodes don't depend on other wires changing, so they need to be
+        // explicitly re-queued every tick in order to react to the new elapsed tick count.
+        for &n_idx in &self.clock_nodes {
+            Self::enqueue_node_static(&mut self.in_queue, &mut self.dirty_queue, n_idx);
         }
+
+        self.drain_queue();
+        self.tick_count += 1;
     }
-
-
-
 
     fn output(&self, node: NodeId, pin: u8) -> bool {
         if let Some(&w_idx) = self.circuit.node_input_pins.get(&(node, pin)) {
@@ -193,6 +222,10 @@ impl Runner for EventDrivenRunner {
         } else {
             false
         }
+    }
+
+    fn current_tick(&self) -> u64 {
+        self.tick_count
     }
 }
 

@@ -47,6 +47,9 @@ impl Runner for FlatRunnerBenchWrapper {
     fn output(&self, node: NodeId, pin: u8) -> bool {
         self.0.output(node, pin)
     }
+    fn current_tick(&self) -> u64 {
+        self.0.current_tick()
+    }
 }
 
 // 3. FlatRunner - Unoptimized
@@ -161,19 +164,22 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let mut adder8_runner = F::create(&adder8_fixture.circuit, &opt_adder8);
     let a0_node = adder8_fixture.nodes["A_0"];
     let mut toggle = false;
-    c.bench_function(&format!("{}/ripple_carry_adder_8bit_tick", factory_name), |b| {
-        b.iter_custom(|iters| {
-            let start = std::time::Instant::now();
-            for _ in 0..iters {
-                for _ in 0..BATCH_TICKS {
-                    toggle = !toggle;
-                    adder8_runner.set_input(a0_node, 0, toggle);
-                    adder8_runner.tick();
+    c.bench_function(
+        &format!("{}/ripple_carry_adder_8bit_tick", factory_name),
+        |b| {
+            b.iter_custom(|iters| {
+                let start = std::time::Instant::now();
+                for _ in 0..iters {
+                    for _ in 0..BATCH_TICKS {
+                        toggle = !toggle;
+                        adder8_runner.set_input(a0_node, 0, toggle);
+                        adder8_runner.tick();
+                    }
                 }
-            }
-            start.elapsed() / BATCH_TICKS
-        });
-    });
+                start.elapsed() / BATCH_TICKS
+            });
+        },
+    );
 
     // 6. Large 500-gate Quiescent Grid benchmark (tests event-driven speedup on large sparse events)
     let grid500_fixture = fixtures::large_quiescent_grid_500();
@@ -181,19 +187,22 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let mut grid500_runner = F::create(&grid500_fixture.circuit, &opt_grid500);
     let in0_node = grid500_fixture.nodes["In_0"];
     let mut grid_toggle = false;
-    c.bench_function(&format!("{}/large_quiescent_grid_500_tick", factory_name), |b| {
-        b.iter_custom(|iters| {
-            let start = std::time::Instant::now();
-            for _ in 0..iters {
-                for _ in 0..BATCH_TICKS {
-                    grid_toggle = !grid_toggle;
-                    grid500_runner.set_input(in0_node, 0, grid_toggle);
-                    grid500_runner.tick();
+    c.bench_function(
+        &format!("{}/large_quiescent_grid_500_tick", factory_name),
+        |b| {
+            b.iter_custom(|iters| {
+                let start = std::time::Instant::now();
+                for _ in 0..iters {
+                    for _ in 0..BATCH_TICKS {
+                        grid_toggle = !grid_toggle;
+                        grid500_runner.set_input(in0_node, 0, grid_toggle);
+                        grid500_runner.tick();
+                    }
                 }
-            }
-            start.elapsed() / BATCH_TICKS
-        });
-    });
+                start.elapsed() / BATCH_TICKS
+            });
+        },
+    );
 
     // 7. 4-Level Recursive 16-Bit Adder benchmark
     let adder16_fixture = fixtures::recursive_16bit_adder();
@@ -201,19 +210,22 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     let mut adder16_runner = F::create(&adder16_fixture.circuit, &opt_adder16);
     let a0_16 = adder16_fixture.nodes["A_0"];
     let mut toggle16 = false;
-    c.bench_function(&format!("{}/recursive_16bit_adder_tick", factory_name), |b| {
-        b.iter_custom(|iters| {
-            let start = std::time::Instant::now();
-            for _ in 0..iters {
-                for _ in 0..BATCH_TICKS {
-                    toggle16 = !toggle16;
-                    adder16_runner.set_input(a0_16, 0, toggle16);
-                    adder16_runner.tick();
+    c.bench_function(
+        &format!("{}/recursive_16bit_adder_tick", factory_name),
+        |b| {
+            b.iter_custom(|iters| {
+                let start = std::time::Instant::now();
+                for _ in 0..iters {
+                    for _ in 0..BATCH_TICKS {
+                        toggle16 = !toggle16;
+                        adder16_runner.set_input(a0_16, 0, toggle16);
+                        adder16_runner.tick();
+                    }
                 }
-            }
-            start.elapsed() / BATCH_TICKS
-        });
-    });
+                start.elapsed() / BATCH_TICKS
+            });
+        },
+    );
 
     // 8. 5-Level Deep 8-Bit CPU Core Subsystem benchmark
     let cpu_fixture = fixtures::cpu_subsystem_8bit();
@@ -236,8 +248,6 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     });
 }
 
-
-
 // ... runner factories ...
 
 pub struct EventDrivenRunnerBenchWrapper(EventDrivenRunner);
@@ -251,6 +261,9 @@ impl Runner for EventDrivenRunnerBenchWrapper {
     }
     fn output(&self, node: NodeId, pin: u8) -> bool {
         self.0.output(node, pin)
+    }
+    fn current_tick(&self) -> u64 {
+        self.0.current_tick()
     }
 }
 
@@ -292,6 +305,9 @@ impl Runner for SimdRunnerBenchWrapper {
     fn output(&self, node: NodeId, pin: u8) -> bool {
         self.0.output(node, pin)
     }
+    fn current_tick(&self) -> u64 {
+        self.0.current_tick()
+    }
 }
 
 // 7. SimdRunner - Unoptimized
@@ -320,7 +336,6 @@ impl BenchmarkRunnerFactory for SimdOptimizedBenchFactory {
     }
 }
 
-
 fn runner_benchmarks(c: &mut Criterion) {
     bench_factory::<NaiveUnoptimizedBenchFactory>(c);
     bench_factory::<NaiveOptimizedBenchFactory>(c);
@@ -345,7 +360,3 @@ criterion_group! {
     targets = runner_benchmarks
 }
 criterion_main!(benches);
-
-
-
-
