@@ -148,8 +148,10 @@ Each layer transforms the circuit data model into a lower-level, more execution-
 #### Level 0: Dynamic Graph (`Circuit`)
 - **Data Model**: `SlotMap<NodeId, Node>` & `SlotMap<WireId, Wire>`.
 - **Purpose**: Interactive UI editing in Bevy, real-time node insertion/deletion, dynamic rewiring.
+- **Primitive & Control Gate Suite**: Supports standard logic primitives (`And`, `Or`, `Not`, `Xor`, `Nand`, `Nor`, `Xnor`, `Buffer`), multiplexing/routing (`Mux`, `Demux`, `TriStateBuffer`), and clock sources (`Clock`).
 - **Nested Sub-Circuits**: Supports modular composition via `NodeKind::SubCircuit(Box<Circuit>)` and `circuit.add_subcircuit(sub)`. Input/output pins are mapped dynamically to inner `Input` and `Output` nodes.
 - **Runner**: `NaiveRunner` / `InterpreterRunner`. Evaluates node logic recursively via inner runner instances for `SubCircuit` nodes.
+
 
 #### Level 1: Flattened Direct Index Circuit (`FlattenedCircuit`)
 - **Data Model**: Contiguous `Vec<FlatNode>` and `Vec<u32>` direct index lookup arrays.

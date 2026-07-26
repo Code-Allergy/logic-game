@@ -50,6 +50,54 @@ impl<'a> NaiveRunner<'a> {
                 let val = self.input_value(node, 0) ^ self.input_value(node, 1);
                 self.set_output(node, 0, val);
             }
+            NodeKind::Nand => {
+                let val = !(self.input_value(node, 0) && self.input_value(node, 1));
+                self.set_output(node, 0, val);
+            }
+            NodeKind::Nor => {
+                let val = !(self.input_value(node, 0) || self.input_value(node, 1));
+                self.set_output(node, 0, val);
+            }
+            NodeKind::Xnor => {
+                let val = !(self.input_value(node, 0) ^ self.input_value(node, 1));
+                self.set_output(node, 0, val);
+            }
+            NodeKind::Buffer => {
+                let val = self.input_value(node, 0);
+                self.set_output(node, 0, val);
+            }
+            NodeKind::Mux => {
+                let d0 = self.input_value(node, 0);
+                let d1 = self.input_value(node, 1);
+                let sel = self.input_value(node, 2);
+                let val = if sel { d1 } else { d0 };
+                self.set_output(node, 0, val);
+            }
+            NodeKind::Demux => {
+                let input_signal = self.input_value(node, 0);
+                let sel = self.input_value(node, 1);
+                if sel {
+                    self.set_output(node, 0, false);
+                    self.set_output(node, 1, input_signal);
+                } else {
+                    self.set_output(node, 0, input_signal);
+                    self.set_output(node, 1, false);
+                }
+            }
+            NodeKind::TriStateBuffer => {
+                let input_signal = self.input_value(node, 0);
+                let enable = self.input_value(node, 1);
+                if enable {
+                    self.set_output(node, 0, input_signal);
+                } else {
+                    self.set_output(node, 0, false);
+                }
+            }
+            NodeKind::Clock { period_ticks, phase } => {
+                let val = (phase % period_ticks) < (period_ticks / 2);
+                self.set_output(node, 0, val);
+            }
+
             NodeKind::SubCircuit(sub) => {
                 let mut sub_runner = NaiveRunner::new(sub);
 

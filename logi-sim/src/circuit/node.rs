@@ -19,6 +19,14 @@ pub enum NodeKind {
     Or,
     Not,
     Xor,
+    Nand,
+    Nor,
+    Xnor,
+    Buffer,
+    Mux,
+    Demux,
+    TriStateBuffer,
+    Clock { period_ticks: u32, phase: u32 },
 
     SubCircuit(Box<Circuit>),
 }
@@ -32,6 +40,23 @@ impl PartialEq for NodeKind {
             (NodeKind::Or, NodeKind::Or) => true,
             (NodeKind::Not, NodeKind::Not) => true,
             (NodeKind::Xor, NodeKind::Xor) => true,
+            (NodeKind::Nand, NodeKind::Nand) => true,
+            (NodeKind::Nor, NodeKind::Nor) => true,
+            (NodeKind::Xnor, NodeKind::Xnor) => true,
+            (NodeKind::Buffer, NodeKind::Buffer) => true,
+            (NodeKind::Mux, NodeKind::Mux) => true,
+            (NodeKind::Demux, NodeKind::Demux) => true,
+            (NodeKind::TriStateBuffer, NodeKind::TriStateBuffer) => true,
+            (
+                NodeKind::Clock {
+                    period_ticks: p1,
+                    phase: ph1,
+                },
+                NodeKind::Clock {
+                    period_ticks: p2,
+                    phase: ph2,
+                },
+            ) => p1 == p2 && ph1 == ph2,
             (NodeKind::SubCircuit(a), NodeKind::SubCircuit(b)) => {
                 std::ptr::eq(a.as_ref(), b.as_ref())
             }
@@ -39,6 +64,7 @@ impl PartialEq for NodeKind {
         }
     }
 }
+
 
 impl Eq for NodeKind {}
 

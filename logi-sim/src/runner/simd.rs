@@ -59,17 +59,45 @@ impl Runner for SimdRunner {
         for inst in &self.circuit.instructions {
             let in0 = self.wire_values[inst.in0 as usize];
             let in1 = self.wire_values[inst.in1 as usize];
+            let in2 = self.wire_values[inst.in2 as usize];
+
+            match inst.op {
+                SimdOp::Demux => {
+                    let sig = in0;
+                    let sel = in1;
+                    let out0 = sig & !sel;
+                    let out1 = sig & sel;
+                    if let Some(&w0) = inst.outputs.first() {
+                        self.wire_values[w0 as usize] = out0;
+                    }
+                    if let Some(&w1) = inst.outputs.get(1) {
+                        self.wire_values[w1 as usize] = out1;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+
             let out = match inst.op {
                 SimdOp::And => in0 & in1,
                 SimdOp::Or => in0 | in1,
                 SimdOp::Not => !in0,
                 SimdOp::Xor => in0 ^ in1,
+                SimdOp::Nand => !(in0 & in1),
+                SimdOp::Nor => !(in0 | in1),
+                SimdOp::Xnor => !(in0 ^ in1),
+                SimdOp::Buffer => in0,
+                SimdOp::Mux => (in1 & in2) | (in0 & !in2),
+                SimdOp::TriStateBuffer => in0 & in1,
+                SimdOp::Clock => u64x4::ZERO,
+                SimdOp::Demux => unreachable!(),
             };
             for &out_w_idx in &inst.outputs {
                 self.wire_values[out_w_idx as usize] = out;
             }
         }
     }
+
 
     fn output(&self, node: NodeId, pin: u8) -> bool {
         let arr: [u64; 4] = self.output_u64x4(node, pin).into();

@@ -81,6 +81,46 @@ impl Circuit {
         self.add_node(NodeKind::Xor, 2, 1)
     }
 
+    pub fn nand(&mut self) -> NodeId {
+        self.add_node(NodeKind::Nand, 2, 1)
+    }
+
+    pub fn nor(&mut self) -> NodeId {
+        self.add_node(NodeKind::Nor, 2, 1)
+    }
+
+    pub fn xnor(&mut self) -> NodeId {
+        self.add_node(NodeKind::Xnor, 2, 1)
+    }
+
+    pub fn buffer(&mut self) -> NodeId {
+        self.add_node(NodeKind::Buffer, 1, 1)
+    }
+
+    pub fn mux(&mut self) -> NodeId {
+        self.add_node(NodeKind::Mux, 3, 1)
+    }
+
+    pub fn demux(&mut self) -> NodeId {
+        self.add_node(NodeKind::Demux, 2, 2)
+    }
+
+    pub fn tristate(&mut self) -> NodeId {
+        self.add_node(NodeKind::TriStateBuffer, 2, 1)
+    }
+
+    pub fn clock(&mut self, period_ticks: u32) -> NodeId {
+        self.add_node(
+            NodeKind::Clock {
+                period_ticks,
+                phase: 0,
+            },
+            0,
+            1,
+        )
+    }
+
+
     pub fn add_subcircuit(&mut self, sub: Circuit) -> NodeId {
         let num_inputs = sub
             .nodes

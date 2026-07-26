@@ -23,8 +23,17 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Or => "OR",
         NodeKind::Not => "NOT",
         NodeKind::Xor => "XOR",
+        NodeKind::Nand => "NAND",
+        NodeKind::Nor => "NOR",
+        NodeKind::Xnor => "XNOR",
+        NodeKind::Buffer => "BUFFER",
+        NodeKind::Mux => "MUX",
+        NodeKind::Demux => "DEMUX",
+        NodeKind::TriStateBuffer => "TRISTATE",
+        NodeKind::Clock { .. } => "CLOCK",
         NodeKind::SubCircuit(_) => "SUBCIRCUIT",
     }
 }
+
 
 

@@ -9,6 +9,14 @@ pub enum SimdOp {
     Or = 1,
     Not = 2,
     Xor = 3,
+    Nand = 4,
+    Nor = 5,
+    Xnor = 6,
+    Buffer = 7,
+    Mux = 8,
+    Demux = 9,
+    TriStateBuffer = 10,
+    Clock = 11,
 }
 
 #[derive(Clone, Debug)]
@@ -16,9 +24,9 @@ pub struct SimdGateInstruction {
     pub op: SimdOp,
     pub in0: u32,
     pub in1: u32,
+    pub in2: u32,
     pub outputs: SmallVec<[u32; 2]>,
 }
-
 
 /// Level 3 Bit-Packed SIMD Circuit Representation.
 #[derive(Clone, Debug)]
@@ -100,20 +108,30 @@ impl BitPackedCircuit {
                 NodeKind::Or => SimdOp::Or,
                 NodeKind::Not => SimdOp::Not,
                 NodeKind::Xor => SimdOp::Xor,
+                NodeKind::Nand => SimdOp::Nand,
+                NodeKind::Nor => SimdOp::Nor,
+                NodeKind::Xnor => SimdOp::Xnor,
+                NodeKind::Buffer => SimdOp::Buffer,
+                NodeKind::Mux => SimdOp::Mux,
+                NodeKind::Demux => SimdOp::Demux,
+                NodeKind::TriStateBuffer => SimdOp::TriStateBuffer,
+                NodeKind::Clock { .. } => SimdOp::Clock,
             };
-
 
             let in0 = f_node.inputs.first().copied().unwrap_or(0) as u32;
             let in1 = f_node.inputs.get(1).copied().unwrap_or(0) as u32;
+            let in2 = f_node.inputs.get(2).copied().unwrap_or(0) as u32;
             let outputs = f_node.outputs.iter().map(|&w| w as u32).collect();
 
             instructions.push(SimdGateInstruction {
                 op,
                 in0,
                 in1,
+                in2,
                 outputs,
             });
         }
+
 
 
         Self {

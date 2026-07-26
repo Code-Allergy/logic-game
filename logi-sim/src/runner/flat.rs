@@ -31,10 +31,18 @@ impl FlatRunner {
             self.wire_values[wire_idx] = value;
         }
     }
+
+    fn set_output_pin(&mut self, node_idx: usize, pin: usize, value: bool) {
+        let node = &self.circuit.nodes[node_idx];
+        if pin < node.outputs.len() {
+            self.wire_values[node.outputs[pin]] = value;
+        }
+    }
 }
 
 impl Runner for FlatRunner {
     fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
+
         if let Some(w_indices) = self.circuit.node_output_pins.get(&(node, pin)) {
             for &w_idx in w_indices {
                 self.wire_values[w_idx] = value;
@@ -42,22 +50,71 @@ impl Runner for FlatRunner {
         }
     }
 
-
     fn tick(&mut self) {
+
         for n_idx in 0..self.circuit.nodes.len() {
             let kind = &self.circuit.nodes[n_idx].kind;
-            let output = match kind {
+            match kind {
                 NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => continue,
-                NodeKind::And => self.input_value(n_idx, 0) && self.input_value(n_idx, 1),
-                NodeKind::Or => self.input_value(n_idx, 0) || self.input_value(n_idx, 1),
-                NodeKind::Not => !self.input_value(n_idx, 0),
-                NodeKind::Xor => self.input_value(n_idx, 0) ^ self.input_value(n_idx, 1),
-            };
-
-
-            self.set_output(n_idx, output);
+                NodeKind::And => {
+                    let out = self.input_value(n_idx, 0) && self.input_value(n_idx, 1);
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Or => {
+                    let out = self.input_value(n_idx, 0) || self.input_value(n_idx, 1);
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Not => {
+                    let out = !self.input_value(n_idx, 0);
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Xor => {
+                    let out = self.input_value(n_idx, 0) ^ self.input_value(n_idx, 1);
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Nand => {
+                    let out = !(self.input_value(n_idx, 0) && self.input_value(n_idx, 1));
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Nor => {
+                    let out = !(self.input_value(n_idx, 0) || self.input_value(n_idx, 1));
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Xnor => {
+                    let out = !(self.input_value(n_idx, 0) ^ self.input_value(n_idx, 1));
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Buffer => {
+                    let out = self.input_value(n_idx, 0);
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Mux => {
+                    let d0 = self.input_value(n_idx, 0);
+                    let d1 = self.input_value(n_idx, 1);
+                    let sel = self.input_value(n_idx, 2);
+                    let out = if sel { d1 } else { d0 };
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Demux => {
+                    let sig = self.input_value(n_idx, 0);
+                    let sel = self.input_value(n_idx, 1);
+                    self.set_output_pin(n_idx, 0, if !sel { sig } else { false });
+                    self.set_output_pin(n_idx, 1, if sel { sig } else { false });
+                }
+                NodeKind::TriStateBuffer => {
+                    let sig = self.input_value(n_idx, 0);
+                    let enable = self.input_value(n_idx, 1);
+                    let out = if enable { sig } else { false };
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::Clock { period_ticks, phase } => {
+                    let out = (phase % period_ticks) < (period_ticks / 2);
+                    self.set_output(n_idx, out);
+                }
+            }
         }
     }
+
 
     fn output(&self, node: NodeId, pin: u8) -> bool {
         if let Some(&w_idx) = self.circuit.node_input_pins.get(&(node, pin)) {

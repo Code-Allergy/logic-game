@@ -56,17 +56,101 @@ impl EventDrivenRunner {
         }
     }
 
-    fn evaluate_node(&self, node_idx: usize) -> bool {
-        let kind = &self.circuit.nodes[node_idx].kind;
-        match kind {
-            NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => false,
-            NodeKind::And => self.input_value(node_idx, 0) && self.input_value(node_idx, 1),
-            NodeKind::Or => self.input_value(node_idx, 0) || self.input_value(node_idx, 1),
-            NodeKind::Not => !self.input_value(node_idx, 0),
-            NodeKind::Xor => self.input_value(node_idx, 0) ^ self.input_value(node_idx, 1),
+    fn set_node_outputs(&mut self, n_idx: usize, value: bool) {
+        let outputs = &self.circuit.nodes[n_idx].outputs;
+        for &out_w_idx in outputs {
+            if self.wire_values[out_w_idx] != value {
+                self.wire_values[out_w_idx] = value;
+                for &listener_n_idx in &self.circuit.wire_listeners[out_w_idx] {
+                    Self::enqueue_node_static(
+                        &mut self.in_queue,
+                        &mut self.dirty_queue,
+                        listener_n_idx,
+                    );
+                }
+            }
         }
-
     }
+
+    fn set_output_pin(&mut self, n_idx: usize, pin: usize, value: bool) {
+        let outputs = &self.circuit.nodes[n_idx].outputs;
+        if pin < outputs.len() {
+            let out_w_idx = outputs[pin];
+            if self.wire_values[out_w_idx] != value {
+                self.wire_values[out_w_idx] = value;
+                for &listener_n_idx in &self.circuit.wire_listeners[out_w_idx] {
+                    Self::enqueue_node_static(
+                        &mut self.in_queue,
+                        &mut self.dirty_queue,
+                        listener_n_idx,
+                    );
+                }
+            }
+        }
+    }
+
+    fn process_node_outputs(&mut self, n_idx: usize) {
+        let kind = &self.circuit.nodes[n_idx].kind;
+        match kind {
+            NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => {}
+            NodeKind::And => {
+                let val = self.input_value(n_idx, 0) && self.input_value(n_idx, 1);
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Or => {
+                let val = self.input_value(n_idx, 0) || self.input_value(n_idx, 1);
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Not => {
+                let val = !self.input_value(n_idx, 0);
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Xor => {
+                let val = self.input_value(n_idx, 0) ^ self.input_value(n_idx, 1);
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Nand => {
+                let val = !(self.input_value(n_idx, 0) && self.input_value(n_idx, 1));
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Nor => {
+                let val = !(self.input_value(n_idx, 0) || self.input_value(n_idx, 1));
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Xnor => {
+                let val = !(self.input_value(n_idx, 0) ^ self.input_value(n_idx, 1));
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Buffer => {
+                let val = self.input_value(n_idx, 0);
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Mux => {
+                let d0 = self.input_value(n_idx, 0);
+                let d1 = self.input_value(n_idx, 1);
+                let sel = self.input_value(n_idx, 2);
+                let val = if sel { d1 } else { d0 };
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Demux => {
+                let sig = self.input_value(n_idx, 0);
+                let sel = self.input_value(n_idx, 1);
+                self.set_output_pin(n_idx, 0, if !sel { sig } else { false });
+                self.set_output_pin(n_idx, 1, if sel { sig } else { false });
+            }
+            NodeKind::TriStateBuffer => {
+                let sig = self.input_value(n_idx, 0);
+                let enable = self.input_value(n_idx, 1);
+                let val = if enable { sig } else { false };
+                self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::Clock { period_ticks, phase } => {
+                let val = (phase % period_ticks) < (period_ticks / 2);
+                self.set_node_outputs(n_idx, val);
+            }
+        }
+    }
+
 }
 
 impl Runner for EventDrivenRunner {
@@ -75,7 +159,6 @@ impl Runner for EventDrivenRunner {
             for &w_idx in w_indices {
                 if self.wire_values[w_idx] != value {
                     self.wire_values[w_idx] = value;
-                    // Queue all nodes listening to this wire
                     for &listener_n_idx in &self.circuit.wire_listeners[w_idx] {
                         Self::enqueue_node_static(
                             &mut self.in_queue,
@@ -89,34 +172,18 @@ impl Runner for EventDrivenRunner {
     }
 
     fn tick(&mut self) {
-        // Drain dirty queue until signal propagation stabilizes
         let mut iterations = 0;
         while let Some(n_idx) = self.dirty_queue.pop_front() {
             self.in_queue[n_idx] = false;
-            let new_output = self.evaluate_node(n_idx);
-
-            // Update outputs and enqueue listeners if output wire state toggled
-            let outputs = &self.circuit.nodes[n_idx].outputs;
-            for &out_w_idx in outputs {
-                if self.wire_values[out_w_idx] != new_output {
-                    self.wire_values[out_w_idx] = new_output;
-                    for &listener_n_idx in &self.circuit.wire_listeners[out_w_idx] {
-                        Self::enqueue_node_static(
-                            &mut self.in_queue,
-                            &mut self.dirty_queue,
-                            listener_n_idx,
-                        );
-                    }
-                }
-            }
+            self.process_node_outputs(n_idx);
 
             iterations += 1;
             if iterations > 10_000 {
-                // Safety guard against infinite feedback loops per tick
                 break;
             }
         }
     }
+
 
 
 
