@@ -68,3 +68,33 @@ fn test_threaded_simulation_engine_atomic_queries() {
     // Stop worker cleanly
     engine.stop_worker();
 }
+
+#[test]
+fn test_flat_runner_equivalence() {
+    let mut c = Circuit::new();
+    let in_a = c.input();
+    let in_b = c.input();
+    let and = c.and();
+    let out = c.output();
+
+    c.connect((in_a, 0), (and, 0));
+    c.connect((in_b, 0), (and, 1));
+    c.connect((and, 0), (out, 0));
+
+    let mut naive = NaiveRunner::new(&c);
+    let flat_circuit = FlattenedCircuit::compile(&c);
+    let mut flat = FlatRunner::new(flat_circuit);
+
+    naive.set_input(in_a, 0, true);
+    flat.set_input(in_a, 0, true);
+
+    naive.set_input(in_b, 0, true);
+    flat.set_input(in_b, 0, true);
+
+    naive.tick();
+    flat.tick();
+
+    assert_eq!(naive.output(out, 0), flat.output(out, 0));
+    assert_eq!(flat.output(out, 0), true);
+}
+
