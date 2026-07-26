@@ -340,7 +340,7 @@ impl SimBridge {
         self.inner().engine.stop_worker();
     }
 
-    pub fn set_tick_rate(&self, tick_rate: f64) {
+    pub fn set_tick_rate(&self, tick_rate: Option<f64>) {
         self.send_cmd(SimCommand::SetTickRate(tick_rate));
     }
 

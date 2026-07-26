@@ -102,8 +102,12 @@ pub fn update_tickrate_system(
     bridge: Res<SimBridge>,
 ) {
     if sim_config.is_changed() {
-        let tick_rate = sim_config.tick_rate.max(0.1);
-        bridge.set_tick_rate(tick_rate);
+        if sim_config.unlimited_tick_rate {
+            bridge.set_tick_rate(None);
+        } else {
+            let tick_rate = sim_config.tick_rate.max(0.1);
+            bridge.set_tick_rate(Some(tick_rate));
+        }
     }
 }
 
@@ -320,9 +324,14 @@ pub fn simulation_config_ui_system(
 ) -> Result<(), BevyError> {
     egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (Hz)");
-        ui.add(
-            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=1000.0).text("Tick Rate"),
+
+        ui.checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate");
+
+        ui.add_enabled(
+            !sim_config.unlimited_tick_rate,
+            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=1_000_000.0).text("Tick Rate"),
         );
+
         ui.separator();
         ui.label(format!("Sim ticks: {}", bridge.tick_count()));
         ui.label(format!("Running: {}", bridge.is_running));
