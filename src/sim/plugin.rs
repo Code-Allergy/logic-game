@@ -4,16 +4,17 @@ use bevy::prelude::*;
 
 use crate::GameState;
 use crate::sim::{
-    GameCircuit, SelectedGate, SimBridge, SimulationConfig,
+    SelectedGate, SimBridge, SimulationConfig,
     systems::{
         bridge_flush_system, drag_selected_system, draw_connections_system, draw_gates_system,
-        gate_selection_system, rebuild_spatial_grid_system, simulation_config_ui_system,
-        ui_for_selected_gate, update_connections_system, update_input_colours_system,
-        update_inputs_on_left_click, update_selected_gate, update_spatial_grid_system,
-        update_tickrate_system,
+        gate_selection_system, rebuild_spatial_grid_system, save_on_exit_system,
+        simulation_config_ui_system, ui_for_selected_gate, update_connections_system,
+        update_input_colours_system, update_inputs_on_left_click, update_selected_gate,
+        update_spatial_grid_system, update_tickrate_system,
     },
 };
 
+use super::fixtures::build_half_adder;
 use super::spatial_grid::SpatialGrid;
 
 pub struct SimulationPlugin {
@@ -33,7 +34,7 @@ impl Plugin for SimulationPlugin {
         // ── Resources inserted at startup so Bevy param validation never sees
         //    a missing resource, regardless of which GameState is active.
         //    (Bevy 0.19 validates Res<T> params *before* evaluating run_if.)
-        let game_circuit = GameCircuit::new("default");
+        let game_circuit = build_half_adder();
         let sim_bridge = SimBridge::from_circuit(&game_circuit);
 
         app
@@ -84,7 +85,10 @@ impl Plugin for SimulationPlugin {
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
                 (simulation_config_ui_system, ui_for_selected_gate).run_if(in_state(state.clone())),
-            );
+            )
+            // ── Save on exit ─────────────────────────────────────────────────
+            // Runs independently of state so that it always fires when closing
+            .add_systems(Update, save_on_exit_system);
     }
 }
 
