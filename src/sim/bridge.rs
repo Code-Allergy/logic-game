@@ -37,6 +37,7 @@ use super::model::{GameCircuit, GameNode, GameWire};
 #[derive(Resource, Default)]
 pub struct SimStateCache {
     pub wires: HashMap<Uuid, bool>,
+    pub tick_count: u64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -349,10 +350,6 @@ impl SimBridge {
     pub fn stop(&mut self) {
         self.is_running = false;
         self.inner().engine.stop_worker();
-    }
-
-    pub fn set_tick_rate(&self, tick_rate: Option<f64>) {
-        self.send_cmd(SimCommand::SetTickRate(tick_rate));
     }
 
     // ─────────────────────────────────────────────────────────────────────

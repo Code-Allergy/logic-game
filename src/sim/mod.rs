@@ -65,15 +65,11 @@ pub struct SelectedGate(pub Option<(Entity, Uuid)>);
 #[derive(Resource, Debug)]
 pub struct SimulationConfig {
     pub tick_rate: f64,
-    pub unlimited_tick_rate: bool,
 }
 
 impl Default for SimulationConfig {
     fn default() -> Self {
-        Self {
-            tick_rate: 10.0,
-            unlimited_tick_rate: false,
-        }
+        Self { tick_rate: 10.0 }
     }
 }
 

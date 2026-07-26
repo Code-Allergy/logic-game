@@ -9,7 +9,7 @@ use bevy_egui::{EguiContexts, egui};
 
 use crate::{SAVE_FILE_NAME, temp::GateComponentSelectionEvent};
 
-use logi_sim::prelude::SimEvent;
+use logi_sim::engine::SimEvent;
 
 use super::{
     ConnectionLine, GameCircuit, GameNodeKind, GateComponent, SavedSimulation, Selected,
@@ -35,7 +35,9 @@ pub fn bridge_flush_system(mut bridge: ResMut<SimBridge>, mut cache: ResMut<SimS
                     }
                 }
             }
-            SimEvent::TickStarted { .. } | SimEvent::TickCompleted { .. } => {}
+            SimEvent::TickStarted { tick_count } | SimEvent::TickCompleted { tick_count } => {
+                cache.tick_count = tick_count;
+            }
             SimEvent::StatusChanged { is_running } => {
                 bridge.is_running = is_running;
             }
@@ -113,15 +115,11 @@ pub fn rebuild_spatial_grid_system(
 // Per-frame update systems
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Update worker tickrate when `SimulationConfig` changes.
-pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, bridge: Res<SimBridge>) {
+/// Update `Time<Fixed>` timestep when `SimulationConfig` tick rate changes.
+pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, mut time: ResMut<Time<Fixed>>) {
     if sim_config.is_changed() {
-        if sim_config.unlimited_tick_rate {
-            bridge.set_tick_rate(None);
-        } else {
-            let tick_rate = sim_config.tick_rate.max(0.1);
-            bridge.set_tick_rate(Some(tick_rate));
-        }
+        let tick_rate = sim_config.tick_rate.max(0.001);
+        time.set_timestep_seconds(1.0 / tick_rate);
     }
 }
 
@@ -371,21 +369,31 @@ pub fn drag_selected_system(
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
     mut contexts: EguiContexts,
-    bridge: Res<SimBridge>,
+    mut bridge: ResMut<SimBridge>,
+    cache: Res<SimStateCache>,
 ) -> Result<(), BevyError> {
     egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (Hz)");
-
-        ui.checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate");
-
-        ui.add_enabled(
-            !sim_config.unlimited_tick_rate,
-            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=1_000_000.0).text("Tick Rate"),
-        );
-
+        ui.add(egui::Slider::new(&mut sim_config.tick_rate, 0.1..=1000.0).text("Tick Rate"));
         ui.separator();
-        ui.label(format!("Sim ticks: {}", bridge.tick_count()));
+        ui.label(format!("Sim ticks: {}", cache.tick_count));
         ui.label(format!("Running: {}", bridge.is_running));
+
+        ui.horizontal(|ui| {
+            if ui
+                .button(if bridge.is_running { "Pause" } else { "Play" })
+                .clicked()
+            {
+                if bridge.is_running {
+                    bridge.pause();
+                } else {
+                    bridge.resume();
+                }
+            }
+            if ui.button("Step").clicked() {
+                bridge.step();
+            }
+        });
     });
     Ok(())
 }

@@ -3868,7 +3868,6 @@ name = "logi-sim"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "log",
  "slotmap",
  "smallvec",
  "wide",
