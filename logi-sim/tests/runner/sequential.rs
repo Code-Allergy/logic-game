@@ -1,6 +1,7 @@
-use super::common::{FlatFactory, NaiveFactory, RunnerFactory};
+use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory};
 use logi_sim::fixtures;
 use logi_sim::runner::Runner;
+
 
 pub fn run_sequential_suite<F>()
 where
@@ -99,12 +100,19 @@ where
 }
 
 #[test]
-fn naive_sequential_suite() {
+fn sequential_suite_naive() {
+
     run_sequential_suite::<NaiveFactory>();
 }
 
 #[test]
-fn flat_sequential_suite() {
+fn sequential_suite_flat() {
     run_sequential_suite::<FlatFactory>();
 }
+
+#[test]
+fn sequential_suite_event_driven() {
+    run_sequential_suite::<EventDrivenFactory>();
+}
+
 

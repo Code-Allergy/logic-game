@@ -10,12 +10,12 @@ pub mod bevy_integration;
 
 pub mod prelude {
     pub use crate::circuit::{
-        Circuit, FlattenedCircuit, InputPin, InputRef, Node, NodeId, NodeKind, OutputPin,
-        OutputRef, Wire, WireId,
+        Circuit, EventDrivenCircuit, FlattenedCircuit, InputPin, InputRef, Node, NodeId, NodeKind,
+        OutputPin, OutputRef, Wire, WireId,
     };
     pub use crate::compiler::Compiler;
     pub use crate::engine::{SharedState, SimulationEngine};
-    pub use crate::runner::{FlatRunner, InspectableRunner, NaiveRunner, Runner};
+    pub use crate::runner::{EventDrivenRunner, FlatRunner, InspectableRunner, NaiveRunner, Runner};
 
 
     #[cfg(feature = "bevy")]

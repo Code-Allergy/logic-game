@@ -39,10 +39,38 @@ impl Runner for FlatRunnerWrapper {
 impl RunnerFactory for FlatFactory {
     type Runner<'a> = FlatRunnerWrapper;
 
-
     fn create<'a>(circuit: &'a Circuit) -> Self::Runner<'a> {
         let flat_circuit = FlattenedCircuit::compile(circuit);
         FlatRunnerWrapper(FlatRunner::new(flat_circuit))
     }
 }
+
+pub struct EventDrivenFactory;
+
+pub struct EventDrivenRunnerWrapper(EventDrivenRunner);
+
+impl Runner for EventDrivenRunnerWrapper {
+    fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
+        self.0.set_input(node, pin, value);
+    }
+
+    fn tick(&mut self) {
+        self.0.tick();
+    }
+
+    fn output(&self, node: NodeId, pin: u8) -> bool {
+        self.0.output(node, pin)
+    }
+}
+
+impl RunnerFactory for EventDrivenFactory {
+    type Runner<'a> = EventDrivenRunnerWrapper;
+
+    fn create<'a>(circuit: &'a Circuit) -> Self::Runner<'a> {
+        let event_circuit = EventDrivenCircuit::compile(circuit);
+        EventDrivenRunnerWrapper(EventDrivenRunner::new(event_circuit))
+    }
+}
+
+
 

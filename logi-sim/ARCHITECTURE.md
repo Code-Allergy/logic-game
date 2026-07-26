@@ -288,11 +288,13 @@ pub trait BenchmarkRunnerFactory {
 
 ### 6.2 Pre-Configured Benchmark Factories
 
-The suite compares 4 primary configurations:
+The suite compares 6 primary configurations side-by-side:
 1. **`NaiveRunner-unoptimized`**: Raw `Circuit` executed via `NaiveRunner`.
 2. **`NaiveRunner-optimized`**: Structural `Compiler::optimize` output executed via `NaiveRunner`.
 3. **`FlatRunner-unoptimized`**: Raw `FlattenedCircuit` executed via `FlatRunner`.
 4. **`FlatRunner-optimized`**: `FlattenedCircuit` compiled from `Compiler::optimize` output executed via `FlatRunner`.
+5. **`EventDrivenRunner-unoptimized`**: Raw `EventDrivenCircuit` executed via `EventDrivenRunner`.
+6. **`EventDrivenRunner-optimized`**: `EventDrivenCircuit` compiled from `Compiler::optimize` output executed via `EventDrivenRunner`.
 
 ### 6.3 Standardized Benchmark Circuits
 
@@ -309,6 +311,7 @@ To execute the benchmark suite and generate Criterion HTML reports:
 ```bash
 cargo bench -p logi-sim
 ```
+
 
 
 

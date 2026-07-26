@@ -130,13 +130,56 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     });
 }
 
+pub struct EventDrivenRunnerBenchWrapper(EventDrivenRunner);
+
+impl Runner for EventDrivenRunnerBenchWrapper {
+    fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
+        self.0.set_input(node, pin, value);
+    }
+    fn tick(&mut self) {
+        self.0.tick();
+    }
+    fn output(&self, node: NodeId, pin: u8) -> bool {
+        self.0.output(node, pin)
+    }
+}
+
+// 5. EventDrivenRunner - Unoptimized
+pub struct EventDrivenUnoptimizedBenchFactory;
+impl BenchmarkRunnerFactory for EventDrivenUnoptimizedBenchFactory {
+    fn name() -> &'static str {
+        "EventDrivenRunner-unoptimized"
+    }
+    type Runner<'a> = EventDrivenRunnerBenchWrapper;
+    fn create<'a>(circuit: &'a Circuit, _opt_circuit: &'a Circuit) -> Self::Runner<'a> {
+        let event_circuit = EventDrivenCircuit::compile(circuit);
+        EventDrivenRunnerBenchWrapper(EventDrivenRunner::new(event_circuit))
+    }
+}
+
+// 6. EventDrivenRunner - Optimized
+pub struct EventDrivenOptimizedBenchFactory;
+impl BenchmarkRunnerFactory for EventDrivenOptimizedBenchFactory {
+    fn name() -> &'static str {
+        "EventDrivenRunner-optimized"
+    }
+    type Runner<'a> = EventDrivenRunnerBenchWrapper;
+    fn create<'a>(_circuit: &'a Circuit, opt_circuit: &'a Circuit) -> Self::Runner<'a> {
+        let event_circuit = EventDrivenCircuit::compile(opt_circuit);
+        EventDrivenRunnerBenchWrapper(EventDrivenRunner::new(event_circuit))
+    }
+}
+
 fn runner_benchmarks(c: &mut Criterion) {
     bench_factory::<NaiveUnoptimizedBenchFactory>(c);
     bench_factory::<NaiveOptimizedBenchFactory>(c);
     bench_factory::<FlatUnoptimizedBenchFactory>(c);
     bench_factory::<FlatOptimizedBenchFactory>(c);
+    bench_factory::<EventDrivenUnoptimizedBenchFactory>(c);
+    bench_factory::<EventDrivenOptimizedBenchFactory>(c);
 }
 
 criterion_group!(benches, runner_benchmarks);
 criterion_main!(benches);
+
 

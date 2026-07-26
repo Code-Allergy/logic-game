@@ -1,6 +1,7 @@
-use super::common::{FlatFactory, NaiveFactory, RunnerFactory};
+use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory};
 use logi_sim::fixtures;
 use logi_sim::runner::Runner;
+
 
 pub fn run_complex_suite<F>()
 where
@@ -176,12 +177,19 @@ where
 }
 
 #[test]
-fn naive_complex_suite() {
+fn complex_suite_naive() {
+
     run_complex_suite::<NaiveFactory>();
 }
 
 #[test]
-fn flat_complex_suite() {
+fn complex_suite_flat() {
     run_complex_suite::<FlatFactory>();
 }
+
+#[test]
+fn complex_suite_event_driven() {
+    run_complex_suite::<EventDrivenFactory>();
+}
+
 

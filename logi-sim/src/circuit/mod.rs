@@ -1,3 +1,4 @@
+pub mod event_driven;
 pub mod flattened;
 pub mod node;
 pub mod pin;
@@ -5,11 +6,13 @@ pub mod utils;
 pub mod wire;
 
 pub use {
+    event_driven::EventDrivenCircuit,
     flattened::FlattenedCircuit,
     node::{Node, NodeId, NodeKind},
     pin::{InputPin, OutputPin},
     wire::{InputRef, OutputRef, Wire, WireId},
 };
+
 
 
 use utils::{get_in_pin_name, get_out_pin_name};

@@ -1,6 +1,7 @@
-use super::common::{FlatFactory, NaiveFactory, RunnerFactory};
+use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory};
 use logi_sim::fixtures;
 use logi_sim::runner::Runner;
+
 
 pub fn run_adders_suite<F>()
 where
@@ -91,12 +92,19 @@ where
 }
 
 #[test]
-fn naive_adders_suite() {
+fn adders_suite_naive() {
+
     run_adders_suite::<NaiveFactory>();
 }
 
 #[test]
-fn flat_adders_suite() {
+fn adders_suite_flat() {
     run_adders_suite::<FlatFactory>();
 }
+
+#[test]
+fn adders_suite_event_driven() {
+    run_adders_suite::<EventDrivenFactory>();
+}
+
 
