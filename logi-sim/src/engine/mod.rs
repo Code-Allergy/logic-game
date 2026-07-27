@@ -23,6 +23,35 @@ pub enum RunnerType {
     SimdOptimized,
 }
 
+impl RunnerType {
+    pub const ALL: &'static [RunnerType] = &[
+        RunnerType::Naive,
+        RunnerType::NaiveOptimized,
+        RunnerType::Flat,
+        RunnerType::FlatOptimized,
+        RunnerType::EventDriven,
+        RunnerType::EventDrivenOptimized,
+        RunnerType::Simd,
+        RunnerType::SimdOptimized,
+    ];
+}
+
+impl std::fmt::Display for RunnerType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            RunnerType::Naive => "Naive",
+            RunnerType::NaiveOptimized => "Naive (Optimized)",
+            RunnerType::Flat => "Flat",
+            RunnerType::FlatOptimized => "Flat (Optimized)",
+            RunnerType::EventDriven => "Event Driven",
+            RunnerType::EventDrivenOptimized => "Event Driven (Optimized)",
+            RunnerType::Simd => "SIMD",
+            RunnerType::SimdOptimized => "SIMD (Optimized)",
+        };
+        write!(f, "{}", name)
+    }
+}
+
 /// Commands sent to the simulation worker thread.
 pub enum SimCommand {
     SetInput {
@@ -66,6 +95,7 @@ pub enum SimCommand {
 pub enum SimEvent {
     TickCompleted { tick_count: u64 },
     StatusChanged { is_running: bool },
+    RunnerSet(RunnerType),
 }
 
 /// Top-level owned Simulation Engine.
@@ -278,6 +308,8 @@ impl SimulationEngine {
                 });
             }
 
+            let _ = tx_evt.send(SimEvent::RunnerSet(current_runner_type));
+
             loop {
                 // Process all queued commands from main thread
                 while let Ok(cmd) = rx_cmd.try_recv() {
@@ -285,6 +317,7 @@ impl SimulationEngine {
                         SimCommand::SetRunner(rt) => {
                             current_runner_type = rt;
                             needs_rebuild = true;
+                            let _ = tx_evt.send(SimEvent::RunnerSet(current_runner_type));
                         }
                         SimCommand::SetTickRate(rate) => {
                             tick_rate = rate;

@@ -26,6 +26,7 @@ pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation};
 pub use plugin::SimulationPlugin;
 
 use bevy::prelude::*;
+use logi_sim::engine::RunnerType;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +73,7 @@ pub struct SelectedGate(pub Option<(Entity, Uuid)>);
 pub struct SimulationConfig {
     pub tick_rate: f64,
     pub unlimited_tick_rate: bool,
+    pub current_runner: RunnerType,
 }
 
 impl Default for SimulationConfig {
@@ -79,6 +81,7 @@ impl Default for SimulationConfig {
         Self {
             tick_rate: 10.0,
             unlimited_tick_rate: false,
+            current_runner: RunnerType::default(),
         }
     }
 }
