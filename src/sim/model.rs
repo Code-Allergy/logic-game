@@ -44,9 +44,8 @@ pub enum GameNodeKind {
     Demux,
     TriStateBuffer,
     Clock { period_ticks: u32 },
-    // Sub-circuits are referenced by a saved-circuit UUID so that nested
-    // circuits can be loaded independently.
-    SubCircuit { circuit_id: Uuid },
+    // Sub-circuits hold a complete nested `GameCircuit`.
+    SubCircuit { circuit: Box<GameCircuit> },
 }
 
 impl GameNodeKind {
@@ -65,7 +64,11 @@ impl GameNodeKind {
             GameNodeKind::Mux => 3,
             GameNodeKind::Demux | GameNodeKind::TriStateBuffer => 2,
             GameNodeKind::Clock { .. } => 0,
-            GameNodeKind::SubCircuit { .. } => 0, // variable – set by bridge
+            GameNodeKind::SubCircuit { circuit } => circuit
+                .nodes
+                .values()
+                .filter(|n| matches!(n.kind, GameNodeKind::Input))
+                .count(),
         }
     }
 
@@ -86,7 +89,11 @@ impl GameNodeKind {
             GameNodeKind::Demux => 2,
             GameNodeKind::TriStateBuffer => 1,
             GameNodeKind::Clock { .. } => 1,
-            GameNodeKind::SubCircuit { .. } => 0, // variable – set by bridge
+            GameNodeKind::SubCircuit { circuit } => circuit
+                .nodes
+                .values()
+                .filter(|n| matches!(n.kind, GameNodeKind::Output))
+                .count(),
         }
     }
 
@@ -146,6 +153,7 @@ impl GameNodeKind {
 /// Stores all persistent data the editor needs for display, interaction, and
 /// serialization. The simulator counterpart is addressed via `SimBridge`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq)]
 pub struct GameNode {
     /// Stable identifier. Survives save/load and circuit switches.
     pub id: Uuid,
@@ -173,6 +181,7 @@ impl GameNode {
 
 /// A directed wire connecting one node's output pin to another node's input pin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq)]
 pub struct GameWire {
     /// Stable identifier.
     pub id: Uuid,
@@ -204,6 +213,7 @@ impl GameWire {
 /// that gets serialized to disk. `SimBridge` builds the `logi-sim` runtime from
 /// this model on demand.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, Resource)]
+#[derive(PartialEq)]
 pub struct GameCircuit {
     /// Circuit-level identifier, useful for sub-circuit references.
     pub id: Uuid,
