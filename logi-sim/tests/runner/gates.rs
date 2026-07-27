@@ -2,6 +2,7 @@ use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory
 use logi_sim::fixtures;
 use logi_sim::runner::Runner;
 
+
 // AND gate runner test
 
 pub fn run_gate_suite<F>()

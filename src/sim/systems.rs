@@ -7,12 +7,17 @@
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 
-use crate::{SAVE_FILE_NAME, temp::GateComponentSelectionEvent};
+use crate::{
+    SAVE_FILE_NAME,
+    temp::GateComponentSelectionEvent,
+};
 
 use super::{
     ConnectionLine, GameCircuit, GameNodeKind, GateComponent, SavedSimulation, Selected,
-    SelectedGate, SimBridge, SimulationConfig, calculate_connection_geometry, get_gate_sprite,
+    SelectedGate, SimBridge, SimulationConfig,
+    calculate_connection_geometry,
     spatial_grid::SpatialGrid,
+    get_gate_sprite,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,11 +71,7 @@ pub fn draw_connections_system(
                 custom_size: Some(Vec2::new(dist, 2.0)),
                 ..Default::default()
             },
-            Transform {
-                translation: mid,
-                rotation: rot,
-                scale: Vec3::ONE,
-            },
+            Transform { translation: mid, rotation: rot, scale: Vec3::ONE },
             ConnectionLine {
                 id: wire.id,
                 source_node: wire.source_node,
@@ -96,7 +97,10 @@ pub fn rebuild_spatial_grid_system(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Update `Time<Fixed>` timestep when `SimulationConfig` tick rate changes.
-pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, mut time: ResMut<Time<Fixed>>) {
+pub fn update_tickrate_system(
+    sim_config: Res<SimulationConfig>,
+    mut time: ResMut<Time<Fixed>>,
+) {
     if sim_config.is_changed() {
         let tick_rate = sim_config.tick_rate.max(0.001);
         time.set_timestep_seconds(1.0 / tick_rate);
@@ -110,9 +114,7 @@ pub fn update_input_colours_system(
     mut query: Query<(&mut Sprite, &GateComponent)>,
 ) {
     for (mut sprite, gc) in query.iter_mut() {
-        let Some(node) = game_circuit.nodes.get(&gc.id) else {
-            continue;
-        };
+        let Some(node) = game_circuit.nodes.get(&gc.id) else { continue };
         match &node.kind {
             GameNodeKind::Input => {
                 // For an Input node read output pin 0 (its only pin).
@@ -192,20 +194,12 @@ pub fn update_inputs_on_left_click(
     query: Query<(Entity, &Transform, &GateComponent)>,
     mut select_writer: MessageWriter<GateComponentSelectionEvent>,
 ) {
-    let Ok((camera, camera_transform)) = q_camera.single() else {
-        return;
-    };
-    let Ok(window) = q_window.single() else {
-        return;
-    };
+    let Ok((camera, camera_transform)) = q_camera.single() else { return };
+    let Ok(window) = q_window.single() else { return };
 
     if mouse_button_input.just_pressed(MouseButton::Left) {
-        let Some(screen_pos) = window.cursor_position() else {
-            return;
-        };
-        let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) else {
-            return;
-        };
+        let Some(screen_pos) = window.cursor_position() else { return };
+        let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) else { return };
         let distance = -ray.origin.z / ray.direction.z;
         let world_pos = ray.origin + ray.direction * distance;
 
@@ -216,7 +210,8 @@ pub fn update_inputs_on_left_click(
                 .inverse()
                 .transform_point3(world_pos)
                 .truncate();
-            if local.x >= -half.x && local.x <= half.x && local.y >= -half.y && local.y <= half.y {
+            if local.x >= -half.x && local.x <= half.x && local.y >= -half.y && local.y <= half.y
+            {
                 select_writer.write(GateComponentSelectionEvent {
                     entity,
                     component: *gate,
@@ -258,18 +253,10 @@ pub fn gate_selection_system(
         commands.entity(e).remove::<Selected>();
     }
 
-    let Ok(window) = q_window.single() else {
-        return;
-    };
-    let Ok((camera, global_transform)) = q_camera.single() else {
-        return;
-    };
-    let Some(screen_pos) = window.cursor_position() else {
-        return;
-    };
-    let Ok(ray) = camera.viewport_to_world(global_transform, screen_pos) else {
-        return;
-    };
+    let Ok(window) = q_window.single() else { return };
+    let Ok((camera, global_transform)) = q_camera.single() else { return };
+    let Some(screen_pos) = window.cursor_position() else { return };
+    let Ok(ray) = camera.viewport_to_world(global_transform, screen_pos) else { return };
     let distance = -ray.origin.z / ray.direction.z;
     let world_pos = ray.origin + ray.direction * distance;
 
@@ -282,7 +269,8 @@ pub fn gate_selection_system(
                 .inverse()
                 .transform_point3(world_pos)
                 .truncate();
-            if local.x >= -half.x && local.x <= half.x && local.y >= -half.y && local.y <= half.y {
+            if local.x >= -half.x && local.x <= half.x && local.y >= -half.y && local.y <= half.y
+            {
                 let offset = transform.translation.truncate() - world_pos.truncate();
                 commands.entity(ent).insert(Selected { offset });
                 break;
@@ -302,18 +290,10 @@ pub fn drag_selected_system(
     if !mouse_button_input.pressed(MouseButton::Right) {
         return;
     }
-    let Ok((camera, camera_transform)) = q_camera.single() else {
-        return;
-    };
-    let Ok(window) = q_window.single() else {
-        return;
-    };
-    let Some(screen_pos) = window.cursor_position() else {
-        return;
-    };
-    let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) else {
-        return;
-    };
+    let Ok((camera, camera_transform)) = q_camera.single() else { return };
+    let Ok(window) = q_window.single() else { return };
+    let Some(screen_pos) = window.cursor_position() else { return };
+    let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) else { return };
     let distance = -ray.origin.z / ray.direction.z;
     let world_pos = (ray.origin + ray.direction * distance).truncate();
 
@@ -340,7 +320,9 @@ pub fn simulation_config_ui_system(
 ) -> Result<(), BevyError> {
     egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (Hz)");
-        ui.add(egui::Slider::new(&mut sim_config.tick_rate, 0.1..=1000.0).text("Tick Rate"));
+        ui.add(
+            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=1000.0).text("Tick Rate"),
+        );
         ui.separator();
         ui.label(format!("Sim ticks: {}", bridge.tick_count()));
         ui.label(format!("Running: {}", bridge.is_running));

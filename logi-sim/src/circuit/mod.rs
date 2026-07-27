@@ -15,6 +15,9 @@ pub use {
     wire::{InputRef, OutputRef, Wire, WireId},
 };
 
+
+
+
 use utils::{get_in_pin_name, get_out_pin_name};
 
 use slotmap::SlotMap;
@@ -25,6 +28,8 @@ pub struct Circuit {
     pub nodes: SlotMap<NodeId, Node>,
     pub wires: SlotMap<WireId, Wire>,
 }
+
+
 
 impl Circuit {
     pub fn new() -> Self {
@@ -115,6 +120,7 @@ impl Circuit {
         )
     }
 
+
     pub fn add_subcircuit(&mut self, sub: Circuit) -> NodeId {
         let num_inputs = sub
             .nodes
@@ -129,6 +135,8 @@ impl Circuit {
         self.add_node(NodeKind::SubCircuit(Box::new(sub)), num_inputs, num_outputs)
     }
 }
+
+
 
 // connections
 impl Circuit {

@@ -12,8 +12,9 @@ use uuid::Uuid;
 use crate::{
     GameState,
     sim::{
-        ConnectionLine, GameCircuit, GameNode, GameNodeKind, GameWire, GateComponent, SimBridge,
-        calculate_connection_geometry, get_gate_sprite, spatial_grid::SpatialGrid,
+        ConnectionLine, GameCircuit, GameNode, GameNodeKind, GameWire, GateComponent,
+        SimBridge, calculate_connection_geometry, get_gate_sprite,
+        spatial_grid::SpatialGrid,
     },
     temp::GateComponentSelectionEvent,
 };
@@ -76,11 +77,7 @@ impl Plugin for EditorPlugin {
             .add_message::<CreateConnectionEvent>()
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
-                (
-                    editor_ui_system,
-                    process_gate_placement,
-                    handle_connection_creation,
-                )
+                (editor_ui_system, process_gate_placement, handle_connection_creation)
                     .run_if(in_state(GameState::Simulating)),
             );
     }
@@ -99,12 +96,8 @@ pub fn editor_ui_system(
     button_input: Res<ButtonInput<MouseButton>>,
 ) -> Result<(), BevyError> {
     let ctx = contexts.ctx_mut()?;
-    let Ok(window) = q_window.single() else {
-        return Ok(());
-    };
-    let Ok((camera, camera_transform)) = q_camera.single() else {
-        return Ok(());
-    };
+    let Ok(window) = q_window.single() else { return Ok(()); };
+    let Ok((camera, camera_transform)) = q_camera.single() else { return Ok(()); };
 
     egui::SidePanel::left("editor_panel")
         .resizable(true)
@@ -157,8 +150,7 @@ pub fn editor_ui_system(
                     }
                 }
                 if ui.button("CLOCK").clicked() {
-                    editor_state.selected_gate_type =
-                        Some(GameNodeKind::Clock { period_ticks: 10 });
+                    editor_state.selected_gate_type = Some(GameNodeKind::Clock { period_ticks: 10 });
                     editor_state.connection_mode = false;
                 }
             });
@@ -198,10 +190,7 @@ pub fn editor_ui_system(
                     let d = -ray.origin.z / ray.direction.z;
                     let world_pos = (ray.origin + ray.direction * d).truncate();
                     if !ctx.is_pointer_over_egui() {
-                        create_gate_events.write(CreateGateEvent {
-                            kind,
-                            position: world_pos,
-                        });
+                        create_gate_events.write(CreateGateEvent { kind, position: world_pos });
                     }
                 }
             }
@@ -304,11 +293,7 @@ pub fn handle_connection_creation(
                             custom_size: Some(Vec2::new(dist, 2.0)),
                             ..Default::default()
                         },
-                        Transform {
-                            translation: mid,
-                            rotation: rot,
-                            scale: Vec3::ONE,
-                        },
+                        Transform { translation: mid, rotation: rot, scale: Vec3::ONE },
                         ConnectionLine {
                             id: wire.id,
                             source_node: src_uuid,

@@ -2,9 +2,7 @@ use crate::circuit::{Circuit, NodeId, NodeKind, WireId};
 use std::collections::{HashSet, VecDeque};
 
 /// Optimization Pass: Prunes dead nodes and wires not transitively connected to any `Output` node.
-pub fn cull_dead_nodes_with_map(
-    circuit: &Circuit,
-) -> (Circuit, std::collections::HashMap<NodeId, NodeId>) {
+pub fn cull_dead_nodes_with_map(circuit: &Circuit) -> (Circuit, std::collections::HashMap<NodeId, NodeId>) {
     let mut live_nodes = HashSet::<NodeId>::new();
     let mut live_wires = HashSet::<WireId>::new();
     let mut queue = VecDeque::<NodeId>::new();
@@ -42,8 +40,7 @@ pub fn cull_dead_nodes_with_map(
 
     for (node_id, node) in &circuit.nodes {
         if live_nodes.contains(&node_id) {
-            let new_node =
-                optimized.add_node(node.kind.clone(), node.inputs.len(), node.outputs.len());
+            let new_node = optimized.add_node(node.kind.clone(), node.inputs.len(), node.outputs.len());
             node_map.insert(node_id, new_node);
         }
     }

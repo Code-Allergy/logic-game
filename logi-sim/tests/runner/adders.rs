@@ -2,6 +2,8 @@ use super::common::{EventDrivenFactory, FlatFactory, NaiveFactory, RunnerFactory
 use logi_sim::fixtures;
 use logi_sim::runner::Runner;
 
+
+
 pub fn run_adders_suite<F>()
 where
     F: RunnerFactory,
@@ -85,27 +87,14 @@ where
         runner.tick();
         runner.tick();
 
-        assert_eq!(
-            runner.output(sum, 0),
-            expected_sum,
-            "Sum failed for A={}, B={}, Cin={}",
-            a,
-            b,
-            cin
-        );
-        assert_eq!(
-            runner.output(cout, 0),
-            expected_cout,
-            "Cout failed for A={}, B={}, Cin={}",
-            a,
-            b,
-            cin
-        );
+        assert_eq!(runner.output(sum, 0), expected_sum, "Sum failed for A={}, B={}, Cin={}", a, b, cin);
+        assert_eq!(runner.output(cout, 0), expected_cout, "Cout failed for A={}, B={}, Cin={}", a, b, cin);
     }
 }
 
 #[test]
 fn adders_suite_naive() {
+
     run_adders_suite::<NaiveFactory>();
 }
 
