@@ -340,7 +340,7 @@ pub fn drag_selected_system(
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
     mut contexts: EguiContexts,
-    bridge: Res<SimBridge>,
+    mut bridge: ResMut<SimBridge>,
 ) -> Result<(), BevyError> {
     egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (Hz)");
@@ -355,6 +355,21 @@ pub fn simulation_config_ui_system(
         ui.separator();
         ui.label(format!("Sim ticks: {}", bridge.tick_count()));
         ui.label(format!("Running: {}", bridge.is_running));
+        ui.horizontal(|ui| {
+            if ui
+                .button(if bridge.is_running { "Pause" } else { "Play" })
+                .clicked()
+            {
+                if bridge.is_running {
+                    bridge.pause();
+                } else {
+                    bridge.resume();
+                }
+            }
+            if ui.button("Step").clicked() {
+                bridge.step();
+            }
+        });
     });
     Ok(())
 }
