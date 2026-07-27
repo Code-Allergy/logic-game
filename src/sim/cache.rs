@@ -25,8 +25,10 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use uuid::Uuid;
 
-use logi_sim::prelude::WireId;
 use logi_sim::engine::SimEvent;
+use logi_sim::prelude::WireId;
+
+use crate::sim::SimulationConfig;
 
 use super::bridge::SimBridge;
 use super::model::GameCircuit;
@@ -157,13 +159,17 @@ impl SimCache {
     /// Apply lifecycle [`SimEvent`]s (pause/resume/stop and manual step).
     ///
     /// Wire state is handled by [`Self::update_from_snapshot`] instead.
-    pub fn apply_events(&mut self, events: &[SimEvent]) {
+    pub fn apply_events(&mut self, events: &[SimEvent], sim_config: &mut SimulationConfig) {
         for event in events {
             match event {
+                SimEvent::RunnerSet(runner_type) => {
+                    sim_config.current_runner = runner_type.clone();
+                }
                 SimEvent::StatusChanged { is_running } => {
                     self.is_running = *is_running;
                 }
                 SimEvent::TickCompleted { .. } => {
+                    info!("Sim Step completed");
                     // Currently informational only; consumed so the channel
                     // doesn't grow. Callers that care about step completion
                     // can extend this branch.

@@ -24,6 +24,7 @@ use super::{
 pub fn bridge_flush_system(
     mut bridge: ResMut<SimBridge>,
     mut cache: ResMut<SimCache>,
+    mut sim_config: ResMut<SimulationConfig>,
     game_circuit: Res<GameCircuit>,
 ) {
     bridge.flush_pending();
@@ -42,7 +43,7 @@ pub fn bridge_flush_system(
     // Drain events for lifecycle signals (StatusChanged only; wire events are
     // handled by the snapshot above).
     let events = bridge.drain_events();
-    cache.apply_events(&events);
+    cache.apply_events(&events, &mut sim_config);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,7 +141,11 @@ pub fn update_input_colours_system(
         match &node.kind {
             GameNodeKind::Input => {
                 // Input nodes have one output pin (pin 0).
-                let on = cache.node_outputs.get(&(gc.id, 0)).copied().unwrap_or(false);
+                let on = cache
+                    .node_outputs
+                    .get(&(gc.id, 0))
+                    .copied()
+                    .unwrap_or(false);
                 sprite.color = if on {
                     Color::srgb(0.0, 1.0, 0.0)
                 } else {
@@ -374,7 +379,21 @@ pub fn simulation_config_ui_system(
         );
 
         ui.separator();
-        // tick_count() is a cheap AtomicU64 read — no cache needed.
+
+        let mut selected_runner = sim_config.current_runner;
+        egui::ComboBox::from_label("Active Runner")
+            .selected_text(selected_runner.to_string())
+            .show_ui(ui, |ui| {
+                for &runner_type in logi_sim::engine::RunnerType::ALL {
+                    ui.selectable_value(&mut selected_runner, runner_type, runner_type.to_string());
+                }
+            });
+
+        if selected_runner != sim_config.current_runner {
+            bridge.set_runner_type(selected_runner);
+        }
+
+        ui.separator();
         ui.label(format!("Sim ticks: {}", bridge.tick_count()));
         ui.label(format!("Running: {}", cache.is_running));
         ui.horizontal(|ui| {
@@ -416,8 +435,11 @@ pub fn ui_for_selected_gate(
 
                     if let GameNodeKind::Input = &node.kind {
                         // Read current driven value from cache.
-                        let current_val =
-                            cache.node_outputs.get(&(node.id, 0)).copied().unwrap_or(false);
+                        let current_val = cache
+                            .node_outputs
+                            .get(&(node.id, 0))
+                            .copied()
+                            .unwrap_or(false);
                         let mut value = current_val;
                         let resp = ui.checkbox(&mut value, "Driven Value");
                         if resp.changed() {
