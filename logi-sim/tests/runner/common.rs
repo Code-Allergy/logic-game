@@ -13,10 +13,10 @@ pub trait RunnerFactory {
 }
 
 impl RunnerFactory for NaiveFactory {
-    type Runner<'a> = NaiveRunner<'a>;
+    type Runner<'a> = NaiveRunner;
 
     fn create<'a>(circuit: &'a Circuit) -> Self::Runner<'a> {
-        NaiveRunner::new(circuit)
+        NaiveRunner::new(circuit.clone())
     }
 }
 
