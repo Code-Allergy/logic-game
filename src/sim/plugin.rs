@@ -6,16 +6,26 @@ use crate::GameState;
 use crate::sim::{
     SelectedGate, SimBridge, SimulationConfig,
     systems::{
-        bridge_flush_system, drag_selected_system, draw_connections_system, draw_gates_system,
-        gate_selection_system, rebuild_spatial_grid_system, save_on_exit_system,
-        simulation_config_ui_system, ui_for_selected_gate, update_connections_system,
-        update_input_colours_system, update_inputs_on_left_click, update_selected_gate,
-        update_spatial_grid_system, update_tickrate_system,
+        bridge_flush_system,
+        draw_connections_system,
+        draw_gates_system,
+        drag_selected_system,
+        gate_selection_system,
+        rebuild_spatial_grid_system,
+        simulation_config_ui_system,
+        ui_for_selected_gate,
+        update_connections_system,
+        update_input_colours_system,
+        update_inputs_on_left_click,
+        update_selected_gate,
+        update_spatial_grid_system,
+        update_tickrate_system,
+        save_on_exit_system,
     },
 };
 
-use super::fixtures::build_half_adder;
 use super::spatial_grid::SpatialGrid;
+use super::fixtures::build_half_adder;
 
 pub struct SimulationPlugin {
     pub state: GameState,
@@ -84,7 +94,8 @@ impl Plugin for SimulationPlugin {
             // at plugin build time).
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
-                (simulation_config_ui_system, ui_for_selected_gate).run_if(in_state(state.clone())),
+                (simulation_config_ui_system, ui_for_selected_gate)
+                    .run_if(in_state(state.clone())),
             )
             // ── Save on exit ─────────────────────────────────────────────────
             // Runs independently of state so that it always fires when closing

@@ -1,11 +1,7 @@
 use logi_sim::circuit::Circuit;
 use logi_sim::prelude::*;
 
-fn run_runner_test<R: Runner>(
-    mut runner: R,
-    inputs: &[(logi_sim::circuit::NodeId, u8, bool)],
-    outputs: &[(logi_sim::circuit::NodeId, u8, bool)],
-) {
+fn run_runner_test<R: Runner>(mut runner: R, inputs: &[(logi_sim::circuit::NodeId, u8, bool)], outputs: &[(logi_sim::circuit::NodeId, u8, bool)]) {
     for &(node, pin, val) in inputs {
         runner.set_input(node, pin, val);
     }
@@ -22,10 +18,7 @@ fn run_runner_test<R: Runner>(
 
 fn verify_all_runners_truth_table(
     circuit: &Circuit,
-    test_cases: Vec<(
-        Vec<(logi_sim::circuit::NodeId, u8, bool)>,
-        Vec<(logi_sim::circuit::NodeId, u8, bool)>,
-    )>,
+    test_cases: Vec<(Vec<(logi_sim::circuit::NodeId, u8, bool)>, Vec<(logi_sim::circuit::NodeId, u8, bool)>)>,
 ) {
     for (inputs, outputs) in test_cases {
         let naive = NaiveRunner::new(circuit);
@@ -125,39 +118,15 @@ fn test_mux_full_truth_table() {
     // Testing all 8 combinations of D0, D1, Sel
     let cases = vec![
         // Sel = 0 -> Output = D0
-        (
-            vec![(d0, 0, false), (d1, 0, false), (sel, 0, false)],
-            vec![(out, 0, false)],
-        ),
-        (
-            vec![(d0, 0, false), (d1, 0, true), (sel, 0, false)],
-            vec![(out, 0, false)],
-        ),
-        (
-            vec![(d0, 0, true), (d1, 0, false), (sel, 0, false)],
-            vec![(out, 0, true)],
-        ),
-        (
-            vec![(d0, 0, true), (d1, 0, true), (sel, 0, false)],
-            vec![(out, 0, true)],
-        ),
+        (vec![(d0, 0, false), (d1, 0, false), (sel, 0, false)], vec![(out, 0, false)]),
+        (vec![(d0, 0, false), (d1, 0, true),  (sel, 0, false)], vec![(out, 0, false)]),
+        (vec![(d0, 0, true),  (d1, 0, false), (sel, 0, false)], vec![(out, 0, true)]),
+        (vec![(d0, 0, true),  (d1, 0, true),  (sel, 0, false)], vec![(out, 0, true)]),
         // Sel = 1 -> Output = D1
-        (
-            vec![(d0, 0, false), (d1, 0, false), (sel, 0, true)],
-            vec![(out, 0, false)],
-        ),
-        (
-            vec![(d0, 0, false), (d1, 0, true), (sel, 0, true)],
-            vec![(out, 0, true)],
-        ),
-        (
-            vec![(d0, 0, true), (d1, 0, false), (sel, 0, true)],
-            vec![(out, 0, false)],
-        ),
-        (
-            vec![(d0, 0, true), (d1, 0, true), (sel, 0, true)],
-            vec![(out, 0, true)],
-        ),
+        (vec![(d0, 0, false), (d1, 0, false), (sel, 0, true)], vec![(out, 0, false)]),
+        (vec![(d0, 0, false), (d1, 0, true),  (sel, 0, true)], vec![(out, 0, true)]),
+        (vec![(d0, 0, true),  (d1, 0, false), (sel, 0, true)], vec![(out, 0, false)]),
+        (vec![(d0, 0, true),  (d1, 0, true),  (sel, 0, true)], vec![(out, 0, true)]),
     ];
 
     verify_all_runners_truth_table(&c, cases);
@@ -179,23 +148,11 @@ fn test_demux_full_truth_table() {
 
     let cases = vec![
         // Sel = 0 -> Out0 = Sig, Out1 = false
-        (
-            vec![(sig, 0, false), (sel, 0, false)],
-            vec![(out0, 0, false), (out1, 0, false)],
-        ),
-        (
-            vec![(sig, 0, true), (sel, 0, false)],
-            vec![(out0, 0, true), (out1, 0, false)],
-        ),
+        (vec![(sig, 0, false), (sel, 0, false)], vec![(out0, 0, false), (out1, 0, false)]),
+        (vec![(sig, 0, true),  (sel, 0, false)], vec![(out0, 0, true),  (out1, 0, false)]),
         // Sel = 1 -> Out0 = false, Out1 = Sig
-        (
-            vec![(sig, 0, false), (sel, 0, true)],
-            vec![(out0, 0, false), (out1, 0, false)],
-        ),
-        (
-            vec![(sig, 0, true), (sel, 0, true)],
-            vec![(out0, 0, false), (out1, 0, true)],
-        ),
+        (vec![(sig, 0, false), (sel, 0, true)],  vec![(out0, 0, false), (out1, 0, false)]),
+        (vec![(sig, 0, true),  (sel, 0, true)],  vec![(out0, 0, false), (out1, 0, true)]),
     ];
 
     verify_all_runners_truth_table(&c, cases);
@@ -215,23 +172,11 @@ fn test_tristate_buffer_full_truth_table() {
 
     let cases = vec![
         // Enable = 0 -> Output = false (Z)
-        (
-            vec![(sig, 0, false), (enable, 0, false)],
-            vec![(out, 0, false)],
-        ),
-        (
-            vec![(sig, 0, true), (enable, 0, false)],
-            vec![(out, 0, false)],
-        ),
+        (vec![(sig, 0, false), (enable, 0, false)], vec![(out, 0, false)]),
+        (vec![(sig, 0, true),  (enable, 0, false)], vec![(out, 0, false)]),
         // Enable = 1 -> Output = Signal
-        (
-            vec![(sig, 0, false), (enable, 0, true)],
-            vec![(out, 0, false)],
-        ),
-        (
-            vec![(sig, 0, true), (enable, 0, true)],
-            vec![(out, 0, true)],
-        ),
+        (vec![(sig, 0, false), (enable, 0, true)],  vec![(out, 0, false)]),
+        (vec![(sig, 0, true),  (enable, 0, true)],  vec![(out, 0, true)]),
     ];
 
     verify_all_runners_truth_table(&c, cases);

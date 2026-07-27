@@ -84,8 +84,7 @@ impl FlattenCtx {
         for (node_id, node) in &circuit.nodes {
             if matches!(node.kind, NodeKind::Input) {
                 if !self.is_root {
-                    if let Some(input_idx) = child_input_nodes.iter().position(|&id| id == node_id)
-                    {
+                    if let Some(input_idx) = child_input_nodes.iter().position(|&id| id == node_id) {
                         if let Some(&ext_w_idx) = external_inputs.get(input_idx) {
                             for pin in &node.outputs {
                                 for w in &pin.wires {
@@ -102,9 +101,7 @@ impl FlattenCtx {
         for (node_id, node) in &circuit.nodes {
             if matches!(node.kind, NodeKind::Output) {
                 if !self.is_root {
-                    if let Some(output_idx) =
-                        child_output_nodes.iter().position(|&id| id == node_id)
-                    {
+                    if let Some(output_idx) = child_output_nodes.iter().position(|&id| id == node_id) {
                         if let Some(ext_out_wires) = external_outputs.get(output_idx) {
                             for pin in &node.inputs {
                                 if let Some(w) = pin.wire {
@@ -157,7 +154,8 @@ impl FlattenCtx {
                             if let Some(w) = pin.wire {
                                 if let Some(&w_idx) = local_wire_map.get(&w) {
                                     inputs.push(w_idx);
-                                    self.node_input_pins.insert((node_id, pin_idx as u8), w_idx);
+                                    self.node_input_pins
+                                        .insert((node_id, pin_idx as u8), w_idx);
                                 }
                             }
                         }

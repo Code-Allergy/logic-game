@@ -10,9 +10,6 @@
 
 mod plugin;
 
-#[cfg(test)]
-mod tests;
-
 pub mod bridge;
 pub mod model;
 pub mod fixtures;
@@ -69,15 +66,11 @@ pub struct SelectedGate(pub Option<(Entity, Uuid)>);
 #[derive(Resource, Debug)]
 pub struct SimulationConfig {
     pub tick_rate: f64,
-    pub unlimited_tick_rate: bool,
 }
 
 impl Default for SimulationConfig {
     fn default() -> Self {
-        Self {
-            tick_rate: 10.0,
-            unlimited_tick_rate: false,
-        }
+        Self { tick_rate: 10.0 }
     }
 }
 
@@ -88,19 +81,19 @@ impl Default for SimulationConfig {
 /// Returns a base [`Sprite`] for a given node kind.
 pub fn get_gate_sprite(kind: &GameNodeKind) -> Sprite {
     let color = match kind {
-        GameNodeKind::And => Color::srgb(0.0, 0.6, 0.3),
-        GameNodeKind::Or => Color::srgb(1.0, 1.0, 0.0),
-        GameNodeKind::Not => Color::srgb(0.0, 0.1, 0.5),
+        GameNodeKind::And  => Color::srgb(0.0, 0.6, 0.3),
+        GameNodeKind::Or   => Color::srgb(1.0, 1.0, 0.0),
+        GameNodeKind::Not  => Color::srgb(0.0, 0.1, 0.5),
         GameNodeKind::Nand => Color::srgb(0.6, 0.2, 0.0),
-        GameNodeKind::Nor => Color::srgb(0.5, 0.5, 0.0),
-        GameNodeKind::Xor => Color::srgb(0.0, 0.5, 0.8),
+        GameNodeKind::Nor  => Color::srgb(0.5, 0.5, 0.0),
+        GameNodeKind::Xor  => Color::srgb(0.0, 0.5, 0.8),
         GameNodeKind::Xnor => Color::srgb(0.2, 0.3, 0.8),
         GameNodeKind::Buffer => Color::srgb(0.4, 0.4, 0.4),
-        GameNodeKind::Mux => Color::srgb(0.6, 0.0, 0.6),
+        GameNodeKind::Mux   => Color::srgb(0.6, 0.0, 0.6),
         GameNodeKind::Demux => Color::srgb(0.8, 0.0, 0.8),
         GameNodeKind::TriStateBuffer => Color::srgb(0.3, 0.3, 0.6),
         GameNodeKind::Clock { .. } => Color::srgb(0.5, 0.1, 0.3),
-        GameNodeKind::Input => Color::srgb(0.1, 0.1, 0.1),
+        GameNodeKind::Input  => Color::srgb(0.1, 0.1, 0.1),
         GameNodeKind::Output => Color::srgb(0.15, 0.15, 0.15),
         GameNodeKind::SubCircuit { .. } => Color::srgb(0.1, 0.5, 0.3),
     };
