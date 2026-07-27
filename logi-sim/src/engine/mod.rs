@@ -64,8 +64,6 @@ pub enum SimCommand {
 /// Events emitted from the simulation worker thread.
 #[derive(Debug, Clone)]
 pub enum SimEvent {
-    WireStateChanged { wire: WireId, value: bool },
-    TickStarted { tick_count: u64 },
     TickCompleted { tick_count: u64 },
     StatusChanged { is_running: bool },
 }
@@ -295,12 +293,10 @@ impl SimulationEngine {
             let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
             let mut next_tick_time = std::time::Instant::now();
 
-            // Perform initial wire state sync – emit WireStateChanged for every wire
-            // so the frontend cache starts with the correct initial state.
+            // Perform initial wire state sync
             if let Ok(mut lock) = shared.wire_states.write() {
                 runner.for_each_wire(&mut |wire, val| {
                     lock.insert(wire, val);
-                    let _ = tx_evt.send(SimEvent::WireStateChanged { wire, value: val });
                 });
             }
 
@@ -385,10 +381,6 @@ impl SimulationEngine {
                             let tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
                             if let Ok(mut lock) = shared.wire_states.write() {
                                 runner.for_each_wire(&mut |wire, val| {
-                                    let old = lock.get(wire).copied().unwrap_or(false);
-                                    if old != val {
-                                        let _ = tx_evt.send(SimEvent::WireStateChanged { wire, value: val });
-                                    }
                                     lock.insert(wire, val);
                                 });
                             }
@@ -432,17 +424,10 @@ impl SimulationEngine {
                             runner = build_runner(&circuit, current_runner_type);
                             needs_rebuild = false;
                         }
-                        let _ = tx_evt.send(SimEvent::TickStarted {
-                            tick_count: shared.tick_count.load(Ordering::Relaxed),
-                        });
                         runner.tick();
                         let _tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
                         if let Ok(mut lock) = shared.wire_states.write() {
                             runner.for_each_wire(&mut |wire, val| {
-                                let old = lock.get(wire).copied().unwrap_or(false);
-                                if old != val {
-                                    let _ = tx_evt.send(SimEvent::WireStateChanged { wire, value: val });
-                                }
                                 lock.insert(wire, val);
                             });
                         }

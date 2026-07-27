@@ -122,40 +122,52 @@ impl SimCache {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Event application
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────
+    // Snapshot (once per frame)
+    // ─────────────────────────────────────────────────────────────────────
 
-    /// Apply a batch of [`SimEvent`]s, updating the cache snapshot.
+    /// Refresh the cache from the simulator's shared state with a **single
+    /// `RwLock::read()`** per frame.
     ///
-    /// Called once per frame in `PreUpdate` after [`SimBridge::drain_events`].
-    pub fn apply_events(&mut self, events: &[SimEvent]) {
-        for event in events {
-            match *event {
-                SimEvent::WireStateChanged { wire, value } => {
-                    if let Some(entries) = self.wire_reverse.get(&wire) {
-                        for entry in entries {
-                            // Update the wire value (same for all entries on this wire).
-                            self.wire_values.insert(entry.wire_uuid, value);
-
-                            // Update the node pin state.
-                            match entry.direction {
-                                PinDirection::Output => {
-                                    self.node_outputs.insert((entry.node_uuid, entry.pin), value);
-                                }
-                                PinDirection::Input => {
-                                    self.node_inputs.insert((entry.node_uuid, entry.pin), value);
-                                }
-                            }
+    /// This is O(N wires) regardless of how many simulation ticks ran since the
+    /// last Bevy frame.  At high or unlimited tick rates this is far cheaper
+    /// than accumulating one `WireStateChanged` event per wire transition.
+    pub fn update_from_snapshot(&mut self, bridge: &SimBridge) {
+        bridge.snapshot_wire_states(&mut |wire_id, val| {
+            if let Some(entries) = self.wire_reverse.get(&wire_id) {
+                for entry in entries {
+                    self.wire_values.insert(entry.wire_uuid, val);
+                    match entry.direction {
+                        PinDirection::Output => {
+                            self.node_outputs.insert((entry.node_uuid, entry.pin), val);
+                        }
+                        PinDirection::Input => {
+                            self.node_inputs.insert((entry.node_uuid, entry.pin), val);
                         }
                     }
                 }
+            }
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Event application (lifecycle events only)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Apply lifecycle [`SimEvent`]s (pause/resume/stop and manual step).
+    ///
+    /// Wire state is handled by [`Self::update_from_snapshot`] instead.
+    pub fn apply_events(&mut self, events: &[SimEvent]) {
+        for event in events {
+            match event {
                 SimEvent::StatusChanged { is_running } => {
-                    self.is_running = is_running;
+                    self.is_running = *is_running;
                 }
-                // TickStarted / TickCompleted — tick_count is read directly
-                // from the bridge via the cheap AtomicU64, so we ignore these.
-                SimEvent::TickStarted { .. } | SimEvent::TickCompleted { .. } => {}
+                SimEvent::TickCompleted { .. } => {
+                    // Currently informational only; consumed so the channel
+                    // doesn't grow. Callers that care about step completion
+                    // can extend this branch.
+                }
             }
         }
     }

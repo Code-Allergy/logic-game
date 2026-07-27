@@ -361,6 +361,20 @@ impl SimBridge {
         self.shared_state.tick_count()
     }
 
+    /// Snapshot the current state of every wire with a single `RwLock::read()`.
+    ///
+    /// Calls `f(wire_id, value)` for each wire in the shared state.  This is
+    /// the intended way for [`crate::sim::SimCache`] to refresh itself once per
+    /// Bevy frame — one lock acquisition regardless of how many simulation ticks
+    /// ran since the last frame.
+    pub fn snapshot_wire_states(&self, f: &mut impl FnMut(WireId, bool)) {
+        if let Ok(lock) = self.shared_state.wire_states.read() {
+            for (wire_id, &val) in lock.iter() {
+                f(wire_id, val);
+            }
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Per-frame update (called from PreUpdate by bridge_flush_system)
     // ─────────────────────────────────────────────────────────────────────

@@ -35,6 +35,12 @@ pub fn bridge_flush_system(
         cache.rebuild_index(&game_circuit, &bridge);
     }
 
+    // Snapshot all wire states in one RwLock::read() — O(N wires), independent
+    // of how many simulation ticks ran this frame.
+    cache.update_from_snapshot(&bridge);
+
+    // Drain events for lifecycle signals (StatusChanged only; wire events are
+    // handled by the snapshot above).
     let events = bridge.drain_events();
     cache.apply_events(&events);
 }
