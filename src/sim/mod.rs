@@ -10,6 +10,9 @@
 
 mod plugin;
 
+#[cfg(test)]
+mod tests;
+
 pub mod bridge;
 pub mod model;
 pub mod spatial_grid;
