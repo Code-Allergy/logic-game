@@ -26,7 +26,11 @@ pub enum NodeKind {
     Mux,
     Demux,
     TriStateBuffer,
-    Clock { period_ticks: u32, phase: u32 },
+    Clock {
+        period_ticks: u32,
+        duty_ticks: u32,
+        phase: u32,
+    },
 
     SubCircuit(Box<Circuit>),
 }
@@ -50,13 +54,15 @@ impl PartialEq for NodeKind {
             (
                 NodeKind::Clock {
                     period_ticks: p1,
+                    duty_ticks: d1,
                     phase: ph1,
                 },
                 NodeKind::Clock {
                     period_ticks: p2,
+                    duty_ticks: d2,
                     phase: ph2,
                 },
-            ) => p1 == p2 && ph1 == ph2,
+            ) => p1 == p2 && d1 == d2 && ph1 == ph2,
             (NodeKind::SubCircuit(a), NodeKind::SubCircuit(b)) => {
                 std::ptr::eq(a.as_ref(), b.as_ref())
             }

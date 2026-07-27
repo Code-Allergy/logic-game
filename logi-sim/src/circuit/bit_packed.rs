@@ -16,7 +16,6 @@ pub enum SimdOp {
     Mux = 8,
     Demux = 9,
     TriStateBuffer = 10,
-    Clock = 11,
 }
 
 #[derive(Clone, Debug)]
@@ -28,10 +27,19 @@ pub struct SimdGateInstruction {
     pub outputs: SmallVec<[u32; 2]>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SimdClock {
+    pub period_ticks: u32,
+    pub duty_ticks: u32,
+    pub phase: u32,
+    pub outputs: SmallVec<[u32; 2]>,
+}
+
 /// Level 3 Bit-Packed SIMD Circuit Representation.
 #[derive(Clone, Debug)]
 pub struct BitPackedCircuit {
     pub instructions: Vec<SimdGateInstruction>,
+    pub clocks: Vec<SimdClock>,
     pub wire_count: usize,
     pub node_to_idx: HashMap<NodeId, usize>,
     pub wire_to_idx: HashMap<WireId, usize>,
@@ -99,6 +107,7 @@ impl BitPackedCircuit {
 
         // Convert topological nodes to compact SIMD instructions
         let mut instructions = Vec::with_capacity(node_count);
+        let mut clocks = Vec::new();
 
         for &n_idx in &topo_order {
             let f_node = &flat.nodes[n_idx];
@@ -115,7 +124,19 @@ impl BitPackedCircuit {
                 NodeKind::Mux => SimdOp::Mux,
                 NodeKind::Demux => SimdOp::Demux,
                 NodeKind::TriStateBuffer => SimdOp::TriStateBuffer,
-                NodeKind::Clock { .. } => SimdOp::Clock,
+                NodeKind::Clock {
+                    period_ticks,
+                    duty_ticks,
+                    phase,
+                } => {
+                    clocks.push(SimdClock {
+                        period_ticks,
+                        duty_ticks,
+                        phase,
+                        outputs: f_node.outputs.iter().map(|&w| w as u32).collect(),
+                    });
+                    continue;
+                }
             };
 
             let in0 = f_node.inputs.first().copied().unwrap_or(0) as u32;
@@ -134,6 +155,7 @@ impl BitPackedCircuit {
 
         Self {
             instructions,
+            clocks,
             wire_count,
             node_to_idx: flat.node_to_idx.clone(),
             wire_to_idx: flat.wire_to_idx.clone(),

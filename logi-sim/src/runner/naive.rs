@@ -106,11 +106,12 @@ impl NaiveRunner {
             }
             NodeKind::Clock {
                 period_ticks,
+                duty_ticks,
                 phase,
             } => {
                 let period = (*period_ticks).max(1) as u64;
                 let elapsed = self.tick_count.wrapping_add(*phase as u64) % period;
-                let val = elapsed < period / 2;
+                let val = elapsed < (*duty_ticks).max(1) as u64;
                 self.set_output(node_id, 0, val);
             }
 

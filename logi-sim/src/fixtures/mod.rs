@@ -685,7 +685,7 @@ pub fn cpu_subsystem_8bit() -> Fixture {
     }
 
     // Level 5 (Root): 8-Bit CPU Core Subsystem
-    let _clk_node = b.circuit.clock(2);
+    let _clk_node = b.circuit.clock(4, 1);
     let alu_op = b.input("ALU_OpSel");
 
     let mut cpu_a_in = Vec::new();

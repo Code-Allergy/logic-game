@@ -57,6 +57,16 @@ impl Runner for SimdRunner {
     }
 
     fn tick(&mut self) {
+        for clock in &self.circuit.clocks {
+            let elapsed =
+                self.tick_count.wrapping_add(clock.phase as u64) % clock.period_ticks.max(1) as u64;
+            let val = elapsed < clock.duty_ticks.max(1) as u64;
+            let vec_val = u64x4::splat(if val { u64::MAX } else { 0 });
+            for &out_w_idx in &clock.outputs {
+                self.wire_values[out_w_idx as usize] = vec_val;
+            }
+        }
+
         // Tight 256-bit SIMD vector execution loop over contiguous memory
         for inst in &self.circuit.instructions {
             let in0 = self.wire_values[inst.in0 as usize];
@@ -91,7 +101,6 @@ impl Runner for SimdRunner {
                 SimdOp::Buffer => in0,
                 SimdOp::Mux => (in1 & in2) | (in0 & !in2),
                 SimdOp::TriStateBuffer => in0 & in1,
-                SimdOp::Clock => u64x4::ZERO,
                 SimdOp::Demux => unreachable!(),
             };
             for &out_w_idx in &inst.outputs {

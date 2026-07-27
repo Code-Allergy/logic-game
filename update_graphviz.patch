@@ -1,0 +1,11 @@
+--- logi-sim/src/graphviz/util.rs
++++ logi-sim/src/graphviz/util.rs
+@@ -30,7 +30,7 @@
+         NodeKind::Mux => "MUX",
+         NodeKind::Demux => "DEMUX",
+         NodeKind::TriStateBuffer => "TRISTATE",
+-        NodeKind::Clock { .. } => "CLOCK",
++        NodeKind::Clock { .. } => "CLOCK",
+         NodeKind::SubCircuit(_) => "SUBCIRCUIT",
+     };
+     format!("{}_{}", base_name, idx)

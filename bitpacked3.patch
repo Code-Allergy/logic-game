@@ -1,0 +1,27 @@
+--- logi-sim/src/circuit/bit_packed.rs
++++ logi-sim/src/circuit/bit_packed.rs
+@@ -107,15 +107,15 @@
+                 NodeKind::Mux => SimdOp::Mux,
+                 NodeKind::Demux => SimdOp::Demux,
+                 NodeKind::TriStateBuffer => SimdOp::TriStateBuffer,
+-                NodeKind::Clock { .. } => SimdOp::Clock,
++                NodeKind::Clock { period_ticks, duty_ticks, phase } => {
++                    clocks.push(SimdClock {
++                        period_ticks: *period_ticks,
++                        duty_ticks: *duty_ticks,
++                        phase: *phase,
++                        outputs: f_node.outputs.iter().map(|&w| w as u32).collect(),
++                    });
++                    continue;
++                }
+             };
+
+             let in0 = f_node.inputs.first().copied().unwrap_or(0) as u32;
+@@ -131,6 +131,7 @@
+
+         Self {
+             instructions,
++            clocks,
+             wire_count,
+             node_to_idx: flat.node_to_idx.clone(),
+             wire_to_idx: flat.wire_to_idx.clone(),
