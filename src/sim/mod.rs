@@ -15,6 +15,7 @@ mod tests;
 
 pub mod bridge;
 pub mod model;
+pub mod fixtures;
 pub mod spatial_grid;
 pub mod systems;
 
