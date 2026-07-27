@@ -2,8 +2,9 @@ pub mod atomic_state;
 
 pub use atomic_state::SharedState;
 
-use crate::circuit::{Circuit, InputRef, NodeId, NodeKind, OutputRef, WireId};
-use crate::runner::{InspectableRunner, NaiveRunner, Runner};
+use crate::circuit::{Circuit, FlattenedCircuit, InputRef, NodeId, NodeKind, OutputRef, WireId};
+use crate::compiler::Compiler;
+use crate::runner::{FlatRunner, InspectableRunner, NaiveRunner, Runner};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -71,6 +72,12 @@ pub struct SimulationEngine {
     worker_handle: Option<JoinHandle<()>>,
 }
 
+pub fn rebuild_runner(circuit: &mut Circuit) -> FlatRunner {
+    let optimized = Compiler::optimize(circuit);
+    let flat_circuit = FlattenedCircuit::compile(&optimized);
+    FlatRunner::new(flat_circuit)
+}
+
 impl SimulationEngine {
     /// Create an engine whose event `Receiver` is held internally.
     /// Callers can take the `Receiver` via [`take_event_receiver`].
@@ -133,7 +140,7 @@ impl SimulationEngine {
         let mut circuit = self.circuit.clone();
 
         let handle = spawn(move || {
-            let mut runner = NaiveRunner::new(&circuit);
+            let mut runner = rebuild_runner(&mut circuit);
             let mut running = true;
 
             let mut tick_rate = Some(10.0);
@@ -170,7 +177,7 @@ impl SimulationEngine {
                             response_tx,
                         } => {
                             let node_id = circuit.add_node(kind, inputs, outputs);
-                            runner = NaiveRunner::new(&circuit);
+                            runner = rebuild_runner(&mut circuit);
                             let _ = response_tx.send((temp_id, node_id));
                         }
                         SimCommand::AddWire {
@@ -181,23 +188,23 @@ impl SimulationEngine {
                         } => {
                             let wire_id =
                                 circuit.connect((source.node, source.pin), (sink.node, sink.pin));
-                            runner = NaiveRunner::new(&circuit);
+                            runner = rebuild_runner(&mut circuit);
                             let _ = response_tx.send((temp_id, wire_id));
                         }
                         SimCommand::RemoveNode { node } => {
                             circuit.nodes.remove(node);
-                            runner = NaiveRunner::new(&circuit);
+                            runner = rebuild_runner(&mut circuit);
                         }
                         SimCommand::RemoveWire { wire } => {
                             circuit.wires.remove(wire);
-                            runner = NaiveRunner::new(&circuit);
+                            runner = rebuild_runner(&mut circuit);
                         }
                         SimCommand::RebuildCircuit {
                             circuit: new_circuit,
                             response_tx,
                         } => {
                             circuit = new_circuit;
-                            runner = NaiveRunner::new(&circuit);
+                            runner = rebuild_runner(&mut circuit);
                             let _ = response_tx.send(());
                         }
                         SimCommand::Pause => {
