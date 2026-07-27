@@ -159,18 +159,7 @@ impl SimBridge {
 
         let mut sorted_nodes: Vec<_> = game_circuit.nodes.values().collect();
         sorted_nodes.sort_by(|a, b| {
-            let a_is_io = matches!(&a.kind, super::model::GameNodeKind::Input | super::model::GameNodeKind::Output);
-            let b_is_io = matches!(&b.kind, super::model::GameNodeKind::Input | super::model::GameNodeKind::Output);
-
-            if a_is_io && b_is_io {
-                a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id))
-            } else if a_is_io {
-                std::cmp::Ordering::Less
-            } else if b_is_io {
-                std::cmp::Ordering::Greater
-            } else {
-                a.id.cmp(&b.id)
-            }
+            a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id))
         });
 
         for node in sorted_nodes {
@@ -256,15 +245,9 @@ impl SimBridge {
     /// Add a new node to the running simulation. The [`NodeId`] mapping is
     /// resolved asynchronously via [`flush_pending`].
     pub fn add_node(&mut self, node: &GameNode) -> Uuid {
-        let kind = if let super::model::GameNodeKind::SubCircuit { circuit: sub_game_circuit } = &node.kind {
-            let (sub_sim_circuit, _, _) = Self::build_sim_circuit(sub_game_circuit);
-            logi_sim::circuit::NodeKind::SubCircuit(Box::new(sub_sim_circuit))
-        } else if let Some(kind) = node.kind.to_sim_kind() {
-            kind
-        } else {
+        let Some(kind) = node.kind.to_sim_kind() else {
             return node.id;
         };
-
         let inputs = node.kind.input_count();
         let outputs = node.kind.output_count();
 
