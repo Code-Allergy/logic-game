@@ -12,10 +12,10 @@ use std::thread::{JoinHandle, spawn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunnerType {
-    #[default]
     Naive,
     NaiveOptimized,
     Flat,
+    #[default]
     FlatOptimized,
     EventDriven,
     EventDrivenOptimized,
