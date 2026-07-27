@@ -15,8 +15,8 @@ pub enum RunnerType {
     Naive,
     NaiveOptimized,
     Flat,
-    #[default]
     FlatOptimized,
+    #[default]
     EventDriven,
     EventDrivenOptimized,
     Simd,
