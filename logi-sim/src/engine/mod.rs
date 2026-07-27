@@ -2,14 +2,26 @@ pub mod atomic_state;
 
 pub use atomic_state::SharedState;
 
-use crate::circuit::{Circuit, FlattenedCircuit, InputRef, NodeId, NodeKind, OutputRef, WireId};
-use crate::compiler::Compiler;
-use crate::runner::{FlatRunner, InspectableRunner, NaiveRunner, Runner};
+use crate::circuit::{Circuit, InputRef, NodeId, NodeKind, OutputRef, WireId};
+use crate::runner::{InspectableRunner, NaiveRunner};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{JoinHandle, spawn};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunnerType {
+    Naive,
+    NaiveOptimized,
+    Flat,
+    #[default]
+    FlatOptimized,
+    EventDriven,
+    EventDrivenOptimized,
+    Simd,
+    SimdOptimized,
+}
 
 /// Commands sent to the simulation worker thread.
 pub enum SimCommand {
@@ -46,6 +58,7 @@ pub enum SimCommand {
     Step,
     Stop,
     SetTickRate(Option<f64>),
+    SetRunner(RunnerType),
 }
 
 /// Events emitted from the simulation worker thread.
@@ -64,6 +77,7 @@ pub enum SimEvent {
 pub struct SimulationEngine {
     pub circuit: Circuit,
     pub shared_state: Arc<SharedState>,
+    runner_type: RunnerType,
     command_tx: Option<Sender<SimCommand>>,
     /// Internal event receiver when the caller hasn't provided an external Sender.
     event_rx: Option<Receiver<SimEvent>>,
@@ -72,10 +86,139 @@ pub struct SimulationEngine {
     worker_handle: Option<JoinHandle<()>>,
 }
 
-pub fn rebuild_runner(circuit: &mut Circuit) -> FlatRunner {
-    let optimized = Compiler::optimize(circuit);
-    let flat_circuit = FlattenedCircuit::compile(&optimized);
-    FlatRunner::new(flat_circuit)
+struct MappedRunner {
+    inner: Box<dyn InspectableRunner>,
+    node_map: std::collections::HashMap<NodeId, NodeId>,
+    wire_map: std::collections::HashMap<WireId, WireId>,
+    reverse_wire_map: std::collections::HashMap<WireId, WireId>,
+}
+
+impl crate::runner::Runner for MappedRunner {
+    fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
+        if let Some(&mapped_node) = self.node_map.get(&node) {
+            self.inner.set_input(mapped_node, pin, value);
+        }
+    }
+
+    fn tick(&mut self) {
+        self.inner.tick();
+    }
+
+    fn output(&self, node: NodeId, pin: u8) -> bool {
+        if let Some(&mapped_node) = self.node_map.get(&node) {
+            self.inner.output(mapped_node, pin)
+        } else {
+            false
+        }
+    }
+
+    fn current_tick(&self) -> u64 {
+        self.inner.current_tick()
+    }
+}
+
+impl InspectableRunner for MappedRunner {
+    fn wire_value(&self, wire: WireId) -> bool {
+        if let Some(&mapped_wire) = self.wire_map.get(&wire) {
+            self.inner.wire_value(mapped_wire)
+        } else {
+            false
+        }
+    }
+
+    fn for_each_wire(&self, f: &mut dyn FnMut(WireId, bool)) {
+        self.inner.for_each_wire(&mut |mapped_wire, value| {
+            if let Some(&raw_wire) = self.reverse_wire_map.get(&mapped_wire) {
+                f(raw_wire, value);
+            }
+        });
+    }
+}
+
+fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn InspectableRunner> {
+    use crate::circuit::{BitPackedCircuit, EventDrivenCircuit, FlattenedCircuit};
+    use crate::runner::{EventDrivenRunner, FlatRunner, SimdRunner};
+
+    let is_optimized = match runner_type {
+        RunnerType::NaiveOptimized
+        | RunnerType::FlatOptimized
+        | RunnerType::EventDrivenOptimized
+        | RunnerType::SimdOptimized => true,
+        _ => false,
+    };
+
+    if is_optimized {
+        let (opt_circuit, node_map) = crate::compiler::dead_code::cull_dead_nodes_with_map(circuit);
+
+        let mut wire_map = std::collections::HashMap::new();
+        let mut reverse_wire_map = std::collections::HashMap::new();
+
+        // cull_dead_nodes_with_map preserves wires that are connected. But it creates a new circuit with new WireIds.
+        // We need to map raw wire IDs to opt wire IDs.
+        // Let's match them based on source node and pin.
+        // For each wire in opt_circuit, find its source node and pin. Map back to raw source node, and find raw wire.
+        let mut reverse_node_map = std::collections::HashMap::new();
+        for (raw_node, opt_node) in &node_map {
+            reverse_node_map.insert(*opt_node, *raw_node);
+        }
+
+        for (opt_wire_id, opt_wire) in &opt_circuit.wires {
+            let opt_source_node = opt_wire.source.node;
+            if let Some(&raw_source_node) = reverse_node_map.get(&opt_source_node) {
+                if let Some(raw_node_ref) = circuit.nodes.get(raw_source_node) {
+                    if let Some(raw_out_pin) =
+                        raw_node_ref.outputs.get(opt_wire.source.pin as usize)
+                    {
+                        if let Some(&raw_wire_id) = raw_out_pin.wires.first() {
+                            wire_map.insert(raw_wire_id, opt_wire_id);
+                            reverse_wire_map.insert(opt_wire_id, raw_wire_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        let inner: Box<dyn InspectableRunner> = match runner_type {
+            RunnerType::NaiveOptimized => Box::new(NaiveRunner::new(opt_circuit)),
+            RunnerType::FlatOptimized => {
+                let flat = FlattenedCircuit::compile(&opt_circuit);
+                Box::new(FlatRunner::new(flat))
+            }
+            RunnerType::EventDrivenOptimized => {
+                let evt = EventDrivenCircuit::compile(&opt_circuit);
+                Box::new(EventDrivenRunner::new(evt))
+            }
+            RunnerType::SimdOptimized => {
+                let bp = BitPackedCircuit::compile(&opt_circuit);
+                Box::new(SimdRunner::new(bp))
+            }
+            _ => unreachable!(),
+        };
+
+        Box::new(MappedRunner {
+            inner,
+            node_map,
+            wire_map,
+            reverse_wire_map,
+        })
+    } else {
+        match runner_type {
+            RunnerType::Naive => Box::new(NaiveRunner::new(circuit.clone())),
+            RunnerType::Flat => {
+                let flat = FlattenedCircuit::compile(circuit);
+                Box::new(FlatRunner::new(flat))
+            }
+            RunnerType::EventDriven => {
+                let evt = EventDrivenCircuit::compile(circuit);
+                Box::new(EventDrivenRunner::new(evt))
+            }
+            RunnerType::Simd => {
+                let bp = BitPackedCircuit::compile(circuit);
+                Box::new(SimdRunner::new(bp))
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl SimulationEngine {
@@ -85,6 +228,7 @@ impl SimulationEngine {
         Self {
             circuit,
             shared_state: Arc::new(SharedState::new()),
+            runner_type: RunnerType::default(),
             command_tx: None,
             event_rx: None,
             external_event_tx: None,
@@ -100,6 +244,7 @@ impl SimulationEngine {
         Self {
             circuit,
             shared_state: Arc::new(SharedState::new()),
+            runner_type: RunnerType::default(),
             command_tx: None,
             event_rx: None,
             external_event_tx: Some(event_tx),
@@ -138,10 +283,12 @@ impl SimulationEngine {
 
         let shared = Arc::clone(&self.shared_state);
         let mut circuit = self.circuit.clone();
+        let mut current_runner_type = self.runner_type;
 
         let handle = spawn(move || {
-            let mut runner = rebuild_runner(&mut circuit);
+            let mut runner = build_runner(&circuit, current_runner_type);
             let mut running = true;
+            let mut needs_rebuild = false;
 
             let mut tick_rate = Some(10.0);
             let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
@@ -158,6 +305,10 @@ impl SimulationEngine {
                 // Process all queued commands from main thread
                 while let Ok(cmd) = rx_cmd.try_recv() {
                     match cmd {
+                        SimCommand::SetRunner(rt) => {
+                            current_runner_type = rt;
+                            needs_rebuild = true;
+                        }
                         SimCommand::SetTickRate(rate) => {
                             tick_rate = rate;
                             if let Some(r) = rate {
@@ -167,6 +318,10 @@ impl SimulationEngine {
                             next_tick_time = std::time::Instant::now();
                         }
                         SimCommand::SetInput { node, pin, value } => {
+                            if needs_rebuild {
+                                runner = build_runner(&circuit, current_runner_type);
+                                needs_rebuild = false;
+                            }
                             runner.set_input(node, pin, value);
                         }
                         SimCommand::AddNode {
@@ -177,7 +332,7 @@ impl SimulationEngine {
                             response_tx,
                         } => {
                             let node_id = circuit.add_node(kind, inputs, outputs);
-                            runner = rebuild_runner(&mut circuit);
+                            needs_rebuild = true;
                             let _ = response_tx.send((temp_id, node_id));
                         }
                         SimCommand::AddWire {
@@ -188,23 +343,23 @@ impl SimulationEngine {
                         } => {
                             let wire_id =
                                 circuit.connect((source.node, source.pin), (sink.node, sink.pin));
-                            runner = rebuild_runner(&mut circuit);
+                            needs_rebuild = true;
                             let _ = response_tx.send((temp_id, wire_id));
                         }
                         SimCommand::RemoveNode { node } => {
                             circuit.nodes.remove(node);
-                            runner = rebuild_runner(&mut circuit);
+                            needs_rebuild = true;
                         }
                         SimCommand::RemoveWire { wire } => {
                             circuit.wires.remove(wire);
-                            runner = rebuild_runner(&mut circuit);
+                            needs_rebuild = true;
                         }
                         SimCommand::RebuildCircuit {
                             circuit: new_circuit,
                             response_tx,
                         } => {
                             circuit = new_circuit;
-                            runner = rebuild_runner(&mut circuit);
+                            needs_rebuild = true;
                             let _ = response_tx.send(());
                         }
                         SimCommand::Pause => {
@@ -219,6 +374,10 @@ impl SimulationEngine {
                             let _ = tx_evt.send(SimEvent::StatusChanged { is_running: true });
                         }
                         SimCommand::Step => {
+                            if needs_rebuild {
+                                runner = build_runner(&circuit, current_runner_type);
+                                needs_rebuild = false;
+                            }
                             runner.tick();
                             let tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
                             if let Ok(mut lock) = shared.wire_states.write() {
@@ -262,6 +421,10 @@ impl SimulationEngine {
                     }
 
                     if should_tick {
+                        if needs_rebuild {
+                            runner = build_runner(&circuit, current_runner_type);
+                            needs_rebuild = false;
+                        }
                         let _ = tx_evt.send(SimEvent::TickStarted {
                             tick_count: shared.tick_count.load(Ordering::Relaxed),
                         });
@@ -283,6 +446,13 @@ impl SimulationEngine {
     }
 
     /// Stops the background worker thread if active.
+    pub fn set_runner(&mut self, runner_type: RunnerType) {
+        self.runner_type = runner_type;
+        if let Some(tx) = &self.command_tx {
+            let _ = tx.send(SimCommand::SetRunner(runner_type));
+        }
+    }
+
     pub fn stop_worker(&mut self) {
         if let Some(tx) = self.command_tx.take() {
             let _ = tx.send(SimCommand::Stop);
@@ -363,7 +533,7 @@ impl SimulationEngine {
 
     /// Step simulation synchronously on current thread (when worker thread is not running).
     pub fn step_sync(&mut self) {
-        let mut runner = NaiveRunner::new(&self.circuit);
+        let mut runner = build_runner(&self.circuit, self.runner_type);
         runner.tick();
         self.shared_state.tick_count.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut lock) = self.shared_state.wire_states.write() {

@@ -28,7 +28,7 @@ fn verify_all_runners_truth_table(
     )>,
 ) {
     for (inputs, outputs) in test_cases {
-        let naive = NaiveRunner::new(circuit);
+        let naive = NaiveRunner::new(circuit.clone());
         run_runner_test(naive, &inputs, &outputs);
 
         let flat = FlatRunner::new(FlattenedCircuit::compile(circuit));

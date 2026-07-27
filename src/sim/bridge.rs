@@ -23,7 +23,7 @@ use bevy::prelude::*;
 use uuid::Uuid;
 
 use logi_sim::circuit::Circuit;
-use logi_sim::engine::{SimCommand, SimEvent, SimulationEngine};
+use logi_sim::engine::{RunnerType, SimCommand, SimEvent, SimulationEngine};
 use logi_sim::prelude::{InputRef, NodeId, OutputRef, SharedState, WireId};
 
 use super::model::{GameCircuit, GameNode, GameWire};
@@ -342,6 +342,10 @@ impl SimBridge {
 
     pub fn set_tick_rate(&self, tick_rate: Option<f64>) {
         self.send_cmd(SimCommand::SetTickRate(tick_rate));
+    }
+
+    pub fn set_runner_type(&mut self, runner_type: RunnerType) {
+        self.inner().engine.set_runner(runner_type);
     }
 
     // ─────────────────────────────────────────────────────────────────────
