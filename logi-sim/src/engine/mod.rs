@@ -148,7 +148,8 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
     };
 
     if is_optimized {
-        let (opt_circuit, node_map) = crate::compiler::dead_code::cull_dead_nodes_with_map(circuit);
+        let (opt_circuit, node_map, _) =
+            crate::compiler::dead_code::cull_dead_nodes_with_map(circuit);
 
         let mut wire_map = std::collections::HashMap::new();
         let mut reverse_wire_map = std::collections::HashMap::new();

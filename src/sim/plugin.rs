@@ -14,7 +14,7 @@ use crate::sim::{
     },
 };
 
-use super::fixtures::build_8bit_counter;
+use super::fixtures::build_half_adder;
 use super::spatial_grid::SpatialGrid;
 
 pub struct SimulationPlugin {
@@ -34,7 +34,7 @@ impl Plugin for SimulationPlugin {
         // ── Resources inserted at startup so Bevy param validation never sees
         //    a missing resource, regardless of which GameState is active.
         //    (Bevy 0.19 validates Res<T> params *before* evaluating run_if.)
-        let game_circuit = build_8bit_counter();
+        let game_circuit = build_half_adder();
         let sim_bridge = SimBridge::from_circuit(&game_circuit);
 
         app
