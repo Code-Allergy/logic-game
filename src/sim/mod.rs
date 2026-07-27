@@ -14,12 +14,14 @@ mod plugin;
 mod tests;
 
 pub mod bridge;
+pub mod cache;
 pub mod fixtures;
 pub mod model;
 pub mod spatial_grid;
 pub mod systems;
 
 pub use bridge::SimBridge;
+pub use cache::SimCache;
 pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation};
 pub use plugin::SimulationPlugin;
 

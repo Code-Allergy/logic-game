@@ -349,36 +349,16 @@ impl SimBridge {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Atomic state reads (lock-free, per-frame)
+    // Per-frame atomic reads
     // ─────────────────────────────────────────────────────────────────────
 
-    pub fn wire_value(&self, uuid: Uuid) -> bool {
-        let Some(&wire_id) = self.wire_by_uuid.get(&uuid) else {
-            return false;
-        };
-        self.shared_state.get_wire(wire_id)
-    }
-
-    pub fn node_output(&self, uuid: Uuid, pin: u8) -> bool {
-        let Some(&node_id) = self.node_by_uuid.get(&uuid) else {
-            return false;
-        };
-        self.inner().engine.get_output(node_id, pin)
-    }
-
-    pub fn node_input(&self, uuid: Uuid, pin: u8) -> bool {
-        let Some(&node_id) = self.node_by_uuid.get(&uuid) else {
-            return false;
-        };
-        self.inner().engine.get_input(node_id, pin)
-    }
-
+    /// Read the total number of completed simulation ticks.
+    ///
+    /// This is a single [`AtomicU64::load`] (lock-free, no IPC) and is cheap
+    /// to call every frame.  Wire / pin state should be read from
+    /// [`crate::sim::SimCache`] instead.
     pub fn tick_count(&self) -> u64 {
         self.shared_state.tick_count()
-    }
-
-    pub fn shared_state(&self) -> Arc<SharedState> {
-        Arc::clone(&self.shared_state)
     }
 
     // ─────────────────────────────────────────────────────────────────────

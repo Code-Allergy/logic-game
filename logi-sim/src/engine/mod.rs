@@ -12,11 +12,11 @@ use std::thread::{JoinHandle, spawn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunnerType {
+    #[default]
     Naive,
     NaiveOptimized,
     Flat,
     FlatOptimized,
-    #[default]
     EventDriven,
     EventDrivenOptimized,
     Simd,
@@ -295,10 +295,12 @@ impl SimulationEngine {
             let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
             let mut next_tick_time = std::time::Instant::now();
 
-            // Perform initial wire state sync
+            // Perform initial wire state sync – emit WireStateChanged for every wire
+            // so the frontend cache starts with the correct initial state.
             if let Ok(mut lock) = shared.wire_states.write() {
                 runner.for_each_wire(&mut |wire, val| {
                     lock.insert(wire, val);
+                    let _ = tx_evt.send(SimEvent::WireStateChanged { wire, value: val });
                 });
             }
 
@@ -383,6 +385,10 @@ impl SimulationEngine {
                             let tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
                             if let Ok(mut lock) = shared.wire_states.write() {
                                 runner.for_each_wire(&mut |wire, val| {
+                                    let old = lock.get(wire).copied().unwrap_or(false);
+                                    if old != val {
+                                        let _ = tx_evt.send(SimEvent::WireStateChanged { wire, value: val });
+                                    }
                                     lock.insert(wire, val);
                                 });
                             }
@@ -433,6 +439,10 @@ impl SimulationEngine {
                         let _tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
                         if let Ok(mut lock) = shared.wire_states.write() {
                             runner.for_each_wire(&mut |wire, val| {
+                                let old = lock.get(wire).copied().unwrap_or(false);
+                                if old != val {
+                                    let _ = tx_evt.send(SimEvent::WireStateChanged { wire, value: val });
+                                }
                                 lock.insert(wire, val);
                             });
                         }

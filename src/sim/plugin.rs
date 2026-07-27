@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use crate::GameState;
 use crate::sim::{
-    SelectedGate, SimBridge, SimulationConfig,
+    SelectedGate, SimBridge, SimCache, SimulationConfig,
     systems::{
         bridge_flush_system, drag_selected_system, draw_connections_system, draw_gates_system,
         gate_selection_system, rebuild_spatial_grid_system, save_on_exit_system,
@@ -14,7 +14,7 @@ use crate::sim::{
     },
 };
 
-use super::fixtures::build_8bit_counter;
+use super::fixtures;
 use super::spatial_grid::SpatialGrid;
 
 pub struct SimulationPlugin {
@@ -34,17 +34,18 @@ impl Plugin for SimulationPlugin {
         // ── Resources inserted at startup so Bevy param validation never sees
         //    a missing resource, regardless of which GameState is active.
         //    (Bevy 0.19 validates Res<T> params *before* evaluating run_if.)
-        let game_circuit = build_8bit_counter();
+        let game_circuit = fixtures::build_8bit_counter();
         let sim_bridge = SimBridge::from_circuit(&game_circuit);
 
         app
-            // ── Core resources (always present) ─────────────────────────────
+            // ── Core resources (always present) ─────────────────────────────────────────
             .insert_resource(game_circuit)
             .insert_resource(sim_bridge)
             .init_resource::<SimulationConfig>()
             .init_resource::<SelectedGate>()
+            .init_resource::<SimCache>()
             .insert_resource(SpatialGrid::new(100.0))
-            // ── On-enter: resume bridge + spawn visuals ──────────────────────
+            // ── On-enter: resume bridge + spawn visuals + prime cache index ───────────────
             .add_systems(
                 OnEnter(state.clone()),
                 (
@@ -52,6 +53,7 @@ impl Plugin for SimulationPlugin {
                     draw_gates_system,
                     draw_connections_system.after(draw_gates_system),
                     rebuild_spatial_grid_system.after(draw_gates_system),
+                    rebuild_cache_index_system.after(draw_gates_system),
                 ),
             )
             // ── On-exit: pause bridge + despawn visuals ──────────────────────
@@ -104,6 +106,22 @@ fn pause_bridge_system(mut bridge: ResMut<SimBridge>) {
     bridge.pause();
 }
 
+/// Prime the [`SimCache`] reverse index immediately after entering the sim state.
+///
+/// `bridge_flush_system` also rebuilds on `is_changed()`, but running it here
+/// in `OnEnter` guarantees the index is ready before the first `Update` frame.
+fn rebuild_cache_index_system(
+    bridge: Res<SimBridge>,
+    game_circuit: Res<crate::sim::GameCircuit>,
+    mut cache: ResMut<SimCache>,
+) {
+    cache.rebuild_index(&game_circuit, &bridge);
+    // Seed is_running from the bridge's synchronously-maintained flag so the
+    // Pause/Play button is correct on the very first frame, before any
+    // StatusChanged event arrives from the worker.
+    cache.is_running = bridge.is_running;
+}
+
 /// Despawn all gate / connection-line entities when leaving the sim state.
 /// The `SimBridge` and `GameCircuit` resources are intentionally *kept* so
 /// that Bevy param validation never sees a missing resource.
@@ -112,9 +130,11 @@ fn despawn_sim_entities(
     gate_entities: Query<Entity, With<crate::sim::GateComponent>>,
     conn_entities: Query<Entity, With<crate::sim::ConnectionLine>>,
     mut grid: ResMut<SpatialGrid>,
+    mut cache: ResMut<SimCache>,
 ) {
     for entity in gate_entities.iter().chain(conn_entities.iter()) {
         commands.entity(entity).despawn();
     }
     grid.clear();
+    cache.clear();
 }

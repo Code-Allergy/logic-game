@@ -2,6 +2,7 @@
 name = "sim_core"
 version = "0.1.0"
 edition = "2024"
+[workspace]
 
 [dependencies]
 ahash = { version = "0.8.12", features = ["std", "serde"] }
