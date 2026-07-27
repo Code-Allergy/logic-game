@@ -2,7 +2,6 @@ use crate::sim::GateComponent;
 use crate::sim::Selected;
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 
 #[derive(Resource, Default)]
 pub struct SelectionState {

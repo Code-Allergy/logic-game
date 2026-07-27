@@ -138,7 +138,7 @@ impl SimBridge {
     /// Lock the inner state. Panics only if the mutex is poisoned (i.e. a
     /// previous panic occurred inside a lock – which should never happen in
     /// normal operation).
-    fn inner(&self) -> std::sync::MutexGuard<SimInner> {
+    fn inner(&self) -> std::sync::MutexGuard<'_, SimInner> {
         self.inner.lock().expect("SimBridge inner mutex poisoned")
     }
 
@@ -157,13 +157,29 @@ impl SimBridge {
         let mut circuit = Circuit::new();
         let mut node_by_uuid: HashMap<Uuid, NodeId> = HashMap::new();
 
-        for node in game_circuit.nodes.values() {
-            if let Some(kind) = node.kind.to_sim_kind() {
-                let inputs = node.kind.input_count();
-                let outputs = node.kind.output_count();
-                let sim_id = circuit.add_node(kind, inputs, outputs);
-                node_by_uuid.insert(node.id, sim_id);
+        let mut sorted_nodes: Vec<_> = game_circuit.nodes.values().collect();
+        sorted_nodes.sort_by(|a, b| {
+            a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id))
+        });
+
+        for node in sorted_nodes {
+            match &node.kind {
+                super::model::GameNodeKind::Input | super::model::GameNodeKind::Output => {
+                    assert!(node.label.is_some(), "Input and Output nodes must have a label set for mapping");
+                }
+                _ => {}
             }
+
+            let sim_id = if let super::model::GameNodeKind::SubCircuit { circuit: sub_game_circuit } = &node.kind {
+                let (sub_sim_circuit, _, _) = Self::build_sim_circuit(sub_game_circuit);
+                circuit.add_subcircuit(sub_sim_circuit)
+            } else if let Some(kind) = node.kind.to_sim_kind() {
+                circuit.add_node(kind, node.kind.input_count(), node.kind.output_count())
+            } else {
+                continue;
+            };
+
+            node_by_uuid.insert(node.id, sim_id);
         }
 
         let mut wire_by_uuid: HashMap<Uuid, WireId> = HashMap::new();
