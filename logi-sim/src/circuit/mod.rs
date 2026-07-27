@@ -104,10 +104,11 @@ impl Circuit {
         self.add_node(NodeKind::TriStateBuffer, 2, 1)
     }
 
-    pub fn clock(&mut self, period_ticks: u32) -> NodeId {
+    pub fn clock(&mut self, period_ticks: u32, duty_ticks: u32) -> NodeId {
         self.add_node(
             NodeKind::Clock {
                 period_ticks,
+                duty_ticks,
                 phase: 0,
             },
             0,

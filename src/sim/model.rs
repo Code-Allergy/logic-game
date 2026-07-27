@@ -43,7 +43,7 @@ pub enum GameNodeKind {
     Mux,
     Demux,
     TriStateBuffer,
-    Clock { period_ticks: u32 },
+    Clock { period_ticks: u32, duty_ticks: u32 },
     // Sub-circuits hold a complete nested `GameCircuit`.
     SubCircuit { circuit: Box<GameCircuit> },
 }
@@ -114,8 +114,10 @@ impl GameNodeKind {
             GameNodeKind::Mux => Some(NodeKind::Mux),
             GameNodeKind::Demux => Some(NodeKind::Demux),
             GameNodeKind::TriStateBuffer => Some(NodeKind::TriStateBuffer),
-            GameNodeKind::Clock { period_ticks } => Some(NodeKind::Clock {
+            GameNodeKind::Clock { period_ticks, duty_ticks } => Some(NodeKind::Clock {
+                    duty_ticks: *duty_ticks,
                 period_ticks: *period_ticks,
+
                 phase: 0,
             }),
             GameNodeKind::SubCircuit { .. } => None,
@@ -152,8 +154,7 @@ impl GameNodeKind {
 ///
 /// Stores all persistent data the editor needs for display, interaction, and
 /// serialization. The simulator counterpart is addressed via `SimBridge`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GameNode {
     /// Stable identifier. Survives save/load and circuit switches.
     pub id: Uuid,
@@ -180,8 +181,7 @@ impl GameNode {
 }
 
 /// A directed wire connecting one node's output pin to another node's input pin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GameWire {
     /// Stable identifier.
     pub id: Uuid,
@@ -212,8 +212,7 @@ impl GameWire {
 /// This is the authoritative source of truth for the editor and the only thing
 /// that gets serialized to disk. `SimBridge` builds the `logi-sim` runtime from
 /// this model on demand.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, Resource)]
-#[derive(PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Resource, PartialEq)]
 pub struct GameCircuit {
     /// Circuit-level identifier, useful for sub-circuit references.
     pub id: Uuid,

@@ -158,19 +158,23 @@ impl SimBridge {
         let mut node_by_uuid: HashMap<Uuid, NodeId> = HashMap::new();
 
         let mut sorted_nodes: Vec<_> = game_circuit.nodes.values().collect();
-        sorted_nodes.sort_by(|a, b| {
-            a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id))
-        });
+        sorted_nodes.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
 
         for node in sorted_nodes {
             match &node.kind {
                 super::model::GameNodeKind::Input | super::model::GameNodeKind::Output => {
-                    assert!(node.label.is_some(), "Input and Output nodes must have a label set for mapping");
+                    assert!(
+                        node.label.is_some(),
+                        "Input and Output nodes must have a label set for mapping"
+                    );
                 }
                 _ => {}
             }
 
-            let sim_id = if let super::model::GameNodeKind::SubCircuit { circuit: sub_game_circuit } = &node.kind {
+            let sim_id = if let super::model::GameNodeKind::SubCircuit {
+                circuit: sub_game_circuit,
+            } = &node.kind
+            {
                 let (sub_sim_circuit, _, _) = Self::build_sim_circuit(sub_game_circuit);
                 circuit.add_subcircuit(sub_sim_circuit)
             } else if let Some(kind) = node.kind.to_sim_kind() {

@@ -141,7 +141,10 @@ pub fn build_t_ff_circuit() -> GameCircuit {
 pub fn build_8bit_counter_subcircuit() -> GameCircuit {
     let mut circuit = GameCircuit::new("8-Bit Counter (Subcircuits)");
 
-    let mut clock = GameNode::new(GameNodeKind::Clock { period_ticks: 4 }, Vec2::new(-400.0, 100.0));
+    let mut clock = GameNode::new(
+        GameNodeKind::Clock { period_ticks: 4, duty_ticks: 1 },
+        Vec2::new(-400.0, 100.0),
+    );
     clock.label = Some("Clock".to_string());
     let clock_id = circuit.add_node(clock);
 
@@ -153,14 +156,22 @@ pub fn build_8bit_counter_subcircuit() -> GameCircuit {
 
     for i in 0..8 {
         let ff_pos = Vec2::new(-200.0 + (i as f32) * 200.0, 0.0);
-        let mut ff_node = GameNode::new(GameNodeKind::SubCircuit { circuit: Box::new(build_t_ff_circuit()) }, ff_pos);
+        let mut ff_node = GameNode::new(
+            GameNodeKind::SubCircuit {
+                circuit: Box::new(build_t_ff_circuit()),
+            },
+            ff_pos,
+        );
         ff_node.label = Some(format!("T-FF {}", i));
         let ff_id = circuit.add_node(ff_node);
 
         circuit.add_wire(GameWire::new(current_clk, 0, ff_id, 0)); // Clock to Clock
         circuit.add_wire(GameWire::new(reset_id, 0, ff_id, 1)); // Reset to Reset
 
-        let mut out_node = GameNode::new(GameNodeKind::Output, Vec2::new(ff_pos.x + 150.0, ff_pos.y + 100.0));
+        let mut out_node = GameNode::new(
+            GameNodeKind::Output,
+            Vec2::new(ff_pos.x + 150.0, ff_pos.y + 100.0),
+        );
         out_node.label = Some(format!("Bit {}", i));
         let out_node_id = circuit.add_node(out_node);
         circuit.add_wire(GameWire::new(ff_id, 0, out_node_id, 0)); // Q to Output
@@ -175,7 +186,7 @@ pub fn build_8bit_counter() -> GameCircuit {
     let mut circuit = GameCircuit::new("8-Bit Counter");
 
     let clock = GameNode::new(
-        GameNodeKind::Clock { period_ticks: 4 },
+        GameNodeKind::Clock { period_ticks: 4, duty_ticks: 1 },
         Vec2::new(-400.0, 100.0),
     );
     let clock_id = circuit.add_node(clock);

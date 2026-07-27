@@ -109,11 +109,12 @@ impl Runner for FlatRunner {
                 }
                 NodeKind::Clock {
                     period_ticks,
+                    duty_ticks,
                     phase,
                 } => {
                     let period = (*period_ticks).max(1) as u64;
                     let elapsed = self.tick_count.wrapping_add(*phase as u64) % period;
-                    let out = elapsed < period / 2;
+                    let out = elapsed < (*duty_ticks).max(1) as u64;
                     self.set_output(n_idx, out);
                 }
             }
