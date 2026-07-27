@@ -5,9 +5,9 @@ fn test_dead_code_culling() {
     let mut c = Circuit::new();
 
     // Live branch: A -> AND -> Output
-    let in_a = c.input();
+    let in_a = c.input("In");
     let and1 = c.and();
-    let out = c.output();
+    let out = c.output("Out");
     c.connect((in_a, 0), (and1, 0));
     c.connect((and1, 0), (out, 0));
 

@@ -446,8 +446,8 @@ pub fn recursive_16bit_adder() -> Fixture {
 
     // Level 1: Half Adder sub-circuit + 10 dead floating gates
     let mut half_adder = Circuit::new();
-    let ha_a = half_adder.input();
-    let ha_b = half_adder.input();
+    let ha_a = half_adder.input("In");
+    let ha_b = half_adder.input("In");
     let ha_sum = half_adder.xor();
     let ha_carry = half_adder.and();
 
@@ -456,8 +456,8 @@ pub fn recursive_16bit_adder() -> Fixture {
     half_adder.connect((ha_a, 0), (ha_carry, 0));
     half_adder.connect((ha_b, 0), (ha_carry, 1));
 
-    let ha_out_sum = half_adder.output();
-    let ha_out_carry = half_adder.output();
+    let ha_out_sum = half_adder.output("Out");
+    let ha_out_carry = half_adder.output("Out");
     half_adder.connect((ha_sum, 0), (ha_out_sum, 0));
     half_adder.connect((ha_carry, 0), (ha_out_carry, 0));
 
@@ -470,9 +470,9 @@ pub fn recursive_16bit_adder() -> Fixture {
 
     // Level 2: Full Adder sub-circuit (2x Half Adder + OR)
     let mut full_adder = Circuit::new();
-    let fa_a = full_adder.input();
-    let fa_b = full_adder.input();
-    let fa_cin = full_adder.input();
+    let fa_a = full_adder.input("In");
+    let fa_b = full_adder.input("In");
+    let fa_cin = full_adder.input("In");
 
     let ha1 = full_adder.add_subcircuit(half_adder.clone());
     full_adder.connect((fa_a, 0), (ha1, 0));
@@ -486,8 +486,8 @@ pub fn recursive_16bit_adder() -> Fixture {
     full_adder.connect((ha1, 1), (fa_or, 0)); // HA1 Carry -> OR 0
     full_adder.connect((ha2, 1), (fa_or, 1)); // HA2 Carry -> OR 1
 
-    let fa_out_sum = full_adder.output();
-    let fa_out_cout = full_adder.output();
+    let fa_out_sum = full_adder.output("Out");
+    let fa_out_cout = full_adder.output("Out");
     full_adder.connect((ha2, 0), (fa_out_sum, 0));
     full_adder.connect((fa_or, 0), (fa_out_cout, 0));
 
@@ -496,12 +496,12 @@ pub fn recursive_16bit_adder() -> Fixture {
     let mut a_4bit_in = Vec::new();
     let mut b_4bit_in = Vec::new();
     for _ in 0..4 {
-        a_4bit_in.push(adder_4bit.input());
+        a_4bit_in.push(adder_4bit.input("In"));
     }
     for _ in 0..4 {
-        b_4bit_in.push(adder_4bit.input());
+        b_4bit_in.push(adder_4bit.input("In"));
     }
-    let cin_4bit = adder_4bit.input();
+    let cin_4bit = adder_4bit.input("In");
 
     let mut fas = Vec::new();
     for i in 0..4 {
@@ -509,7 +509,7 @@ pub fn recursive_16bit_adder() -> Fixture {
         adder_4bit.connect((a_4bit_in[i], 0), (fa, 0));
         adder_4bit.connect((b_4bit_in[i], 0), (fa, 1));
 
-        let sum_out = adder_4bit.output();
+        let sum_out = adder_4bit.output("Out");
         adder_4bit.connect((fa, 0), (sum_out, 0));
         fas.push(fa);
     }
@@ -520,7 +520,7 @@ pub fn recursive_16bit_adder() -> Fixture {
     adder_4bit.connect((fas[1], 1), (fas[2], 2));
     adder_4bit.connect((fas[2], 1), (fas[3], 2));
 
-    let cout_4bit = adder_4bit.output();
+    let cout_4bit = adder_4bit.output("Out");
     adder_4bit.connect((fas[3], 1), (cout_4bit, 0));
 
     // Level 4: 16-Bit Adder Root Circuit (4x 4-Bit Adder)
@@ -565,9 +565,9 @@ pub fn cpu_subsystem_8bit() -> Fixture {
 
     // Level 1: 1-Bit ALU Slice (AND, OR, XOR, MUX)
     let mut alu_slice = Circuit::new();
-    let slice_a = alu_slice.input();
-    let slice_b = alu_slice.input();
-    let slice_op = alu_slice.input(); // OpSel (0 = AND, 1 = OR)
+    let slice_a = alu_slice.input("In");
+    let slice_b = alu_slice.input("In");
+    let slice_op = alu_slice.input("In"); // OpSel (0 = AND, 1 = OR)
 
     let and_gate = alu_slice.and();
     alu_slice.connect((slice_a, 0), (and_gate, 0));
@@ -582,7 +582,7 @@ pub fn cpu_subsystem_8bit() -> Fixture {
     alu_slice.connect((or_gate, 0), (mux_op, 1));
     alu_slice.connect((slice_op, 0), (mux_op, 2));
 
-    let slice_out = alu_slice.output();
+    let slice_out = alu_slice.output("Out");
     alu_slice.connect((mux_op, 0), (slice_out, 0));
 
     // Level 2: 8-Bit ALU Sub-Circuit (8x 1-Bit ALU Slices + XNOR Equal Flag)
@@ -590,12 +590,12 @@ pub fn cpu_subsystem_8bit() -> Fixture {
     let mut alu_a_inputs = Vec::new();
     let mut alu_b_inputs = Vec::new();
     for _ in 0..8 {
-        alu_a_inputs.push(alu_8bit.input());
+        alu_a_inputs.push(alu_8bit.input("In"));
     }
     for _ in 0..8 {
-        alu_b_inputs.push(alu_8bit.input());
+        alu_b_inputs.push(alu_8bit.input("In"));
     }
-    let alu_op_in = alu_8bit.input();
+    let alu_op_in = alu_8bit.input("In");
 
     let mut alu_slice_nodes = Vec::new();
     for bit in 0..8 {
@@ -604,7 +604,7 @@ pub fn cpu_subsystem_8bit() -> Fixture {
         alu_8bit.connect((alu_b_inputs[bit], 0), (slice_node, 1));
         alu_8bit.connect((alu_op_in, 0), (slice_node, 2));
 
-        let s_out = alu_8bit.output();
+        let s_out = alu_8bit.output("Out");
         alu_8bit.connect((slice_node, 0), (s_out, 0));
         alu_slice_nodes.push(slice_node);
     }
@@ -625,16 +625,16 @@ pub fn cpu_subsystem_8bit() -> Fixture {
         alu_8bit.connect((xnor_nodes[bit], 0), (and_flag, 1));
         current_flag_node = and_flag;
     }
-    let equal_flag_out = alu_8bit.output();
+    let equal_flag_out = alu_8bit.output("Out");
     alu_8bit.connect((current_flag_node, 0), (equal_flag_out, 0));
 
     // Level 3: 8-Bit Register Sub-Circuit
     let mut reg_8bit = Circuit::new();
     let mut reg_d_in = Vec::new();
     for _ in 0..8 {
-        reg_d_in.push(reg_8bit.input());
+        reg_d_in.push(reg_8bit.input("In"));
     }
-    let reg_enable = reg_8bit.input();
+    let reg_enable = reg_8bit.input("In");
 
     let mut reg_q_out = Vec::new();
     for bit in 0..8 {
@@ -642,7 +642,7 @@ pub fn cpu_subsystem_8bit() -> Fixture {
         reg_8bit.connect((reg_d_in[bit], 0), (tri, 0));
         reg_8bit.connect((reg_enable, 0), (tri, 1));
 
-        let q_out = reg_8bit.output();
+        let q_out = reg_8bit.output("Out");
         reg_8bit.connect((tri, 0), (q_out, 0));
         reg_q_out.push(q_out);
     }
@@ -651,12 +651,12 @@ pub fn cpu_subsystem_8bit() -> Fixture {
     let mut reg_file = Circuit::new();
     let mut rf_data_in = Vec::new();
     for _ in 0..8 {
-        rf_data_in.push(reg_file.input());
+        rf_data_in.push(reg_file.input("In"));
     }
-    let rf_write_sel = reg_file.input();
+    let rf_write_sel = reg_file.input("In");
 
     let demux_decoder = reg_file.demux();
-    let rf_global_write_en = reg_file.input();
+    let rf_global_write_en = reg_file.input("In");
     reg_file.connect((rf_global_write_en, 0), (demux_decoder, 0));
     reg_file.connect((rf_write_sel, 0), (demux_decoder, 1));
 
@@ -679,7 +679,7 @@ pub fn cpu_subsystem_8bit() -> Fixture {
         reg_file.connect((r1_sub, bit as u8), (mux_read, 1));
         reg_file.connect((rf_write_sel, 0), (mux_read, 2));
 
-        let rf_out = reg_file.output();
+        let rf_out = reg_file.output("Out");
         reg_file.connect((mux_read, 0), (rf_out, 0));
         rf_out_nodes.push(rf_out);
     }

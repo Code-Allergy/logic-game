@@ -44,7 +44,7 @@ impl NaiveRunner {
     fn evaluate_node(&mut self, node_id: NodeId) {
         let node_kind = self.circuit.nodes[node_id].kind.clone();
         match &node_kind {
-            NodeKind::Input | NodeKind::Output => return, // no evaluation needed
+            NodeKind::Input { .. } | NodeKind::Output { .. } => return, // no evaluation needed
             NodeKind::And => {
                 let val = self.input_value(node_id, 0) && self.input_value(node_id, 1);
                 self.set_output(node_id, 0, val);
@@ -118,36 +118,48 @@ impl NaiveRunner {
                 let mut sub_runner = NaiveRunner::new((**sub).clone());
 
                 // Map parent input pins to child Input nodes
-                let input_nodes: Vec<NodeId> = sub
+                let mut input_nodes: Vec<(NodeId, String)> = sub
                     .nodes
                     .iter()
-                    .filter(|(_, n)| matches!(n.kind, NodeKind::Input))
-                    .map(|(id, _)| id)
+                    .filter_map(|(id, n)| {
+                        if let NodeKind::Input { name } = &n.kind {
+                            Some((id, name.clone()))
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
+                input_nodes.sort_by(|a, b| a.1.cmp(&b.1));
 
                 let node_inputs_len = self.circuit.nodes[node_id].inputs.len();
                 let node_outputs_len = self.circuit.nodes[node_id].outputs.len();
 
-                for (pin_idx, &in_node_id) in input_nodes.iter().enumerate() {
+                for (pin_idx, (in_node_id, _)) in input_nodes.iter().enumerate() {
                     if pin_idx < node_inputs_len {
                         let val = self.input_value(node_id, pin_idx);
-                        sub_runner.set_input(in_node_id, 0, val);
+                        sub_runner.set_input(*in_node_id, 0, val);
                     }
                 }
 
                 sub_runner.tick();
 
                 // Map child Output nodes to parent output pins
-                let output_nodes: Vec<NodeId> = sub
+                let mut output_nodes: Vec<(NodeId, String)> = sub
                     .nodes
                     .iter()
-                    .filter(|(_, n)| matches!(n.kind, NodeKind::Output))
-                    .map(|(id, _)| id)
+                    .filter_map(|(id, n)| {
+                        if let NodeKind::Output { name } = &n.kind {
+                            Some((id, name.clone()))
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
+                output_nodes.sort_by(|a, b| a.1.cmp(&b.1));
 
-                for (pin_idx, &out_node_id) in output_nodes.iter().enumerate() {
+                for (pin_idx, (out_node_id, _)) in output_nodes.iter().enumerate() {
                     if pin_idx < node_outputs_len {
-                        let val = sub_runner.output(out_node_id, 0);
+                        let val = sub_runner.output(*out_node_id, 0);
                         self.set_output(node_id, pin_idx, val);
                     }
                 }

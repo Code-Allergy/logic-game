@@ -29,13 +29,13 @@ impl FixtureBuilder {
 
 impl FixtureBuilder {
     pub fn input(&mut self, name: &'static str) -> NodeId {
-        let node = self.circuit.input();
+        let node = self.circuit.input(name);
         self.nodes.insert(name, node);
         node
     }
 
     pub fn output(&mut self, name: &'static str) -> NodeId {
-        let node = self.circuit.output();
+        let node = self.circuit.output(name);
         self.nodes.insert(name, node);
         node
     }

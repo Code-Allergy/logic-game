@@ -12,8 +12,8 @@ use crate::circuit::Circuit;
 
 #[derive(Clone, Debug)]
 pub enum NodeKind {
-    Input,
-    Output,
+    Input { name: String },
+    Output { name: String },
 
     And,
     Or,
@@ -34,8 +34,8 @@ pub enum NodeKind {
 impl PartialEq for NodeKind {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (NodeKind::Input, NodeKind::Input) => true,
-            (NodeKind::Output, NodeKind::Output) => true,
+            (NodeKind::Input { name: a }, NodeKind::Input { name: b }) => a == b,
+            (NodeKind::Output { name: a }, NodeKind::Output { name: b }) => a == b,
             (NodeKind::And, NodeKind::And) => true,
             (NodeKind::Or, NodeKind::Or) => true,
             (NodeKind::Not, NodeKind::Not) => true,

@@ -24,7 +24,7 @@ impl EventDrivenRunner {
 
         // Seed initial queue with all non-input/non-output logic nodes once on startup
         for (n_idx, node) in circuit.nodes.iter().enumerate() {
-            if !matches!(node.kind, NodeKind::Input | NodeKind::Output) {
+            if !matches!(node.kind, NodeKind::Input { .. } | NodeKind::Output { .. }) {
                 dirty_queue.push_back(n_idx);
             } else {
                 in_queue[n_idx] = false;
@@ -107,7 +107,7 @@ impl EventDrivenRunner {
     fn process_node_outputs(&mut self, n_idx: usize) {
         let kind = &self.circuit.nodes[n_idx].kind;
         match kind {
-            NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => {}
+            NodeKind::Input { .. } | NodeKind::Output { .. } | NodeKind::SubCircuit(_) => {}
             NodeKind::And => {
                 let val = self.input_value(n_idx, 0) && self.input_value(n_idx, 1);
                 self.set_node_outputs(n_idx, val);

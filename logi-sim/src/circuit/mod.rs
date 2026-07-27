@@ -52,12 +52,12 @@ impl Circuit {
         })
     }
 
-    pub fn input(&mut self) -> NodeId {
-        self.add_node(NodeKind::Input, 0, 1)
+    pub fn input(&mut self, name: &str) -> NodeId {
+        self.add_node(NodeKind::Input { name: name.to_string() }, 0, 1)
     }
 
-    pub fn output(&mut self) -> NodeId {
-        self.add_node(NodeKind::Output, 1, 0)
+    pub fn output(&mut self, name: &str) -> NodeId {
+        self.add_node(NodeKind::Output { name: name.to_string() }, 1, 0)
     }
 
     pub fn and(&mut self) -> NodeId {
@@ -119,12 +119,12 @@ impl Circuit {
         let num_inputs = sub
             .nodes
             .values()
-            .filter(|n| matches!(n.kind, NodeKind::Input))
+            .filter(|n| matches!(n.kind, NodeKind::Input { .. }))
             .count();
         let num_outputs = sub
             .nodes
             .values()
-            .filter(|n| matches!(n.kind, NodeKind::Output))
+            .filter(|n| matches!(n.kind, NodeKind::Output { .. }))
             .count();
         self.add_node(NodeKind::SubCircuit(Box::new(sub)), num_inputs, num_outputs)
     }

@@ -3,8 +3,8 @@ use logi_sim::prelude::*;
 
 fn build_half_adder_subcircuit() -> (Circuit, NodeId, NodeId, NodeId, NodeId) {
     let mut c = Circuit::new();
-    let a = c.input();
-    let b = c.input();
+    let a = c.input("In");
+    let b = c.input("In");
 
     let sum_xor = c.xor();
     let carry_and = c.and();
@@ -15,8 +15,8 @@ fn build_half_adder_subcircuit() -> (Circuit, NodeId, NodeId, NodeId, NodeId) {
     c.connect((a, 0), (carry_and, 0));
     c.connect((b, 0), (carry_and, 1));
 
-    let out_sum = c.output();
-    let out_carry = c.output();
+    let out_sum = c.output("Out");
+    let out_carry = c.output("Out");
 
     c.connect((sum_xor, 0), (out_sum, 0));
     c.connect((carry_and, 0), (out_carry, 0));
@@ -28,16 +28,16 @@ fn build_parent_with_subcircuit() -> (Circuit, NodeId, NodeId, NodeId, NodeId) {
     let (half_adder, _, _, _, _) = build_half_adder_subcircuit();
 
     let mut parent = Circuit::new();
-    let in0 = parent.input();
-    let in1 = parent.input();
+    let in0 = parent.input("In");
+    let in1 = parent.input("In");
 
     let sub_node = parent.add_subcircuit(half_adder);
 
     parent.connect((in0, 0), (sub_node, 0));
     parent.connect((in1, 0), (sub_node, 1));
 
-    let out_sum = parent.output();
-    let out_carry = parent.output();
+    let out_sum = parent.output("Out");
+    let out_carry = parent.output("Out");
 
     parent.connect((sub_node, 0), (out_sum, 0));
     parent.connect((sub_node, 1), (out_carry, 0));

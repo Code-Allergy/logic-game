@@ -5,10 +5,10 @@ use std::time::Duration;
 #[test]
 fn test_simulation_engine_synchronous() {
     let mut c = Circuit::new();
-    let in_a = c.input();
-    let in_b = c.input();
+    let in_a = c.input("In");
+    let in_b = c.input("In");
     let and = c.and();
-    let out = c.output();
+    let out = c.output("Out");
 
     let wire_a = c.connect((in_a, 0), (and, 0));
     let wire_b = c.connect((in_b, 0), (and, 1));
@@ -29,10 +29,10 @@ fn test_simulation_engine_synchronous() {
 #[test]
 fn test_threaded_simulation_engine_atomic_queries() {
     let mut c = Circuit::new();
-    let in_a = c.input();
-    let in_b = c.input();
+    let in_a = c.input("In");
+    let in_b = c.input("In");
     let and = c.and();
-    let out = c.output();
+    let out = c.output("Out");
 
     c.connect((in_a, 0), (and, 0));
     c.connect((in_b, 0), (and, 1));
@@ -75,10 +75,10 @@ fn test_threaded_simulation_engine_atomic_queries() {
 #[test]
 fn test_flat_runner_equivalence() {
     let mut c = Circuit::new();
-    let in_a = c.input();
-    let in_b = c.input();
+    let in_a = c.input("In");
+    let in_b = c.input("In");
     let and = c.and();
-    let out = c.output();
+    let out = c.output("Out");
 
     c.connect((in_a, 0), (and, 0));
     c.connect((in_b, 0), (and, 1));

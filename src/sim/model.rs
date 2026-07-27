@@ -99,10 +99,11 @@ impl GameNodeKind {
 
     /// Convert to a `logi_sim` `NodeKind` for passing into the simulator.
     /// Returns `None` for `SubCircuit` (handled separately by the bridge).
-    pub fn to_sim_kind(&self) -> Option<NodeKind> {
+    pub fn to_sim_kind(&self, label: Option<&str>) -> Option<NodeKind> {
+        let name = label.unwrap_or("unnamed").to_string();
         match self {
-            GameNodeKind::Input => Some(NodeKind::Input),
-            GameNodeKind::Output => Some(NodeKind::Output),
+            GameNodeKind::Input => Some(NodeKind::Input { name }),
+            GameNodeKind::Output => Some(NodeKind::Output { name }),
             GameNodeKind::And => Some(NodeKind::And),
             GameNodeKind::Or => Some(NodeKind::Or),
             GameNodeKind::Not => Some(NodeKind::Not),

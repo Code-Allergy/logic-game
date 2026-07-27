@@ -66,23 +66,37 @@ impl FlattenCtx {
             }
         }
 
-        let child_input_nodes: Vec<NodeId> = circuit
+        let mut child_input_nodes: Vec<(NodeId, String)> = circuit
             .nodes
             .iter()
-            .filter(|(_, n)| matches!(n.kind, NodeKind::Input))
-            .map(|(id, _)| id)
+            .filter_map(|(id, n)| {
+                if let NodeKind::Input { name } = &n.kind {
+                    Some((id, name.clone()))
+                } else {
+                    None
+                }
+            })
             .collect();
+        child_input_nodes.sort_by(|a, b| a.1.cmp(&b.1));
+        let child_input_nodes: Vec<NodeId> = child_input_nodes.into_iter().map(|(id, _)| id).collect();
 
-        let child_output_nodes: Vec<NodeId> = circuit
+        let mut child_output_nodes: Vec<(NodeId, String)> = circuit
             .nodes
             .iter()
-            .filter(|(_, n)| matches!(n.kind, NodeKind::Output))
-            .map(|(id, _)| id)
+            .filter_map(|(id, n)| {
+                if let NodeKind::Output { name } = &n.kind {
+                    Some((id, name.clone()))
+                } else {
+                    None
+                }
+            })
             .collect();
+        child_output_nodes.sort_by(|a, b| a.1.cmp(&b.1));
+        let child_output_nodes: Vec<NodeId> = child_output_nodes.into_iter().map(|(id, _)| id).collect();
 
         // 1. Process Input nodes first to map external input wires
         for (node_id, node) in &circuit.nodes {
-            if matches!(node.kind, NodeKind::Input) {
+            if matches!(node.kind, NodeKind::Input { .. }) {
                 if !self.is_root {
                     if let Some(input_idx) = child_input_nodes.iter().position(|&id| id == node_id)
                     {
@@ -100,7 +114,7 @@ impl FlattenCtx {
 
         // 1.5 Process Output nodes first to map external output wires
         for (node_id, node) in &circuit.nodes {
-            if matches!(node.kind, NodeKind::Output) {
+            if matches!(node.kind, NodeKind::Output { .. }) {
                 if !self.is_root {
                     if let Some(output_idx) =
                         child_output_nodes.iter().position(|&id| id == node_id)
@@ -122,7 +136,7 @@ impl FlattenCtx {
         // 2. Process all other nodes
         for (node_id, node) in &circuit.nodes {
             match &node.kind {
-                NodeKind::Input => {
+                NodeKind::Input { .. } => {
                     if self.is_root {
                         let n_idx = self.nodes.len();
                         self.node_to_idx.insert(node_id, n_idx);
@@ -141,13 +155,13 @@ impl FlattenCtx {
                         }
 
                         self.nodes.push(FlatNode {
-                            kind: NodeKind::Input,
+                            kind: node.kind.clone(),
                             inputs: SmallVec::new(),
                             outputs,
                         });
                     }
                 }
-                NodeKind::Output => {
+                NodeKind::Output { .. } => {
                     if self.is_root {
                         let n_idx = self.nodes.len();
                         self.node_to_idx.insert(node_id, n_idx);
@@ -163,7 +177,7 @@ impl FlattenCtx {
                         }
 
                         self.nodes.push(FlatNode {
-                            kind: NodeKind::Output,
+                            kind: node.kind.clone(),
                             inputs,
                             outputs: SmallVec::new(),
                         });

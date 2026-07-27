@@ -45,10 +45,10 @@ fn verify_all_runners_truth_table(
 #[test]
 fn test_nand_full_truth_table() {
     let mut c = Circuit::new();
-    let a = c.input();
-    let b = c.input();
+    let a = c.input("In");
+    let b = c.input("In");
     let nand = c.nand();
-    let out = c.output();
+    let out = c.output("Out");
 
     c.connect((a, 0), (nand, 0));
     c.connect((b, 0), (nand, 1));
@@ -67,10 +67,10 @@ fn test_nand_full_truth_table() {
 #[test]
 fn test_nor_full_truth_table() {
     let mut c = Circuit::new();
-    let a = c.input();
-    let b = c.input();
+    let a = c.input("In");
+    let b = c.input("In");
     let nor = c.nor();
-    let out = c.output();
+    let out = c.output("Out");
 
     c.connect((a, 0), (nor, 0));
     c.connect((b, 0), (nor, 1));
@@ -89,10 +89,10 @@ fn test_nor_full_truth_table() {
 #[test]
 fn test_xnor_full_truth_table() {
     let mut c = Circuit::new();
-    let a = c.input();
-    let b = c.input();
+    let a = c.input("In");
+    let b = c.input("In");
     let xnor = c.xnor();
-    let out = c.output();
+    let out = c.output("Out");
 
     c.connect((a, 0), (xnor, 0));
     c.connect((b, 0), (xnor, 1));
@@ -111,11 +111,11 @@ fn test_xnor_full_truth_table() {
 #[test]
 fn test_mux_full_truth_table() {
     let mut c = Circuit::new();
-    let d0 = c.input();
-    let d1 = c.input();
-    let sel = c.input();
+    let d0 = c.input("In");
+    let d1 = c.input("In");
+    let sel = c.input("In");
     let mux = c.mux();
-    let out = c.output();
+    let out = c.output("Out");
 
     c.connect((d0, 0), (mux, 0));
     c.connect((d1, 0), (mux, 1));
@@ -166,11 +166,11 @@ fn test_mux_full_truth_table() {
 #[test]
 fn test_demux_full_truth_table() {
     let mut c = Circuit::new();
-    let sig = c.input();
-    let sel = c.input();
+    let sig = c.input("In");
+    let sel = c.input("In");
     let demux = c.demux();
-    let out0 = c.output();
-    let out1 = c.output();
+    let out0 = c.output("Out");
+    let out1 = c.output("Out");
 
     c.connect((sig, 0), (demux, 0));
     c.connect((sel, 0), (demux, 1));
@@ -204,10 +204,10 @@ fn test_demux_full_truth_table() {
 #[test]
 fn test_tristate_buffer_full_truth_table() {
     let mut c = Circuit::new();
-    let sig = c.input();
-    let enable = c.input();
+    let sig = c.input("In");
+    let enable = c.input("In");
     let tri = c.tristate();
-    let out = c.output();
+    let out = c.output("Out");
 
     c.connect((sig, 0), (tri, 0));
     c.connect((enable, 0), (tri, 1));

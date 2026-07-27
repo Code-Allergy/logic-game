@@ -184,7 +184,7 @@ impl SimBridge {
             let sim_id = if let super::model::GameNodeKind::SubCircuit { circuit: sub_game_circuit } = &node.kind {
                 let (sub_sim_circuit, _, _) = Self::build_sim_circuit(sub_game_circuit);
                 circuit.add_subcircuit(sub_sim_circuit)
-            } else if let Some(kind) = node.kind.to_sim_kind() {
+            } else if let Some(kind) = node.kind.to_sim_kind(node.label.as_deref()) {
                 circuit.add_node(kind, node.kind.input_count(), node.kind.output_count())
             } else {
                 continue;
@@ -259,7 +259,7 @@ impl SimBridge {
         let kind = if let super::model::GameNodeKind::SubCircuit { circuit: sub_game_circuit } = &node.kind {
             let (sub_sim_circuit, _, _) = Self::build_sim_circuit(sub_game_circuit);
             logi_sim::circuit::NodeKind::SubCircuit(Box::new(sub_sim_circuit))
-        } else if let Some(kind) = node.kind.to_sim_kind() {
+        } else if let Some(kind) = node.kind.to_sim_kind(node.label.as_deref()) {
             kind
         } else {
             return node.id;

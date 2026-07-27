@@ -15,9 +15,9 @@ pub fn cull_dead_nodes_with_map(
 
     // Find all Output and Input nodes as starting points for reachability and interface preservation
     for (node_id, node) in &circuit.nodes {
-        if matches!(node.kind, NodeKind::Output | NodeKind::Input) {
+        if matches!(node.kind, NodeKind::Output { .. } | NodeKind::Input { .. }) {
             live_nodes.insert(node_id);
-            if matches!(node.kind, NodeKind::Output) {
+            if matches!(node.kind, NodeKind::Output { .. }) {
                 queue.push_back(node_id);
             }
         }

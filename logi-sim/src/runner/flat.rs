@@ -55,7 +55,7 @@ impl Runner for FlatRunner {
         for n_idx in 0..self.circuit.nodes.len() {
             let kind = &self.circuit.nodes[n_idx].kind;
             match kind {
-                NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => continue,
+                NodeKind::Input { .. } | NodeKind::Output { .. } | NodeKind::SubCircuit(_) => continue,
                 NodeKind::And => {
                     let out = self.input_value(n_idx, 0) && self.input_value(n_idx, 1);
                     self.set_output(n_idx, out);

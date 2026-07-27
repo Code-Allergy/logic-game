@@ -64,7 +64,7 @@ impl BitPackedCircuit {
         let mut visited = vec![false; node_count];
 
         for (n_idx, f_node) in flat.nodes.iter().enumerate() {
-            if matches!(f_node.kind, NodeKind::Input) || f_node.inputs.is_empty() {
+            if matches!(f_node.kind, NodeKind::Input { .. }) || f_node.inputs.is_empty() {
                 queue.push_back(n_idx);
                 visited[n_idx] = true;
             }
@@ -103,7 +103,7 @@ impl BitPackedCircuit {
         for &n_idx in &topo_order {
             let f_node = &flat.nodes[n_idx];
             let op = match f_node.kind {
-                NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => continue,
+                NodeKind::Input { .. } | NodeKind::Output { .. } | NodeKind::SubCircuit(_) => continue,
                 NodeKind::And => SimdOp::And,
                 NodeKind::Or => SimdOp::Or,
                 NodeKind::Not => SimdOp::Not,
