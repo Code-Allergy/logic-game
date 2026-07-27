@@ -17,9 +17,9 @@ impl BenchmarkRunnerFactory for NaiveUnoptimizedBenchFactory {
     fn name() -> &'static str {
         "NaiveRunner-unoptimized"
     }
-    type Runner<'a> = NaiveRunner;
+    type Runner<'a> = NaiveRunner<'a>;
     fn create<'a>(circuit: &'a Circuit, _opt_circuit: &'a Circuit) -> Self::Runner<'a> {
-        NaiveRunner::new(circuit.clone())
+        NaiveRunner::new(circuit)
     }
 }
 
@@ -29,9 +29,9 @@ impl BenchmarkRunnerFactory for NaiveOptimizedBenchFactory {
     fn name() -> &'static str {
         "NaiveRunner-optimized"
     }
-    type Runner<'a> = NaiveRunner;
+    type Runner<'a> = NaiveRunner<'a>;
     fn create<'a>(_circuit: &'a Circuit, opt_circuit: &'a Circuit) -> Self::Runner<'a> {
-        NaiveRunner::new(opt_circuit.clone())
+        NaiveRunner::new(opt_circuit)
     }
 }
 

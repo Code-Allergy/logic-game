@@ -1,12 +1,17 @@
 use bevy::prelude::Vec2;
 
-use crate::sim::{GameCircuit, GameNode, GameNodeKind, GameWire};
 use uuid::Uuid;
+use crate::sim::{GameCircuit, GameNode, GameNodeKind, GameWire};
 
 /// Helper to add a Master-Slave T Flip-Flop to the circuit.
 /// Takes clock and reset node IDs, returns (Q, Qn) output pin node IDs.
 /// Uses primitive gates to construct a falling-edge triggered T-FF with asynchronous reset.
-fn add_t_ff(circuit: &mut GameCircuit, clk: Uuid, rst: Uuid, pos: Vec2) -> (Uuid, Uuid) {
+fn add_t_ff(
+    circuit: &mut GameCircuit,
+    clk: Uuid,
+    rst: Uuid,
+    pos: Vec2,
+) -> (Uuid, Uuid) {
     let mut create_node = |kind, dx, dy| {
         let node = GameNode::new(kind, pos + Vec2::new(dx, dy));
         circuit.add_node(node.clone());
@@ -174,10 +179,7 @@ pub fn build_8bit_counter_subcircuit() -> GameCircuit {
 pub fn build_8bit_counter() -> GameCircuit {
     let mut circuit = GameCircuit::new("8-Bit Counter");
 
-    let clock = GameNode::new(
-        GameNodeKind::Clock { period_ticks: 4 },
-        Vec2::new(-400.0, 100.0),
-    );
+    let clock = GameNode::new(GameNodeKind::Clock { period_ticks: 4 }, Vec2::new(-400.0, 100.0));
     let clock_id = circuit.add_node(clock);
 
     let mut reset = GameNode::new(GameNodeKind::Input, Vec2::new(-400.0, -100.0));
@@ -192,10 +194,7 @@ pub fn build_8bit_counter() -> GameCircuit {
 
         let (q, _qn) = add_t_ff(&mut circuit, current_clk, reset_id, ff_pos);
 
-        let mut out_node = GameNode::new(
-            GameNodeKind::Output,
-            Vec2::new(ff_pos.x + 150.0, ff_pos.y + 100.0),
-        );
+        let mut out_node = GameNode::new(GameNodeKind::Output, Vec2::new(ff_pos.x + 150.0, ff_pos.y + 100.0));
         out_node.label = Some(format!("Bit {}", i));
         let out_node_id = circuit.add_node(out_node);
 

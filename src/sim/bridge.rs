@@ -23,7 +23,7 @@ use bevy::prelude::*;
 use uuid::Uuid;
 
 use logi_sim::circuit::Circuit;
-use logi_sim::engine::{RunnerType, SimCommand, SimEvent, SimulationEngine};
+use logi_sim::engine::{SimCommand, SimEvent, SimulationEngine};
 use logi_sim::prelude::{InputRef, NodeId, OutputRef, SharedState, WireId};
 
 use super::model::{GameCircuit, GameNode, GameWire};
@@ -360,35 +360,37 @@ impl SimBridge {
         self.send_cmd(SimCommand::SetTickRate(tick_rate));
     }
 
-    pub fn set_runner_type(&mut self, runner_type: RunnerType) {
-        self.inner().engine.set_runner(runner_type);
+    // ─────────────────────────────────────────────────────────────────────
+    // Atomic state reads (lock-free, per-frame)
+    // ─────────────────────────────────────────────────────────────────────
+
+    pub fn wire_value(&self, uuid: Uuid) -> bool {
+        let Some(&wire_id) = self.wire_by_uuid.get(&uuid) else {
+            return false;
+        };
+        self.shared_state.get_wire(wire_id)
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Per-frame atomic reads
-    // ─────────────────────────────────────────────────────────────────────
+    pub fn node_output(&self, uuid: Uuid, pin: u8) -> bool {
+        let Some(&node_id) = self.node_by_uuid.get(&uuid) else {
+            return false;
+        };
+        self.inner().engine.get_output(node_id, pin)
+    }
 
-    /// Read the total number of completed simulation ticks.
-    ///
-    /// This is a single [`AtomicU64::load`] (lock-free, no IPC) and is cheap
-    /// to call every frame.  Wire / pin state should be read from
-    /// [`crate::sim::SimCache`] instead.
+    pub fn node_input(&self, uuid: Uuid, pin: u8) -> bool {
+        let Some(&node_id) = self.node_by_uuid.get(&uuid) else {
+            return false;
+        };
+        self.inner().engine.get_input(node_id, pin)
+    }
+
     pub fn tick_count(&self) -> u64 {
         self.shared_state.tick_count()
     }
 
-    /// Snapshot the current state of every wire with a single `RwLock::read()`.
-    ///
-    /// Calls `f(wire_id, value)` for each wire in the shared state.  This is
-    /// the intended way for [`crate::sim::SimCache`] to refresh itself once per
-    /// Bevy frame — one lock acquisition regardless of how many simulation ticks
-    /// ran since the last frame.
-    pub fn snapshot_wire_states(&self, f: &mut impl FnMut(WireId, bool)) {
-        if let Ok(lock) = self.shared_state.wire_states.read() {
-            for (wire_id, &val) in lock.iter() {
-                f(wire_id, val);
-            }
-        }
+    pub fn shared_state(&self) -> Arc<SharedState> {
+        Arc::clone(&self.shared_state)
     }
 
     // ─────────────────────────────────────────────────────────────────────

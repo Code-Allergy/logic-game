@@ -84,7 +84,7 @@ fn test_flat_runner_equivalence() {
     c.connect((in_b, 0), (and, 1));
     c.connect((and, 0), (out, 0));
 
-    let mut naive = NaiveRunner::new(c.clone());
+    let mut naive = NaiveRunner::new(&c);
     let flat_circuit = FlattenedCircuit::compile(&c);
     let mut flat = FlatRunner::new(flat_circuit);
 

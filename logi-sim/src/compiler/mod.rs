@@ -19,7 +19,6 @@ impl Compiler {
         Circuit,
         std::collections::HashMap<crate::circuit::NodeId, crate::circuit::NodeId>,
     ) {
-        let (c, m, _) = dead_code::cull_dead_nodes_with_map(circuit);
-        (c, m)
+        dead_code::cull_dead_nodes_with_map(circuit)
     }
 }

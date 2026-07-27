@@ -4,11 +4,7 @@ use std::collections::{HashSet, VecDeque};
 /// Optimization Pass: Prunes dead nodes and wires not transitively connected to any `Output` node.
 pub fn cull_dead_nodes_with_map(
     circuit: &Circuit,
-) -> (
-    Circuit,
-    std::collections::HashMap<NodeId, NodeId>,
-    std::collections::HashMap<WireId, WireId>,
-) {
+) -> (Circuit, std::collections::HashMap<NodeId, NodeId>) {
     let mut live_nodes = HashSet::<NodeId>::new();
     let mut live_wires = HashSet::<WireId>::new();
     let mut queue = VecDeque::<NodeId>::new();
@@ -43,7 +39,6 @@ pub fn cull_dead_nodes_with_map(
     // Rebuild optimized circuit containing only live nodes and wires
     let mut optimized = Circuit::new();
     let mut node_map = std::collections::HashMap::new();
-    let mut wire_map = std::collections::HashMap::new();
 
     for (node_id, node) in &circuit.nodes {
         if live_nodes.contains(&node_id) {
@@ -58,16 +53,14 @@ pub fn cull_dead_nodes_with_map(
             if let Some(&new_source) = node_map.get(&wire.source.node) {
                 for sink in &wire.sinks {
                     if let Some(&new_sink) = node_map.get(&sink.node) {
-                        let new_wire_id =
-                            optimized.connect((new_source, wire.source.pin), (new_sink, sink.pin));
-                        wire_map.insert(wire_id, new_wire_id);
+                        optimized.connect((new_source, wire.source.pin), (new_sink, sink.pin));
                     }
                 }
             }
         }
     }
 
-    (optimized, node_map, wire_map)
+    (optimized, node_map)
 }
 
 pub fn cull_dead_nodes(circuit: &Circuit) -> Circuit {

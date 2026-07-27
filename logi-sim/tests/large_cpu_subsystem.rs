@@ -134,11 +134,11 @@ fn test_large_8bit_cpu_subsystem_simd_runner() {
 #[test]
 fn test_large_8bit_cpu_subsystem_naive_runner() {
     let fixture = logi_sim::fixtures::cpu_subsystem_8bit();
-    let naive_runner = NaiveRunner::new(fixture.circuit.clone());
+    let naive_runner = NaiveRunner::new(&fixture.circuit);
     run_cpu_test("NaiveRunner-unoptimized", naive_runner, &fixture, None);
 
     let (opt_circuit, node_map) = Compiler::optimize_with_map(&fixture.circuit);
-    let opt_naive_runner = NaiveRunner::new(opt_circuit.clone());
+    let opt_naive_runner = NaiveRunner::new(&opt_circuit);
     run_cpu_test(
         "NaiveRunner-optimized",
         opt_naive_runner,

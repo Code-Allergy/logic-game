@@ -85,7 +85,7 @@ fn verify_subcircuit_runner<R: Runner>(
 #[test]
 fn test_subcircuit_naive_runner() {
     let (parent, in0, in1, sum, carry) = build_parent_with_subcircuit();
-    let runner = NaiveRunner::new(parent.clone());
+    let runner = NaiveRunner::new(&parent);
     verify_subcircuit_runner(runner, in0, in1, sum, carry);
 }
 
