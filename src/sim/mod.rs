@@ -31,6 +31,7 @@ pub use plugin::{
 pub use service::{SimExecutionService, SimRuntime};
 
 use bevy::prelude::*;
+use bevy::reflect::Reflect;
 use logi_sim::engine::RunnerType;
 use uuid::Uuid;
 
@@ -39,54 +40,180 @@ use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Bevy component that links a rendered entity to a [`GameNode`] by UUID.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Reflect)]
+#[reflect(Component)]
 pub struct GateComponent {
     pub id: Uuid,
-    pub position: Vec2,
+    pub label: String,
+    pub kind: GateKindTag,
+    pub input_count: u8,
+    pub output_count: u8,
+    pub input_bits: u64,
+    pub output_bits: u64,
 }
 
 impl GateComponent {
-    pub fn new(id: Uuid, position: Vec2) -> Self {
-        Self { id, position }
+    pub fn new(node: &GameNode) -> Self {
+        let kind = GateKindTag::from_node_kind(&node.kind);
+        Self {
+            id: node.id,
+            label: node
+                .label
+                .clone()
+                .unwrap_or_else(|| node.id.to_string()[..8].to_string()),
+            kind,
+            input_count: node.kind.input_count().min(u8::MAX as usize) as u8,
+            output_count: node.kind.output_count().min(u8::MAX as usize) as u8,
+            input_bits: 0,
+            output_bits: 0,
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        self.kind.display_name()
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
+pub enum GateKindTag {
+    Input,
+    Input8,
+    Input64,
+    Output,
+    Output8,
+    Output64,
+    Display,
+    Expand8,
+    Expand64,
+    ReduceOr8,
+    ReduceOr64,
+    And,
+    Or,
+    Not,
+    Xor,
+    Nand,
+    Nor,
+    Xnor,
+    Buffer,
+    Mux,
+    Demux,
+    TriStateBuffer,
+    Counter8,
+    Clock,
+    SubCircuit,
+}
+
+impl GateKindTag {
+    pub fn from_node_kind(kind: &GameNodeKind) -> Self {
+        match kind {
+            GameNodeKind::Input => Self::Input,
+            GameNodeKind::Input8 => Self::Input8,
+            GameNodeKind::Input64 => Self::Input64,
+            GameNodeKind::Output => Self::Output,
+            GameNodeKind::Output8 => Self::Output8,
+            GameNodeKind::Output64 => Self::Output64,
+            GameNodeKind::Display { .. } => Self::Display,
+            GameNodeKind::Expand8 => Self::Expand8,
+            GameNodeKind::Expand64 => Self::Expand64,
+            GameNodeKind::ReduceOr8 => Self::ReduceOr8,
+            GameNodeKind::ReduceOr64 => Self::ReduceOr64,
+            GameNodeKind::And => Self::And,
+            GameNodeKind::Or => Self::Or,
+            GameNodeKind::Not => Self::Not,
+            GameNodeKind::Xor => Self::Xor,
+            GameNodeKind::Nand => Self::Nand,
+            GameNodeKind::Nor => Self::Nor,
+            GameNodeKind::Xnor => Self::Xnor,
+            GameNodeKind::Buffer => Self::Buffer,
+            GameNodeKind::Mux => Self::Mux,
+            GameNodeKind::Demux => Self::Demux,
+            GameNodeKind::TriStateBuffer => Self::TriStateBuffer,
+            GameNodeKind::Counter8 => Self::Counter8,
+            GameNodeKind::Clock { .. } => Self::Clock,
+            GameNodeKind::SubCircuit { .. } => Self::SubCircuit,
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Input => "INPUT",
+            Self::Input8 => "INPUT8",
+            Self::Input64 => "INPUT64",
+            Self::Output => "OUTPUT",
+            Self::Output8 => "OUTPUT8",
+            Self::Output64 => "OUTPUT64",
+            Self::Display => "DISPLAY",
+            Self::Expand8 => "1->8",
+            Self::Expand64 => "1->64",
+            Self::ReduceOr8 => "8->1",
+            Self::ReduceOr64 => "64->1",
+            Self::And => "AND",
+            Self::Or => "OR",
+            Self::Not => "NOT",
+            Self::Xor => "XOR",
+            Self::Nand => "NAND",
+            Self::Nor => "NOR",
+            Self::Xnor => "XNOR",
+            Self::Buffer => "BUFFER",
+            Self::Mux => "MUX",
+            Self::Demux => "DEMUX",
+            Self::TriStateBuffer => "TRI-STATE",
+            Self::Counter8 => "COUNTER8",
+            Self::Clock => "CLOCK",
+            Self::SubCircuit => "SUBCIRCUIT",
+        }
+    }
+}
+
+/// Human-friendly label for inspector/overlay display.
+pub fn gate_display_name(node_id: Uuid, label: &Option<String>, kind: &GameNodeKind) -> String {
+    let fallback = format!("{}", &node_id.to_string()[..8]);
+    match label {
+        Some(text) if !text.is_empty() => format!("{} {}", kind.display_name(), text),
+        _ => format!("{} {}", kind.display_name(), fallback),
     }
 }
 
 /// Bevy component representing a rendered wire between two nodes.
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Reflect)]
+#[reflect(Component)]
 pub struct ConnectionLine {
     pub id: Uuid,
     pub source_node: Uuid,
+    pub source_pin: u8,
     pub sink_node: Uuid,
+    pub sink_pin: u8,
+    pub bit_width: u8,
+    pub value: bool,
+    #[reflect(ignore)]
     pub wire_kind: WireKind,
 }
 
 /// Per-gate snapshot of all output pin states (bits 0..63).
-#[derive(Component, Debug, Clone, Copy, Default)]
+#[derive(Component, Debug, Clone, Copy, Default, Reflect)]
+#[reflect(Component)]
 pub struct SimNodeOutputs {
     pub bits: u64,
 }
 
 /// Per-gate snapshot of all input pin states (bits 0..63).
-#[derive(Component, Debug, Clone, Copy, Default)]
+#[derive(Component, Debug, Clone, Copy, Default, Reflect)]
+#[reflect(Component)]
 pub struct SimNodeInputs {
     pub bits: u64,
 }
 
-/// Per-wire snapshot of current logic value.
-#[derive(Component, Debug, Clone, Copy, Default)]
-pub struct SimWireValue {
-    pub value: bool,
-}
-
 /// Text attached to a multi-bit display node.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[reflect(Component)]
 pub struct LogicDisplay {
     pub node_id: Uuid,
     pub bits: u8,
 }
 
 /// Marker for gate entities that are currently selected for dragging.
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct Selected {
     pub offset: Vec2,
 }

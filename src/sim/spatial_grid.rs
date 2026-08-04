@@ -5,6 +5,7 @@ use bevy::{platform::collections::HashMap, prelude::*};
 pub struct SpatialGrid {
     // Map from grid cell to entities in that cell
     cells: HashMap<(i32, i32), Vec<Entity>>,
+    positions: HashMap<Entity, Vec2>,
     // Cell size for the grid
     cell_size: f32,
 }
@@ -13,6 +14,7 @@ impl SpatialGrid {
     pub fn new(cell_size: f32) -> Self {
         SpatialGrid {
             cells: HashMap::new(),
+            positions: HashMap::new(),
             cell_size,
         }
     }
@@ -27,12 +29,21 @@ impl SpatialGrid {
 
     // Add entity to the grid
     pub fn insert(&mut self, entity: Entity, position: Vec2) {
+        if let Some(old_position) = self.positions.insert(entity, position) {
+            let old_cell = self.get_cell(old_position);
+            if let Some(entities) = self.cells.get_mut(&old_cell) {
+                entities.retain(|&candidate| candidate != entity);
+            }
+        }
         let cell = self.get_cell(position);
         self.cells.entry(cell).or_default().push(entity);
     }
 
     // Remove entity from the grid
-    pub fn remove(&mut self, entity: Entity, position: Vec2) {
+    pub fn remove(&mut self, entity: Entity) {
+        let Some(position) = self.positions.remove(&entity) else {
+            return;
+        };
         let cell = self.get_cell(position);
         if let Some(entities) = self.cells.get_mut(&cell) {
             entities.retain(|&e| e != entity);
@@ -40,8 +51,7 @@ impl SpatialGrid {
     }
 
     // Update entity position in the grid
-    pub fn update(&mut self, entity: Entity, old_pos: Vec2, new_pos: Vec2) {
-        self.remove(entity, old_pos);
+    pub fn update(&mut self, entity: Entity, new_pos: Vec2) {
         self.insert(entity, new_pos);
     }
 
@@ -69,5 +79,6 @@ impl SpatialGrid {
     // Clear the grid
     pub fn clear(&mut self) {
         self.cells.clear();
+        self.positions.clear();
     }
 }

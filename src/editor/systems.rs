@@ -8,6 +8,7 @@ use crate::sim::{
 };
 use crate::sim::{ConnectionLine, GameNode};
 use crate::temp::GateComponentSelectionEvent;
+use crate::sim::gate_display_name;
 
 use super::{CreateConnectionEvent, CreateGateEvent, EditorState};
 
@@ -48,7 +49,8 @@ pub fn process_gate_placement(
                 sprite,
                 Transform::from_xyz(event.position.x, event.position.y, 0.0),
                 Visibility::Visible,
-                GateComponent::new(node_uuid, event.position),
+                Name::new(gate_display_name(node_uuid, &node.label, &event.kind)),
+                GateComponent::new(&node),
             ))
             .id();
 
@@ -297,9 +299,14 @@ pub fn apply_connection_events_system(
                 ConnectionLine {
                     id: wire.id,
                     source_node: event.source_node,
+                    source_pin: event.source_pin,
                     sink_node: event.sink_node,
+                    sink_pin: event.sink_pin,
+                    bit_width: u8::try_from(event.wire_kind.bit_width()).unwrap_or(u8::MAX),
+                    value: false,
                     wire_kind: event.wire_kind.clone(),
                 },
+                Name::new(format!("Wire {}", wire.id)),
             ));
         }
     }

@@ -17,6 +17,7 @@ use crate::sim::{
         drive_threadless_simulation,
         gate_selection_system,
         sync_sim_cache_system,
+        sync_gate_components_to_model_system,
         rebuild_spatial_grid_system,
         save_on_exit_system,
         workspace_io_system,
@@ -157,6 +158,12 @@ impl Plugin for SimulationViewPlugin {
             .insert_resource(SpatialGrid::new(100.0))
             .add_message::<crate::editor::LoadWorkspaceEvent>()
             .add_message::<crate::editor::SaveWorkspaceEvent>()
+            .register_type::<crate::sim::ConnectionLine>()
+            .register_type::<crate::sim::GateComponent>()
+            .register_type::<crate::sim::GateKindTag>()
+            .register_type::<crate::sim::LogicDisplay>()
+            .register_type::<crate::sim::SimNodeOutputs>()
+            .register_type::<crate::sim::SimNodeInputs>()
             .add_systems(
                 OnEnter(state.clone()),
                 (
@@ -172,6 +179,7 @@ impl Plugin for SimulationViewPlugin {
                 Update,
                 (
                     workspace_io_system,
+                    sync_gate_components_to_model_system,
                     update_input_colours_system,
                     update_logic_displays_system,
                     gate_selection_system.before(drag_selected_system),
