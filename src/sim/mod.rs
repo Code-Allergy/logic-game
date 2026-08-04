@@ -17,14 +17,15 @@ pub mod bridge;
 pub mod cache;
 pub mod fixtures;
 pub mod model;
+pub mod service;
 pub mod spatial_grid;
 pub mod systems;
 
 pub use bridge::SimBridge;
-pub use bridge::SimRuntime;
 pub use cache::SimCache;
 pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation};
 pub use plugin::SimulationPlugin;
+pub use service::{SimExecutionService, SimRuntime};
 
 use bevy::prelude::*;
 use logi_sim::engine::RunnerType;

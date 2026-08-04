@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, channel};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::{JoinHandle, spawn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -27,6 +28,8 @@ pub enum RunnerType {
 }
 
 impl RunnerType {
+    /// All runner types exposed on the current compilation target.
+    #[cfg(not(target_arch = "wasm32"))]
     pub const ALL: &'static [RunnerType] = &[
         RunnerType::Naive,
         RunnerType::NaiveOptimized,
@@ -38,6 +41,16 @@ impl RunnerType {
         RunnerType::Simd,
         RunnerType::SimdOptimized,
         RunnerType::ThreadedFlatOptimized,
+    ];
+
+    #[cfg(target_arch = "wasm32")]
+    pub const ALL: &'static [RunnerType] = &[
+        RunnerType::Naive,
+        RunnerType::NaiveOptimized,
+        RunnerType::Flat,
+        RunnerType::FlatOptimized,
+        RunnerType::EventDriven,
+        RunnerType::EventDrivenOptimized,
     ];
 }
 
@@ -119,7 +132,10 @@ pub struct SimulationEngine {
     event_rx: Option<Receiver<SimEvent>>,
     /// External event sender provided by the caller (e.g. SimBridge).
     external_event_tx: Option<Sender<SimEvent>>,
+    #[cfg(not(target_arch = "wasm32"))]
     worker_handle: Option<JoinHandle<()>>,
+    #[cfg(target_arch = "wasm32")]
+    worker_handle: (),
 }
 
 struct SyncRunnerState {
@@ -262,14 +278,17 @@ impl InspectableRunner for MappedRunner {
 
 fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn InspectableRunner> {
     use crate::circuit::{BitPackedCircuit, EventDrivenCircuit, FlattenedCircuit};
+    #[cfg(target_arch = "wasm32")]
+    use crate::runner::{EventDrivenRunner, FlatRunner};
+    #[cfg(not(target_arch = "wasm32"))]
     use crate::runner::{EventDrivenRunner, FlatRunner, SimdRunner, ThreadedFlatRunner};
 
     let is_optimized = match runner_type {
         RunnerType::NaiveOptimized
         | RunnerType::FlatOptimized
-        | RunnerType::ThreadedFlatOptimized
-        | RunnerType::EventDrivenOptimized
-        | RunnerType::SimdOptimized => true,
+        | RunnerType::EventDrivenOptimized => true,
+        #[cfg(not(target_arch = "wasm32"))]
+        RunnerType::ThreadedFlatOptimized | RunnerType::SimdOptimized => true,
         _ => false,
     };
 
@@ -295,6 +314,7 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
                 let flat = FlattenedCircuit::compile(&opt_circuit);
                 Box::new(FlatRunner::new(flat))
             }
+            #[cfg(not(target_arch = "wasm32"))]
             RunnerType::ThreadedFlatOptimized => {
                 let flat = FlattenedCircuit::compile(&opt_circuit);
                 Box::new(ThreadedFlatRunner::new(flat))
@@ -303,6 +323,7 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
                 let evt = EventDrivenCircuit::compile(&opt_circuit);
                 Box::new(EventDrivenRunner::new(evt))
             }
+            #[cfg(not(target_arch = "wasm32"))]
             RunnerType::SimdOptimized => {
                 let bp = BitPackedCircuit::compile(&opt_circuit);
                 Box::new(SimdRunner::new(bp))
@@ -326,6 +347,7 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
                 let flat = FlattenedCircuit::compile(circuit);
                 Box::new(FlatRunner::new(flat))
             }
+            #[cfg(not(target_arch = "wasm32"))]
             RunnerType::ThreadedFlat => {
                 let flat = FlattenedCircuit::compile(circuit);
                 Box::new(ThreadedFlatRunner::new(flat))
@@ -334,9 +356,18 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
                 let evt = EventDrivenCircuit::compile(circuit);
                 Box::new(EventDrivenRunner::new(evt))
             }
+            #[cfg(not(target_arch = "wasm32"))]
             RunnerType::Simd => {
                 let bp = BitPackedCircuit::compile(circuit);
                 Box::new(SimdRunner::new(bp))
+            }
+            #[cfg(target_arch = "wasm32")]
+            RunnerType::ThreadedFlat
+            | RunnerType::ThreadedFlatOptimized
+            | RunnerType::Simd
+            | RunnerType::SimdOptimized => {
+                let flat = FlattenedCircuit::compile(circuit);
+                Box::new(FlatRunner::new(flat))
             }
             _ => unreachable!(),
         }
@@ -371,7 +402,10 @@ impl SimulationEngine {
             command_tx: None,
             event_rx: None,
             external_event_tx: None,
+            #[cfg(not(target_arch = "wasm32"))]
             worker_handle: None,
+            #[cfg(target_arch = "wasm32")]
+            worker_handle: (),
         }
     }
 
@@ -388,7 +422,10 @@ impl SimulationEngine {
             command_tx: None,
             event_rx: None,
             external_event_tx: Some(event_tx),
+            #[cfg(not(target_arch = "wasm32"))]
             worker_handle: None,
+            #[cfg(target_arch = "wasm32")]
+            worker_handle: (),
         }
     }
 
@@ -561,251 +598,263 @@ impl SimulationEngine {
 
     /// Spawns a background thread that continuously ticks the simulation as fast as possible.
     pub fn start_worker(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         if self.worker_handle.is_some() {
             return; // Worker thread already running
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx_cmd, rx_cmd) = channel::<SimCommand>();
+            let tx_evt = if let Some(ext_tx) = self.external_event_tx.take() {
+                ext_tx
+            } else {
+                let (tx, rx) = channel::<SimEvent>();
+                self.event_rx = Some(rx);
+                tx
+            };
+            self.command_tx = Some(tx_cmd);
+            self.shared_state.is_running.store(true, Ordering::Relaxed);
 
-        let (tx_cmd, rx_cmd) = channel::<SimCommand>();
-        // If the caller provided an external Sender use that; otherwise create
-        // an internal channel and stash the Receiver.
-        let tx_evt = if let Some(ext_tx) = self.external_event_tx.take() {
-            ext_tx
-        } else {
-            let (tx, rx) = channel::<SimEvent>();
-            self.event_rx = Some(rx);
-            tx
-        };
-        self.command_tx = Some(tx_cmd);
-        self.shared_state.is_running.store(true, Ordering::Relaxed);
+            let shared = Arc::clone(&self.shared_state);
+            let mut circuit = self.circuit.clone();
+            let mut current_runner_type = self.runner_type;
+            let handle = spawn(move || {
+                let mut runner = build_runner(&circuit, current_runner_type);
+                let mut running = true;
+                let mut needs_rebuild = false;
+                let mut ticks_since_snapshot = 0_u32;
+                let mut pending_cmd = None;
 
-        let shared = Arc::clone(&self.shared_state);
-        let mut circuit = self.circuit.clone();
-        let mut current_runner_type = self.runner_type;
+                let mut tick_rate = Some(10.0);
+                let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
+                let mut next_tick_time = std::time::Instant::now();
+                let mut last_snapshot_time = std::time::Instant::now();
+                let mut last_slow_warning = None;
 
-        let handle = spawn(move || {
-            let mut runner = build_runner(&circuit, current_runner_type);
-            let mut running = true;
-            let mut needs_rebuild = false;
-            let mut ticks_since_snapshot = 0_u32;
-            let mut pending_cmd = None;
+                // Perform initial wire state sync
+                publish_wire_states(&shared, runner.as_ref());
 
-            let mut tick_rate = Some(10.0);
-            let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
-            let mut next_tick_time = std::time::Instant::now();
-            let mut last_snapshot_time = std::time::Instant::now();
-            let mut last_slow_warning = None;
+                let _ = tx_evt.send(SimEvent::RunnerSet(current_runner_type));
 
-            // Perform initial wire state sync
-            publish_wire_states(&shared, runner.as_ref());
-
-            let _ = tx_evt.send(SimEvent::RunnerSet(current_runner_type));
-
-            loop {
-                // Process all queued commands from main thread
                 loop {
-                    let cmd = pending_cmd.take().or_else(|| rx_cmd.try_recv().ok());
-                    let Some(cmd) = cmd else {
-                        break;
-                    };
-                    match cmd {
-                        SimCommand::SetRunner(rt) => {
-                            let compatible_layout =
-                                is_optimized_runner(current_runner_type) == is_optimized_runner(rt);
-                            let tick = runner.current_tick();
-                            let execution_state = runner.execution_state();
-                            let mut observable_state = Vec::new();
-                            runner.for_each_wire(&mut |wire, value| {
-                                observable_state.push((wire, value));
-                            });
+                    // Process all queued commands from main thread
+                    loop {
+                        let cmd = pending_cmd.take().or_else(|| rx_cmd.try_recv().ok());
+                        let Some(cmd) = cmd else {
+                            break;
+                        };
+                        match cmd {
+                            SimCommand::SetRunner(rt) => {
+                                let compatible_layout = is_optimized_runner(current_runner_type)
+                                    == is_optimized_runner(rt);
+                                let tick = runner.current_tick();
+                                let execution_state = runner.execution_state();
+                                let mut observable_state = Vec::new();
+                                runner.for_each_wire(&mut |wire, value| {
+                                    observable_state.push((wire, value));
+                                });
 
-                            current_runner_type = rt;
-                            let mut replacement = build_runner(&circuit, current_runner_type);
-                            if !compatible_layout
-                                || !replacement.restore_execution_state(&execution_state)
-                            {
-                                for (wire, value) in observable_state {
-                                    replacement.restore_wire_value(wire, value);
+                                current_runner_type = rt;
+                                let mut replacement = build_runner(&circuit, current_runner_type);
+                                if !compatible_layout
+                                    || !replacement.restore_execution_state(&execution_state)
+                                {
+                                    for (wire, value) in observable_state {
+                                        replacement.restore_wire_value(wire, value);
+                                    }
                                 }
-                            }
-                            replacement.set_current_tick(tick);
-                            runner = replacement;
-                            needs_rebuild = false;
-                            publish_wire_states(&shared, runner.as_ref());
-                            let _ = tx_evt.send(SimEvent::RunnerSet(current_runner_type));
-                        }
-                        SimCommand::SetTickRate(rate) => {
-                            tick_rate = rate;
-                            if let Some(r) = rate {
-                                tick_duration = std::time::Duration::from_secs_f64(
-                                    1.0 / r.clamp(0.001, 1_000_000_000.0),
-                                );
-                            }
-                            next_tick_time = std::time::Instant::now();
-                            last_snapshot_time = next_tick_time;
-                        }
-                        SimCommand::SetInput { node, pin, value } => {
-                            if needs_rebuild {
-                                runner = build_runner(&circuit, current_runner_type);
+                                replacement.set_current_tick(tick);
+                                runner = replacement;
                                 needs_rebuild = false;
+                                publish_wire_states(&shared, runner.as_ref());
+                                let _ = tx_evt.send(SimEvent::RunnerSet(current_runner_type));
                             }
-                            runner.set_input(node, pin, value);
-                        }
-                        SimCommand::AddNode {
-                            temp_id,
-                            kind,
-                            inputs,
-                            outputs,
-                            response_tx,
-                        } => {
-                            let node_id = circuit.add_node(kind, inputs, outputs);
-                            needs_rebuild = true;
-                            let _ = response_tx.send((temp_id, node_id));
-                        }
-                        SimCommand::AddWire {
-                            temp_id,
-                            source,
-                            sink,
-                            response_tx,
-                        } => {
-                            let wire_id =
-                                circuit.connect((source.node, source.pin), (sink.node, sink.pin));
-                            needs_rebuild = true;
-                            let _ = response_tx.send((temp_id, wire_id));
-                        }
-                        SimCommand::RemoveNode { node } => {
-                            circuit.nodes.remove(node);
-                            needs_rebuild = true;
-                        }
-                        SimCommand::RemoveWire { wire } => {
-                            circuit.wires.remove(wire);
-                            needs_rebuild = true;
-                        }
-                        SimCommand::RebuildCircuit {
-                            circuit: new_circuit,
-                            response_tx,
-                        } => {
-                            circuit = new_circuit;
-                            needs_rebuild = true;
-                            let _ = response_tx.send(());
-                        }
-                        SimCommand::Pause => {
-                            running = false;
-                            shared.is_running.store(false, Ordering::Relaxed);
-                            let _ = tx_evt.send(SimEvent::StatusChanged { is_running: false });
-                        }
-                        SimCommand::Resume => {
-                            running = true;
-                            next_tick_time = std::time::Instant::now();
-                            shared.is_running.store(true, Ordering::Relaxed);
-                            let _ = tx_evt.send(SimEvent::StatusChanged { is_running: true });
-                        }
-                        SimCommand::Step => {
-                            if needs_rebuild {
-                                runner = build_runner(&circuit, current_runner_type);
-                                needs_rebuild = false;
+                            SimCommand::SetTickRate(rate) => {
+                                tick_rate = rate;
+                                if let Some(r) = rate {
+                                    tick_duration = std::time::Duration::from_secs_f64(
+                                        1.0 / r.clamp(0.001, 1_000_000_000.0),
+                                    );
+                                }
+                                next_tick_time = std::time::Instant::now();
+                                last_snapshot_time = next_tick_time;
                             }
-                            runner.tick();
-                            let tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
-                            publish_wire_states(&shared, runner.as_ref());
-                            ticks_since_snapshot = 0;
-                            last_snapshot_time = std::time::Instant::now();
-                            let _ = tx_evt.send(SimEvent::TickCompleted { tick_count: tc });
-                        }
-                        SimCommand::Stop => {
-                            shared.is_running.store(false, Ordering::Relaxed);
-                            let _ = tx_evt.send(SimEvent::StatusChanged { is_running: false });
-                            return;
+                            SimCommand::SetInput { node, pin, value } => {
+                                if needs_rebuild {
+                                    runner = build_runner(&circuit, current_runner_type);
+                                    needs_rebuild = false;
+                                }
+                                runner.set_input(node, pin, value);
+                            }
+                            SimCommand::AddNode {
+                                temp_id,
+                                kind,
+                                inputs,
+                                outputs,
+                                response_tx,
+                            } => {
+                                let node_id = circuit.add_node(kind, inputs, outputs);
+                                needs_rebuild = true;
+                                let _ = response_tx.send((temp_id, node_id));
+                            }
+                            SimCommand::AddWire {
+                                temp_id,
+                                source,
+                                sink,
+                                response_tx,
+                            } => {
+                                let wire_id = circuit
+                                    .connect((source.node, source.pin), (sink.node, sink.pin));
+                                needs_rebuild = true;
+                                let _ = response_tx.send((temp_id, wire_id));
+                            }
+                            SimCommand::RemoveNode { node } => {
+                                circuit.nodes.remove(node);
+                                needs_rebuild = true;
+                            }
+                            SimCommand::RemoveWire { wire } => {
+                                circuit.wires.remove(wire);
+                                needs_rebuild = true;
+                            }
+                            SimCommand::RebuildCircuit {
+                                circuit: new_circuit,
+                                response_tx,
+                            } => {
+                                circuit = new_circuit;
+                                needs_rebuild = true;
+                                let _ = response_tx.send(());
+                            }
+                            SimCommand::Pause => {
+                                running = false;
+                                shared.is_running.store(false, Ordering::Relaxed);
+                                let _ = tx_evt.send(SimEvent::StatusChanged { is_running: false });
+                            }
+                            SimCommand::Resume => {
+                                running = true;
+                                next_tick_time = std::time::Instant::now();
+                                shared.is_running.store(true, Ordering::Relaxed);
+                                let _ = tx_evt.send(SimEvent::StatusChanged { is_running: true });
+                            }
+                            SimCommand::Step => {
+                                if needs_rebuild {
+                                    runner = build_runner(&circuit, current_runner_type);
+                                    needs_rebuild = false;
+                                }
+                                runner.tick();
+                                let tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
+                                publish_wire_states(&shared, runner.as_ref());
+                                ticks_since_snapshot = 0;
+                                last_snapshot_time = std::time::Instant::now();
+                                let _ = tx_evt.send(SimEvent::TickCompleted { tick_count: tc });
+                            }
+                            SimCommand::Stop => {
+                                shared.is_running.store(false, Ordering::Relaxed);
+                                let _ = tx_evt.send(SimEvent::StatusChanged { is_running: false });
+                                return;
+                            }
                         }
                     }
-                }
 
-                if running {
-                    let mut ticks_to_run = 0_u32;
+                    if running {
+                        let mut ticks_to_run = 0_u32;
 
-                    if let Some(rate) = tick_rate {
-                        let now = std::time::Instant::now();
-                        if now >= next_tick_time {
-                            let lag = now.saturating_duration_since(next_tick_time);
-                            if lag >= SLOW_SIMULATION_LAG {
-                                let should_warn = last_slow_warning.is_none_or(|last| {
-                                    now.duration_since(last) >= SLOW_WARNING_INTERVAL
-                                });
-                                if should_warn {
-                                    log::warn!(
-                                        "Simulation cannot sustain requested {rate:.0} Hz; dropping {:.1} ms of backlog",
-                                        lag.as_secs_f64() * 1_000.0
-                                    );
-                                    last_slow_warning = Some(now);
+                        if let Some(rate) = tick_rate {
+                            let now = std::time::Instant::now();
+                            if now >= next_tick_time {
+                                let lag = now.saturating_duration_since(next_tick_time);
+                                if lag >= SLOW_SIMULATION_LAG {
+                                    let should_warn = last_slow_warning.is_none_or(|last| {
+                                        now.duration_since(last) >= SLOW_WARNING_INTERVAL
+                                    });
+                                    if should_warn {
+                                        log::warn!(
+                                            "Simulation cannot sustain requested {rate:.0} Hz; dropping {:.1} ms of backlog",
+                                            lag.as_secs_f64() * 1_000.0
+                                        );
+                                        last_slow_warning = Some(now);
+                                    }
+                                    next_tick_time = now;
                                 }
-                                next_tick_time = now;
-                            }
 
-                            let duration_ns = tick_duration.as_nanos().max(1);
-                            let due = (now.saturating_duration_since(next_tick_time).as_nanos()
-                                / duration_ns)
-                                + 1;
-                            ticks_to_run = due.min(MAX_RATE_CATCH_UP_TICKS as u128) as u32;
-                            next_tick_time += tick_duration * ticks_to_run;
-                        } else {
-                            let remaining = next_tick_time.saturating_duration_since(now);
-                            if remaining > SCHEDULER_SPIN_THRESHOLD {
-                                match rx_cmd.recv_timeout(remaining - SCHEDULER_SPIN_THRESHOLD) {
-                                    Ok(cmd) => pending_cmd = Some(cmd),
-                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-                                }
+                                let duration_ns = tick_duration.as_nanos().max(1);
+                                let due =
+                                    (now.saturating_duration_since(next_tick_time).as_nanos()
+                                        / duration_ns)
+                                        + 1;
+                                ticks_to_run = due.min(MAX_RATE_CATCH_UP_TICKS as u128) as u32;
+                                next_tick_time += tick_duration * ticks_to_run;
                             } else {
-                                std::hint::spin_loop();
+                                let remaining = next_tick_time.saturating_duration_since(now);
+                                if remaining > SCHEDULER_SPIN_THRESHOLD {
+                                    match rx_cmd.recv_timeout(remaining - SCHEDULER_SPIN_THRESHOLD)
+                                    {
+                                        Ok(cmd) => pending_cmd = Some(cmd),
+                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    std::hint::spin_loop();
+                                }
+                            }
+                        } else {
+                            ticks_to_run = UNLIMITED_BATCH_TICKS;
+                        }
+
+                        if ticks_to_run > 0 {
+                            if needs_rebuild {
+                                runner = build_runner(&circuit, current_runner_type);
+                                needs_rebuild = false;
+                            }
+                            for _ in 0..ticks_to_run {
+                                runner.tick();
+                            }
+                            shared
+                                .tick_count
+                                .fetch_add(ticks_to_run as u64, Ordering::Relaxed);
+                            ticks_since_snapshot =
+                                ticks_since_snapshot.saturating_add(ticks_to_run);
+
+                            if tick_rate.is_none() {
+                                // Deliberately timer- and syscall-free. This is the
+                                // only synchronization point in unlimited mode.
+                                publish_wire_states(&shared, runner.as_ref());
+                                ticks_since_snapshot = 0;
+                            } else {
+                                let now = std::time::Instant::now();
+                                // Slow rate-limited simulations must publish every
+                                // tick. Otherwise an immediately due 0.1 Hz tick
+                                // can remain invisible until the next tick ten
+                                // seconds later. At high rates, retain the bounded
+                                // publication interval to amortize observation.
+                                if tick_duration >= MAX_SNAPSHOT_INTERVAL
+                                    || now.duration_since(last_snapshot_time)
+                                        >= MAX_SNAPSHOT_INTERVAL
+                                {
+                                    publish_wire_states(&shared, runner.as_ref());
+                                    ticks_since_snapshot = 0;
+                                    last_snapshot_time = now;
+                                }
                             }
                         }
                     } else {
-                        ticks_to_run = UNLIMITED_BATCH_TICKS;
-                    }
-
-                    if ticks_to_run > 0 {
-                        if needs_rebuild {
-                            runner = build_runner(&circuit, current_runner_type);
-                            needs_rebuild = false;
+                        match rx_cmd.recv() {
+                            Ok(cmd) => pending_cmd = Some(cmd),
+                            Err(_) => return,
                         }
-                        for _ in 0..ticks_to_run {
-                            runner.tick();
-                        }
-                        shared
-                            .tick_count
-                            .fetch_add(ticks_to_run as u64, Ordering::Relaxed);
-                        ticks_since_snapshot = ticks_since_snapshot.saturating_add(ticks_to_run);
-
-                        if tick_rate.is_none() {
-                            // Deliberately timer- and syscall-free. This is the
-                            // only synchronization point in unlimited mode.
-                            publish_wire_states(&shared, runner.as_ref());
-                            ticks_since_snapshot = 0;
-                        } else {
-                            let now = std::time::Instant::now();
-                            // Slow rate-limited simulations must publish every
-                            // tick. Otherwise an immediately due 0.1 Hz tick
-                            // can remain invisible until the next tick ten
-                            // seconds later. At high rates, retain the bounded
-                            // publication interval to amortize observation.
-                            if tick_duration >= MAX_SNAPSHOT_INTERVAL
-                                || now.duration_since(last_snapshot_time) >= MAX_SNAPSHOT_INTERVAL
-                            {
-                                publish_wire_states(&shared, runner.as_ref());
-                                ticks_since_snapshot = 0;
-                                last_snapshot_time = now;
-                            }
-                        }
-                    }
-                } else {
-                    match rx_cmd.recv() {
-                        Ok(cmd) => pending_cmd = Some(cmd),
-                        Err(_) => return,
                     }
                 }
-            }
-        });
+            });
 
-        self.worker_handle = Some(handle);
+            self.worker_handle = Some(handle);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Background workers are not available on wasm targets; threadless mode
+            // advances state through direct calls into `step`/`tick_sync` instead.
+        }
     }
 
     /// Stops the background worker thread if active.
@@ -819,11 +868,14 @@ impl SimulationEngine {
     }
 
     pub fn stop_worker(&mut self) {
-        if let Some(tx) = self.command_tx.take() {
-            let _ = tx.send(SimCommand::Stop);
-        }
-        if let Some(handle) = self.worker_handle.take() {
-            let _ = handle.join();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(tx) = self.command_tx.take() {
+                let _ = tx.send(SimCommand::Stop);
+            }
+            if let Some(handle) = self.worker_handle.take() {
+                let _ = handle.join();
+            }
         }
         self.shared_state.is_running.store(false, Ordering::Relaxed);
     }
@@ -919,14 +971,23 @@ impl SimulationEngine {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn is_optimized_runner(runner: RunnerType) -> bool {
+    matches!(
+        runner,
+        RunnerType::NaiveOptimized | RunnerType::FlatOptimized | RunnerType::EventDrivenOptimized
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn is_optimized_runner(runner: RunnerType) -> bool {
     matches!(
         runner,
         RunnerType::NaiveOptimized
             | RunnerType::FlatOptimized
             | RunnerType::ThreadedFlatOptimized
-            | RunnerType::EventDrivenOptimized
             | RunnerType::SimdOptimized
+            | RunnerType::EventDrivenOptimized
     )
 }
 

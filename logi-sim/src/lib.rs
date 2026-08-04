@@ -15,7 +15,8 @@ pub mod prelude {
     pub use crate::compiler::Compiler;
     pub use crate::engine::{SharedState, SimCommand, SimEvent, SimulationEngine};
     pub use crate::runner::{
-        EventDrivenRunner, FlatRunner, InspectableRunner, NaiveRunner, Runner, SimdRunner,
-        ThreadedFlatRunner,
+        EventDrivenRunner, FlatRunner, InspectableRunner, NaiveRunner, Runner,
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use crate::runner::{SimdRunner, ThreadedFlatRunner};
 }

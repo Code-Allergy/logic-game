@@ -710,15 +710,17 @@ unsafe fn execute_and_block_vector<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(in0) & *wires_ptr.add(in1);
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(in0) & *wires_ptr.add(in1);
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -731,15 +733,17 @@ unsafe fn execute_or_block_vector<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(in0) | *wires_ptr.add(in1);
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(in0) | *wires_ptr.add(in1);
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -752,15 +756,17 @@ unsafe fn execute_xor_block_vector<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(in0) ^ *wires_ptr.add(in1);
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(in0) ^ *wires_ptr.add(in1);
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -773,15 +779,17 @@ unsafe fn execute_nand_block_vector<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = !(*wires_ptr.add(in0) & *wires_ptr.add(in1));
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = !(*wires_ptr.add(in0) & *wires_ptr.add(in1));
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -794,15 +802,17 @@ unsafe fn execute_nor_block_vector<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = !(*wires_ptr.add(in0) | *wires_ptr.add(in1));
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = !(*wires_ptr.add(in0) | *wires_ptr.add(in1));
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -815,15 +825,17 @@ unsafe fn execute_xnor_block_vector<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = !(*wires_ptr.add(in0) ^ *wires_ptr.add(in1));
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = !(*wires_ptr.add(in0) ^ *wires_ptr.add(in1));
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -836,15 +848,17 @@ unsafe fn execute_tri_state_buffer_block_vector<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(in0) & *wires_ptr.add(in1);
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(in0) & *wires_ptr.add(in1);
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -855,13 +869,15 @@ unsafe fn execute_not_block_vector<I: SimdIndex>(
     mut unary_cursor: *const crate::circuit::SimdUnaryInstruction<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*unary_cursor;
-        let out = inst.output.as_usize();
-        let input = inst.input.as_usize();
-        *wires_ptr.add(out) = !*wires_ptr.add(input);
-        unary_cursor = unary_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*unary_cursor;
+            let out = inst.output.as_usize();
+            let input = inst.input.as_usize();
+            *wires_ptr.add(out) = !*wires_ptr.add(input);
+            unary_cursor = unary_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -872,13 +888,15 @@ unsafe fn execute_buffer_block_vector<I: SimdIndex>(
     mut unary_cursor: *const crate::circuit::SimdUnaryInstruction<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*unary_cursor;
-        let out = inst.output.as_usize();
-        let input = inst.input.as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(input);
-        unary_cursor = unary_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*unary_cursor;
+            let out = inst.output.as_usize();
+            let input = inst.input.as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(input);
+            unary_cursor = unary_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -889,18 +907,20 @@ unsafe fn execute_mux_block_vector<I: SimdIndex>(
     mut ternary_cursor: *const crate::circuit::SimdTernaryInstruction<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*ternary_cursor;
-        let out = inst.output.as_usize();
-        let in0 = inst.in0.as_usize();
-        let in1 = inst.in1.as_usize();
-        let select = inst.in2.as_usize();
-        let a = *wires_ptr.add(in0);
-        let b = *wires_ptr.add(in1);
-        let sel = *wires_ptr.add(select);
-        *wires_ptr.add(out) = (b & sel) | (a & !sel);
-        ternary_cursor = ternary_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*ternary_cursor;
+            let out = inst.output.as_usize();
+            let in0 = inst.in0.as_usize();
+            let in1 = inst.in1.as_usize();
+            let select = inst.in2.as_usize();
+            let a = *wires_ptr.add(in0);
+            let b = *wires_ptr.add(in1);
+            let sel = *wires_ptr.add(select);
+            *wires_ptr.add(out) = (b & sel) | (a & !sel);
+            ternary_cursor = ternary_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -911,18 +931,20 @@ unsafe fn execute_demux_block_vector<I: SimdIndex>(
     mut demux_cursor: *const crate::circuit::SimdDemuxInstruction<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*demux_cursor;
-        let out_false = inst.out_false.as_usize();
-        let out_true = inst.out_true.as_usize();
-        let input = inst.input.as_usize();
-        let select = inst.select.as_usize();
-        let input_value = *wires_ptr.add(input);
-        let select_value = *wires_ptr.add(select);
-        *wires_ptr.add(out_false) = input_value & !select_value;
-        *wires_ptr.add(out_true) = input_value & select_value;
-        demux_cursor = demux_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*demux_cursor;
+            let out_false = inst.out_false.as_usize();
+            let out_true = inst.out_true.as_usize();
+            let input = inst.input.as_usize();
+            let select = inst.select.as_usize();
+            let input_value = *wires_ptr.add(input);
+            let select_value = *wires_ptr.add(select);
+            *wires_ptr.add(out_false) = input_value & !select_value;
+            *wires_ptr.add(out_true) = input_value & select_value;
+            demux_cursor = demux_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -933,25 +955,27 @@ unsafe fn execute_adder_block_vector<I: SimdIndex>(
     mut adders_cursor: *const crate::circuit::SimdAdder<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*adders_cursor;
-        let mut carry = inst
-            .carry_in
-            .map(|wire| *wires_ptr.add(wire.as_usize()))
-            .unwrap_or(u64x4::ZERO);
-        let bits = inst.a.len();
-        let mut bit = 0;
-        while bit < bits {
-            let a = *wires_ptr.add(inst.a[bit].as_usize());
-            let b = *wires_ptr.add(inst.b[bit].as_usize());
-            let sum = a ^ b ^ carry;
-            write_outputs(wires_ptr, &inst.outputs[bit], sum);
-            carry = (a & b) | (carry & (a ^ b));
-            bit += 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*adders_cursor;
+            let mut carry = inst
+                .carry_in
+                .map(|wire| *wires_ptr.add(wire.as_usize()))
+                .unwrap_or(u64x4::ZERO);
+            let bits = inst.a.len();
+            let mut bit = 0;
+            while bit < bits {
+                let a = *wires_ptr.add(inst.a[bit].as_usize());
+                let b = *wires_ptr.add(inst.b[bit].as_usize());
+                let sum = a ^ b ^ carry;
+                write_outputs(wires_ptr, &inst.outputs[bit], sum);
+                carry = (a & b) | (carry & (a ^ b));
+                bit += 1;
+            }
+            write_outputs(wires_ptr, &inst.outputs[inst.a.len()], carry);
+            adders_cursor = adders_cursor.add(1);
+            remaining -= 1;
         }
-        write_outputs(wires_ptr, &inst.outputs[inst.a.len()], carry);
-        adders_cursor = adders_cursor.add(1);
-        remaining -= 1;
     }
 }
 
@@ -962,18 +986,20 @@ unsafe fn execute_clock_block_scalar<I: SimdIndex>(
     wires_ptr: *mut u8,
     clock_phase: &mut [u64],
 ) {
-    let clocks = program.clocks.as_ptr();
-    let mut clock_idx = 0;
-    while clock_idx < program.clocks.len() {
-        let clock = &*clocks.add(clock_idx);
-        let phase = clock_phase.get_unchecked_mut(clock_idx);
-        let output = *phase < clock.duty_ticks;
-        *wires_ptr.add(clock.output.as_usize()) = if output { 1 } else { 0 };
-        *phase += 1;
-        if *phase >= clock.period_ticks {
-            *phase = 0;
+    unsafe {
+        let clocks = program.clocks.as_ptr();
+        let mut clock_idx = 0;
+        while clock_idx < program.clocks.len() {
+            let clock = &*clocks.add(clock_idx);
+            let phase = clock_phase.get_unchecked_mut(clock_idx);
+            let output = *phase < clock.duty_ticks;
+            *wires_ptr.add(clock.output.as_usize()) = if output { 1 } else { 0 };
+            *phase += 1;
+            if *phase >= clock.period_ticks {
+                *phase = 0;
+            }
+            clock_idx += 1;
         }
-        clock_idx += 1;
     }
 }
 
@@ -984,25 +1010,27 @@ unsafe fn execute_counter_block_scalar<I: SimdIndex>(
     wires_ptr: *mut u8,
     previous_clock: &mut [u8],
 ) {
-    let counters = program.counters.as_ptr();
-    let mut counter_idx = 0;
-    while counter_idx < program.counters.len() {
-        let counter = &*counters.add(counter_idx);
-        let previous = previous_clock.get_unchecked_mut(counter_idx);
-        let counter_clock = *wires_ptr.add(counter.increment.as_usize());
-        let counter_reset = *wires_ptr.add(counter.reset.as_usize());
-        let mut carry = *previous & !counter_clock;
-        let mut output_idx = 0;
-        while output_idx < counter.outputs.len() {
-            let outputs = &counter.outputs[output_idx];
-            let old = first_wire_or_zero_scalar(wires_ptr, outputs);
-            let next = (old ^ carry) & !counter_reset;
-            write_outputs_scalar(wires_ptr, outputs, next);
-            carry &= old;
-            output_idx += 1;
+    unsafe {
+        let counters = program.counters.as_ptr();
+        let mut counter_idx = 0;
+        while counter_idx < program.counters.len() {
+            let counter = &*counters.add(counter_idx);
+            let previous = previous_clock.get_unchecked_mut(counter_idx);
+            let counter_clock = *wires_ptr.add(counter.increment.as_usize());
+            let counter_reset = *wires_ptr.add(counter.reset.as_usize());
+            let mut carry = *previous & !counter_clock;
+            let mut output_idx = 0;
+            while output_idx < counter.outputs.len() {
+                let outputs = &counter.outputs[output_idx];
+                let old = first_wire_or_zero_scalar(wires_ptr, outputs);
+                let next = (old ^ carry) & !counter_reset;
+                write_outputs_scalar(wires_ptr, outputs, next);
+                carry &= old;
+                output_idx += 1;
+            }
+            *previous = counter_clock;
+            counter_idx += 1;
         }
-        *previous = counter_clock;
-        counter_idx += 1;
     }
 }
 
@@ -1015,15 +1043,17 @@ unsafe fn execute_and_block_scalar<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(in0) & *wires_ptr.add(in1);
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(in0) & *wires_ptr.add(in1);
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1036,15 +1066,17 @@ unsafe fn execute_or_block_scalar<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(in0) | *wires_ptr.add(in1);
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(in0) | *wires_ptr.add(in1);
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1057,15 +1089,17 @@ unsafe fn execute_xor_block_scalar<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(in0) ^ *wires_ptr.add(in1);
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(in0) ^ *wires_ptr.add(in1);
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1078,15 +1112,17 @@ unsafe fn execute_nand_block_scalar<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = 1 ^ (*wires_ptr.add(in0) & *wires_ptr.add(in1));
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = 1 ^ (*wires_ptr.add(in0) & *wires_ptr.add(in1));
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1099,15 +1135,17 @@ unsafe fn execute_nor_block_scalar<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = 1 ^ (*wires_ptr.add(in0) | *wires_ptr.add(in1));
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = 1 ^ (*wires_ptr.add(in0) | *wires_ptr.add(in1));
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1120,15 +1158,17 @@ unsafe fn execute_xnor_block_scalar<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = 1 ^ (*wires_ptr.add(in0) ^ *wires_ptr.add(in1));
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = 1 ^ (*wires_ptr.add(in0) ^ *wires_ptr.add(in1));
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1141,15 +1181,17 @@ unsafe fn execute_tri_state_buffer_block_scalar<I: SimdIndex>(
     mut binary_out_cursor: *const I,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let out = (*binary_out_cursor).as_usize();
-        let in0 = (*binary_in0_cursor).as_usize();
-        let in1 = (*binary_in1_cursor).as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(in0) & *wires_ptr.add(in1);
-        binary_in0_cursor = binary_in0_cursor.add(1);
-        binary_in1_cursor = binary_in1_cursor.add(1);
-        binary_out_cursor = binary_out_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let out = (*binary_out_cursor).as_usize();
+            let in0 = (*binary_in0_cursor).as_usize();
+            let in1 = (*binary_in1_cursor).as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(in0) & *wires_ptr.add(in1);
+            binary_in0_cursor = binary_in0_cursor.add(1);
+            binary_in1_cursor = binary_in1_cursor.add(1);
+            binary_out_cursor = binary_out_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1160,13 +1202,15 @@ unsafe fn execute_not_block_scalar<I: SimdIndex>(
     mut unary_cursor: *const crate::circuit::SimdUnaryInstruction<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*unary_cursor;
-        let out = inst.output.as_usize();
-        let input = inst.input.as_usize();
-        *wires_ptr.add(out) = 1 ^ *wires_ptr.add(input);
-        unary_cursor = unary_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*unary_cursor;
+            let out = inst.output.as_usize();
+            let input = inst.input.as_usize();
+            *wires_ptr.add(out) = 1 ^ *wires_ptr.add(input);
+            unary_cursor = unary_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1177,13 +1221,15 @@ unsafe fn execute_buffer_block_scalar<I: SimdIndex>(
     mut unary_cursor: *const crate::circuit::SimdUnaryInstruction<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*unary_cursor;
-        let out = inst.output.as_usize();
-        let input = inst.input.as_usize();
-        *wires_ptr.add(out) = *wires_ptr.add(input);
-        unary_cursor = unary_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*unary_cursor;
+            let out = inst.output.as_usize();
+            let input = inst.input.as_usize();
+            *wires_ptr.add(out) = *wires_ptr.add(input);
+            unary_cursor = unary_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1194,18 +1240,20 @@ unsafe fn execute_mux_block_scalar<I: SimdIndex>(
     mut ternary_cursor: *const crate::circuit::SimdTernaryInstruction<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*ternary_cursor;
-        let out = inst.output.as_usize();
-        let in0 = inst.in0.as_usize();
-        let in1 = inst.in1.as_usize();
-        let select = inst.in2.as_usize();
-        let a = *wires_ptr.add(in0);
-        let b = *wires_ptr.add(in1);
-        let sel = *wires_ptr.add(select);
-        *wires_ptr.add(out) = (b & sel) | (a & (1 ^ sel));
-        ternary_cursor = ternary_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*ternary_cursor;
+            let out = inst.output.as_usize();
+            let in0 = inst.in0.as_usize();
+            let in1 = inst.in1.as_usize();
+            let select = inst.in2.as_usize();
+            let a = *wires_ptr.add(in0);
+            let b = *wires_ptr.add(in1);
+            let sel = *wires_ptr.add(select);
+            *wires_ptr.add(out) = (b & sel) | (a & (1 ^ sel));
+            ternary_cursor = ternary_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1216,18 +1264,20 @@ unsafe fn execute_demux_block_scalar<I: SimdIndex>(
     mut demux_cursor: *const crate::circuit::SimdDemuxInstruction<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*demux_cursor;
-        let out_false = inst.out_false.as_usize();
-        let out_true = inst.out_true.as_usize();
-        let input = inst.input.as_usize();
-        let select = inst.select.as_usize();
-        let input_value = *wires_ptr.add(input);
-        let select_value = *wires_ptr.add(select);
-        *wires_ptr.add(out_false) = input_value & (1 ^ select_value);
-        *wires_ptr.add(out_true) = input_value & select_value;
-        demux_cursor = demux_cursor.add(1);
-        remaining -= 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*demux_cursor;
+            let out_false = inst.out_false.as_usize();
+            let out_true = inst.out_true.as_usize();
+            let input = inst.input.as_usize();
+            let select = inst.select.as_usize();
+            let input_value = *wires_ptr.add(input);
+            let select_value = *wires_ptr.add(select);
+            *wires_ptr.add(out_false) = input_value & (1 ^ select_value);
+            *wires_ptr.add(out_true) = input_value & select_value;
+            demux_cursor = demux_cursor.add(1);
+            remaining -= 1;
+        }
     }
 }
 
@@ -1238,25 +1288,27 @@ unsafe fn execute_adder_block_scalar<I: SimdIndex>(
     mut adders_cursor: *const crate::circuit::SimdAdder<I>,
     mut remaining: usize,
 ) {
-    while remaining > 0 {
-        let inst = &*adders_cursor;
-        let mut carry = inst
-            .carry_in
-            .map(|wire| *wires_ptr.add(wire.as_usize()))
-            .unwrap_or(0);
-        let bits = inst.a.len();
-        let mut bit = 0;
-        while bit < bits {
-            let a = *wires_ptr.add(inst.a[bit].as_usize());
-            let b = *wires_ptr.add(inst.b[bit].as_usize());
-            let sum = a ^ b ^ carry;
-            write_outputs_scalar(wires_ptr, &inst.outputs[bit], sum);
-            carry = (a & b) | (carry & (a ^ b));
-            bit += 1;
+    unsafe {
+        while remaining > 0 {
+            let inst = &*adders_cursor;
+            let mut carry = inst
+                .carry_in
+                .map(|wire| *wires_ptr.add(wire.as_usize()))
+                .unwrap_or(0);
+            let bits = inst.a.len();
+            let mut bit = 0;
+            while bit < bits {
+                let a = *wires_ptr.add(inst.a[bit].as_usize());
+                let b = *wires_ptr.add(inst.b[bit].as_usize());
+                let sum = a ^ b ^ carry;
+                write_outputs_scalar(wires_ptr, &inst.outputs[bit], sum);
+                carry = (a & b) | (carry & (a ^ b));
+                bit += 1;
+            }
+            write_outputs_scalar(wires_ptr, &inst.outputs[inst.a.len()], carry);
+            adders_cursor = adders_cursor.add(1);
+            remaining -= 1;
         }
-        write_outputs_scalar(wires_ptr, &inst.outputs[inst.a.len()], carry);
-        adders_cursor = adders_cursor.add(1);
-        remaining -= 1;
     }
 }
 

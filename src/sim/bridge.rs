@@ -16,37 +16,18 @@
 //!   can read [`SimEvent`]s produced by the worker on each frame.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use uuid::Uuid;
 
+use super::service::{DirectSimService, SimExecutionService, SimRuntime, ThreadedSimService};
 use logi_sim::circuit::Circuit;
-use logi_sim::engine::{RunnerType, SimCommand, SimEvent, SimulationEngine};
-use logi_sim::prelude::{InputRef, NodeId, OutputRef, SharedState, WireId};
+use logi_sim::engine::{RunnerType, SimEvent};
+use logi_sim::prelude::{InputRef, NodeId, OutputRef, WireId};
 
 use super::model::{GameCircuit, GameNode, GameWire};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Inner mutable state (wrapped in Mutex so SimBridge is Sync)
-//
-// `SimulationEngine` contains `Option<Receiver<SimEvent>>` which is `!Sync`.
-// By wrapping the engine + command channel in a `Mutex` we get a type that is
-// both `Send` (Receiver<T>: Send if T: Send) and `Sync` (Mutex<T>: Sync if T: Send).
-// ─────────────────────────────────────────────────────────────────────────────
-
-struct SimInner {
-    engine: SimulationEngine,
-    command_tx: Option<Sender<SimCommand>>,
-    event_rx: Option<Receiver<SimEvent>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimRuntime {
-    Threaded,
-    Threadless,
-}
 
 /// Represents a pending `AddNode` command awaiting a `NodeId` response from the worker.
 struct PendingNode {
@@ -64,20 +45,19 @@ struct PendingWire {
 // SimBridge
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Bevy `Resource` that owns the simulation worker thread and the bidirectional
+/// Bevy `Resource` that owns the simulation bridge layer and the bidirectional
 /// `Uuid ↔ NodeId / WireId` mapping tables.
 ///
 /// All game systems interact with the simulator exclusively through this
 /// resource – they never touch `logi-sim` types directly.
 ///
 /// # Sync safety
-/// The engine's internal `Receiver` is `!Sync`. We solve this by wrapping the
-/// entire engine + channels in a `Mutex<SimInner>`. Access to the inner state
-/// happens exclusively from Bevy's main thread via `ResMut<SimBridge>`.
+/// The bridge wraps the execution service in an `Arc`, while each service
+/// implementation handles its own internal synchronization.
 #[derive(Resource)]
 pub struct SimBridge {
-    // ── Mutex-wrapped engine (makes the whole struct Sync) ─────────────────
-    inner: Mutex<SimInner>,
+    // ── Execution service (threaded or direct) ────────────────────────────
+    service: Arc<dyn SimExecutionService>,
 
     // ── Pending async responses (also !Sync, also wrapped) ─────────────────
     pending_nodes: Mutex<Vec<PendingNode>>,
@@ -89,8 +69,6 @@ pub struct SimBridge {
     wire_by_uuid: HashMap<Uuid, WireId>,
     uuid_by_wire: HashMap<WireId, Uuid>,
 
-    // ── Shared atomic state (Arc<RwLock<...>>, Send+Sync) ──────────────────
-    shared_state: Arc<SharedState>,
     runtime: SimRuntime,
 
     // ── Metadata ───────────────────────────────────────────────────────────
@@ -128,105 +106,27 @@ impl SimBridge {
         let uuid_by_wire: HashMap<WireId, Uuid> =
             wire_by_uuid.iter().map(|(u, w)| (*w, *u)).collect();
 
-        let mut engine = match runtime {
-            SimRuntime::Threaded => {
-                let (event_tx, _event_rx) = mpsc::channel::<SimEvent>();
-                let mut engine = SimulationEngine::new_with_event_channel(sim_circuit, event_tx);
-                engine.start_worker();
-                engine
-            }
-            SimRuntime::Threadless => {
-                let engine = SimulationEngine::new(sim_circuit);
-                engine
-            }
+        let service: Arc<dyn SimExecutionService> = match runtime {
+            SimRuntime::Threaded => Arc::new(ThreadedSimService::new(sim_circuit)),
+            SimRuntime::Threadless => Arc::new(DirectSimService::new(sim_circuit)),
         };
-
-        let (command_tx, event_rx) = match runtime {
-            SimRuntime::Threaded => (engine.command_sender(), engine.take_event_receiver()),
-            SimRuntime::Threadless => (None, None),
-        };
-        let shared_state = Arc::clone(&engine.shared_state);
 
         Self {
-            inner: Mutex::new(SimInner {
-                engine,
-                command_tx: command_tx.clone(),
-                event_rx,
-            }),
+            service,
             pending_nodes: Mutex::new(Vec::new()),
             pending_wires: Mutex::new(Vec::new()),
             node_by_uuid,
             uuid_by_node,
             wire_by_uuid,
             uuid_by_wire,
-            shared_state,
             runtime,
             next_temp_id: 0,
             is_running: true,
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Private helpers
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// Lock the inner state. Panics only if the mutex is poisoned (i.e. a
-    /// previous panic occurred inside a lock – which should never happen in
-    /// normal operation).
-    fn inner(&self) -> std::sync::MutexGuard<'_, SimInner> {
-        self.inner.lock().expect("SimBridge inner mutex poisoned")
-    }
-
     pub fn runtime(&self) -> SimRuntime {
         self.runtime
-    }
-
-    fn send_cmd(&self, cmd: SimCommand) {
-        let mut inner = self.inner();
-        if let Some(tx) = &inner.command_tx {
-            let _ = tx.send(cmd);
-            return;
-        }
-
-        match cmd {
-            SimCommand::SetRunner(runner_type) => {
-                inner.engine.set_runner(runner_type);
-            }
-            SimCommand::SetInput { node, pin, value } => inner.engine.set_input(node, pin, value),
-            SimCommand::SetTickRate(tick_rate) => inner.engine.set_tick_rate(tick_rate),
-            SimCommand::AddNode {
-                temp_id,
-                kind,
-                inputs,
-                outputs,
-                response_tx,
-            } => {
-                let node_id = inner.engine.add_node(kind, inputs, outputs);
-                let _ = response_tx.send((temp_id, node_id));
-            }
-            SimCommand::AddWire {
-                temp_id,
-                source,
-                sink,
-                response_tx,
-            } => {
-                let wire_id = inner.engine.add_wire(source, sink);
-                let _ = response_tx.send((temp_id, wire_id));
-            }
-            SimCommand::RemoveNode { node } => inner.engine.remove_node(node),
-            SimCommand::RemoveWire { wire } => inner.engine.remove_wire(wire),
-            SimCommand::RebuildCircuit {
-                circuit,
-                response_tx,
-            } => {
-                inner.engine.rebuild_circuit(circuit);
-                let _ = response_tx.send(());
-            }
-            SimCommand::Pause => inner.engine.pause(),
-            SimCommand::Resume => inner.engine.resume(),
-            SimCommand::Step => inner.engine.step(),
-            SimCommand::Stop => inner.engine.stop_worker(),
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -290,10 +190,7 @@ impl SimBridge {
     /// Replace the current circuit. Stops the old worker, rebuilds from
     /// `game_circuit`, and restarts.
     pub fn load_circuit(&mut self, game_circuit: &GameCircuit) {
-        {
-            let mut inner = self.inner();
-            inner.engine.stop_worker();
-        }
+        self.service.stop();
 
         self.node_by_uuid.clear();
         self.uuid_by_node.clear();
@@ -308,31 +205,10 @@ impl SimBridge {
         self.wire_by_uuid = wire_by_uuid;
         self.uuid_by_wire = self.wire_by_uuid.iter().map(|(u, w)| (*w, *u)).collect();
 
-        match self.runtime {
-            SimRuntime::Threaded => {
-                let (event_tx, event_rx) = mpsc::channel::<SimEvent>();
-                let mut engine = SimulationEngine::new_with_event_channel(sim_circuit, event_tx);
-                engine.start_worker();
-                let command_tx = engine
-                    .command_sender()
-                    .expect("worker should be running after start_worker");
-                self.shared_state = Arc::clone(&engine.shared_state);
-                *self.inner() = SimInner {
-                    engine,
-                    command_tx: Some(command_tx),
-                    event_rx: Some(event_rx),
-                };
-            }
-            SimRuntime::Threadless => {
-                let engine = SimulationEngine::new(sim_circuit);
-                self.shared_state = Arc::clone(&engine.shared_state);
-                *self.inner() = SimInner {
-                    engine,
-                    command_tx: None,
-                    event_rx: None,
-                };
-            }
-        }
+        self.service = match self.runtime {
+            SimRuntime::Threaded => Arc::new(ThreadedSimService::new(sim_circuit)),
+            SimRuntime::Threadless => Arc::new(DirectSimService::new(sim_circuit)),
+        };
         self.is_running = true;
     }
 
@@ -352,14 +228,7 @@ impl SimBridge {
         let temp_id = self.next_temp_id;
         self.next_temp_id += 1;
 
-        let (resp_tx, resp_rx) = mpsc::channel::<(u64, NodeId)>();
-        self.send_cmd(SimCommand::AddNode {
-            temp_id,
-            kind,
-            inputs,
-            outputs,
-            response_tx: resp_tx,
-        });
+        let resp_rx = self.service.add_node(temp_id, kind, inputs, outputs);
         self.pending_nodes.lock().unwrap().push(PendingNode {
             game_uuid: node.id,
             response_rx: resp_rx,
@@ -376,19 +245,17 @@ impl SimBridge {
         let temp_id = self.next_temp_id;
         self.next_temp_id += 1;
 
-        let (resp_tx, resp_rx) = mpsc::channel::<(u64, WireId)>();
-        self.send_cmd(SimCommand::AddWire {
+        let resp_rx = self.service.add_wire(
             temp_id,
-            source: OutputRef {
+            OutputRef {
                 node: src_node,
                 pin: wire.source_pin,
             },
-            sink: InputRef {
+            InputRef {
                 node: snk_node,
                 pin: wire.sink_pin,
             },
-            response_tx: resp_tx,
-        });
+        );
         self.pending_wires.lock().unwrap().push(PendingWire {
             game_uuid: wire.id,
             response_rx: resp_rx,
@@ -401,7 +268,7 @@ impl SimBridge {
     pub fn remove_node(&mut self, uuid: Uuid) {
         if let Some(node_id) = self.node_by_uuid.remove(&uuid) {
             self.uuid_by_node.remove(&node_id);
-            self.send_cmd(SimCommand::RemoveNode { node: node_id });
+            self.service.remove_node(node_id);
         }
     }
 
@@ -409,7 +276,7 @@ impl SimBridge {
     pub fn remove_wire(&mut self, uuid: Uuid) {
         if let Some(wire_id) = self.wire_by_uuid.remove(&uuid) {
             self.uuid_by_wire.remove(&wire_id);
-            self.send_cmd(SimCommand::RemoveWire { wire: wire_id });
+            self.service.remove_wire(wire_id);
         }
     }
 
@@ -423,11 +290,7 @@ impl SimBridge {
                 "Setting input for node {:?} pin {} to {}",
                 node_id, pin, value
             );
-            self.send_cmd(SimCommand::SetInput {
-                node: node_id,
-                pin,
-                value,
-            });
+            self.service.set_input(node_id, pin, value);
         }
     }
 
@@ -437,45 +300,34 @@ impl SimBridge {
 
     pub fn pause(&mut self) {
         self.is_running = false;
-        self.send_cmd(SimCommand::Pause);
+        self.service.pause();
     }
 
     pub fn resume(&mut self) {
         self.is_running = true;
-        self.send_cmd(SimCommand::Resume);
+        self.service.resume();
     }
 
     pub fn step(&self) {
-        self.send_cmd(SimCommand::Step);
+        self.service.tick();
     }
 
-    /// Run multiple simulation ticks synchronously in threadless mode, or enqueue
-    /// each tick as a command in threaded mode.
+    /// Run multiple simulation ticks.
     pub fn step_many(&self, ticks: u64) {
-        if self.runtime() == SimRuntime::Threadless {
-            let mut inner = self.inner();
-            for _ in 0..ticks {
-                inner.engine.step();
-            }
-            return;
-        }
-
-        for _ in 0..ticks {
-            self.send_cmd(SimCommand::Step);
-        }
+        self.service.step_many(ticks);
     }
 
     pub fn stop(&mut self) {
         self.is_running = false;
-        self.inner().engine.stop_worker();
+        self.service.stop();
     }
 
     pub fn set_tick_rate(&self, tick_rate: Option<f64>) {
-        self.send_cmd(SimCommand::SetTickRate(tick_rate));
+        self.service.set_tick_rate(tick_rate);
     }
 
     pub fn set_runner_type(&mut self, runner_type: RunnerType) {
-        self.inner().engine.set_runner(runner_type);
+        self.service.set_runner_type(runner_type);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -488,7 +340,7 @@ impl SimBridge {
     /// to call every frame.  Wire / pin state should be read from
     /// [`crate::sim::SimCache`] instead.
     pub fn tick_count(&self) -> u64 {
-        self.shared_state.tick_count()
+        self.service.tick_count()
     }
 
     /// Snapshot the current state of every wire with a single `RwLock::read()`.
@@ -498,11 +350,7 @@ impl SimBridge {
     /// Bevy frame — one lock acquisition regardless of how many simulation ticks
     /// ran since the last frame.
     pub fn snapshot_wire_states(&self, f: &mut impl FnMut(WireId, bool)) {
-        if let Ok(lock) = self.shared_state.wire_states.read() {
-            for (wire_id, &val) in lock.iter() {
-                f(wire_id, val);
-            }
-        }
+        self.service.snapshot_wire_states(f);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -548,15 +396,7 @@ impl SimBridge {
 
     /// Collect all `SimEvent`s produced by the worker since the last call.
     pub fn drain_events(&self) -> Vec<SimEvent> {
-        let mut events = Vec::new();
-        let inner = self.inner();
-        let Some(event_rx) = &inner.event_rx else {
-            return events;
-        };
-        while let Ok(evt) = event_rx.try_recv() {
-            events.push(evt);
-        }
-        events
+        self.service.drain_events()
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -590,8 +430,6 @@ impl SimBridge {
 
 impl Drop for SimBridge {
     fn drop(&mut self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.engine.stop_worker();
-        }
+        self.service.stop();
     }
 }

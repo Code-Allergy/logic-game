@@ -4,7 +4,8 @@ use bevy::prelude::*;
 
 use crate::GameState;
 use crate::sim::{
-    SelectedGate, SimBridge, SimCache, SimulationConfig, ThreadlessStepper, TickRateMeter,
+    SelectedGate, SimBridge, SimCache, SimRuntime, SimulationConfig, ThreadlessStepper,
+    TickRateMeter,
     systems::{
         bridge_flush_system, drag_selected_system, draw_connections_system, draw_gates_system,
         drive_threadless_simulation, gate_selection_system, rebuild_spatial_grid_system,
@@ -20,23 +21,38 @@ use super::spatial_grid::SpatialGrid;
 
 pub struct SimulationPlugin {
     pub state: GameState,
+    pub runtime: SimRuntime,
 }
 
 impl SimulationPlugin {
     pub fn new(state: GameState) -> Self {
-        Self { state }
+        Self {
+            state,
+            #[cfg(not(target_arch = "wasm32"))]
+            runtime: SimRuntime::Threaded,
+            #[cfg(target_arch = "wasm32")]
+            runtime: SimRuntime::Threadless,
+        }
+    }
+
+    pub fn with_runtime(state: GameState, runtime: SimRuntime) -> Self {
+        Self { state, runtime }
     }
 }
 
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         let state = self.state.clone();
+        let runtime = self.runtime;
 
         // ── Resources inserted at startup so Bevy param validation never sees
         //    a missing resource, regardless of which GameState is active.
         //    (Bevy 0.19 validates Res<T> params *before* evaluating run_if.)
         let game_circuit = fixtures::build_64bit_counter_subcircuits();
-        let mut sim_bridge = SimBridge::from_circuit(&game_circuit);
+        let mut sim_bridge = match runtime {
+            SimRuntime::Threaded => SimBridge::from_circuit_threaded(&game_circuit),
+            SimRuntime::Threadless => SimBridge::from_circuit_threadless(&game_circuit),
+        };
         power_on_reset(&mut sim_bridge, &game_circuit);
 
         app
