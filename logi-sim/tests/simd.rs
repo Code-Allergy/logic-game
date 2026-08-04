@@ -1,5 +1,15 @@
 use logi_sim::fixtures;
 use logi_sim::prelude::*;
+
+#[test]
+fn floating_binary_gates_compile_without_panicking() {
+    let mut circuit = Circuit::new();
+    let floating_and = circuit.and();
+    let floating_or = circuit.or();
+    circuit.connect((floating_and, 0), (floating_or, 0));
+    let mut runner = SimdRunner::new(BitPackedCircuit::compile(&circuit));
+    runner.tick();
+}
 use std::collections::HashMap;
 use std::mem::size_of;
 

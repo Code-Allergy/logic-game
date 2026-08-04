@@ -287,7 +287,7 @@ fn contains_nested_state(circuit: &Circuit) -> bool {
             child
                 .nodes
                 .values()
-                .any(|nested| matches!(nested.kind, NodeKind::Counter8))
+                .any(|nested| matches!(nested.kind, NodeKind::Counter8 | NodeKind::Counter64))
                 || contains_nested_state(child)
         }
         _ => false,

@@ -43,6 +43,48 @@ impl FlatRunner {
             self.wire_values[node.outputs[pin]] = value;
         }
     }
+
+    fn set_logical_output_pin(&mut self, node_idx: usize, pin: usize, value: bool) {
+        if let Some(wires) = self.circuit.nodes[node_idx].output_pins.get(pin) {
+            for &wire in wires {
+                self.wire_values[wire] = value;
+            }
+        }
+    }
+
+    fn evaluate_counter(&mut self, node_idx: usize, bits: usize) {
+        let clock = self.input_value(node_idx, 0);
+        let reset = self.input_value(node_idx, 1);
+        let falling = self.previous_clock[node_idx] && !clock;
+        let pins = self.circuit.nodes[node_idx].output_pins.clone();
+        let observable = self.circuit.idx_to_wire.len();
+        let mut carry = falling;
+        for pin in pins.iter().take(bits) {
+            let old = pin
+                .iter()
+                .find(|&&wire| wire < observable)
+                .or_else(|| pin.first())
+                .map(|&wire| self.wire_values[wire])
+                .unwrap_or(false);
+            let next = if reset { false } else { old ^ carry };
+            carry &= old;
+            for &wire in pin {
+                self.wire_values[wire] = next;
+            }
+        }
+        self.previous_clock[node_idx] = clock;
+    }
+
+    fn evaluate_adder(&mut self, node_idx: usize, bits: usize, has_carry: bool) {
+        let mut carry = has_carry && self.input_value(node_idx, bits * 2);
+        for bit in 0..bits {
+            let a = self.input_value(node_idx, bit);
+            let b = self.input_value(node_idx, bits + bit);
+            self.set_logical_output_pin(node_idx, bit, a ^ b ^ carry);
+            carry = (a && b) || (carry && (a ^ b));
+        }
+        self.set_logical_output_pin(node_idx, bits, carry);
+    }
 }
 
 impl Runner for FlatRunner {
@@ -57,8 +99,8 @@ impl Runner for FlatRunner {
     fn tick(&mut self) {
         for executable_idx in 0..self.circuit.executable_nodes.len() {
             let n_idx = self.circuit.executable_nodes[executable_idx];
-            let kind = &self.circuit.nodes[n_idx].kind;
-            match kind {
+            let kind = self.circuit.nodes[n_idx].kind.clone();
+            match &kind {
                 NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => continue,
                 NodeKind::And => {
                     let out = self.input_value(n_idx, 0) && self.input_value(n_idx, 1);
@@ -112,26 +154,13 @@ impl Runner for FlatRunner {
                     self.set_output(n_idx, out);
                 }
                 NodeKind::Counter8 => {
-                    let clock = self.input_value(n_idx, 0);
-                    let reset = self.input_value(n_idx, 1);
-                    let falling = self.previous_clock[n_idx] && !clock;
-                    let pins = self.circuit.nodes[n_idx].output_pins.clone();
-                    let observable = self.circuit.idx_to_wire.len();
-                    let mut carry = falling;
-                    for pin in pins.iter().take(8) {
-                        let old = pin
-                            .iter()
-                            .find(|&&wire| wire < observable)
-                            .or_else(|| pin.first())
-                            .map(|&wire| self.wire_values[wire])
-                            .unwrap_or(false);
-                        let next = if reset { false } else { old ^ carry };
-                        carry &= old;
-                        for &wire in pin {
-                            self.wire_values[wire] = next;
-                        }
-                    }
-                    self.previous_clock[n_idx] = clock;
+                    self.evaluate_counter(n_idx, 8);
+                }
+                NodeKind::Counter64 => {
+                    self.evaluate_counter(n_idx, 64);
+                }
+                NodeKind::Adder { bits, carry_in } => {
+                    self.evaluate_adder(n_idx, usize::from(*bits), *carry_in);
                 }
                 NodeKind::Clock {
                     period_ticks,

@@ -29,6 +29,14 @@ pub enum NodeKind {
     /// Falling-edge-triggered byte counter. Inputs are increment and reset;
     /// outputs are the eight little-endian state bits.
     Counter8,
+    /// Falling-edge-triggered 64-bit counter with increment/reset inputs.
+    Counter64,
+    /// Native ripple-adder macro cell. Inputs are A bits, B bits, and optional
+    /// carry-in; outputs are sum bits followed by carry-out.
+    Adder {
+        bits: u16,
+        carry_in: bool,
+    },
     Clock {
         period_ticks: u32,
         duty_ticks: u32,
@@ -55,6 +63,17 @@ impl PartialEq for NodeKind {
             (NodeKind::Demux, NodeKind::Demux) => true,
             (NodeKind::TriStateBuffer, NodeKind::TriStateBuffer) => true,
             (NodeKind::Counter8, NodeKind::Counter8) => true,
+            (NodeKind::Counter64, NodeKind::Counter64) => true,
+            (
+                NodeKind::Adder {
+                    bits: a_bits,
+                    carry_in: a_carry,
+                },
+                NodeKind::Adder {
+                    bits: b_bits,
+                    carry_in: b_carry,
+                },
+            ) => a_bits == b_bits && a_carry == b_carry,
             (
                 NodeKind::Clock {
                     period_ticks: p1,

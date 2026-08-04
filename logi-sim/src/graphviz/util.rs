@@ -31,6 +31,11 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Demux => "DEMUX",
         NodeKind::TriStateBuffer => "TRISTATE",
         NodeKind::Counter8 => "COUNTER8",
+        NodeKind::Counter64 => "COUNTER64",
+        NodeKind::Adder {
+            carry_in: false, ..
+        } => "HALF_ADDER",
+        NodeKind::Adder { carry_in: true, .. } => "ADDER",
         NodeKind::Clock { .. } => "CLOCK",
         NodeKind::SubCircuit(_) => "SUBCIRCUIT",
     }

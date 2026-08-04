@@ -8,8 +8,9 @@ pub mod wire;
 
 pub use {
     bit_packed::{
-        BitPackedCircuit, SimdBinaryInstruction, SimdBlock, SimdClock, SimdDemuxInstruction,
-        SimdIndex, SimdOp, SimdProgram, SimdPrograms, SimdTernaryInstruction, SimdUnaryInstruction,
+        BitPackedCircuit, SimdAdder, SimdBinaryInstruction, SimdBlock, SimdClock,
+        SimdCounterInstruction, SimdDemuxInstruction, SimdIndex, SimdOp, SimdProgram, SimdPrograms,
+        SimdTernaryInstruction, SimdUnaryInstruction,
     },
     event_driven::EventDrivenCircuit,
     flattened::FlattenedCircuit,

@@ -155,6 +155,26 @@ fn execute_program<I: SimdIndex>(
                     wires[inst.out_true.as_usize()] = input & select;
                 }
             }
+            SimdOp::Adder => {
+                for inst in &program.adders[start..end] {
+                    let mut carry = inst
+                        .carry_in
+                        .map(|wire| wires[wire.as_usize()])
+                        .unwrap_or(u64x4::ZERO);
+                    for bit in 0..inst.a.len() {
+                        let a = wires[inst.a[bit].as_usize()];
+                        let b = wires[inst.b[bit].as_usize()];
+                        let sum = a ^ b ^ carry;
+                        for output in &inst.outputs[bit] {
+                            wires[output.as_usize()] = sum;
+                        }
+                        carry = (a & b) | (carry & (a ^ b));
+                    }
+                    for output in &inst.outputs[inst.a.len()] {
+                        wires[output.as_usize()] = carry;
+                    }
+                }
+            }
         }
     }
 }

@@ -47,6 +47,34 @@ impl NaiveRunner {
             self.wire_values[wire] = value;
         }
     }
+    fn evaluate_counter(&mut self, node_id: NodeId, bits: usize) {
+        let clock = self.input_value(node_id, 0);
+        let reset = self.input_value(node_id, 1);
+        let falling = self.previous_clock[node_id] && !clock;
+        let mut carry = falling;
+        for pin in 0..bits {
+            let old = self.circuit.nodes[node_id]
+                .outputs
+                .get(pin)
+                .and_then(|output| output.wires.first())
+                .map(|wire| self.wire_values[*wire])
+                .unwrap_or(false);
+            let next = if reset { false } else { old ^ carry };
+            carry &= old;
+            self.set_output(node_id, pin, next);
+        }
+        self.previous_clock[node_id] = clock;
+    }
+    fn evaluate_adder(&mut self, node_id: NodeId, bits: usize, has_carry: bool) {
+        let mut carry = has_carry && self.input_value(node_id, bits * 2);
+        for bit in 0..bits {
+            let a = self.input_value(node_id, bit);
+            let b = self.input_value(node_id, bits + bit);
+            self.set_output(node_id, bit, a ^ b ^ carry);
+            carry = (a && b) || (carry && (a ^ b));
+        }
+        self.set_output(node_id, bits, carry);
+    }
     fn evaluate_node(&mut self, node_id: NodeId) {
         let node_kind = self.circuit.nodes[node_id].kind.clone();
         match &node_kind {
@@ -111,24 +139,13 @@ impl NaiveRunner {
                 }
             }
             NodeKind::Counter8 => {
-                let clock = self.input_value(node_id, 0);
-                let reset = self.input_value(node_id, 1);
-                let falling = self.previous_clock[node_id] && !clock;
-                if reset || falling {
-                    let mut carry = falling;
-                    for pin in 0..8 {
-                        let old = self.circuit.nodes[node_id]
-                            .outputs
-                            .get(pin)
-                            .and_then(|output| output.wires.first())
-                            .map(|wire| self.wire_values[*wire])
-                            .unwrap_or(false);
-                        let next = if reset { false } else { old ^ carry };
-                        carry &= old;
-                        self.set_output(node_id, pin, next);
-                    }
-                }
-                self.previous_clock[node_id] = clock;
+                self.evaluate_counter(node_id, 8);
+            }
+            NodeKind::Counter64 => {
+                self.evaluate_counter(node_id, 64);
+            }
+            NodeKind::Adder { bits, carry_in } => {
+                self.evaluate_adder(node_id, usize::from(*bits), *carry_in);
             }
             NodeKind::Clock {
                 period_ticks,

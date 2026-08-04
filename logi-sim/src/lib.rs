@@ -8,9 +8,9 @@ pub mod runner;
 pub mod prelude {
     pub use crate::circuit::{
         BitPackedCircuit, Circuit, EventDrivenCircuit, FlattenedCircuit, InputPin, InputRef, Node,
-        NodeId, NodeKind, OutputPin, OutputRef, SimdBinaryInstruction, SimdBlock, SimdClock,
-        SimdDemuxInstruction, SimdIndex, SimdOp, SimdProgram, SimdPrograms, SimdTernaryInstruction,
-        SimdUnaryInstruction, Wire, WireId,
+        NodeId, NodeKind, OutputPin, OutputRef, SimdAdder, SimdBinaryInstruction, SimdBlock,
+        SimdClock, SimdCounterInstruction, SimdDemuxInstruction, SimdIndex, SimdOp, SimdProgram,
+        SimdPrograms, SimdTernaryInstruction, SimdUnaryInstruction, Wire, WireId,
     };
     pub use crate::compiler::Compiler;
     pub use crate::engine::{SharedState, SimCommand, SimEvent, SimulationEngine};

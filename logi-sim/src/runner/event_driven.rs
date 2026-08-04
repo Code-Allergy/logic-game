@@ -106,9 +106,57 @@ impl EventDrivenRunner {
         }
     }
 
+    fn set_logical_output_pin(&mut self, n_idx: usize, pin: usize, value: bool) {
+        let wires = self.circuit.nodes[n_idx]
+            .output_pins
+            .get(pin)
+            .cloned()
+            .unwrap_or_default();
+        for wire in wires {
+            if self.wire_values[wire] != value {
+                self.wire_values[wire] = value;
+                for &listener in &self.circuit.wire_listeners[wire] {
+                    Self::enqueue_node_static(&mut self.in_queue, &mut self.dirty_queue, listener);
+                }
+            }
+        }
+    }
+
+    fn evaluate_counter(&mut self, n_idx: usize, bits: usize) {
+        let clock = self.input_value(n_idx, 0);
+        let reset = self.input_value(n_idx, 1);
+        let falling = self.previous_clock[n_idx] && !clock;
+        self.previous_clock[n_idx] = clock;
+        let output_pins = self.circuit.nodes[n_idx].output_pins.clone();
+        let observable = self.circuit.idx_to_wire.len();
+        let mut carry = falling;
+        for (bit, pin) in output_pins.iter().take(bits).enumerate() {
+            let old = pin
+                .iter()
+                .find(|&&wire| wire < observable)
+                .or_else(|| pin.first())
+                .map(|&wire| self.wire_values[wire])
+                .unwrap_or(false);
+            let next = if reset { false } else { old ^ carry };
+            carry &= old;
+            self.set_logical_output_pin(n_idx, bit, next);
+        }
+    }
+
+    fn evaluate_adder(&mut self, n_idx: usize, bits: usize, has_carry: bool) {
+        let mut carry = has_carry && self.input_value(n_idx, bits * 2);
+        for bit in 0..bits {
+            let a = self.input_value(n_idx, bit);
+            let b = self.input_value(n_idx, bits + bit);
+            self.set_logical_output_pin(n_idx, bit, a ^ b ^ carry);
+            carry = (a && b) || (carry && (a ^ b));
+        }
+        self.set_logical_output_pin(n_idx, bits, carry);
+    }
+
     fn process_node_outputs(&mut self, n_idx: usize) {
-        let kind = &self.circuit.nodes[n_idx].kind;
-        match kind {
+        let kind = self.circuit.nodes[n_idx].kind.clone();
+        match &kind {
             NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => {}
             NodeKind::And => {
                 let val = self.input_value(n_idx, 0) && self.input_value(n_idx, 1);
@@ -162,35 +210,13 @@ impl EventDrivenRunner {
                 self.set_node_outputs(n_idx, val);
             }
             NodeKind::Counter8 => {
-                let clock = self.input_value(n_idx, 0);
-                let reset = self.input_value(n_idx, 1);
-                let falling = self.previous_clock[n_idx] && !clock;
-                self.previous_clock[n_idx] = clock;
-                let output_pins = self.circuit.nodes[n_idx].output_pins.clone();
-                let observable = self.circuit.idx_to_wire.len();
-                let mut carry = falling;
-                for pin in output_pins.iter().take(8) {
-                    let old = pin
-                        .iter()
-                        .find(|&&wire| wire < observable)
-                        .or_else(|| pin.first())
-                        .map(|&wire| self.wire_values[wire])
-                        .unwrap_or(false);
-                    let next = if reset { false } else { old ^ carry };
-                    carry &= old;
-                    for &wire in pin {
-                        if self.wire_values[wire] != next {
-                            self.wire_values[wire] = next;
-                            for &listener in &self.circuit.wire_listeners[wire] {
-                                Self::enqueue_node_static(
-                                    &mut self.in_queue,
-                                    &mut self.dirty_queue,
-                                    listener,
-                                );
-                            }
-                        }
-                    }
-                }
+                self.evaluate_counter(n_idx, 8);
+            }
+            NodeKind::Counter64 => {
+                self.evaluate_counter(n_idx, 64);
+            }
+            NodeKind::Adder { bits, carry_in } => {
+                self.evaluate_adder(n_idx, usize::from(*bits), *carry_in);
             }
             NodeKind::Clock {
                 period_ticks,

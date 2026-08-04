@@ -1,5 +1,7 @@
+pub mod combinational_cells;
 pub mod common_cells;
 pub mod dead_code;
+pub mod sequential_cells;
 
 use std::collections::HashMap;
 
@@ -12,7 +14,17 @@ pub struct Compiler;
 impl Compiler {
     /// Runs optimization passes on a circuit before passing it to execution runners.
     pub fn optimize(circuit: &Circuit) -> Circuit {
-        Self::optimize_with_map(circuit).0
+        let optimized = Self::optimize_with_maps(circuit).0;
+
+        // Callers that do not need raw-to-optimized identity maps can also
+        // replace the circuit root itself. Mapping-preserving compilation
+        // deliberately keeps that outer shell so game/editor observations
+        // continue to address the user's visible nodes and wires.
+        let lowered = combinational_cells::lower_handmade_adder(&optimized)
+            .or_else(|| sequential_cells::lower_handmade_counter(&optimized));
+        lowered
+            .map(|circuit| Self::optimize_with_maps(&circuit).0)
+            .unwrap_or(optimized)
     }
 
     /// Runs optimization passes and returns a mapping from raw NodeIds to optimized NodeIds.
@@ -34,15 +46,28 @@ impl Compiler {
         let mut recursively_optimized = circuit.clone();
         for node in recursively_optimized.nodes.values_mut() {
             if let NodeKind::SubCircuit(child) = &mut node.kind {
-                **child = Self::optimize(child);
+                let lowered_before_children = combinational_cells::lower_handmade_adder(child)
+                    .or_else(|| sequential_cells::lower_handmade_counter(child));
+                if let Some(lowered) = lowered_before_children {
+                    **child = Self::optimize(&lowered);
+                } else {
+                    let optimized_child = Self::optimize(child);
+                    **child = combinational_cells::lower_handmade_adder(&optimized_child)
+                        .or_else(|| sequential_cells::lower_handmade_counter(&optimized_child))
+                        .unwrap_or(optimized_child);
+                }
             }
         }
 
         let (mut current, mut raw_node_map, mut raw_wire_map) =
             dead_code::cull_dead_nodes_with_map(&recursively_optimized);
 
-        loop {
-            let old_node_count = current.nodes.len();
+        // Local passes run to a fixed point. Keeping map composition here
+        // makes future lowering/canonicalization passes safe to add without
+        // weakening API wire observability.
+        const MAX_OPTIMIZATION_ROUNDS: usize = 16;
+        for _round in 0..MAX_OPTIMIZATION_ROUNDS {
+            let old_shape = (current.nodes.len(), current.wires.len());
             let (next, node_map, wire_map) = common_cells::merge_common_cells_with_map(&current);
 
             for mapped in raw_node_map.values_mut() {
@@ -53,7 +78,7 @@ impl Compiler {
             }
 
             current = next;
-            if current.nodes.len() == old_node_count {
+            if (current.nodes.len(), current.wires.len()) == old_shape {
                 break;
             }
         }

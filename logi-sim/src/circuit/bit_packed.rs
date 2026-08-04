@@ -16,6 +16,7 @@ pub enum SimdOp {
     Mux = 8,
     Demux = 9,
     TriStateBuffer = 10,
+    Adder = 11,
 }
 
 pub trait SimdIndex: Copy + std::fmt::Debug + Send + Sync + 'static {
@@ -87,10 +88,18 @@ pub struct SimdClock<I> {
 
 #[repr(C)]
 #[derive(Clone, Debug)]
-pub struct SimdCounter8<I> {
+pub struct SimdCounterInstruction<I> {
     pub increment: I,
     pub reset: I,
-    pub outputs: [SmallVec<[I; 2]>; 8],
+    pub outputs: Vec<SmallVec<[I; 2]>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SimdAdder<I> {
+    pub a: Vec<I>,
+    pub b: Vec<I>,
+    pub carry_in: Option<I>,
+    pub outputs: Vec<SmallVec<[I; 2]>>,
 }
 
 #[repr(C)]
@@ -109,7 +118,8 @@ pub struct SimdProgram<I> {
     pub ternary: Vec<SimdTernaryInstruction<I>>,
     pub demux: Vec<SimdDemuxInstruction<I>>,
     pub clocks: Vec<SimdClock<I>>,
-    pub counters: Vec<SimdCounter8<I>>,
+    pub counters: Vec<SimdCounterInstruction<I>>,
+    pub adders: Vec<SimdAdder<I>>,
 }
 
 impl<I> Default for SimdProgram<I> {
@@ -122,6 +132,7 @@ impl<I> Default for SimdProgram<I> {
             demux: Vec::new(),
             clocks: Vec::new(),
             counters: Vec::new(),
+            adders: Vec::new(),
         }
     }
 }
@@ -162,6 +173,8 @@ fn node_op(kind: &NodeKind) -> Option<SimdOp> {
         | NodeKind::Output
         | NodeKind::Clock { .. }
         | NodeKind::Counter8
+        | NodeKind::Counter64
+        | NodeKind::Adder { .. }
         | NodeKind::SubCircuit(_) => return None,
     })
 }
@@ -251,7 +264,12 @@ fn build_program<I: SimdIndex>(
             }
             continue;
         }
-        if matches!(node.kind, NodeKind::Counter8) {
+        if matches!(node.kind, NodeKind::Counter8 | NodeKind::Counter64) {
+            let bits = if matches!(node.kind, NodeKind::Counter8) {
+                8
+            } else {
+                64
+            };
             let outputs: Vec<_> = node
                 .output_pins
                 .iter()
@@ -270,12 +288,45 @@ fn build_program<I: SimdIndex>(
                         .collect::<SmallVec<[I; 2]>>()
                 })
                 .collect();
-            if node.inputs.len() >= 2 && outputs.len() >= 8 {
-                program.counters.push(SimdCounter8 {
+            if node.inputs.len() >= 2 && outputs.len() >= bits {
+                program.counters.push(SimdCounterInstruction {
                     increment: I::from_usize(node.inputs[0]),
                     reset: I::from_usize(node.inputs[1]),
-                    outputs: std::array::from_fn(|index| outputs[index].clone()),
+                    outputs: outputs.into_iter().take(bits).collect(),
                 });
+            }
+            continue;
+        }
+        if let NodeKind::Adder { bits, carry_in } = node.kind {
+            let bits = usize::from(bits);
+            if node.inputs.len() >= bits * 2 + usize::from(carry_in)
+                && node.output_pins.len() > bits
+            {
+                let convert_pin = |pin: &SmallVec<[usize; 2]>| {
+                    pin.iter()
+                        .copied()
+                        .filter(|&wire| {
+                            wire < observable_wire_count || !wire_listeners[wire].is_empty()
+                        })
+                        .map(I::from_usize)
+                        .collect::<SmallVec<[I; 2]>>()
+                };
+                let start = program.adders.len();
+                program.adders.push(SimdAdder {
+                    a: node.inputs[..bits]
+                        .iter()
+                        .copied()
+                        .map(I::from_usize)
+                        .collect(),
+                    b: node.inputs[bits..bits * 2]
+                        .iter()
+                        .copied()
+                        .map(I::from_usize)
+                        .collect(),
+                    carry_in: carry_in.then(|| I::from_usize(node.inputs[bits * 2])),
+                    outputs: node.output_pins[..=bits].iter().map(convert_pin).collect(),
+                });
+                push_block(&mut program.blocks, SimdOp::Adder, start);
             }
             continue;
         }
@@ -298,6 +349,9 @@ fn build_program<I: SimdIndex>(
             .collect();
         match op {
             SimdOp::Not | SimdOp::Buffer => {
+                if inputs.is_empty() {
+                    continue;
+                }
                 for output in outputs {
                     let start = program.unary.len();
                     program.unary.push(SimdUnaryInstruction {
@@ -308,6 +362,9 @@ fn build_program<I: SimdIndex>(
                 }
             }
             SimdOp::Mux => {
+                if inputs.len() < 3 {
+                    continue;
+                }
                 for output in outputs {
                     let start = program.ternary.len();
                     program.ternary.push(SimdTernaryInstruction {
@@ -320,7 +377,7 @@ fn build_program<I: SimdIndex>(
                 }
             }
             SimdOp::Demux => {
-                if outputs.len() >= 2 {
+                if inputs.len() >= 2 && outputs.len() >= 2 {
                     let start = program.demux.len();
                     program.demux.push(SimdDemuxInstruction {
                         input: I::from_usize(inputs[0]),
@@ -332,6 +389,9 @@ fn build_program<I: SimdIndex>(
                 }
             }
             _ => {
+                if inputs.len() < 2 {
+                    continue;
+                }
                 for output in outputs {
                     let start = program.binary.len();
                     program.binary.push(SimdBinaryInstruction {

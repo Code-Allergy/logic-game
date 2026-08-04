@@ -56,12 +56,28 @@ pub fn cull_dead_nodes_with_map(
     for (wire_id, wire) in &circuit.wires {
         if live_wires.contains(&wire_id) {
             if let Some(&new_source) = node_map.get(&wire.source.node) {
+                let mut rebuilt_wire = None;
                 for sink in &wire.sinks {
                     if let Some(&new_sink) = node_map.get(&sink.node) {
-                        let new_wire_id =
-                            optimized.connect((new_source, wire.source.pin), (new_sink, sink.pin));
-                        wire_map.insert(wire_id, new_wire_id);
+                        if let Some(new_wire_id) = rebuilt_wire {
+                            optimized.wires[new_wire_id]
+                                .sinks
+                                .push(crate::circuit::InputRef {
+                                    node: new_sink,
+                                    pin: sink.pin,
+                                });
+                            optimized.nodes[new_sink].inputs[sink.pin as usize].wire =
+                                Some(new_wire_id);
+                        } else {
+                            rebuilt_wire = Some(
+                                optimized
+                                    .connect((new_source, wire.source.pin), (new_sink, sink.pin)),
+                            );
+                        }
                     }
+                }
+                if let Some(new_wire_id) = rebuilt_wire {
+                    wire_map.insert(wire_id, new_wire_id);
                 }
             }
         }
