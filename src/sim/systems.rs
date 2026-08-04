@@ -7,8 +7,16 @@
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io;
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
-use crate::{SAVE_FILE_NAME, temp::GateComponentSelectionEvent};
+use crate::{
+    editor::{LoadWorkspaceEvent, SaveWorkspaceEvent},
+    temp::GateComponentSelectionEvent,
+    DEFAULT_WORKSPACE_EXT, SAVE_FILE_NAME, UiPointerState, WORKSPACE_DIR,
+};
 
 use super::{
     ConnectionLine, GameCircuit, GameNodeKind, GateComponent, LogicDisplay, SavedSimulation,
@@ -314,11 +322,15 @@ pub fn update_spatial_grid_system(
 /// Toggle an Input gate's value on left-click.
 pub fn update_inputs_on_left_click(
     q_window: Query<&Window, With<PrimaryWindow>>,
+    ui_pointer: Res<UiPointerState>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     query: Query<(Entity, &Transform, &GateComponent)>,
     mut select_writer: MessageWriter<GateComponentSelectionEvent>,
 ) {
+    if ui_pointer.over_egui {
+        return;
+    }
     let Ok((camera, camera_transform)) = q_camera.single() else {
         return;
     };
@@ -373,11 +385,15 @@ pub fn gate_selection_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     grid: Res<SpatialGrid>,
+    ui_pointer: Res<UiPointerState>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     query: Query<(Entity, &Transform), With<GateComponent>>,
     mut commands: Commands,
     selected_query: Query<Entity, With<Selected>>,
 ) {
+    if ui_pointer.over_egui {
+        return;
+    }
     if !mouse_button_input.just_pressed(MouseButton::Right) {
         return;
     }
@@ -422,10 +438,14 @@ pub fn gate_selection_system(
 pub fn drag_selected_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
+    ui_pointer: Res<UiPointerState>,
     mut query: Query<(&mut Transform, &Selected, &mut GateComponent)>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     mut game_circuit: ResMut<GameCircuit>,
 ) {
+    if ui_pointer.over_egui {
+        return;
+    }
     if !mouse_button_input.pressed(MouseButton::Right) {
         return;
     }
@@ -620,4 +640,160 @@ pub fn save_on_exit_system(
             info!("Saved simulation to {SAVE_FILE_NAME}");
         }
     }
+}
+
+pub fn workspace_io_system(
+    mut commands: Commands,
+    mut game_circuit: ResMut<GameCircuit>,
+    mut bridge: ResMut<SimBridge>,
+    mut cache: ResMut<SimCache>,
+    mut grid: ResMut<SpatialGrid>,
+    mut load_events: MessageReader<LoadWorkspaceEvent>,
+    mut save_events: MessageReader<SaveWorkspaceEvent>,
+    gate_entities: Query<Entity, With<GateComponent>>,
+    connection_entities: Query<Entity, With<ConnectionLine>>,
+    background_entities: Query<Entity, With<SimBackground>>,
+) {
+    let mut has_event = false;
+    for ev in save_events.read() {
+        has_event = true;
+        if let Err(err) = save_workspace_to_disk(&ev.name, &game_circuit) {
+            eprintln!("Failed to save workspace {}: {err}", ev.name);
+        }
+    }
+
+    let mut load_circuit: Option<GameCircuit> = None;
+    for ev in load_events.read() {
+        has_event = true;
+        load_circuit = Some(ev.circuit.clone());
+    }
+    if !has_event {
+        return;
+    }
+
+    // Load requests replace the active circuit and rebuild simulation visuals.
+    if let Some(next_circuit) = load_circuit {
+        *game_circuit = next_circuit;
+
+        // Clear simulation cache and replace the running graph.
+        cache.clear();
+        grid.clear();
+        bridge.load_circuit(&game_circuit);
+        cache.rebuild_index(&game_circuit, &bridge);
+
+        // Wipe all old gate/connection visuals so we can rebuild cleanly.
+        let mut entities_to_despawn: Vec<Entity> = gate_entities
+            .iter()
+            .chain(connection_entities.iter())
+            .chain(background_entities.iter())
+            .collect();
+        entities_to_despawn.sort_unstable_by_key(|entity| entity.index());
+        entities_to_despawn.dedup();
+        for entity in entities_to_despawn {
+            commands.entity(entity).despawn();
+        }
+
+        // Spawn fresh visuals for the new circuit.
+        let mut positions: HashMap<Uuid, Vec3> = HashMap::new();
+        for node in game_circuit.nodes.values() {
+            positions.insert(
+                node.id,
+                Vec3::new(node.position.x, node.position.y, 0.0),
+            );
+
+            let sprite = get_gate_sprite(&node.kind);
+            let mut entity = commands.spawn((
+                sprite,
+                Transform::from_xyz(node.position.x, node.position.y, 0.0),
+                Visibility::Visible,
+                GateComponent::new(node.id, node.position),
+            ));
+            if let GameNodeKind::Display { bits } = node.kind {
+                let digits = usize::from(bits).div_ceil(4);
+                entity.with_children(|parent| {
+                    parent.spawn((
+                        Text2d::new(format!("0x{:0digits$X}", 0)),
+                        TextFont::from_font_size(22.0),
+                        TextColor(Color::srgb(0.3, 1.0, 0.5)),
+                        Transform::from_xyz(0.0, 0.0, 1.0),
+                        LogicDisplay {
+                            node_id: node.id,
+                            bits,
+                        },
+                    ));
+                });
+            }
+            let entity = entity.id();
+            grid.insert(entity, node.position);
+        }
+
+        for wire in game_circuit.wires.values() {
+            let (Some(&from), Some(&to)) = (
+                positions.get(&wire.source_node),
+                positions.get(&wire.sink_node),
+            ) else {
+                continue;
+            };
+            let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
+            commands.spawn((
+                Sprite {
+                    color: Color::WHITE,
+                    custom_size: Some(Vec2::new(dist, 2.0)),
+                    ..Default::default()
+                },
+                Transform {
+                    translation: mid,
+                    rotation: rot,
+                    scale: Vec3::ONE,
+                },
+                Visibility::Visible,
+                ConnectionLine {
+                    id: wire.id,
+                    source_node: wire.source_node,
+                    sink_node: wire.sink_node,
+                },
+            ));
+        }
+
+        // Re-create the background behind the circuit.
+        commands.spawn((
+            SimBackground,
+            Sprite {
+                color: Color::srgba(0.050, 0.229, 0.793, 1.000),
+                ..Default::default()
+            },
+            Transform {
+                translation: Vec3::new(0.0, 0.0, -1000.0),
+                scale: Vec3::new(8000.0, 6000.0, 1.0),
+                ..Default::default()
+            },
+            Visibility::Visible,
+        ));
+    }
+}
+
+fn save_workspace_to_disk(name: &str, circuit: &GameCircuit) -> io::Result<()> {
+    let workspace_dir = Path::new(WORKSPACE_DIR);
+    if !workspace_dir.exists() {
+        fs::create_dir_all(workspace_dir)?;
+    }
+
+    let path = workspace_path(name);
+    let file = File::create(path)?;
+    let saved = SavedSimulation::new(circuit.clone());
+    serde_json::to_writer_pretty(file, &saved).map_err(io::Error::other)?;
+    Ok(())
+}
+
+fn workspace_path(name: &str) -> PathBuf {
+    Path::new(WORKSPACE_DIR).join(format!("{}{}", sanitize_workspace_name(name), DEFAULT_WORKSPACE_EXT))
+}
+
+fn sanitize_workspace_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c => c,
+        })
+        .collect()
 }

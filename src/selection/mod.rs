@@ -1,5 +1,6 @@
 use crate::sim::GateComponent;
 use crate::sim::Selected;
+use crate::UiPointerState;
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::*;
 
@@ -23,10 +24,19 @@ pub struct ComponentsUnselected {
 pub struct SelectionBox;
 
 pub fn mouse_selection_input(
+    ui_pointer: Res<UiPointerState>,
     mouse_input: Res<ButtonInput<MouseButton>>,
     mut cursor_moved: MessageReader<CursorMoved>,
     mut sel: ResMut<SelectionState>,
 ) {
+    if ui_pointer.over_egui {
+        if mouse_input.just_released(MouseButton::Left) {
+            sel.drag_start = None;
+            sel.drag_current = None;
+        }
+        return;
+    }
+
     // 1) Update the latest cursor position every frame
     let mut latest_pos = None;
     for ev in cursor_moved.read() {
@@ -88,6 +98,7 @@ pub fn draw_selection_box(
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_selection(
     mut sel: ResMut<SelectionState>,
+    ui_pointer: Res<UiPointerState>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
     mut select_writer: MessageWriter<ComponentsSelected>,
     mut unselect_writer: MessageWriter<ComponentsUnselected>,
@@ -97,6 +108,12 @@ pub fn finalize_selection(
     selected_query: Query<Entity, With<Selected>>,
 ) -> Result {
     // Only act on release
+    if ui_pointer.over_egui {
+        sel.drag_start = None;
+        sel.drag_current = None;
+        return Ok(());
+    }
+
     if sel.drag_start.is_none() || sel.drag_current.is_none() {
         return Ok(());
     }

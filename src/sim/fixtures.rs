@@ -3,6 +3,17 @@ use bevy::prelude::Vec2;
 use crate::sim::{GameCircuit, GameNode, GameNodeKind, GameWire};
 use uuid::Uuid;
 
+pub fn fixture_workspace_catalog() -> Vec<(String, GameCircuit)> {
+    vec![
+        ("Half Adder".to_string(), build_half_adder()),
+        ("8-Bit Counter".to_string(), build_8bit_counter()),
+        ("8-Bit Counter Block".to_string(), build_8bit_counter_block()),
+        ("8-Bit Counter Subcircuit".to_string(), build_8bit_counter_subcircuit()),
+        ("64-Bit Counter (8 x 8-Bit Subcircuits)".to_string(), build_64bit_counter_subcircuits()),
+        ("T Flip-Flop".to_string(), build_t_ff_circuit()),
+    ]
+}
+
 /// Helper to add a Master-Slave T Flip-Flop to the circuit.
 /// Takes clock and reset node IDs, returns (Q, Qn) output pin node IDs.
 /// Uses primitive gates to construct a falling-edge triggered T-FF with asynchronous reset.

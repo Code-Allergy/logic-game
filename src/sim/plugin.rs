@@ -18,6 +18,7 @@ use crate::sim::{
         gate_selection_system,
         rebuild_spatial_grid_system,
         save_on_exit_system,
+        workspace_io_system,
         simulation_config_ui_system,
         ui_for_selected_gate,
         update_connections_system,
@@ -76,6 +77,8 @@ impl Plugin for SimulationPlugin {
             .init_resource::<SelectedGate>()
             .init_resource::<SimCache>()
             .insert_resource(SpatialGrid::new(100.0))
+            .add_message::<crate::editor::LoadWorkspaceEvent>()
+            .add_message::<crate::editor::SaveWorkspaceEvent>()
             // ── On-enter: resume bridge + spawn visuals + prime cache index ───────────────
             .add_systems(
                 OnEnter(state.clone()),
@@ -102,6 +105,7 @@ impl Plugin for SimulationPlugin {
             .add_systems(
                 Update,
                 (
+                    workspace_io_system,
                     update_input_colours_system,
                     update_logic_displays_system,
                     gate_selection_system.before(drag_selected_system),

@@ -16,7 +16,7 @@ use gate_quest::sim::SimulationPlugin;
 use gate_quest::temp::GateComponentSelectionEvent;
 use gate_quest::title::MainMenuPlugin;
 use gate_quest::zoom_camera;
-use gate_quest::{GAME_TITLE, GAME_WEB_TAG, GameSettings, GameState, initial_startup_system};
+use gate_quest::{update_ui_pointer_state, GAME_TITLE, GAME_WEB_TAG, GameSettings, GameState, UiPointerState, initial_startup_system};
 
 fn main() {
     let disable_egui = env::var_os("GATEQUEST_DISABLE_EGUI").is_some();
@@ -57,20 +57,26 @@ fn main() {
         app = app.add_plugins(SelectionPlugin);
     }
 
-    app
-    .init_state::<GameState>()
-    .add_message::<GateComponentSelectionEvent>()
-    .insert_resource(ClearColor(Color::srgba(0.050, 0.229, 0.793, 1.000)))
-    .insert_resource(SettingsMenuOpen(false))
-    .insert_resource(GameSettings::default())
-    .add_systems(
-        Startup,
-        (
-            initial_startup_system.before(configure_camera_scaling),
-            configure_camera_scaling,
-        ),
-    )
-    .add_systems(Update, zoom_camera.run_if(in_state(GameState::Simulating)))
-    .add_systems(Update, (show_settings_menu, settings_menu_button_system))
-    .run();
+    app = app
+        .init_state::<GameState>()
+        .insert_resource(UiPointerState::default())
+        .add_message::<GateComponentSelectionEvent>()
+        .insert_resource(ClearColor(Color::srgba(0.050, 0.229, 0.793, 1.000)))
+        .insert_resource(SettingsMenuOpen(false))
+        .insert_resource(GameSettings::default())
+        .add_systems(
+            Startup,
+            (
+                initial_startup_system.before(configure_camera_scaling),
+                configure_camera_scaling,
+            ),
+        )
+        .add_systems(Update, zoom_camera.run_if(in_state(GameState::Simulating)))
+        .add_systems(Update, (show_settings_menu, settings_menu_button_system));
+
+    if !disable_egui {
+        app = app.add_systems(bevy_egui::EguiPrimaryContextPass, update_ui_pointer_state);
+    }
+
+    app.run();
 }

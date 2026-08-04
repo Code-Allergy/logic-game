@@ -30,6 +30,8 @@ pub mod temp {
 }
 
 pub const SAVE_FILE_NAME: &str = "./simulation.json";
+pub const WORKSPACE_DIR: &str = "./workspaces";
+pub const DEFAULT_WORKSPACE_EXT: &str = ".json";
 pub const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.15);
 pub const HOVERED_BUTTON: Color = Color::srgb(0.25, 0.25, 0.25);
 pub const PRESSED_BUTTON: Color = Color::srgb(0.35, 0.75, 0.35);
@@ -39,6 +41,11 @@ pub const GAME_WEB_TAG: &str = "#gatequest-canvas";
 
 #[derive(Component)]
 pub struct MainCamera;
+
+#[derive(Resource, Default)]
+pub struct UiPointerState {
+    pub over_egui: bool,
+}
 
 #[derive(States, Debug, Clone, Eq, PartialEq, Hash, Default)]
 pub enum GameState {
@@ -77,6 +84,10 @@ pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
         MainCamera,
         Transform::from_xyz(0.0, 0.0, 1000.0),
     ));
+}
+
+pub fn update_ui_pointer_state(mut state: ResMut<UiPointerState>, mut contexts: EguiContexts) {
+    state.over_egui = matches!(contexts.ctx_mut(), Ok(ctx) if ctx.is_pointer_over_egui());
 }
 
 pub fn configure_camera_scaling(
