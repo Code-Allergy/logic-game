@@ -121,6 +121,19 @@ struct MappedRunner {
     reverse_wire_map: std::collections::HashMap<WireId, WireId>,
 }
 
+/// Unlimited simulation can run many logical ticks between rendered frames.
+/// Publish observable wire state in batches so snapshotting does not cost more
+/// than the simulation itself.
+const UNLIMITED_SNAPSHOT_INTERVAL_TICKS: u32 = 256;
+
+fn publish_wire_states(shared: &SharedState, runner: &dyn InspectableRunner) {
+    if let Ok(mut lock) = shared.wire_states.write() {
+        runner.for_each_wire(&mut |wire, val| {
+            lock.insert(wire, val);
+        });
+    }
+}
+
 impl crate::runner::Runner for MappedRunner {
     fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
         if let Some(&mapped_node) = self.node_map.get(&node) {
@@ -296,17 +309,14 @@ impl SimulationEngine {
             let mut runner = build_runner(&circuit, current_runner_type);
             let mut running = true;
             let mut needs_rebuild = false;
+            let mut ticks_since_snapshot = 0_u32;
 
             let mut tick_rate = Some(10.0);
             let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
             let mut next_tick_time = std::time::Instant::now();
 
             // Perform initial wire state sync
-            if let Ok(mut lock) = shared.wire_states.write() {
-                runner.for_each_wire(&mut |wire, val| {
-                    lock.insert(wire, val);
-                });
-            }
+            publish_wire_states(&shared, runner.as_ref());
 
             let _ = tx_evt.send(SimEvent::RunnerSet(current_runner_type));
 
@@ -390,11 +400,8 @@ impl SimulationEngine {
                             }
                             runner.tick();
                             let tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
-                            if let Ok(mut lock) = shared.wire_states.write() {
-                                runner.for_each_wire(&mut |wire, val| {
-                                    lock.insert(wire, val);
-                                });
-                            }
+                            publish_wire_states(&shared, runner.as_ref());
+                            ticks_since_snapshot = 0;
                             let _ = tx_evt.send(SimEvent::TickCompleted { tick_count: tc });
                         }
                         SimCommand::Stop => {
@@ -427,7 +434,6 @@ impl SimulationEngine {
                         }
                     } else {
                         should_tick = true;
-                        std::thread::yield_now(); // Yield to prevent completely starving other threads in unlimited mode
                     }
 
                     if should_tick {
@@ -437,10 +443,15 @@ impl SimulationEngine {
                         }
                         runner.tick();
                         let _tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Ok(mut lock) = shared.wire_states.write() {
-                            runner.for_each_wire(&mut |wire, val| {
-                                lock.insert(wire, val);
-                            });
+                        ticks_since_snapshot += 1;
+                        if tick_rate.is_some()
+                            || ticks_since_snapshot >= UNLIMITED_SNAPSHOT_INTERVAL_TICKS
+                        {
+                            publish_wire_states(&shared, runner.as_ref());
+                            ticks_since_snapshot = 0;
+                            if tick_rate.is_none() {
+                                std::thread::yield_now();
+                            }
                         }
                     }
                 } else {
@@ -543,11 +554,7 @@ impl SimulationEngine {
         let mut runner = build_runner(&self.circuit, self.runner_type);
         runner.tick();
         self.shared_state.tick_count.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut lock) = self.shared_state.wire_states.write() {
-            runner.for_each_wire(&mut |wire, val| {
-                lock.insert(wire, val);
-            });
-        }
+        publish_wire_states(&self.shared_state, runner.as_ref());
     }
 }
 

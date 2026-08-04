@@ -21,4 +21,7 @@ criterion = "0.5"
 name = "runners"
 harness = false
 
+[[bench]]
+name = "engine"
+harness = false
 
