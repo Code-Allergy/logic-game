@@ -12,6 +12,7 @@ log = "0.4"
 
 [features]
 default = []
+simd-profile = []
 
 
 [dev-dependencies]
@@ -24,4 +25,3 @@ harness = false
 [[bench]]
 name = "engine"
 harness = false
-

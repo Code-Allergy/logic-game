@@ -4,6 +4,9 @@ pub use builder::Fixture;
 
 mod builder;
 pub mod harness;
+mod throughput;
+
+pub use throughput::{ThroughputFixture, large_dense_fixture};
 
 pub fn and_gate() -> Fixture {
     let mut b = FixtureBuilder::new();

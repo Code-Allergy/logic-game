@@ -20,27 +20,29 @@ pub enum SimdOp {
 }
 
 pub trait SimdIndex: Copy + std::fmt::Debug + Send + Sync + 'static {
-    #[inline(always)]
     fn from_usize(value: usize) -> Self;
-    #[inline(always)]
     fn as_usize(self) -> usize;
 }
 
 impl SimdIndex for u16 {
+    #[inline(always)]
     fn from_usize(value: usize) -> Self {
         value as u16
     }
 
+    #[inline(always)]
     fn as_usize(self) -> usize {
         self as usize
     }
 }
 
 impl SimdIndex for u32 {
+    #[inline(always)]
     fn from_usize(value: usize) -> Self {
         value as u32
     }
 
+    #[inline(always)]
     fn as_usize(self) -> usize {
         self as usize
     }
@@ -59,6 +61,37 @@ pub struct SimdBinaryInstruction<I> {
     pub in0: I,
     pub in1: I,
     pub output: I,
+}
+
+#[derive(Clone, Debug)]
+pub struct SimdBinaryProgram<I> {
+    pub in0: Vec<I>,
+    pub in1: Vec<I>,
+    pub output: Vec<I>,
+}
+
+impl<I> Default for SimdBinaryProgram<I> {
+    fn default() -> Self {
+        Self {
+            in0: Vec::new(),
+            in1: Vec::new(),
+            output: Vec::new(),
+        }
+    }
+}
+
+impl<I> SimdBinaryProgram<I> {
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.output.len()
+    }
+
+    #[inline(always)]
+    pub fn push(&mut self, in0: I, in1: I, output: I) {
+        self.in0.push(in0);
+        self.in1.push(in1);
+        self.output.push(output);
+    }
 }
 
 #[repr(C)]
@@ -116,7 +149,7 @@ pub struct SimdBlock {
 pub struct SimdProgram<I> {
     pub blocks: Vec<SimdBlock>,
     pub unary: Vec<SimdUnaryInstruction<I>>,
-    pub binary: Vec<SimdBinaryInstruction<I>>,
+    pub binary: SimdBinaryProgram<I>,
     pub ternary: Vec<SimdTernaryInstruction<I>>,
     pub demux: Vec<SimdDemuxInstruction<I>>,
     pub clocks: Vec<SimdClock<I>>,
@@ -129,7 +162,7 @@ impl<I> Default for SimdProgram<I> {
         Self {
             blocks: Vec::new(),
             unary: Vec::new(),
-            binary: Vec::new(),
+            binary: SimdBinaryProgram::default(),
             ternary: Vec::new(),
             demux: Vec::new(),
             clocks: Vec::new(),
@@ -398,11 +431,11 @@ fn build_program<I: SimdIndex>(
                 }
                 for output in outputs {
                     let start = program.binary.len();
-                    program.binary.push(SimdBinaryInstruction {
-                        in0: I::from_usize(inputs[0]),
-                        in1: I::from_usize(inputs[1]),
-                        output: I::from_usize(output),
-                    });
+                    program.binary.push(
+                        I::from_usize(inputs[0]),
+                        I::from_usize(inputs[1]),
+                        I::from_usize(output),
+                    );
                     push_block(&mut program.blocks, op, start);
                 }
             }

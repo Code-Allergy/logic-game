@@ -113,71 +113,6 @@ fn circuit_with_dead_code() -> Circuit {
     c
 }
 
-struct LargeThroughputFixture {
-    circuit: Circuit,
-    input_nodes: Vec<NodeId>,
-}
-
-fn large_throughput_fixture() -> LargeThroughputFixture {
-    const INPUT_BITS: usize = 1_024;
-    const BUNDLE_COUNT: usize = 8;
-    const REFERENCE_STEP: usize = 37;
-
-    let mut circuit = Circuit::new();
-    let mut input_nodes = Vec::with_capacity(INPUT_BITS);
-
-    for _ in 0..INPUT_BITS {
-        input_nodes.push(circuit.input());
-    }
-
-    let mut bundle_taps = Vec::with_capacity(BUNDLE_COUNT);
-
-    for bundle in 0..BUNDLE_COUNT {
-        let first = bundle % INPUT_BITS;
-        let mut stage = circuit.xor();
-        circuit.connect((input_nodes[first], 0), (stage, 0));
-        circuit.connect((input_nodes[(first + 1) % INPUT_BITS], 0), (stage, 1));
-
-        let mut source_idx = first + 2;
-        for _ in 2..INPUT_BITS {
-            let source = &input_nodes[source_idx % INPUT_BITS];
-
-            let and_gate = circuit.and();
-            circuit.connect((stage, 0), (and_gate, 0));
-            circuit.connect((*source, 0), (and_gate, 1));
-
-            let or_gate = circuit.or();
-            circuit.connect((stage, 0), (or_gate, 0));
-            circuit.connect((and_gate, 0), (or_gate, 1));
-
-            let next_stage = circuit.xor();
-            circuit.connect((or_gate, 0), (next_stage, 0));
-            circuit.connect((*source, 0), (next_stage, 1));
-
-            stage = next_stage;
-            source_idx = source_idx.wrapping_add(REFERENCE_STEP);
-        }
-
-        bundle_taps.push(stage);
-    }
-
-    let mut reduced = bundle_taps[0];
-    for bundle_out in &bundle_taps[1..] {
-        let reduce_gate = circuit.xor();
-        circuit.connect((reduced, 0), (reduce_gate, 0));
-        circuit.connect((*bundle_out, 0), (reduce_gate, 1));
-        reduced = reduce_gate;
-    }
-
-    let bench_output = circuit.output();
-    circuit.connect((reduced, 0), (bench_output, 0));
-
-    LargeThroughputFixture {
-        circuit,
-        input_nodes,
-    }
-}
-
 const BATCH_TICKS: u32 = 1_000;
 
 fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
@@ -337,7 +272,7 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     });
 
     // 9. Large dense-throughput random-input benchmark for max-tick stress
-    let large_fixture = large_throughput_fixture();
+    let large_fixture = fixtures::large_dense_fixture();
     let opt_large_fixture = Compiler::optimize(&large_fixture.circuit);
     let mut large_runner = F::create(&large_fixture.circuit, &opt_large_fixture);
     let large_inputs = large_fixture.input_nodes;
@@ -369,7 +304,7 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
 }
 
 fn bench_simd_fast_large_dense_throughput(c: &mut Criterion) {
-    let large_fixture = large_throughput_fixture();
+    let large_fixture = fixtures::large_dense_fixture();
     let opt_large_fixture = Compiler::optimize(&large_fixture.circuit);
     let bit_packed = BitPackedCircuit::compile(&opt_large_fixture);
     let node_output_pins = bit_packed.node_output_pins.clone();
@@ -384,7 +319,7 @@ fn bench_simd_fast_large_dense_throughput(c: &mut Criterion) {
         }
     }
 
-    let mut previous_bits = vec![false; input_wires.len()];
+    let mut previous_chunks: Vec<u64> = vec![0; input_wires.len().div_ceil(64)];
     let mut changed_inputs: Vec<(usize, u64)> = Vec::with_capacity(input_wires.len() / 2);
 
     const LARGE_BATCH_TICKS: u32 = 64;
@@ -396,22 +331,30 @@ fn bench_simd_fast_large_dense_throughput(c: &mut Criterion) {
                 let mut lfsr = 0x9E3779B97F4A7C15u64;
                 for _ in 0..iters {
                     for _ in 0..LARGE_BATCH_TICKS {
-                        let mut cursor = 0usize;
-                        for chunk in input_wires.chunks(64) {
+                        for (chunk_index, chunk) in input_wires.chunks(64).enumerate() {
                             lfsr ^= lfsr << 7;
                             lfsr ^= lfsr >> 9;
                             lfsr ^= lfsr << 8;
                             let chunk_bits = lfsr;
-                            for (slot, wire) in chunk.iter().enumerate() {
-                                let new_state = (chunk_bits >> slot) & 1 != 0;
-                                let index = cursor + slot;
-                                if previous_bits[index] != new_state {
-                                    previous_bits[index] = new_state;
-                                    changed_inputs
-                                        .push((*wire, if new_state { u64::MAX } else { 0 }));
+                            let prev = previous_chunks[chunk_index];
+                            let diff = chunk_bits ^ prev;
+                            if diff != 0 {
+                                let mut bits = diff;
+                                while bits != 0 {
+                                    let slot = bits.trailing_zeros() as usize;
+                                    let wire = chunk[slot];
+                                    changed_inputs.push((
+                                        wire,
+                                        if (chunk_bits & (1u64 << slot)) == 0 {
+                                            0
+                                        } else {
+                                            u64::MAX
+                                        },
+                                    ));
+                                    bits &= bits - 1;
                                 }
+                                previous_chunks[chunk_index] = chunk_bits;
                             }
-                            cursor += chunk.len();
                         }
 
                         fast_runner.set_input_scalar_wire_values(&changed_inputs);
@@ -426,7 +369,7 @@ fn bench_simd_fast_large_dense_throughput(c: &mut Criterion) {
 }
 
 fn bench_simd_large_dense_tick_only(c: &mut Criterion) {
-    let large_fixture = large_throughput_fixture();
+    let large_fixture = fixtures::large_dense_fixture();
     let opt_large_fixture = Compiler::optimize(&large_fixture.circuit);
     let bit_packed = BitPackedCircuit::compile(&opt_large_fixture);
     let mut fast_runner = SimdRunner::new(bit_packed);

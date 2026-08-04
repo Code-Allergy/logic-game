@@ -65,7 +65,13 @@ debug = true
 [profile.flamegraph]
 inherits = "release"
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = false
+codegen-units = 8
 debug = true
 strip = false
+
+[profile.flamegraph-noinline]
+inherits = "flamegraph"
+debug = true
+lto = false
+codegen-units = 16
