@@ -380,8 +380,7 @@ fn bevy_bridge_flush_exposes_all_nested_outputs_in_game_uuid_space() {
     loop {
         app.update();
         let cache = app.world().resource::<SimCache>();
-        if cache.node_inputs.get(&(output_a, 0)) == Some(&true)
-            && cache.node_inputs.get(&(output_b, 0)) == Some(&true)
+        if cache.node_input_bits(output_a) & 1 != 0 && cache.node_input_bits(output_b) & 1 != 0
         {
             break;
         }

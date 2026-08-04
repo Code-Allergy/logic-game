@@ -657,15 +657,15 @@ impl SimBridge {
     // ID lookup helpers
     // ─────────────────────────────────────────────────────────────────────
 
-    pub fn node_id(&self, uuid: Uuid) -> Option<NodeId> {
+    pub(crate) fn node_id(&self, uuid: Uuid) -> Option<NodeId> {
         self.node_by_uuid.get(&uuid).copied()
     }
 
-    pub fn node_uuid(&self, id: NodeId) -> Option<Uuid> {
+    pub(crate) fn node_uuid(&self, id: NodeId) -> Option<Uuid> {
         self.uuid_by_node.get(&id).copied()
     }
 
-    pub fn wire_id(&self, uuid: Uuid) -> Option<WireId> {
+    pub(crate) fn wire_id(&self, uuid: Uuid) -> Option<WireId> {
         self.wire_by_uuid
             .get(&uuid)
             .and_then(|segments| segments.first())
@@ -678,7 +678,7 @@ impl SimBridge {
             .map(|segments| segments.as_slice())
     }
 
-    pub fn wire_uuid(&self, id: WireId) -> Option<Uuid> {
+    pub(crate) fn wire_uuid(&self, id: WireId) -> Option<Uuid> {
         self.uuid_by_wire.get(&id).copied()
     }
 

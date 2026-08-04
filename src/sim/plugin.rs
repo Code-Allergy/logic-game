@@ -16,6 +16,7 @@ use crate::sim::{
         draw_sim_background_system,
         drive_threadless_simulation,
         gate_selection_system,
+        sync_sim_cache_system,
         rebuild_spatial_grid_system,
         save_on_exit_system,
         workspace_io_system,
@@ -89,7 +90,8 @@ impl Plugin for SimulationPlugin {
                     draw_gates_system,
                     draw_connections_system.after(draw_gates_system),
                     rebuild_spatial_grid_system.after(draw_gates_system),
-                    rebuild_cache_index_system.after(draw_gates_system),
+                    configure_cache_trace_system.after(draw_gates_system),
+                    rebuild_cache_index_system.after(configure_cache_trace_system),
                 ),
             )
             // ── On-exit: pause bridge + despawn visuals ──────────────────────
@@ -101,6 +103,10 @@ impl Plugin for SimulationPlugin {
             // No run_if here – bridge_flush_system is cheap and safe to call
             // in any state; it's a no-op when there are no pending items.
             .add_systems(PreUpdate, bridge_flush_system)
+            .add_systems(
+                PreUpdate,
+                sync_sim_cache_system.run_if(in_state(state.clone())),
+            )
             // ── Update: interaction + visuals (state-gated) ──────────────────
             .add_systems(
                 Update,
@@ -179,6 +185,12 @@ fn resume_bridge_system(mut bridge: ResMut<SimBridge>) {
     bridge.resume();
 }
 
+fn configure_cache_trace_system(mut cache: ResMut<SimCache>) {
+    if std::env::var("LOGI_SIM_TRACE").is_ok() {
+        cache.set_trace_mapping(true);
+    }
+}
+
 fn pause_bridge_system(mut bridge: ResMut<SimBridge>) {
     bridge.pause();
 }
@@ -196,7 +208,7 @@ fn rebuild_cache_index_system(
     // Seed is_running from the bridge's synchronously-maintained flag so the
     // Pause/Play button is correct on the very first frame, before any
     // StatusChanged event arrives from the worker.
-    cache.is_running = bridge.is_running();
+    cache.set_running(bridge.is_running());
 }
 
 /// Despawn all gate / connection-line entities when leaving the sim state.

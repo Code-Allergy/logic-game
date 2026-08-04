@@ -57,6 +57,24 @@ pub struct ConnectionLine {
     pub wire_kind: WireKind,
 }
 
+/// Per-gate snapshot of all output pin states (bits 0..63).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SimNodeOutputs {
+    pub bits: u64,
+}
+
+/// Per-gate snapshot of all input pin states (bits 0..63).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SimNodeInputs {
+    pub bits: u64,
+}
+
+/// Per-wire snapshot of current logic value.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SimWireValue {
+    pub value: bool,
+}
+
 /// Text attached to a multi-bit display node.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LogicDisplay {

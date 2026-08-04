@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, hash_map::Entry};
 
-use bevy::log::trace;
+use bevy::log::{info, trace};
 use bevy::prelude::*;
 use uuid::Uuid;
 
@@ -68,18 +68,21 @@ struct WirePinEntry {
 /// cross-thread calls into [`SimBridge`].
 #[derive(Resource, Default)]
 pub struct SimCache {
-    // ── Public per-frame snapshot ─────────────────────────────────────────────
+    // ── Internal per-frame snapshot (opaque to callers) ─────────────────────
     /// Current boolean state of each wire, keyed by game-side wire UUID.
-    pub wire_values: HashMap<Uuid, bool>,
+    wire_values: HashMap<Uuid, bool>,
 
     /// Current output-pin state for each node, keyed by `(node_uuid, pin_index)`.
-    pub node_outputs: HashMap<(Uuid, u8), bool>,
+    node_outputs: HashMap<(Uuid, u8), bool>,
 
     /// Current input-pin state for each node, keyed by `(node_uuid, pin_index)`.
-    pub node_inputs: HashMap<(Uuid, u8), bool>,
+    node_inputs: HashMap<(Uuid, u8), bool>,
 
     /// Whether the simulation worker is currently running.
-    pub is_running: bool,
+    is_running: bool,
+
+    /// Optional debug output for boundary mapping issues.
+    trace_mapping: bool,
 
     // ── Internal reverse index (WireId → game-space entries) ──────────────────
     /// Maps a sim-internal `WireId` to all the game-space node/pin pairs that
@@ -88,6 +91,57 @@ pub struct SimCache {
 }
 
 impl SimCache {
+    /// Enable or disable trace output for bridge/cache translation boundaries.
+    pub fn set_trace_mapping(&mut self, enabled: bool) {
+        self.trace_mapping = enabled;
+    }
+
+    /// Whether the simulation runner is currently running.
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
+    /// Return the cached per-node input bits as a compact bitmask.
+    pub fn node_input_bits(&self, node_id: Uuid) -> u64 {
+        let mut bits = 0_u64;
+        for bit in 0..64 {
+            if self
+                .node_inputs
+                .get(&(node_id, bit as u8))
+                .copied()
+                .unwrap_or(false)
+            {
+                bits |= 1_u64 << bit;
+            }
+        }
+        bits
+    }
+
+    /// Return the cached per-node output bits as a compact bitmask.
+    pub fn node_output_bits(&self, node_id: Uuid) -> u64 {
+        let mut bits = 0_u64;
+        for bit in 0..64 {
+            if self
+                .node_outputs
+                .get(&(node_id, bit as u8))
+                .copied()
+                .unwrap_or(false)
+            {
+                bits |= 1_u64 << bit;
+            }
+        }
+        bits
+    }
+
+    /// Return a cached wire value.
+    pub fn wire_value(&self, wire_id: Uuid) -> bool {
+        self.wire_values.get(&wire_id).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn set_running(&mut self, running: bool) {
+        self.is_running = running;
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Index management
     // ─────────────────────────────────────────────────────────────────────────
@@ -102,6 +156,9 @@ impl SimCache {
 
         for wire in circuit.wires.values() {
             let Some(segments) = bridge.wire_segments(wire.id) else {
+                if self.trace_mapping {
+                    trace!("SimCache: missing cached segments for wire {:?}", wire.id);
+                }
                 continue;
             };
 
@@ -138,9 +195,17 @@ impl SimCache {
         self.node_outputs.clear();
         self.node_inputs.clear();
 
+        let mut missing = 0_u64;
+        let mut mapped = 0_u64;
+        let mut multi_pin_wires = 0_u64;
+
         bridge.snapshot_wire_states(&mut |wire_id, val| {
             if let Some(entries) = self.wire_reverse.get(&wire_id) {
+                mapped += 1;
                 for entry in entries {
+                if entries.len() > 1 {
+                    multi_pin_wires += 1;
+                }
                     match self.wire_values.entry(entry.wire_uuid) {
                         Entry::Occupied(mut existing) => {
                             *existing.get_mut() |= val;
@@ -158,8 +223,16 @@ impl SimCache {
                         }
                     }
                 }
+            } else if self.trace_mapping {
+                missing += 1;
             }
         });
+
+            if self.trace_mapping && (missing > 0 || multi_pin_wires > 0) {
+            info!(
+                "SimCache trace: snapshot wires mapped {mapped}, unmapped {missing}, multi-pin wires {multi_pin_wires}"
+            );
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -186,6 +259,19 @@ impl SimCache {
                 }
             }
         }
+    }
+
+    /// Pull latest simulation state and lifecycle events from the bridge in one
+    /// call. This keeps callers from depending on bridge internals.
+    pub(crate) fn sync_with_bridge(
+        &mut self,
+        bridge: &SimBridge,
+        sim_config: &mut SimulationConfig,
+    ) {
+        self.set_running(bridge.is_running());
+        self.update_from_snapshot(bridge);
+        let events = bridge.drain_events();
+        self.apply_events(&events, sim_config);
     }
 
     /// Clear all cached state (e.g. on circuit reload).
