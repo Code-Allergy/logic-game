@@ -55,6 +55,13 @@ pub struct ConnectionLine {
     pub sink_node: Uuid,
 }
 
+/// Text attached to a multi-bit display node.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LogicDisplay {
+    pub node_id: Uuid,
+    pub bits: u8,
+}
+
 /// Marker for gate entities that are currently selected for dragging.
 #[derive(Component)]
 pub struct Selected {
@@ -149,14 +156,23 @@ pub fn get_gate_sprite(kind: &GameNodeKind) -> Sprite {
         GameNodeKind::Mux => Color::srgb(0.6, 0.0, 0.6),
         GameNodeKind::Demux => Color::srgb(0.8, 0.0, 0.8),
         GameNodeKind::TriStateBuffer => Color::srgb(0.3, 0.3, 0.6),
+        GameNodeKind::Counter8 => Color::srgb(0.1, 0.45, 0.65),
         GameNodeKind::Clock { .. } => Color::srgb(0.5, 0.1, 0.3),
         GameNodeKind::Input => Color::srgb(0.1, 0.1, 0.1),
         GameNodeKind::Output => Color::srgb(0.15, 0.15, 0.15),
+        GameNodeKind::Display { .. } => Color::srgb(0.04, 0.09, 0.12),
         GameNodeKind::SubCircuit { .. } => Color::srgb(0.1, 0.5, 0.3),
+    };
+    let size = match kind {
+        GameNodeKind::Display { bits } => {
+            let hex_digits = usize::from(*bits).div_ceil(4);
+            Vec2::new((hex_digits as f32 * 18.0 + 40.0).max(120.0), 70.0)
+        }
+        _ => Vec2::new(50.0, 50.0),
     };
     Sprite {
         color,
-        custom_size: Some(Vec2::new(50.0, 50.0)),
+        custom_size: Some(size),
         ..Default::default()
     }
 }

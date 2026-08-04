@@ -6,6 +6,7 @@ pub struct NaiveRunner {
     circuit: Circuit,
     wire_values: SecondaryMap<WireId, bool>,
     tick_count: u64,
+    previous_clock: SecondaryMap<NodeId, bool>,
 }
 
 impl NaiveRunner {
@@ -15,11 +16,16 @@ impl NaiveRunner {
         for (wire, _) in &circuit.wires {
             wire_values.insert(wire, false);
         }
+        let mut previous_clock = SecondaryMap::new();
+        for (node, _) in &circuit.nodes {
+            previous_clock.insert(node, false);
+        }
 
         Self {
             circuit,
             wire_values,
             tick_count: 0,
+            previous_clock,
         }
     }
     fn input_value(&self, node_id: NodeId, pin: usize) -> bool {
@@ -103,6 +109,26 @@ impl NaiveRunner {
                 } else {
                     self.set_output(node_id, 0, false);
                 }
+            }
+            NodeKind::Counter8 => {
+                let clock = self.input_value(node_id, 0);
+                let reset = self.input_value(node_id, 1);
+                let falling = self.previous_clock[node_id] && !clock;
+                if reset || falling {
+                    let mut carry = falling;
+                    for pin in 0..8 {
+                        let old = self.circuit.nodes[node_id]
+                            .outputs
+                            .get(pin)
+                            .and_then(|output| output.wires.first())
+                            .map(|wire| self.wire_values[*wire])
+                            .unwrap_or(false);
+                        let next = if reset { false } else { old ^ carry };
+                        carry &= old;
+                        self.set_output(node_id, pin, next);
+                    }
+                }
+                self.previous_clock[node_id] = clock;
             }
             NodeKind::Clock {
                 period_ticks,
@@ -199,5 +225,35 @@ impl crate::runner::InspectableRunner for NaiveRunner {
         for (wire, &val) in &self.wire_values {
             f(wire, val);
         }
+    }
+
+    fn execution_state(&self) -> Vec<bool> {
+        let mut state: Vec<_> = self.wire_values.values().copied().collect();
+        state.extend(self.previous_clock.values().copied());
+        state
+    }
+
+    fn restore_execution_state(&mut self, state: &[bool]) -> bool {
+        if state.len() != self.wire_values.len() + self.previous_clock.len() {
+            return false;
+        }
+        let (wires, clocks) = state.split_at(self.wire_values.len());
+        for (value, restored) in self.wire_values.values_mut().zip(wires.iter().copied()) {
+            *value = restored;
+        }
+        for (value, restored) in self.previous_clock.values_mut().zip(clocks.iter().copied()) {
+            *value = restored;
+        }
+        true
+    }
+
+    fn restore_wire_value(&mut self, wire: WireId, value: bool) {
+        if let Some(slot) = self.wire_values.get_mut(wire) {
+            *slot = value;
+        }
+    }
+
+    fn set_current_tick(&mut self, tick: u64) {
+        self.tick_count = tick;
     }
 }

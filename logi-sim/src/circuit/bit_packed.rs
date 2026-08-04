@@ -86,6 +86,14 @@ pub struct SimdClock<I> {
 }
 
 #[repr(C)]
+#[derive(Clone, Debug)]
+pub struct SimdCounter8<I> {
+    pub increment: I,
+    pub reset: I,
+    pub outputs: [SmallVec<[I; 2]>; 8],
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct SimdBlock {
     pub op: SimdOp,
@@ -101,6 +109,7 @@ pub struct SimdProgram<I> {
     pub ternary: Vec<SimdTernaryInstruction<I>>,
     pub demux: Vec<SimdDemuxInstruction<I>>,
     pub clocks: Vec<SimdClock<I>>,
+    pub counters: Vec<SimdCounter8<I>>,
 }
 
 impl<I> Default for SimdProgram<I> {
@@ -112,6 +121,7 @@ impl<I> Default for SimdProgram<I> {
             ternary: Vec::new(),
             demux: Vec::new(),
             clocks: Vec::new(),
+            counters: Vec::new(),
         }
     }
 }
@@ -148,9 +158,11 @@ fn node_op(kind: &NodeKind) -> Option<SimdOp> {
         NodeKind::Mux => SimdOp::Mux,
         NodeKind::Demux => SimdOp::Demux,
         NodeKind::TriStateBuffer => SimdOp::TriStateBuffer,
-        NodeKind::Input | NodeKind::Output | NodeKind::Clock { .. } | NodeKind::SubCircuit(_) => {
-            return None;
-        }
+        NodeKind::Input
+        | NodeKind::Output
+        | NodeKind::Clock { .. }
+        | NodeKind::Counter8
+        | NodeKind::SubCircuit(_) => return None,
     })
 }
 
@@ -235,6 +247,34 @@ fn build_program<I: SimdIndex>(
                     duty_ticks,
                     phase,
                     output: I::from_usize(output),
+                });
+            }
+            continue;
+        }
+        if matches!(node.kind, NodeKind::Counter8) {
+            let outputs: Vec<_> = node
+                .output_pins
+                .iter()
+                .map(|pin| {
+                    let mut wires: Vec<_> = pin
+                        .iter()
+                        .copied()
+                        .filter(|&wire| {
+                            wire < observable_wire_count || !wire_listeners[wire].is_empty()
+                        })
+                        .collect();
+                    wires.sort_by_key(|&wire| wire >= observable_wire_count);
+                    wires
+                        .into_iter()
+                        .map(I::from_usize)
+                        .collect::<SmallVec<[I; 2]>>()
+                })
+                .collect();
+            if node.inputs.len() >= 2 && outputs.len() >= 8 {
+                program.counters.push(SimdCounter8 {
+                    increment: I::from_usize(node.inputs[0]),
+                    reset: I::from_usize(node.inputs[1]),
+                    outputs: std::array::from_fn(|index| outputs[index].clone()),
                 });
             }
             continue;

@@ -184,6 +184,24 @@ impl InspectableRunner for MappedRunner {
             }
         });
     }
+
+    fn execution_state(&self) -> Vec<bool> {
+        self.inner.execution_state()
+    }
+
+    fn restore_execution_state(&mut self, state: &[bool]) -> bool {
+        self.inner.restore_execution_state(state)
+    }
+
+    fn restore_wire_value(&mut self, wire: WireId, value: bool) {
+        if let Some(&mapped_wire) = self.wire_map.get(&wire) {
+            self.inner.restore_wire_value(mapped_wire, value);
+        }
+    }
+
+    fn set_current_tick(&mut self, tick: u64) {
+        self.inner.set_current_tick(tick);
+    }
 }
 
 fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn InspectableRunner> {
@@ -212,6 +230,9 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
         }
 
         let inner: Box<dyn InspectableRunner> = match runner_type {
+            RunnerType::NaiveOptimized if contains_nested_state(&opt_circuit) => {
+                Box::new(FlatRunner::new(FlattenedCircuit::compile(&opt_circuit)))
+            }
             RunnerType::NaiveOptimized => Box::new(NaiveRunner::new(opt_circuit)),
             RunnerType::FlatOptimized => {
                 let flat = FlattenedCircuit::compile(&opt_circuit);
@@ -236,6 +257,9 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
         })
     } else {
         match runner_type {
+            RunnerType::Naive if contains_nested_state(circuit) => {
+                Box::new(FlatRunner::new(FlattenedCircuit::compile(circuit)))
+            }
             RunnerType::Naive => Box::new(NaiveRunner::new(circuit.clone())),
             RunnerType::Flat => {
                 let flat = FlattenedCircuit::compile(circuit);
@@ -252,6 +276,22 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
             _ => unreachable!(),
         }
     }
+}
+
+/// The reference Naive runner currently evaluates nested circuits with a fresh
+/// child runner per tick. Use its scalar flattened fallback when that would
+/// discard sequential state.
+fn contains_nested_state(circuit: &Circuit) -> bool {
+    circuit.nodes.values().any(|node| match &node.kind {
+        NodeKind::SubCircuit(child) => {
+            child
+                .nodes
+                .values()
+                .any(|nested| matches!(nested.kind, NodeKind::Counter8))
+                || contains_nested_state(child)
+        }
+        _ => false,
+    })
 }
 
 impl SimulationEngine {
@@ -345,8 +385,28 @@ impl SimulationEngine {
                     };
                     match cmd {
                         SimCommand::SetRunner(rt) => {
+                            let compatible_layout =
+                                is_optimized_runner(current_runner_type) == is_optimized_runner(rt);
+                            let tick = runner.current_tick();
+                            let execution_state = runner.execution_state();
+                            let mut observable_state = Vec::new();
+                            runner.for_each_wire(&mut |wire, value| {
+                                observable_state.push((wire, value));
+                            });
+
                             current_runner_type = rt;
-                            needs_rebuild = true;
+                            let mut replacement = build_runner(&circuit, current_runner_type);
+                            if !compatible_layout
+                                || !replacement.restore_execution_state(&execution_state)
+                            {
+                                for (wire, value) in observable_state {
+                                    replacement.restore_wire_value(wire, value);
+                                }
+                            }
+                            replacement.set_current_tick(tick);
+                            runner = replacement;
+                            needs_rebuild = false;
+                            publish_wire_states(&shared, runner.as_ref());
                             let _ = tx_evt.send(SimEvent::RunnerSet(current_runner_type));
                         }
                         SimCommand::SetTickRate(rate) => {
@@ -617,6 +677,16 @@ impl SimulationEngine {
         self.shared_state.tick_count.fetch_add(1, Ordering::Relaxed);
         publish_wire_states(&self.shared_state, runner.as_ref());
     }
+}
+
+fn is_optimized_runner(runner: RunnerType) -> bool {
+    matches!(
+        runner,
+        RunnerType::NaiveOptimized
+            | RunnerType::FlatOptimized
+            | RunnerType::EventDrivenOptimized
+            | RunnerType::SimdOptimized
+    )
 }
 
 impl Drop for SimulationEngine {

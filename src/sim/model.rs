@@ -32,6 +32,10 @@ use logi_sim::prelude::NodeKind;
 pub enum GameNodeKind {
     Input,
     Output,
+    /// A multi-bit output sink rendered as a single hexadecimal value.
+    Display {
+        bits: u8,
+    },
     And,
     Or,
     Not,
@@ -43,9 +47,15 @@ pub enum GameNodeKind {
     Mux,
     Demux,
     TriStateBuffer,
-    Clock { period_ticks: u32, duty_ticks: u32 },
+    Counter8,
+    Clock {
+        period_ticks: u32,
+        duty_ticks: u32,
+    },
     // Sub-circuits hold a complete nested `GameCircuit`.
-    SubCircuit { circuit: Box<GameCircuit> },
+    SubCircuit {
+        circuit: Box<GameCircuit>,
+    },
 }
 
 impl GameNodeKind {
@@ -54,6 +64,7 @@ impl GameNodeKind {
         match self {
             GameNodeKind::Input => 0,
             GameNodeKind::Output => 1,
+            GameNodeKind::Display { bits } => usize::from(*bits),
             GameNodeKind::And
             | GameNodeKind::Or
             | GameNodeKind::Xor
@@ -63,6 +74,7 @@ impl GameNodeKind {
             GameNodeKind::Not | GameNodeKind::Buffer => 1,
             GameNodeKind::Mux => 3,
             GameNodeKind::Demux | GameNodeKind::TriStateBuffer => 2,
+            GameNodeKind::Counter8 => 2,
             GameNodeKind::Clock { .. } => 0,
             GameNodeKind::SubCircuit { circuit } => circuit
                 .nodes
@@ -77,6 +89,7 @@ impl GameNodeKind {
         match self {
             GameNodeKind::Input => 1,
             GameNodeKind::Output => 0,
+            GameNodeKind::Display { .. } => 0,
             GameNodeKind::And
             | GameNodeKind::Or
             | GameNodeKind::Xor
@@ -88,6 +101,7 @@ impl GameNodeKind {
             GameNodeKind::Mux => 1,
             GameNodeKind::Demux => 2,
             GameNodeKind::TriStateBuffer => 1,
+            GameNodeKind::Counter8 => 8,
             GameNodeKind::Clock { .. } => 1,
             GameNodeKind::SubCircuit { circuit } => circuit
                 .nodes
@@ -103,6 +117,7 @@ impl GameNodeKind {
         match self {
             GameNodeKind::Input => Some(NodeKind::Input),
             GameNodeKind::Output => Some(NodeKind::Output),
+            GameNodeKind::Display { .. } => Some(NodeKind::Output),
             GameNodeKind::And => Some(NodeKind::And),
             GameNodeKind::Or => Some(NodeKind::Or),
             GameNodeKind::Not => Some(NodeKind::Not),
@@ -114,6 +129,7 @@ impl GameNodeKind {
             GameNodeKind::Mux => Some(NodeKind::Mux),
             GameNodeKind::Demux => Some(NodeKind::Demux),
             GameNodeKind::TriStateBuffer => Some(NodeKind::TriStateBuffer),
+            GameNodeKind::Counter8 => Some(NodeKind::Counter8),
             GameNodeKind::Clock {
                 period_ticks,
                 duty_ticks,
@@ -132,6 +148,7 @@ impl GameNodeKind {
         match self {
             GameNodeKind::Input => "INPUT",
             GameNodeKind::Output => "OUTPUT",
+            GameNodeKind::Display { .. } => "DISPLAY",
             GameNodeKind::And => "AND",
             GameNodeKind::Or => "OR",
             GameNodeKind::Not => "NOT",
@@ -143,6 +160,7 @@ impl GameNodeKind {
             GameNodeKind::Mux => "MUX",
             GameNodeKind::Demux => "DEMUX",
             GameNodeKind::TriStateBuffer => "TRI-STATE",
+            GameNodeKind::Counter8 => "COUNTER8",
             GameNodeKind::Clock { .. } => "CLOCK",
             GameNodeKind::SubCircuit { .. } => "SUBCIRCUIT",
         }

@@ -8,6 +8,7 @@ pub struct EventNode {
     pub kind: NodeKind,
     pub inputs: SmallVec<[usize; 4]>,  // Direct wire indices
     pub outputs: SmallVec<[usize; 2]>, // Direct wire indices
+    pub output_pins: SmallVec<[SmallVec<[usize; 2]>; 2]>,
 }
 
 /// Level 2 Event-Driven Netlist Representation.
@@ -36,6 +37,7 @@ impl EventDrivenCircuit {
                 kind: f_node.kind.clone(),
                 inputs: f_node.inputs.clone(),
                 outputs: f_node.outputs.clone(),
+                output_pins: f_node.output_pins.clone(),
             });
 
             // Register this node as a listener for each of its input wires

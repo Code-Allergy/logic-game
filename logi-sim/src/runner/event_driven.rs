@@ -12,6 +12,7 @@ pub struct EventDrivenRunner {
     /// purely event-driven and must be re-evaluated every tick.
     clock_nodes: Vec<usize>,
     tick_count: u64,
+    previous_clock: Vec<bool>,
 }
 
 impl EventDrivenRunner {
@@ -46,6 +47,7 @@ impl EventDrivenRunner {
             in_queue,
             clock_nodes,
             tick_count: 0,
+            previous_clock: vec![false; node_count],
         };
 
         // Run initial drain to establish steady-state logic level outputs. This does not
@@ -159,6 +161,37 @@ impl EventDrivenRunner {
                 let val = if enable { sig } else { false };
                 self.set_node_outputs(n_idx, val);
             }
+            NodeKind::Counter8 => {
+                let clock = self.input_value(n_idx, 0);
+                let reset = self.input_value(n_idx, 1);
+                let falling = self.previous_clock[n_idx] && !clock;
+                self.previous_clock[n_idx] = clock;
+                let output_pins = self.circuit.nodes[n_idx].output_pins.clone();
+                let observable = self.circuit.idx_to_wire.len();
+                let mut carry = falling;
+                for pin in output_pins.iter().take(8) {
+                    let old = pin
+                        .iter()
+                        .find(|&&wire| wire < observable)
+                        .or_else(|| pin.first())
+                        .map(|&wire| self.wire_values[wire])
+                        .unwrap_or(false);
+                    let next = if reset { false } else { old ^ carry };
+                    carry &= old;
+                    for &wire in pin {
+                        if self.wire_values[wire] != next {
+                            self.wire_values[wire] = next;
+                            for &listener in &self.circuit.wire_listeners[wire] {
+                                Self::enqueue_node_static(
+                                    &mut self.in_queue,
+                                    &mut self.dirty_queue,
+                                    listener,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             NodeKind::Clock {
                 period_ticks,
                 duty_ticks,
@@ -243,5 +276,33 @@ impl InspectableRunner for EventDrivenRunner {
         for (w_idx, &wire_id) in self.circuit.idx_to_wire.iter().enumerate() {
             f(wire_id, self.wire_values[w_idx]);
         }
+    }
+
+    fn execution_state(&self) -> Vec<bool> {
+        let mut state = self.wire_values.clone();
+        state.extend_from_slice(&self.previous_clock);
+        state
+    }
+
+    fn restore_execution_state(&mut self, state: &[bool]) -> bool {
+        if state.len() != self.wire_values.len() + self.previous_clock.len() {
+            return false;
+        }
+        let (wires, clocks) = state.split_at(self.wire_values.len());
+        self.wire_values.copy_from_slice(wires);
+        self.previous_clock.copy_from_slice(clocks);
+        self.dirty_queue.clear();
+        self.in_queue.fill(false);
+        true
+    }
+
+    fn restore_wire_value(&mut self, wire: WireId, value: bool) {
+        if let Some(&index) = self.circuit.wire_to_idx.get(&wire) {
+            self.wire_values[index] = value;
+        }
+    }
+
+    fn set_current_tick(&mut self, tick: u64) {
+        self.tick_count = tick;
     }
 }

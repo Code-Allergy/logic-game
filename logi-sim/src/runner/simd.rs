@@ -8,15 +8,21 @@ pub struct SimdRunner {
     circuit: BitPackedCircuit,
     wire_values: Vec<u64x4>,
     tick_count: u64,
+    previous_clock: Vec<u64x4>,
 }
 
 impl SimdRunner {
     pub fn new(circuit: BitPackedCircuit) -> Self {
         let wire_count = circuit.wire_count;
+        let counter_count = match &circuit.programs {
+            SimdPrograms::Compact(program) => program.counters.len(),
+            SimdPrograms::Wide(program) => program.counters.len(),
+        };
         Self {
             circuit,
             wire_values: vec![u64x4::ZERO; wire_count],
             tick_count: 0,
+            previous_clock: vec![u64x4::ZERO; counter_count],
         }
     }
 
@@ -46,12 +52,35 @@ impl SimdRunner {
 }
 
 #[inline(always)]
-fn execute_program<I: SimdIndex>(program: &SimdProgram<I>, wires: &mut [u64x4], tick_count: u64) {
+fn execute_program<I: SimdIndex>(
+    program: &SimdProgram<I>,
+    wires: &mut [u64x4],
+    previous_clock: &mut [u64x4],
+    tick_count: u64,
+) {
     for clock in &program.clocks {
         let elapsed =
             tick_count.wrapping_add(clock.phase as u64) % clock.period_ticks.max(1) as u64;
         let value = elapsed < clock.duty_ticks.max(1) as u64;
         wires[clock.output.as_usize()] = u64x4::splat(if value { u64::MAX } else { 0 });
+    }
+
+    for (counter, previous) in program.counters.iter().zip(previous_clock) {
+        let clock = wires[counter.increment.as_usize()];
+        let reset = wires[counter.reset.as_usize()];
+        let mut carry = *previous & !clock;
+        for outputs in &counter.outputs {
+            let old = outputs
+                .first()
+                .map(|output| wires[output.as_usize()])
+                .unwrap_or(u64x4::ZERO);
+            let next = (old ^ carry) & !reset;
+            for output in outputs {
+                wires[output.as_usize()] = next;
+            }
+            carry &= old;
+        }
+        *previous = clock;
     }
 
     for block in &program.blocks {
@@ -138,12 +167,18 @@ impl Runner for SimdRunner {
 
     fn tick(&mut self) {
         match &self.circuit.programs {
-            SimdPrograms::Compact(program) => {
-                execute_program(program, &mut self.wire_values, self.tick_count)
-            }
-            SimdPrograms::Wide(program) => {
-                execute_program(program, &mut self.wire_values, self.tick_count)
-            }
+            SimdPrograms::Compact(program) => execute_program(
+                program,
+                &mut self.wire_values,
+                &mut self.previous_clock,
+                self.tick_count,
+            ),
+            SimdPrograms::Wide(program) => execute_program(
+                program,
+                &mut self.wire_values,
+                &mut self.previous_clock,
+                self.tick_count,
+            ),
         }
         self.tick_count += 1;
     }
@@ -171,5 +206,40 @@ impl InspectableRunner for SimdRunner {
             let lanes: [u64; 4] = self.wire_values[index].into();
             f(wire, (lanes[0] & 1) != 0);
         }
+    }
+
+    fn execution_state(&self) -> Vec<bool> {
+        self.wire_values
+            .iter()
+            .chain(&self.previous_clock)
+            .map(|value| {
+                let lanes: [u64; 4] = (*value).into();
+                (lanes[0] & 1) != 0
+            })
+            .collect()
+    }
+
+    fn restore_execution_state(&mut self, state: &[bool]) -> bool {
+        if state.len() != self.wire_values.len() + self.previous_clock.len() {
+            return false;
+        }
+        let (wires, clocks) = state.split_at(self.wire_values.len());
+        for (wire, &value) in self.wire_values.iter_mut().zip(wires) {
+            *wire = u64x4::splat(if value { u64::MAX } else { 0 });
+        }
+        for (clock, &value) in self.previous_clock.iter_mut().zip(clocks) {
+            *clock = u64x4::splat(if value { u64::MAX } else { 0 });
+        }
+        true
+    }
+
+    fn restore_wire_value(&mut self, wire: WireId, value: bool) {
+        if let Some(&index) = self.circuit.wire_to_idx.get(&wire) {
+            self.wire_values[index] = u64x4::splat(if value { u64::MAX } else { 0 });
+        }
+    }
+
+    fn set_current_tick(&mut self, tick: u64) {
+        self.tick_count = tick;
     }
 }

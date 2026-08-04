@@ -9,8 +9,8 @@ use crate::sim::{
         bridge_flush_system, drag_selected_system, draw_connections_system, draw_gates_system,
         gate_selection_system, rebuild_spatial_grid_system, save_on_exit_system,
         simulation_config_ui_system, ui_for_selected_gate, update_connections_system,
-        update_input_colours_system, update_inputs_on_left_click, update_selected_gate,
-        update_spatial_grid_system, update_tickrate_system,
+        update_input_colours_system, update_inputs_on_left_click, update_logic_displays_system,
+        update_selected_gate, update_spatial_grid_system, update_tickrate_system,
     },
 };
 
@@ -34,8 +34,9 @@ impl Plugin for SimulationPlugin {
         // ── Resources inserted at startup so Bevy param validation never sees
         //    a missing resource, regardless of which GameState is active.
         //    (Bevy 0.19 validates Res<T> params *before* evaluating run_if.)
-        let game_circuit = fixtures::build_8bit_counter_subcircuit();
-        let sim_bridge = SimBridge::from_circuit(&game_circuit);
+        let game_circuit = fixtures::build_64bit_counter_subcircuits();
+        let mut sim_bridge = SimBridge::from_circuit(&game_circuit);
+        power_on_reset(&mut sim_bridge, &game_circuit);
 
         app
             // ── Core resources (always present) ─────────────────────────────────────────
@@ -71,6 +72,7 @@ impl Plugin for SimulationPlugin {
                 Update,
                 (
                     update_input_colours_system,
+                    update_logic_displays_system,
                     gate_selection_system.before(drag_selected_system),
                     drag_selected_system,
                     update_connections_system,
@@ -93,6 +95,33 @@ impl Plugin for SimulationPlugin {
             // Runs independently of state so that it always fires when closing
             .add_systems(Update, save_on_exit_system);
     }
+}
+
+/// Hold the fixture's asynchronous reset high long enough for every nested
+/// latch to settle, then release it before normal clocked execution begins.
+fn power_on_reset(bridge: &mut SimBridge, circuit: &crate::sim::GameCircuit) {
+    let Some(reset) = circuit.nodes.values().find(|node| {
+        matches!(node.kind, crate::sim::GameNodeKind::Input)
+            && node.label.as_deref() == Some("Reset")
+    }) else {
+        return;
+    };
+
+    // Commands are consumed FIFO by the worker. Step is honored while paused,
+    // so no wall-clock delay or startup timing race is required here.
+    bridge.pause();
+    bridge.set_input(reset.id, 0, true);
+    let settled_at = bridge.tick_count().saturating_add(64);
+    for _ in 0..64 {
+        bridge.step();
+    }
+    // Do not let the first rendered frame observe the latch network before
+    // reset propagation has completed. This reads one atomic in userspace.
+    while bridge.tick_count() < settled_at {
+        std::hint::spin_loop();
+    }
+    bridge.set_input(reset.id, 0, false);
+    bridge.resume();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

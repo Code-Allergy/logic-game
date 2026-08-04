@@ -30,6 +30,7 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
         NodeKind::Mux => "MUX",
         NodeKind::Demux => "DEMUX",
         NodeKind::TriStateBuffer => "TRISTATE",
+        NodeKind::Counter8 => "COUNTER8",
         NodeKind::Clock { .. } => "CLOCK",
         NodeKind::SubCircuit(_) => "SUBCIRCUIT",
     }

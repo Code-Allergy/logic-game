@@ -34,6 +34,7 @@ impl CellOp {
             NodeKind::Input
             | NodeKind::Output
             | NodeKind::Clock { .. }
+            | NodeKind::Counter8
             | NodeKind::SubCircuit(_) => return None,
         })
     }

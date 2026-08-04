@@ -10,8 +10,8 @@ use bevy_egui::{EguiContexts, egui};
 use crate::{SAVE_FILE_NAME, temp::GateComponentSelectionEvent};
 
 use super::{
-    ConnectionLine, GameCircuit, GameNodeKind, GateComponent, SavedSimulation, Selected,
-    SelectedGate, SimBridge, SimCache, SimulationConfig, TickRateMeter,
+    ConnectionLine, GameCircuit, GameNodeKind, GateComponent, LogicDisplay, SavedSimulation,
+    Selected, SelectedGate, SimBridge, SimCache, SimulationConfig, TickRateMeter,
     calculate_connection_geometry, get_gate_sprite, spatial_grid::SpatialGrid,
 };
 
@@ -54,11 +54,48 @@ pub fn bridge_flush_system(
 pub fn draw_gates_system(game_circuit: Res<GameCircuit>, mut commands: Commands) {
     for node in game_circuit.nodes.values() {
         let sprite = get_gate_sprite(&node.kind);
-        commands.spawn((
+        let mut entity = commands.spawn((
             sprite,
             Transform::from_xyz(node.position.x, node.position.y, 0.0),
             GateComponent::new(node.id, node.position),
         ));
+        if let GameNodeKind::Display { bits } = node.kind {
+            let digits = usize::from(bits).div_ceil(4);
+            entity.with_children(|parent| {
+                parent.spawn((
+                    Text2d::new(format!("0x{:0digits$X}", 0)),
+                    TextFont::from_font_size(22.0),
+                    TextColor(Color::srgb(0.3, 1.0, 0.5)),
+                    Transform::from_xyz(0.0, 0.0, 1.0),
+                    LogicDisplay {
+                        node_id: node.id,
+                        bits,
+                    },
+                ));
+            });
+        }
+    }
+}
+
+/// Format multi-bit display inputs as a fixed-width hexadecimal value.
+pub fn update_logic_displays_system(
+    cache: Res<SimCache>,
+    mut displays: Query<(&mut Text2d, &LogicDisplay)>,
+) {
+    for (mut text, display) in displays.iter_mut() {
+        let mut value = 0_u64;
+        for bit in 0..display.bits.min(64) {
+            if cache
+                .node_inputs
+                .get(&(display.node_id, bit))
+                .copied()
+                .unwrap_or(false)
+            {
+                value |= 1_u64 << bit;
+            }
+        }
+        let digits = usize::from(display.bits).div_ceil(4);
+        text.0 = format!("0x{value:0digits$X}");
     }
 }
 

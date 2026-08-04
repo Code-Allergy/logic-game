@@ -5,15 +5,18 @@ use crate::runner::Runner;
 pub struct FlatRunner {
     circuit: FlattenedCircuit,
     wire_values: Vec<bool>,
+    previous_clock: Vec<bool>,
     tick_count: u64,
 }
 
 impl FlatRunner {
     pub fn new(circuit: FlattenedCircuit) -> Self {
         let wire_count = circuit.wire_count;
+        let node_count = circuit.nodes.len();
         Self {
             circuit,
             wire_values: vec![false; wire_count],
+            previous_clock: vec![false; node_count],
             tick_count: 0,
         }
     }
@@ -108,6 +111,28 @@ impl Runner for FlatRunner {
                     let out = if enable { sig } else { false };
                     self.set_output(n_idx, out);
                 }
+                NodeKind::Counter8 => {
+                    let clock = self.input_value(n_idx, 0);
+                    let reset = self.input_value(n_idx, 1);
+                    let falling = self.previous_clock[n_idx] && !clock;
+                    let pins = self.circuit.nodes[n_idx].output_pins.clone();
+                    let observable = self.circuit.idx_to_wire.len();
+                    let mut carry = falling;
+                    for pin in pins.iter().take(8) {
+                        let old = pin
+                            .iter()
+                            .find(|&&wire| wire < observable)
+                            .or_else(|| pin.first())
+                            .map(|&wire| self.wire_values[wire])
+                            .unwrap_or(false);
+                        let next = if reset { false } else { old ^ carry };
+                        carry &= old;
+                        for &wire in pin {
+                            self.wire_values[wire] = next;
+                        }
+                    }
+                    self.previous_clock[n_idx] = clock;
+                }
                 NodeKind::Clock {
                     period_ticks,
                     duty_ticks,
@@ -150,5 +175,31 @@ impl crate::runner::InspectableRunner for FlatRunner {
         for (w_idx, &wire_id) in self.circuit.idx_to_wire.iter().enumerate() {
             f(wire_id, self.wire_values[w_idx]);
         }
+    }
+
+    fn execution_state(&self) -> Vec<bool> {
+        let mut state = self.wire_values.clone();
+        state.extend_from_slice(&self.previous_clock);
+        state
+    }
+
+    fn restore_execution_state(&mut self, state: &[bool]) -> bool {
+        if state.len() != self.wire_values.len() + self.previous_clock.len() {
+            return false;
+        }
+        let (wires, clocks) = state.split_at(self.wire_values.len());
+        self.wire_values.copy_from_slice(wires);
+        self.previous_clock.copy_from_slice(clocks);
+        true
+    }
+
+    fn restore_wire_value(&mut self, wire: WireId, value: bool) {
+        if let Some(&index) = self.circuit.wire_to_idx.get(&wire) {
+            self.wire_values[index] = value;
+        }
+    }
+
+    fn set_current_tick(&mut self, tick: u64) {
+        self.tick_count = tick;
     }
 }

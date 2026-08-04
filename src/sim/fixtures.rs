@@ -184,6 +184,76 @@ pub fn build_8bit_counter_subcircuit() -> GameCircuit {
     circuit
 }
 
+/// Builds the reusable byte-sized counter used by the 64-bit GUI fixture.
+/// Its alphabetically ordered interface is Increment, Reset, then Bit 00..07.
+pub fn build_8bit_counter_block() -> GameCircuit {
+    let mut circuit = GameCircuit::new("8-Bit Counter Block");
+
+    let mut increment = GameNode::new(GameNodeKind::Input, Vec2::new(-300.0, 80.0));
+    increment.label = Some("Increment".into());
+    let increment_id = circuit.add_node(increment);
+    let mut reset = GameNode::new(GameNodeKind::Input, Vec2::new(-300.0, -80.0));
+    reset.label = Some("Reset".into());
+    let reset_id = circuit.add_node(reset);
+
+    let counter_id = circuit.add_node(GameNode::new(GameNodeKind::Counter8, Vec2::ZERO));
+    circuit.add_wire(GameWire::new(increment_id, 0, counter_id, 0));
+    circuit.add_wire(GameWire::new(reset_id, 0, counter_id, 1));
+
+    for bit in 0..8 {
+        let position = Vec2::new(-200.0 + bit as f32 * 90.0, 100.0);
+        let mut output = GameNode::new(GameNodeKind::Output, position);
+        output.label = Some(format!("Bit {bit:02}"));
+        let output_id = circuit.add_node(output);
+        circuit.add_wire(GameWire::new(counter_id, bit, output_id, 0));
+    }
+    circuit
+}
+
+/// Builds eight byte counter subcircuits chained into a 64-bit ripple counter.
+/// The 64 scalar simulation wires terminate at one hexadecimal display node.
+pub fn build_64bit_counter_subcircuits() -> GameCircuit {
+    let mut circuit = GameCircuit::new("64-Bit Counter (8 x 8-Bit Subcircuits)");
+
+    let mut increment = GameNode::new(
+        GameNodeKind::Clock {
+            period_ticks: 4,
+            duty_ticks: 2,
+        },
+        Vec2::new(-650.0, 120.0),
+    );
+    increment.label = Some("Increment Clock".into());
+    let increment_id = circuit.add_node(increment);
+    let mut reset = GameNode::new(GameNodeKind::Input, Vec2::new(-650.0, -120.0));
+    reset.label = Some("Reset".into());
+    let reset_id = circuit.add_node(reset);
+    let display_id = circuit.add_node(GameNode::new(
+        GameNodeKind::Display { bits: 64 },
+        Vec2::new(650.0, 0.0),
+    ));
+
+    let mut ripple = (increment_id, 0_u8);
+    for byte in 0..8 {
+        let x = -450.0 + byte as f32 * 125.0;
+        let mut counter = GameNode::new(
+            GameNodeKind::SubCircuit {
+                circuit: Box::new(build_8bit_counter_block()),
+            },
+            Vec2::new(x, 0.0),
+        );
+        counter.label = Some(format!("Byte {byte:02}"));
+        let counter_id = circuit.add_node(counter);
+        circuit.add_wire(GameWire::new(ripple.0, ripple.1, counter_id, 0));
+        circuit.add_wire(GameWire::new(reset_id, 0, counter_id, 1));
+        for bit in 0..8_u8 {
+            circuit.add_wire(GameWire::new(counter_id, bit, display_id, byte * 8 + bit));
+        }
+        ripple = (counter_id, 7);
+    }
+
+    circuit
+}
+
 /// Builds an 8-bit ripple counter fixture using T Flip-Flops.
 pub fn build_8bit_counter() -> GameCircuit {
     let mut circuit = GameCircuit::new("8-Bit Counter");

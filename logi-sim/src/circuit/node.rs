@@ -26,6 +26,9 @@ pub enum NodeKind {
     Mux,
     Demux,
     TriStateBuffer,
+    /// Falling-edge-triggered byte counter. Inputs are increment and reset;
+    /// outputs are the eight little-endian state bits.
+    Counter8,
     Clock {
         period_ticks: u32,
         duty_ticks: u32,
@@ -51,6 +54,7 @@ impl PartialEq for NodeKind {
             (NodeKind::Mux, NodeKind::Mux) => true,
             (NodeKind::Demux, NodeKind::Demux) => true,
             (NodeKind::TriStateBuffer, NodeKind::TriStateBuffer) => true,
+            (NodeKind::Counter8, NodeKind::Counter8) => true,
             (
                 NodeKind::Clock {
                     period_ticks: p1,

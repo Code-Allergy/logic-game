@@ -8,6 +8,9 @@ pub struct FlatNode {
     pub kind: NodeKind,
     pub inputs: SmallVec<[usize; 4]>,  // Direct wire array indices
     pub outputs: SmallVec<[usize; 2]>, // Direct wire array indices
+    /// Output wires grouped by logical pin. Nested output aliases remain in
+    /// the same group instead of being mistaken for additional pins.
+    pub output_pins: SmallVec<[SmallVec<[usize; 2]>; 2]>,
 }
 
 /// Level 1 Circuit representation: Flattened contiguous array layout.
@@ -137,6 +140,7 @@ impl FlattenCtx {
                         self.node_to_idx.insert(node_id, n_idx);
 
                         let mut outputs = SmallVec::new();
+                        let mut output_pins = SmallVec::new();
                         for (pin_idx, pin) in node.outputs.iter().enumerate() {
                             let mut out_wires = SmallVec::new();
                             for w in &pin.wires {
@@ -146,13 +150,15 @@ impl FlattenCtx {
                                 }
                             }
                             self.node_output_pins
-                                .insert((node_id, pin_idx as u8), out_wires);
+                                .insert((node_id, pin_idx as u8), out_wires.clone());
+                            output_pins.push(out_wires);
                         }
 
                         self.nodes.push(FlatNode {
                             kind: NodeKind::Input,
                             inputs: SmallVec::new(),
                             outputs,
+                            output_pins,
                         });
                     }
                 }
@@ -175,6 +181,7 @@ impl FlattenCtx {
                             kind: NodeKind::Output,
                             inputs,
                             outputs: SmallVec::new(),
+                            output_pins: SmallVec::new(),
                         });
                     }
                 }
@@ -236,6 +243,7 @@ impl FlattenCtx {
                     }
 
                     let mut outputs = SmallVec::new();
+                    let mut output_pins = SmallVec::new();
                     for (pin_idx, pin) in node.outputs.iter().enumerate() {
                         let mut out_wires = SmallVec::new();
                         for w in &pin.wires {
@@ -250,14 +258,16 @@ impl FlattenCtx {
                         }
                         if self.is_root {
                             self.node_output_pins
-                                .insert((node_id, pin_idx as u8), out_wires);
+                                .insert((node_id, pin_idx as u8), out_wires.clone());
                         }
+                        output_pins.push(out_wires);
                     }
 
                     self.nodes.push(FlatNode {
                         kind: node.kind.clone(),
                         inputs,
                         outputs,
+                        output_pins,
                     });
                 }
             }

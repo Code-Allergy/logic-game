@@ -23,4 +23,17 @@ pub trait Runner {
 pub trait InspectableRunner: Runner {
     fn wire_value(&self, wire: WireId) -> bool;
     fn for_each_wire(&self, f: &mut dyn FnMut(WireId, bool));
+
+    /// Snapshot all execution wires in representation order. Runners compiled
+    /// from the same logical layout can use this to retain feedback state.
+    fn execution_state(&self) -> Vec<bool>;
+
+    /// Restore an execution snapshot, returning false when layouts differ.
+    fn restore_execution_state(&mut self, state: &[bool]) -> bool;
+
+    /// Restore a wire through its stable circuit identity where available.
+    fn restore_wire_value(&mut self, wire: WireId, value: bool);
+
+    /// Preserve clock phase across representation changes.
+    fn set_current_tick(&mut self, tick: u64);
 }
