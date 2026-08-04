@@ -158,6 +158,7 @@ impl EventDrivenRunner {
     fn process_node_outputs(&mut self, n_idx: usize) {
         match &self.circuit.nodes[n_idx].kind {
             NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => {}
+            NodeKind::BusInput { .. } | NodeKind::BusOutput { .. } => {}
             NodeKind::And => {
                 let val = self.input_value(n_idx, 0) && self.input_value(n_idx, 1);
                 self.set_node_outputs(n_idx, val);
@@ -227,6 +228,19 @@ impl EventDrivenRunner {
                 let elapsed = self.tick_count.wrapping_add(*phase as u64) % period;
                 let val = elapsed < (*duty_ticks).max(1) as u64;
                 self.set_node_outputs(n_idx, val);
+            }
+            NodeKind::BusExpand { bits } => {
+                let value = self.input_value(n_idx, 0);
+                for bit in 0..usize::from(*bits) {
+                    self.set_output_pin(n_idx, bit, value);
+                }
+            }
+            NodeKind::BusReduceOr { bits } => {
+                let mut out = false;
+                for bit in 0..usize::from(*bits) {
+                    out |= self.input_value(n_idx, bit);
+                }
+                self.set_node_outputs(n_idx, out);
             }
         }
     }

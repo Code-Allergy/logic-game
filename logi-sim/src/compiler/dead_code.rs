@@ -13,11 +13,18 @@ pub fn cull_dead_nodes_with_map(
     let mut live_wires = HashSet::<WireId>::new();
     let mut queue = VecDeque::<NodeId>::new();
 
-    // Find all Output and Input nodes as starting points for reachability and interface preservation
+    // Find all output/input nodes as starting points for reachability and interface
+    // preservation, including bus versions so multi-bit wrappers stay alive.
     for (node_id, node) in &circuit.nodes {
-        if matches!(node.kind, NodeKind::Output | NodeKind::Input) {
+        if matches!(
+            node.kind,
+            NodeKind::Input
+                | NodeKind::BusInput { .. }
+                | NodeKind::Output
+                | NodeKind::BusOutput { .. }
+        ) {
             live_nodes.insert(node_id);
-            if matches!(node.kind, NodeKind::Output) {
+            if matches!(node.kind, NodeKind::Output | NodeKind::BusOutput { .. }) {
                 queue.push_back(node_id);
             }
         }

@@ -19,6 +19,18 @@ pub fn kind_label(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::Input => "INPUT",
         NodeKind::Output => "OUTPUT",
+        NodeKind::BusInput { .. } => "BUS_INPUT",
+        NodeKind::BusOutput { .. } => "BUS_OUTPUT",
+        NodeKind::BusExpand { bits } => match bits {
+            8 => "1->8",
+            64 => "1->64",
+            _ => "BUS_EXPAND",
+        },
+        NodeKind::BusReduceOr { bits } => match bits {
+            8 => "8->1",
+            64 => "64->1",
+            _ => "BUS_REDUCE_OR",
+        },
         NodeKind::And => "AND",
         NodeKind::Or => "OR",
         NodeKind::Not => "NOT",

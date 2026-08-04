@@ -23,7 +23,7 @@ pub mod systems;
 
 pub use bridge::SimBridge;
 pub use cache::SimCache;
-pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation};
+pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation, WireKind};
 pub use plugin::SimulationPlugin;
 pub use service::{SimExecutionService, SimRuntime};
 
@@ -49,11 +49,12 @@ impl GateComponent {
 }
 
 /// Bevy component representing a rendered wire between two nodes.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone)]
 pub struct ConnectionLine {
     pub id: Uuid,
     pub source_node: Uuid,
     pub sink_node: Uuid,
+    pub wire_kind: WireKind,
 }
 
 /// Text attached to a multi-bit display node.
@@ -167,7 +168,15 @@ pub fn get_gate_sprite(kind: &GameNodeKind) -> Sprite {
         GameNodeKind::Counter8 => Color::srgb(0.1, 0.45, 0.65),
         GameNodeKind::Clock { .. } => Color::srgb(0.5, 0.1, 0.3),
         GameNodeKind::Input => Color::srgb(0.1, 0.1, 0.1),
+        GameNodeKind::Input8 => Color::srgb(0.13, 0.24, 0.48),
+        GameNodeKind::Input64 => Color::srgb(0.08, 0.19, 0.38),
         GameNodeKind::Output => Color::srgb(0.15, 0.15, 0.15),
+        GameNodeKind::Output8 => Color::srgb(0.12, 0.35, 0.12),
+        GameNodeKind::Output64 => Color::srgb(0.08, 0.26, 0.08),
+        GameNodeKind::Expand8 => Color::srgb(0.35, 0.35, 0.0),
+        GameNodeKind::Expand64 => Color::srgb(0.28, 0.28, 0.0),
+        GameNodeKind::ReduceOr8 => Color::srgb(0.75, 0.45, 0.0),
+        GameNodeKind::ReduceOr64 => Color::srgb(0.52, 0.25, 0.0),
         GameNodeKind::Display { .. } => Color::srgb(0.04, 0.09, 0.12),
         GameNodeKind::SubCircuit { .. } => Color::srgb(0.1, 0.5, 0.3),
     };

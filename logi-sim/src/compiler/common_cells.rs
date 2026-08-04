@@ -33,6 +33,10 @@ impl CellOp {
             NodeKind::TriStateBuffer => Self::TriStateBuffer,
             NodeKind::Input
             | NodeKind::Output
+            | NodeKind::BusInput { .. }
+            | NodeKind::BusOutput { .. }
+            | NodeKind::BusExpand { .. }
+            | NodeKind::BusReduceOr { .. }
             | NodeKind::Clock { .. }
             | NodeKind::Counter8
             | NodeKind::Counter64

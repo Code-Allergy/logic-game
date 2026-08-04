@@ -14,6 +14,22 @@ use crate::circuit::Circuit;
 pub enum NodeKind {
     Input,
     Output,
+    /// Multi-bit source node with independent output pins.
+    BusInput {
+        bits: u8,
+    },
+    /// Multi-bit sink node with independent input pins.
+    BusOutput {
+        bits: u8,
+    },
+    /// Copies one input bit across multiple outputs.
+    BusExpand {
+        bits: u8,
+    },
+    /// OR-reduces multiple inputs to one output bit.
+    BusReduceOr {
+        bits: u8,
+    },
 
     And,
     Or,
@@ -51,6 +67,22 @@ impl PartialEq for NodeKind {
         match (self, other) {
             (NodeKind::Input, NodeKind::Input) => true,
             (NodeKind::Output, NodeKind::Output) => true,
+            (
+                NodeKind::BusInput { bits: a_bits },
+                NodeKind::BusInput { bits: b_bits },
+            ) => a_bits == b_bits,
+            (
+                NodeKind::BusOutput { bits: a_bits },
+                NodeKind::BusOutput { bits: b_bits },
+            ) => a_bits == b_bits,
+            (
+                NodeKind::BusExpand { bits: a_bits },
+                NodeKind::BusExpand { bits: b_bits },
+            ) => a_bits == b_bits,
+            (
+                NodeKind::BusReduceOr { bits: a_bits },
+                NodeKind::BusReduceOr { bits: b_bits },
+            ) => a_bits == b_bits,
             (NodeKind::And, NodeKind::And) => true,
             (NodeKind::Or, NodeKind::Or) => true,
             (NodeKind::Not, NodeKind::Not) => true,

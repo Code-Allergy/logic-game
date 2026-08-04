@@ -20,7 +20,7 @@
 //! that reverse lookup from the game-side [`GameCircuit`] + [`SimBridge`] ID
 //! maps whenever the circuit changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 
 use bevy::log::trace;
 use bevy::prelude::*;
@@ -101,27 +101,25 @@ impl SimCache {
         self.wire_reverse.clear();
 
         for wire in circuit.wires.values() {
-            let Some(wire_id) = bridge.wire_id(wire.id) else {
-                continue; // wire not yet registered in the sim
+            let Some(segments) = bridge.wire_segments(wire.id) else {
+                continue;
             };
 
-            let entries = self.wire_reverse.entry(wire_id).or_default();
-
-            // Source side → output pin
-            entries.push(WirePinEntry {
-                node_uuid: wire.source_node,
-                pin: wire.source_pin,
-                direction: PinDirection::Output,
-                wire_uuid: wire.id,
-            });
-
-            // Sink side → input pin
-            entries.push(WirePinEntry {
-                node_uuid: wire.sink_node,
-                pin: wire.sink_pin,
-                direction: PinDirection::Input,
-                wire_uuid: wire.id,
-            });
+            for segment in segments {
+                let entries = self.wire_reverse.entry(segment.wire_id).or_default();
+                entries.push(WirePinEntry {
+                    node_uuid: wire.source_node,
+                    pin: segment.source_pin,
+                    direction: PinDirection::Output,
+                    wire_uuid: wire.id,
+                });
+                entries.push(WirePinEntry {
+                    node_uuid: wire.sink_node,
+                    pin: segment.sink_pin,
+                    direction: PinDirection::Input,
+                    wire_uuid: wire.id,
+                });
+            }
         }
     }
 
@@ -136,10 +134,21 @@ impl SimCache {
     /// last Bevy frame.  At high or unlimited tick rates this is far cheaper
     /// than accumulating one `WireStateChanged` event per wire transition.
     pub fn update_from_snapshot(&mut self, bridge: &SimBridge) {
+        self.wire_values.clear();
+        self.node_outputs.clear();
+        self.node_inputs.clear();
+
         bridge.snapshot_wire_states(&mut |wire_id, val| {
             if let Some(entries) = self.wire_reverse.get(&wire_id) {
                 for entry in entries {
-                    self.wire_values.insert(entry.wire_uuid, val);
+                    match self.wire_values.entry(entry.wire_uuid) {
+                        Entry::Occupied(mut existing) => {
+                            *existing.get_mut() |= val;
+                        }
+                        Entry::Vacant(vacant) => {
+                            vacant.insert(val);
+                        }
+                    }
                     match entry.direction {
                         PinDirection::Output => {
                             self.node_outputs.insert((entry.node_uuid, entry.pin), val);

@@ -121,16 +121,17 @@ impl Circuit {
     }
 
     pub fn add_subcircuit(&mut self, sub: Circuit) -> NodeId {
-        let num_inputs = sub
-            .nodes
-            .values()
-            .filter(|n| matches!(n.kind, NodeKind::Input))
-            .count();
-        let num_outputs = sub
-            .nodes
-            .values()
-            .filter(|n| matches!(n.kind, NodeKind::Output))
-            .count();
+        let mut num_inputs = 0;
+        let mut num_outputs = 0;
+        for node in sub.nodes.values() {
+            match node.kind {
+                NodeKind::Input => num_inputs += 1,
+                NodeKind::BusInput { bits } => num_inputs += usize::from(bits),
+                NodeKind::Output => num_outputs += 1,
+                NodeKind::BusOutput { bits } => num_outputs += usize::from(bits),
+                _ => {}
+            }
+        }
         self.add_node(NodeKind::SubCircuit(Box::new(sub)), num_inputs, num_outputs)
     }
 }

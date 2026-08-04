@@ -39,6 +39,15 @@ struct PendingNode {
 struct PendingWire {
     game_uuid: Uuid,
     response_rx: Receiver<(u64, WireId)>,
+    source_pin: u8,
+    sink_pin: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WireSegment {
+    pub wire_id: WireId,
+    pub source_pin: u8,
+    pub sink_pin: u8,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,7 +75,7 @@ pub struct SimBridge {
     // ── Bi-directional ID maps (HashMap is Send+Sync) ──────────────────────
     node_by_uuid: HashMap<Uuid, NodeId>,
     uuid_by_node: HashMap<NodeId, Uuid>,
-    wire_by_uuid: HashMap<Uuid, WireId>,
+    wire_by_uuid: HashMap<Uuid, Vec<WireSegment>>,
     uuid_by_wire: HashMap<WireId, Uuid>,
 
     runtime: SimRuntime,
@@ -103,8 +112,12 @@ impl SimBridge {
         let (sim_circuit, node_by_uuid, wire_by_uuid) = Self::build_sim_circuit(game_circuit);
         let uuid_by_node: HashMap<NodeId, Uuid> =
             node_by_uuid.iter().map(|(u, n)| (*n, *u)).collect();
-        let uuid_by_wire: HashMap<WireId, Uuid> =
-            wire_by_uuid.iter().map(|(u, w)| (*w, *u)).collect();
+        let mut uuid_by_wire = HashMap::new();
+        for (game_wire_id, segments) in &wire_by_uuid {
+            for segment in segments {
+                uuid_by_wire.insert(segment.wire_id, *game_wire_id);
+            }
+        }
 
         let service: Arc<dyn SimExecutionService> = match runtime {
             SimRuntime::Threaded => Arc::new(ThreadedSimService::new(sim_circuit)),
@@ -141,31 +154,64 @@ impl SimBridge {
 
     fn build_sim_circuit(
         game_circuit: &GameCircuit,
-    ) -> (Circuit, HashMap<Uuid, NodeId>, HashMap<Uuid, WireId>) {
+    ) -> (
+        Circuit,
+        HashMap<Uuid, NodeId>,
+        HashMap<Uuid, Vec<WireSegment>>,
+    ) {
+        Self::build_sim_circuit_internal(game_circuit, true)
+    }
+
+    fn build_sim_circuit_internal(
+        game_circuit: &GameCircuit,
+        include_displays: bool,
+    ) -> (
+        Circuit,
+        HashMap<Uuid, NodeId>,
+        HashMap<Uuid, Vec<WireSegment>>,
+    ) {
         let mut circuit = Circuit::new();
         let mut node_by_uuid: HashMap<Uuid, NodeId> = HashMap::new();
 
         let mut sorted_nodes: Vec<_> = game_circuit.nodes.values().collect();
-        sorted_nodes.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+        sorted_nodes.sort_by(|a, b| {
+            let a_label = Self::input_output_display_name(a);
+            let b_label = Self::input_output_display_name(b);
+            a_label.cmp(&b_label).then_with(|| a.id.cmp(&b.id))
+        });
 
         for node in sorted_nodes {
-            match &node.kind {
-                super::model::GameNodeKind::Input | super::model::GameNodeKind::Output => {
-                    assert!(
-                        node.label.is_some(),
-                        "Input and Output nodes must have a label set for mapping"
-                    );
-                }
-                _ => {}
+            if matches!(
+                node.kind,
+                super::model::GameNodeKind::Input
+                    | super::model::GameNodeKind::Input8
+                    | super::model::GameNodeKind::Input64
+                    | super::model::GameNodeKind::Output
+                    | super::model::GameNodeKind::Output8
+                    | super::model::GameNodeKind::Output64
+                    | super::model::GameNodeKind::Display { .. }
+            ) && (node.label.as_deref().is_none_or(str::is_empty))
+            {
+                warn!(
+                    "IO node {:?} ({:?}) has no label. This can make diagnostics ambiguous during vector wiring.",
+                    node.id,
+                    node.kind
+                );
             }
 
             let sim_id = if let super::model::GameNodeKind::SubCircuit {
                 circuit: sub_game_circuit,
             } = &node.kind
             {
-                let (sub_sim_circuit, _, _) = Self::build_sim_circuit(sub_game_circuit);
+                let (sub_sim_circuit, _, _) =
+                    Self::build_sim_circuit_internal(sub_game_circuit, false);
                 circuit.add_subcircuit(sub_sim_circuit)
             } else if let Some(kind) = node.kind.to_sim_kind() {
+                if !include_displays
+                    && matches!(node.kind, super::model::GameNodeKind::Display { .. })
+                {
+                    continue;
+                }
                 circuit.add_node(kind, node.kind.input_count(), node.kind.output_count())
             } else {
                 continue;
@@ -174,7 +220,7 @@ impl SimBridge {
             node_by_uuid.insert(node.id, sim_id);
         }
 
-        let mut wire_by_uuid: HashMap<Uuid, WireId> = HashMap::new();
+        let mut wire_by_uuid: HashMap<Uuid, Vec<WireSegment>> = HashMap::new();
         for wire in game_circuit.wires.values() {
             let Some(&src_node) = node_by_uuid.get(&wire.source_node) else {
                 continue;
@@ -182,11 +228,169 @@ impl SimBridge {
             let Some(&snk_node) = node_by_uuid.get(&wire.sink_node) else {
                 continue;
             };
-            let wire_id = circuit.connect((src_node, wire.source_pin), (snk_node, wire.sink_pin));
-            wire_by_uuid.insert(wire.id, wire_id);
+            let src_outputs = circuit.nodes[src_node].outputs.len();
+            let snk_inputs = circuit.nodes[snk_node].inputs.len();
+            let mut segments = Vec::new();
+            let source_node_label = game_circuit
+                .nodes
+                .get(&wire.source_node)
+                .map_or_else(
+                    || Self::anonymous_node_desc(wire.source_node),
+                    |node| Self::describe_named_node(node),
+                );
+            let sink_node_label = game_circuit
+                .nodes
+                .get(&wire.sink_node)
+                .map_or_else(
+                    || Self::anonymous_node_desc(wire.sink_node),
+                    |node| Self::describe_named_node(node),
+                );
+            let source_kind = game_circuit
+                .nodes
+                .get(&wire.source_node)
+                .map(|node| format!("{:?}", node.kind));
+            let sink_kind = game_circuit
+                .nodes
+                .get(&wire.sink_node)
+                .map(|node| format!("{:?}", node.kind));
+            let source_width = Self::width_from_game_node(
+                game_circuit,
+                wire.source_node,
+                true, /* is_source */
+            );
+            let sink_width = Self::width_from_game_node(
+                game_circuit,
+                wire.sink_node,
+                false, /* is_source */
+            );
+
+            let source_width_u8 = source_width.min(u8::MAX as usize) as u8;
+            let sink_width_u8 = sink_width.min(u8::MAX as usize) as u8;
+            if !wire.kind.fits_between(source_width_u8, sink_width_u8) {
+                warn!(
+                    "Invalid wire {:?}: kind {} from {source_node_label}({}) -> {sink_node_label}({}) ; src width {source_width}, sink width {sink_width}, but bit width {}",
+                    wire.id,
+                    wire.kind.display_name(),
+                    source_kind.as_deref().unwrap_or("unknown"),
+                    sink_kind.as_deref().unwrap_or("unknown"),
+                    wire.kind.bit_width()
+                );
+                continue;
+            }
+
+            let wire_width = match wire.kind {
+                super::model::WireKind::Scalar => 1usize,
+                super::model::WireKind::Vector { bits } => bits.max(1).into(),
+            };
+
+            for bit in 0..wire_width {
+                let source_pin = match wire.source_pin.checked_add(bit as u8) {
+                    Some(pin) => pin as usize,
+                    None => {
+                        warn!(
+                            "Skipping vector wire {:?}: source pin overflow at offset {}",
+                            wire.id, bit
+                        );
+                        break;
+                    }
+                };
+                let sink_pin = match wire.sink_pin.checked_add(bit as u8) {
+                    Some(pin) => pin as usize,
+                    None => {
+                        warn!(
+                            "Skipping vector wire {:?}: sink pin overflow at offset {}",
+                            wire.id, bit
+                        );
+                        break;
+                    }
+                };
+                if source_pin >= src_outputs {
+                    warn!(
+                        "Skipping vector wire {:?}: source node {source_node_label} ({}) has {} output pins, attempted {} (bit {})",
+                        wire.id,
+                        source_kind.as_deref().unwrap_or("unknown"),
+                        src_outputs,
+                        source_pin,
+                        bit
+                    );
+                    continue;
+                }
+                if sink_pin >= snk_inputs {
+                    warn!(
+                        "Skipping vector wire {:?}: sink node {sink_node_label} ({}) has {} input pins, attempted {} (bit {})",
+                        wire.id,
+                        sink_kind.as_deref().unwrap_or("unknown"),
+                        snk_inputs,
+                        sink_pin,
+                        bit
+                    );
+                    continue;
+                }
+
+                let wire_id =
+                    circuit.connect((src_node, source_pin as u8), (snk_node, sink_pin as u8));
+                segments.push(WireSegment {
+                    wire_id,
+                    source_pin: source_pin as u8,
+                    sink_pin: sink_pin as u8,
+                });
+            }
+
+            if !segments.is_empty() {
+                wire_by_uuid.insert(wire.id, segments);
+            }
         }
 
         (circuit, node_by_uuid, wire_by_uuid)
+    }
+
+    fn anonymous_node_desc(node_id: Uuid) -> String {
+        format!("<unlabeled {}>", node_id)
+    }
+
+    fn describe_named_node(node: &GameNode) -> String {
+        node.label.clone().unwrap_or_else(|| {
+            format!(
+                "{}-{}",
+                Self::input_output_display_name(node),
+                node.id.as_simple()
+            )
+        })
+    }
+
+    fn width_from_game_node(
+        game_circuit: &GameCircuit,
+        node_id: Uuid,
+        is_source: bool,
+    ) -> usize {
+        game_circuit
+            .nodes
+            .get(&node_id)
+            .map(|node| {
+                if is_source {
+                    node.kind.output_count()
+                } else {
+                    node.kind.input_count()
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    fn input_output_display_name(node: &GameNode) -> String {
+        if let Some(label) = &node.label {
+            return label.clone();
+        }
+
+        let prefix = match node.kind {
+            super::model::GameNodeKind::Input => "Input",
+            super::model::GameNodeKind::Input8 => "Input8",
+            super::model::GameNodeKind::Input64 => "Input64",
+            super::model::GameNodeKind::Output => "Output",
+            super::model::GameNodeKind::Output8 => "Output8",
+            super::model::GameNodeKind::Output64 => "Output64",
+            _ => "Node",
+        };
+        format!("{prefix}-{}", node.id)
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -209,7 +413,12 @@ impl SimBridge {
         self.node_by_uuid = node_by_uuid;
         self.uuid_by_node = self.node_by_uuid.iter().map(|(u, n)| (*n, *u)).collect();
         self.wire_by_uuid = wire_by_uuid;
-        self.uuid_by_wire = self.wire_by_uuid.iter().map(|(u, w)| (*w, *u)).collect();
+        self.uuid_by_wire.clear();
+        for (game_wire_id, segments) in &self.wire_by_uuid {
+            for segment in segments {
+                self.uuid_by_wire.insert(segment.wire_id, *game_wire_id);
+            }
+        }
 
         self.service = match self.runtime {
             SimRuntime::Threaded => Arc::new(ThreadedSimService::new(sim_circuit)),
@@ -247,27 +456,57 @@ impl SimBridge {
     pub fn add_wire(&mut self, wire: &GameWire) -> Option<Uuid> {
         let &src_node = self.node_by_uuid.get(&wire.source_node)?;
         let &snk_node = self.node_by_uuid.get(&wire.sink_node)?;
+        let mut bit_index = 0_usize;
+        let wire_width = match wire.kind {
+            super::model::WireKind::Scalar => 1usize,
+            super::model::WireKind::Vector { bits } => bits.max(1).into(),
+        };
 
-        let temp_id = self.next_temp_id;
-        self.next_temp_id += 1;
+        for bit in 0..wire_width {
+            let source_pin = match wire.source_pin.checked_add(bit as u8) {
+                Some(pin) => pin as usize,
+                None => {
+                    warn!(
+                        "Skipping vector wire {:?}: source pin overflow at offset {}",
+                        wire.id, bit
+                    );
+                    break;
+                }
+            };
+            let sink_pin = match wire.sink_pin.checked_add(bit as u8) {
+                Some(pin) => pin as usize,
+                None => {
+                    warn!(
+                        "Skipping vector wire {:?}: sink pin overflow at offset {}",
+                        wire.id, bit
+                    );
+                    break;
+                }
+            };
+            let temp_id = self.next_temp_id;
+            self.next_temp_id += 1;
 
-        let resp_rx = self.service.add_wire(
-            temp_id,
-            OutputRef {
-                node: src_node,
-                pin: wire.source_pin,
-            },
-            InputRef {
-                node: snk_node,
-                pin: wire.sink_pin,
-            },
-        );
-        self.pending_wires.lock().unwrap().push(PendingWire {
-            game_uuid: wire.id,
-            response_rx: resp_rx,
-        });
+            let resp_rx = self.service.add_wire(
+                temp_id,
+                OutputRef {
+                    node: src_node,
+                    pin: source_pin as u8,
+                },
+                InputRef {
+                    node: snk_node,
+                    pin: sink_pin as u8,
+                },
+            );
+            self.pending_wires.lock().unwrap().push(PendingWire {
+                game_uuid: wire.id,
+                response_rx: resp_rx,
+                source_pin: source_pin as u8,
+                sink_pin: sink_pin as u8,
+            });
+            bit_index += 1;
+        }
 
-        Some(wire.id)
+        if bit_index == 0 { None } else { Some(wire.id) }
     }
 
     /// Remove a node (and its wires) by game UUID.
@@ -280,9 +519,11 @@ impl SimBridge {
 
     /// Remove a wire by game UUID.
     pub fn remove_wire(&mut self, uuid: Uuid) {
-        if let Some(wire_id) = self.wire_by_uuid.remove(&uuid) {
-            self.uuid_by_wire.remove(&wire_id);
-            self.service.remove_wire(wire_id);
+        if let Some(segments) = self.wire_by_uuid.remove(&uuid) {
+            for segment in segments {
+                self.uuid_by_wire.remove(&segment.wire_id);
+                self.service.remove_wire(segment.wire_id);
+            }
         }
     }
 
@@ -382,20 +623,27 @@ impl SimBridge {
             self.uuid_by_node.insert(node_id, uuid);
         }
 
-        let mut resolved_wires: Vec<(Uuid, WireId)> = Vec::new();
+        let mut resolved_wires: Vec<(Uuid, WireId, u8, u8)> = Vec::new();
         self.pending_wires
             .lock()
             .unwrap()
             .retain(|p| match p.response_rx.try_recv() {
                 Ok((_temp_id, wire_id)) => {
-                    resolved_wires.push((p.game_uuid, wire_id));
+                    resolved_wires.push((p.game_uuid, wire_id, p.source_pin, p.sink_pin));
                     false
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => true,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
             });
-        for (uuid, wire_id) in resolved_wires {
-            self.wire_by_uuid.insert(uuid, wire_id);
+        for (uuid, wire_id, source_pin, sink_pin) in resolved_wires {
+            self.wire_by_uuid
+                .entry(uuid)
+                .or_default()
+                .push(WireSegment {
+                    wire_id,
+                    source_pin,
+                    sink_pin,
+                });
             self.uuid_by_wire.insert(wire_id, uuid);
         }
     }
@@ -418,7 +666,16 @@ impl SimBridge {
     }
 
     pub fn wire_id(&self, uuid: Uuid) -> Option<WireId> {
-        self.wire_by_uuid.get(&uuid).copied()
+        self.wire_by_uuid
+            .get(&uuid)
+            .and_then(|segments| segments.first())
+            .map(|segment| segment.wire_id)
+    }
+
+    pub(crate) fn wire_segments(&self, uuid: Uuid) -> Option<&[WireSegment]> {
+        self.wire_by_uuid
+            .get(&uuid)
+            .map(|segments| segments.as_slice())
     }
 
     pub fn wire_uuid(&self, id: WireId) -> Option<Uuid> {

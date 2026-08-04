@@ -66,6 +66,38 @@ impl FlattenCtx {
         // last target we happen to visit.
         let mut output_aliases: HashMap<WireId, SmallVec<[usize; 2]>> = HashMap::new();
 
+        let mut child_input_pin_map: HashMap<(NodeId, usize), usize> = HashMap::new();
+        let mut child_output_pin_map: HashMap<(NodeId, usize), usize> = HashMap::new();
+        let mut next_input_pin = 0;
+        let mut next_output_pin = 0;
+        for (node_id, node) in &circuit.nodes {
+            match node.kind {
+                NodeKind::Input => {
+                    child_input_pin_map.insert((node_id, 0), next_input_pin);
+                    next_input_pin += 1;
+                }
+                NodeKind::BusInput { bits } => {
+                    let bits = usize::from(bits);
+                    for bit in 0..bits {
+                        child_input_pin_map.insert((node_id, bit), next_input_pin + bit);
+                    }
+                    next_input_pin += bits;
+                }
+                NodeKind::Output => {
+                    child_output_pin_map.insert((node_id, 0), next_output_pin);
+                    next_output_pin += 1;
+                }
+                NodeKind::BusOutput { bits } => {
+                    let bits = usize::from(bits);
+                    for bit in 0..bits {
+                        child_output_pin_map.insert((node_id, bit), next_output_pin + bit);
+                    }
+                    next_output_pin += bits;
+                }
+                _ => {}
+            }
+        }
+
         for (wire_id, _) in &circuit.wires {
             let global_w_idx = self.wire_count;
             self.wire_count += 1;
@@ -77,28 +109,18 @@ impl FlattenCtx {
             }
         }
 
-        let child_input_nodes: Vec<NodeId> = circuit
-            .nodes
-            .iter()
-            .filter(|(_, n)| matches!(n.kind, NodeKind::Input))
-            .map(|(id, _)| id)
-            .collect();
-
-        let child_output_nodes: Vec<NodeId> = circuit
-            .nodes
-            .iter()
-            .filter(|(_, n)| matches!(n.kind, NodeKind::Output))
-            .map(|(id, _)| id)
-            .collect();
-
         // 1. Process Input nodes first to map external input wires
         for (node_id, node) in &circuit.nodes {
-            if matches!(node.kind, NodeKind::Input)
+            if matches!(node.kind, NodeKind::Input | NodeKind::BusInput { .. })
                 && !self.is_root
-                && let Some(input_idx) = child_input_nodes.iter().position(|&id| id == node_id)
-                && let Some(&ext_w_idx) = external_inputs.get(input_idx)
             {
-                for pin in &node.outputs {
+                for (pin_idx, pin) in node.outputs.iter().enumerate() {
+                    let Some(&input_idx) = child_input_pin_map.get(&(node_id, pin_idx)) else {
+                        continue;
+                    };
+                    let Some(&ext_w_idx) = external_inputs.get(input_idx) else {
+                        continue;
+                    };
                     for w in &pin.wires {
                         local_wire_map.insert(*w, ext_w_idx);
                     }
@@ -108,12 +130,17 @@ impl FlattenCtx {
 
         // 1.5 Process Output nodes first to map external output wires
         for (node_id, node) in &circuit.nodes {
-            if matches!(node.kind, NodeKind::Output)
+            if matches!(node.kind, NodeKind::Output | NodeKind::BusOutput { .. })
                 && !self.is_root
-                && let Some(output_idx) = child_output_nodes.iter().position(|&id| id == node_id)
-                && let Some(ext_out_wires) = external_outputs.get(output_idx)
             {
-                for pin in &node.inputs {
+                for (pin_idx, pin) in node.inputs.iter().enumerate() {
+                    let Some(&output_idx) = child_output_pin_map.get(&(node_id, pin_idx)) else {
+                        continue;
+                    };
+                    let Some(ext_out_wires) = external_outputs.get(output_idx) else {
+                        continue;
+                    };
+
                     if let Some(w) = pin.wire {
                         output_aliases
                             .entry(w)
@@ -121,13 +148,14 @@ impl FlattenCtx {
                             .extend(ext_out_wires.iter().copied());
                     }
                 }
+                continue;
             }
         }
 
         // 2. Process all other nodes
         for (node_id, node) in &circuit.nodes {
             match &node.kind {
-                NodeKind::Input => {
+                NodeKind::Input | NodeKind::BusInput { .. } => {
                     if self.is_root {
                         let n_idx = self.nodes.len();
                         self.node_to_idx.insert(node_id, n_idx);
@@ -155,7 +183,7 @@ impl FlattenCtx {
                         });
                     }
                 }
-                NodeKind::Output => {
+                NodeKind::Output | NodeKind::BusOutput { .. } => {
                     if self.is_root {
                         let n_idx = self.nodes.len();
                         self.node_to_idx.insert(node_id, n_idx);
@@ -280,7 +308,11 @@ impl FlattenedCircuit {
             .filter_map(|(idx, node)| {
                 (!matches!(
                     node.kind,
-                    NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_)
+                    NodeKind::Input
+                        | NodeKind::BusInput { .. }
+                        | NodeKind::Output
+                        | NodeKind::BusOutput { .. }
+                        | NodeKind::SubCircuit(_)
                 ))
                 .then_some(idx)
             })

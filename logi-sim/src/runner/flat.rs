@@ -102,6 +102,7 @@ impl Runner for FlatRunner {
             let kind = self.circuit.nodes[n_idx].kind.clone();
             match &kind {
                 NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => continue,
+                NodeKind::BusInput { .. } | NodeKind::BusOutput { .. } => continue,
                 NodeKind::And => {
                     let out = self.input_value(n_idx, 0) && self.input_value(n_idx, 1);
                     self.set_output(n_idx, out);
@@ -170,6 +171,19 @@ impl Runner for FlatRunner {
                     let period = (*period_ticks).max(1) as u64;
                     let elapsed = self.tick_count.wrapping_add(*phase as u64) % period;
                     let out = elapsed < (*duty_ticks).max(1) as u64;
+                    self.set_output(n_idx, out);
+                }
+                NodeKind::BusExpand { bits } => {
+                    let value = self.input_value(n_idx, 0);
+                    for bit in 0..usize::from(*bits) {
+                        self.set_logical_output_pin(n_idx, bit, value);
+                    }
+                }
+                NodeKind::BusReduceOr { bits } => {
+                    let mut out = false;
+                    for bit in 0..usize::from(*bits) {
+                        out |= self.input_value(n_idx, bit);
+                    }
                     self.set_output(n_idx, out);
                 }
             }

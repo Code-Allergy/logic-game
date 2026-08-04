@@ -212,6 +212,10 @@ fn node_op(kind: &NodeKind) -> Option<SimdOp> {
         NodeKind::Input
         | NodeKind::Output
         | NodeKind::Clock { .. }
+        | NodeKind::BusInput { .. }
+        | NodeKind::BusOutput { .. }
+        | NodeKind::BusExpand { .. }
+        | NodeKind::BusReduceOr { .. }
         | NodeKind::Counter8
         | NodeKind::Counter64
         | NodeKind::Adder { .. }

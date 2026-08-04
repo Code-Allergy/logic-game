@@ -139,6 +139,7 @@ impl ThreadedFlatRunner {
     ) {
         match &self.circuit.nodes[node_idx].kind {
             NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => {}
+            NodeKind::BusInput { .. } | NodeKind::BusOutput { .. } => {}
             NodeKind::And => {
                 let value = self.input_value(node_idx, 0) && self.input_value(node_idx, 1);
                 self.set_output_wires(updates, node_idx, value);
@@ -194,6 +195,19 @@ impl ThreadedFlatRunner {
             NodeKind::Counter64 => {
                 self.evaluate_counter(node_idx, 64, updates, clock_updates);
             }
+            NodeKind::BusExpand { bits } => {
+                let value = self.input_value(node_idx, 0);
+                for bit in 0..usize::from(*bits) {
+                    self.set_output_pin(updates, node_idx, bit, value);
+                }
+            }
+            NodeKind::BusReduceOr { bits } => {
+                let mut value = false;
+                for bit in 0..usize::from(*bits) {
+                    value |= self.input_value(node_idx, bit);
+                }
+                self.set_output_wires(updates, node_idx, value);
+            }
             NodeKind::Adder { bits, carry_in } => {
                 self.evaluate_adder(node_idx, usize::from(*bits), *carry_in, updates);
             }
@@ -244,6 +258,7 @@ impl ThreadedFlatRunner {
                     for &node_idx in chunk {
                         match &circuit.nodes[node_idx].kind {
                             NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => {}
+                            NodeKind::BusInput { .. } | NodeKind::BusOutput { .. } => {}
                             NodeKind::And => {
                                 let value = wire_values[circuit.nodes[node_idx].inputs[0]]
                                     && wire_values[circuit.nodes[node_idx].inputs[1]];
@@ -351,6 +366,29 @@ impl ThreadedFlatRunner {
                                     64,
                                     &mut updates,
                                 );
+                            }
+                            NodeKind::BusExpand { bits } => {
+                                let value = wire_values[circuit.nodes[node_idx].inputs[0]];
+                                let bits = usize::from(*bits);
+                                for bit in 0..bits {
+                                    if let Some(wires) =
+                                        circuit.nodes[node_idx].output_pins.get(bit)
+                                    {
+                                        for &wire in wires {
+                                            updates.wire_updates.push((wire, value));
+                                        }
+                                    }
+                                }
+                            }
+                            NodeKind::BusReduceOr { bits } => {
+                                let bits = usize::from(*bits);
+                                let mut out = false;
+                                for bit in 0..bits {
+                                    out |= wire_values[circuit.nodes[node_idx].inputs[bit]];
+                                }
+                                for &wire in &circuit.nodes[node_idx].outputs {
+                                    updates.wire_updates.push((wire, out));
+                                }
                             }
                             NodeKind::Adder { bits, carry_in } => {
                                 let bit_count = usize::from(*bits);

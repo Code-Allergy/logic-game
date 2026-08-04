@@ -31,11 +31,27 @@ use logi_sim::prelude::NodeKind;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GameNodeKind {
     Input,
+    /// Multi-bit source with independent bit outputs.
+    Input8,
+    /// Multi-bit source with independent bit outputs.
+    Input64,
     Output,
+    /// Multi-bit sink expecting independent bit inputs.
+    Output8,
+    /// Multi-bit sink expecting independent bit inputs.
+    Output64,
     /// A multi-bit output sink rendered as a single hexadecimal value.
     Display {
         bits: u8,
     },
+    /// Expands a scalar signal to multiple identical outputs.
+    Expand8,
+    /// Expands a scalar signal to multiple identical outputs.
+    Expand64,
+    /// Reduces multiple inputs to one scalar via OR.
+    ReduceOr8,
+    /// Reduces multiple inputs to one scalar via OR.
+    ReduceOr64,
     And,
     Or,
     Not,
@@ -63,8 +79,16 @@ impl GameNodeKind {
     pub fn input_count(&self) -> usize {
         match self {
             GameNodeKind::Input => 0,
+            GameNodeKind::Input8 => 0,
+            GameNodeKind::Input64 => 0,
             GameNodeKind::Output => 1,
+            GameNodeKind::Output8 => 8,
+            GameNodeKind::Output64 => 64,
             GameNodeKind::Display { bits } => usize::from(*bits),
+            GameNodeKind::Expand8 => 1,
+            GameNodeKind::Expand64 => 1,
+            GameNodeKind::ReduceOr8 => 8,
+            GameNodeKind::ReduceOr64 => 64,
             GameNodeKind::And
             | GameNodeKind::Or
             | GameNodeKind::Xor
@@ -79,8 +103,14 @@ impl GameNodeKind {
             GameNodeKind::SubCircuit { circuit } => circuit
                 .nodes
                 .values()
-                .filter(|n| matches!(n.kind, GameNodeKind::Input))
-                .count(),
+                .filter(|n| {
+                    matches!(
+                        n.kind,
+                        GameNodeKind::Input | GameNodeKind::Input8 | GameNodeKind::Input64
+                    )
+                })
+                .map(|n| n.kind.output_count())
+                .sum(),
         }
     }
 
@@ -88,8 +118,16 @@ impl GameNodeKind {
     pub fn output_count(&self) -> usize {
         match self {
             GameNodeKind::Input => 1,
+            GameNodeKind::Input8 => 8,
+            GameNodeKind::Input64 => 64,
             GameNodeKind::Output => 0,
+            GameNodeKind::Output8 => 0,
+            GameNodeKind::Output64 => 0,
             GameNodeKind::Display { .. } => 0,
+            GameNodeKind::Expand8 => 8,
+            GameNodeKind::Expand64 => 64,
+            GameNodeKind::ReduceOr8 => 1,
+            GameNodeKind::ReduceOr64 => 1,
             GameNodeKind::And
             | GameNodeKind::Or
             | GameNodeKind::Xor
@@ -106,9 +144,28 @@ impl GameNodeKind {
             GameNodeKind::SubCircuit { circuit } => circuit
                 .nodes
                 .values()
-                .filter(|n| matches!(n.kind, GameNodeKind::Output))
-                .count(),
+                .filter(|n| {
+                    matches!(
+                        n.kind,
+                        GameNodeKind::Output | GameNodeKind::Output8 | GameNodeKind::Output64
+                    )
+                })
+                .map(|n| match n.kind {
+                    GameNodeKind::Output => 1,
+                    GameNodeKind::Output8 => 8,
+                    GameNodeKind::Output64 => 64,
+                    _ => 0,
+                })
+                .sum(),
         }
+    }
+
+    pub fn input_pin_width(&self, pin: u8) -> Option<u8> {
+        (usize::from(pin) < self.input_count()).then_some(1)
+    }
+
+    pub fn output_pin_width(&self, pin: u8) -> Option<u8> {
+        (usize::from(pin) < self.output_count()).then_some(1)
     }
 
     /// Convert to a `logi_sim` `NodeKind` for passing into the simulator.
@@ -116,8 +173,16 @@ impl GameNodeKind {
     pub fn to_sim_kind(&self) -> Option<NodeKind> {
         match self {
             GameNodeKind::Input => Some(NodeKind::Input),
+            GameNodeKind::Input8 => Some(NodeKind::BusInput { bits: 8 }),
+            GameNodeKind::Input64 => Some(NodeKind::BusInput { bits: 64 }),
             GameNodeKind::Output => Some(NodeKind::Output),
-            GameNodeKind::Display { .. } => Some(NodeKind::Output),
+            GameNodeKind::Output8 => Some(NodeKind::BusOutput { bits: 8 }),
+            GameNodeKind::Output64 => Some(NodeKind::BusOutput { bits: 64 }),
+            GameNodeKind::Display { bits } => Some(NodeKind::BusOutput { bits: *bits }),
+            GameNodeKind::Expand8 => Some(NodeKind::BusExpand { bits: 8 }),
+            GameNodeKind::Expand64 => Some(NodeKind::BusExpand { bits: 64 }),
+            GameNodeKind::ReduceOr8 => Some(NodeKind::BusReduceOr { bits: 8 }),
+            GameNodeKind::ReduceOr64 => Some(NodeKind::BusReduceOr { bits: 64 }),
             GameNodeKind::And => Some(NodeKind::And),
             GameNodeKind::Or => Some(NodeKind::Or),
             GameNodeKind::Not => Some(NodeKind::Not),
@@ -147,8 +212,16 @@ impl GameNodeKind {
     pub fn display_name(&self) -> &'static str {
         match self {
             GameNodeKind::Input => "INPUT",
+            GameNodeKind::Input8 => "INPUT8",
+            GameNodeKind::Input64 => "INPUT64",
             GameNodeKind::Output => "OUTPUT",
+            GameNodeKind::Output8 => "OUTPUT8",
+            GameNodeKind::Output64 => "OUTPUT64",
             GameNodeKind::Display { .. } => "DISPLAY",
+            GameNodeKind::Expand8 => "1->8",
+            GameNodeKind::Expand64 => "1->64",
+            GameNodeKind::ReduceOr8 => "8->1",
+            GameNodeKind::ReduceOr64 => "64->1",
             GameNodeKind::And => "AND",
             GameNodeKind::Or => "OR",
             GameNodeKind::Not => "NOT",
@@ -189,6 +262,51 @@ pub struct GameNode {
     pub custom_properties: HashMap<String, String>,
 }
 
+/// Logical width for a connection between two node pins.
+///
+/// Most circuits are still scalar today, but this enum is intentionally
+/// forward-looking so we can add bus-level wiring (8-bit, 64-bit, etc.)
+/// without changing the serialized game model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "bits")]
+pub enum WireKind {
+    Scalar,
+    Vector {
+        #[serde(default)]
+        bits: u8,
+    },
+}
+
+impl Default for WireKind {
+    fn default() -> Self {
+        Self::Scalar
+    }
+}
+
+impl WireKind {
+    pub fn bit_width(&self) -> u8 {
+        match self {
+            Self::Scalar => 1,
+            Self::Vector { bits } => *bits,
+        }
+    }
+
+    pub fn fits_between(&self, source_width: u8, sink_width: u8) -> bool {
+        self.bit_width() <= source_width && self.bit_width() <= sink_width
+    }
+
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Scalar => "Scalar (1-bit)".to_string(),
+            Self::Vector { bits } => format!("Vector ({bits}-bit)"),
+        }
+    }
+
+    pub fn is_supported_by_sim(&self) -> bool {
+        matches!(self, Self::Scalar | Self::Vector { .. })
+    }
+}
+
 impl GameNode {
     pub fn new(kind: GameNodeKind, position: Vec2) -> Self {
         Self {
@@ -214,16 +332,36 @@ pub struct GameWire {
     pub sink_node: Uuid,
     /// Input pin index on the sink node.
     pub sink_pin: u8,
+    /// Logical width for this wire.
+    #[serde(default)]
+    pub kind: WireKind,
 }
 
 impl GameWire {
     pub fn new(source_node: Uuid, source_pin: u8, sink_node: Uuid, sink_pin: u8) -> Self {
+        Self::with_kind(
+            source_node,
+            source_pin,
+            sink_node,
+            sink_pin,
+            WireKind::default(),
+        )
+    }
+
+    pub fn with_kind(
+        source_node: Uuid,
+        source_pin: u8,
+        sink_node: Uuid,
+        sink_pin: u8,
+        kind: WireKind,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             source_node,
             source_pin,
             sink_node,
             sink_pin,
+            kind,
         }
     }
 }

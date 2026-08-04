@@ -77,8 +77,9 @@ impl NaiveRunner {
     }
     fn evaluate_node(&mut self, node_id: NodeId) {
         let node_kind = self.circuit.nodes[node_id].kind.clone();
-        match &node_kind {
+            match &node_kind {
             NodeKind::Input | NodeKind::Output => {}
+            NodeKind::BusInput { .. } | NodeKind::BusOutput { .. } => {}
             NodeKind::And => {
                 let val = self.input_value(node_id, 0) && self.input_value(node_id, 1);
                 self.set_output(node_id, 0, val);
@@ -156,6 +157,19 @@ impl NaiveRunner {
                 let elapsed = self.tick_count.wrapping_add(*phase as u64) % period;
                 let val = elapsed < (*duty_ticks).max(1) as u64;
                 self.set_output(node_id, 0, val);
+            }
+            NodeKind::BusExpand { bits } => {
+                let value = self.input_value(node_id, 0);
+                for bit in 0..usize::from(*bits) {
+                    self.set_output(node_id, bit, value);
+                }
+            }
+            NodeKind::BusReduceOr { bits } => {
+                let mut out = false;
+                for bit in 0..usize::from(*bits) {
+                    out |= self.input_value(node_id, bit);
+                }
+                self.set_output(node_id, 0, out);
             }
 
             NodeKind::SubCircuit(sub) => {

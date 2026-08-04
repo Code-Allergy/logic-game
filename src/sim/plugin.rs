@@ -143,7 +143,12 @@ impl Plugin for SimulationPlugin {
 /// latch to settle, then release it before normal clocked execution begins.
 fn power_on_reset(bridge: &mut SimBridge, circuit: &crate::sim::GameCircuit) {
     let Some(reset) = circuit.nodes.values().find(|node| {
-        matches!(node.kind, crate::sim::GameNodeKind::Input)
+        matches!(
+            node.kind,
+            crate::sim::GameNodeKind::Input
+                | crate::sim::GameNodeKind::Input8
+                | crate::sim::GameNodeKind::Input64
+        )
             && node.label.as_deref() == Some("Reset")
     }) else {
         return;

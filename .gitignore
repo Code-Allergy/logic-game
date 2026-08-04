@@ -8,3 +8,4 @@ simulation.json
 # Local perf/cargo-flamegraph capture artifacts.
 perf.data*
 flamegraph*.svg
+workspaces/
