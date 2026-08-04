@@ -195,9 +195,11 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
     for runner in [
         RunnerType::SimdOptimized,
         RunnerType::Flat,
+        RunnerType::ThreadedFlat,
         RunnerType::EventDriven,
         RunnerType::Simd,
         RunnerType::FlatOptimized,
+        RunnerType::ThreadedFlatOptimized,
         RunnerType::NaiveOptimized,
         RunnerType::Naive,
     ] {

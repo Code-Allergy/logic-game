@@ -106,8 +106,8 @@ pub struct SimdAdder<I> {
 #[derive(Clone, Copy, Debug)]
 pub struct SimdBlock {
     pub op: SimdOp,
-    pub start: u32,
-    pub len: u32,
+    pub start: usize,
+    pub len: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -181,14 +181,13 @@ fn node_op(kind: &NodeKind) -> Option<SimdOp> {
 
 fn push_block(blocks: &mut Vec<SimdBlock>, op: SimdOp, start: usize) {
     if let Some(last) = blocks.last_mut()
-        && last.op == op
-        && last.start as usize + last.len as usize == start
+        && last.op == op && last.start + last.len == start
     {
         last.len += 1;
     } else {
         blocks.push(SimdBlock {
             op,
-            start: start as u32,
+            start,
             len: 1,
         });
     }

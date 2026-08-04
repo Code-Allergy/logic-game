@@ -157,8 +157,10 @@ pub fn editor_ui_system(
                     }
                 }
                 if ui.button("CLOCK").clicked() {
-                    editor_state.selected_gate_type =
-                        Some(GameNodeKind::Clock { period_ticks: 10, duty_ticks: 5 });
+                    editor_state.selected_gate_type = Some(GameNodeKind::Clock {
+                        period_ticks: 10,
+                        duty_ticks: 5,
+                    });
                     editor_state.connection_mode = false;
                 }
             });

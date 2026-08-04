@@ -9,6 +9,7 @@ enum Representation {
     Naive,
     Flat,
     Event,
+    ThreadedFlat,
     Simd,
 }
 
@@ -21,8 +22,8 @@ struct Options {
 }
 
 fn usage() -> &'static str {
-    "usage: profile_tick [engine-][naive|flat|event|simd][-raw] [and|adder|adder8|quiescent500|recursive16|cpu] [ticks]\n\
-     example: profile_tick engine-simd cpu 100000000"
+    "usage: profile_tick [engine-][naive|flat|event|threadedflat|simd][-raw] [and|adder|adder8|quiescent500|recursive16|cpu] [ticks]\n\
+     example: profile_tick engine-threadedflat cpu 100000000"
 }
 
 fn parse_options() -> Result<Options, String> {
@@ -44,6 +45,7 @@ fn parse_options() -> Result<Options, String> {
         "naive" => Representation::Naive,
         "flat" => Representation::Flat,
         "event" => Representation::Event,
+        "threadedflat" => Representation::ThreadedFlat,
         "simd" => Representation::Simd,
         _ => return Err(format!("unknown runner '{runner}'\n{}", usage())),
     };
@@ -131,6 +133,8 @@ fn main() -> ExitCode {
             (Representation::Flat, true) => RunnerType::FlatOptimized,
             (Representation::Event, false) => RunnerType::EventDriven,
             (Representation::Event, true) => RunnerType::EventDrivenOptimized,
+            (Representation::ThreadedFlat, false) => RunnerType::ThreadedFlat,
+            (Representation::ThreadedFlat, true) => RunnerType::ThreadedFlatOptimized,
             (Representation::Simd, false) => RunnerType::Simd,
             (Representation::Simd, true) => RunnerType::SimdOptimized,
         };
@@ -165,6 +169,11 @@ fn main() -> ExitCode {
         ),
         Representation::Event => profile_ticks(
             EventDrivenRunner::new(EventDrivenCircuit::compile(&circuit)),
+            output,
+            options.ticks,
+        ),
+        Representation::ThreadedFlat => profile_ticks(
+            ThreadedFlatRunner::new(FlattenedCircuit::compile(&circuit)),
             output,
             options.ticks,
         ),

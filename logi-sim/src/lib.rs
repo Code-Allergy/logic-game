@@ -16,5 +16,6 @@ pub mod prelude {
     pub use crate::engine::{SharedState, SimCommand, SimEvent, SimulationEngine};
     pub use crate::runner::{
         EventDrivenRunner, FlatRunner, InspectableRunner, NaiveRunner, Runner, SimdRunner,
+        ThreadedFlatRunner,
     };
 }

@@ -17,10 +17,12 @@ pub enum RunnerType {
     Flat,
     #[default]
     FlatOptimized,
+    ThreadedFlat,
     EventDriven,
     EventDrivenOptimized,
     Simd,
     SimdOptimized,
+    ThreadedFlatOptimized,
 }
 
 impl RunnerType {
@@ -29,10 +31,12 @@ impl RunnerType {
         RunnerType::NaiveOptimized,
         RunnerType::Flat,
         RunnerType::FlatOptimized,
+        RunnerType::ThreadedFlat,
         RunnerType::EventDriven,
         RunnerType::EventDrivenOptimized,
         RunnerType::Simd,
         RunnerType::SimdOptimized,
+        RunnerType::ThreadedFlatOptimized,
     ];
 }
 
@@ -43,6 +47,8 @@ impl std::fmt::Display for RunnerType {
             RunnerType::NaiveOptimized => "Naive (Optimized)",
             RunnerType::Flat => "Flat",
             RunnerType::FlatOptimized => "Flat (Optimized)",
+            RunnerType::ThreadedFlat => "Threaded Flat",
+            RunnerType::ThreadedFlatOptimized => "Threaded Flat (Optimized)",
             RunnerType::EventDriven => "Event Driven",
             RunnerType::EventDrivenOptimized => "Event Driven (Optimized)",
             RunnerType::Simd => "SIMD",
@@ -206,11 +212,12 @@ impl InspectableRunner for MappedRunner {
 
 fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn InspectableRunner> {
     use crate::circuit::{BitPackedCircuit, EventDrivenCircuit, FlattenedCircuit};
-    use crate::runner::{EventDrivenRunner, FlatRunner, SimdRunner};
+    use crate::runner::{EventDrivenRunner, FlatRunner, SimdRunner, ThreadedFlatRunner};
 
     let is_optimized = match runner_type {
         RunnerType::NaiveOptimized
         | RunnerType::FlatOptimized
+        | RunnerType::ThreadedFlatOptimized
         | RunnerType::EventDrivenOptimized
         | RunnerType::SimdOptimized => true,
         _ => false,
@@ -238,6 +245,10 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
                 let flat = FlattenedCircuit::compile(&opt_circuit);
                 Box::new(FlatRunner::new(flat))
             }
+            RunnerType::ThreadedFlatOptimized => {
+                let flat = FlattenedCircuit::compile(&opt_circuit);
+                Box::new(ThreadedFlatRunner::new(flat))
+            }
             RunnerType::EventDrivenOptimized => {
                 let evt = EventDrivenCircuit::compile(&opt_circuit);
                 Box::new(EventDrivenRunner::new(evt))
@@ -264,6 +275,10 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
             RunnerType::Flat => {
                 let flat = FlattenedCircuit::compile(circuit);
                 Box::new(FlatRunner::new(flat))
+            }
+            RunnerType::ThreadedFlat => {
+                let flat = FlattenedCircuit::compile(circuit);
+                Box::new(ThreadedFlatRunner::new(flat))
             }
             RunnerType::EventDriven => {
                 let evt = EventDrivenCircuit::compile(circuit);
@@ -684,6 +699,7 @@ fn is_optimized_runner(runner: RunnerType) -> bool {
         runner,
         RunnerType::NaiveOptimized
             | RunnerType::FlatOptimized
+            | RunnerType::ThreadedFlatOptimized
             | RunnerType::EventDrivenOptimized
             | RunnerType::SimdOptimized
     )
