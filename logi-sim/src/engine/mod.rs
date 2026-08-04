@@ -12,12 +12,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::{JoinHandle, spawn};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerType {
     Naive,
     NaiveOptimized,
     Flat,
-    #[default]
     FlatOptimized,
     ThreadedFlat,
     EventDriven,
@@ -25,6 +24,15 @@ pub enum RunnerType {
     Simd,
     SimdOptimized,
     ThreadedFlatOptimized,
+}
+
+impl Default for RunnerType {
+    fn default() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        return RunnerType::SimdOptimized;
+        #[cfg(target_arch = "wasm32")]
+        return RunnerType::EventDrivenOptimized;
+    }
 }
 
 impl RunnerType {

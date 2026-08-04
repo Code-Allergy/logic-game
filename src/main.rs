@@ -1,3 +1,5 @@
+use std::env;
+
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
 
@@ -17,9 +19,13 @@ use gate_quest::zoom_camera;
 use gate_quest::{GAME_TITLE, GAME_WEB_TAG, GameSettings, GameState, initial_startup_system};
 
 fn main() {
+    let disable_egui = env::var_os("GATEQUEST_DISABLE_EGUI").is_some();
+    let disable_editor = env::var_os("GATEQUEST_DISABLE_EDITOR").is_some();
+    let disable_selection = env::var_os("GATEQUEST_DISABLE_SELECTION").is_some();
+
     let mut app = App::new();
 
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    let mut app = app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: GAME_TITLE.to_string(),
             canvas: Some(GAME_WEB_TAG.to_owned()),
@@ -28,18 +34,30 @@ fn main() {
             ..default()
         }),
         ..default()
-    }))
-    .add_plugins(EguiPlugin::default());
+    }));
+
+    if !disable_egui {
+        app = app.add_plugins(EguiPlugin::default());
+    }
 
     #[cfg(debug_assertions)]
-    app.add_plugins(WorldInspectorPlugin::new());
+    if !disable_egui {
+        app = app.add_plugins(WorldInspectorPlugin::new());
+    }
 
     app.add_plugins(MainMenuPlugin {
         state: GameState::MainMenu,
     })
-    .add_plugins(EditorPlugin)
-    .add_plugins(SelectionPlugin)
-    .add_plugins(SimulationPlugin::new(GameState::Simulating))
+    .add_plugins(SimulationPlugin::new(GameState::Simulating));
+
+    if !disable_editor {
+        app = app.add_plugins(EditorPlugin);
+    }
+    if !disable_selection {
+        app = app.add_plugins(SelectionPlugin);
+    }
+
+    app
     .init_state::<GameState>()
     .add_message::<GateComponentSelectionEvent>()
     .insert_resource(ClearColor(Color::srgba(0.050, 0.229, 0.793, 1.000)))

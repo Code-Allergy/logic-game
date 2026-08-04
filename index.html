@@ -8,10 +8,32 @@
         <!-- <link data-trunk rel="copy-dir" href="credits"/>
         <link data-trunk rel="copy-file" href="build/windows/icon.ico"/> -->
         <!-- <link rel="icon" href="icon.ico"> -->
+        <style>
+            html, body, .game-container, #gatequest-canvas {
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+            }
+
+            html, body {
+                background: #0a1c3d;
+                overflow: hidden;
+            }
+
+            .game-container {
+                position: relative;
+                display: block;
+            }
+
+            #gatequest-canvas {
+                display: block;
+                background: #0a1c3d;
+            }
+        </style>
         <!-- <link data-trunk rel="inline" href="build/web/styles.css"/> -->
     </head>
     <body>
-        <!-- <link data-trunk rel="inline" href="build/web/sound.js"/> -->
         <div class="game-container">
             <div class="lds-dual-ring"></div>
             <canvas id="gatequest-canvas">

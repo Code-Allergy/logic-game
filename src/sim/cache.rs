@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 
+use bevy::log::trace;
 use bevy::prelude::*;
 use uuid::Uuid;
 
@@ -169,7 +170,7 @@ impl SimCache {
                     self.is_running = *is_running;
                 }
                 SimEvent::TickCompleted { .. } => {
-                    info!("Sim Step completed");
+                    trace!("Sim Step completed");
                     // Currently informational only; consumed so the channel
                     // doesn't grow. Callers that care about step completion
                     // can extend this branch.

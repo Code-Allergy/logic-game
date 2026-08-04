@@ -1,17 +1,31 @@
 //! Bevy plugin that registers all simulation resources and systems.
 
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
+use crate::MainCamera;
 use crate::GameState;
 use crate::sim::{
     SelectedGate, SimBridge, SimCache, SimRuntime, SimulationConfig, ThreadlessStepper,
     TickRateMeter,
     systems::{
-        bridge_flush_system, drag_selected_system, draw_connections_system, draw_gates_system,
-        drive_threadless_simulation, gate_selection_system, rebuild_spatial_grid_system,
-        save_on_exit_system, simulation_config_ui_system, ui_for_selected_gate,
-        update_connections_system, update_input_colours_system, update_inputs_on_left_click,
-        update_logic_displays_system, update_selected_gate, update_spatial_grid_system,
+        bridge_flush_system,
+        drag_selected_system,
+        draw_connections_system,
+        draw_gates_system,
+        draw_sim_background_system,
+        drive_threadless_simulation,
+        gate_selection_system,
+        rebuild_spatial_grid_system,
+        save_on_exit_system,
+        simulation_config_ui_system,
+        ui_for_selected_gate,
+        update_connections_system,
+        update_input_colours_system,
+        update_inputs_on_left_click,
+        update_logic_displays_system,
+        update_selected_gate,
+        update_spatial_grid_system,
         update_tickrate_system,
     },
 };
@@ -66,7 +80,9 @@ impl Plugin for SimulationPlugin {
             .add_systems(
                 OnEnter(state.clone()),
                 (
+                    reset_sim_camera_system,
                     resume_bridge_system,
+                    draw_sim_background_system,
                     draw_gates_system,
                     draw_connections_system.after(draw_gates_system),
                     rebuild_spatial_grid_system.after(draw_gates_system),
@@ -181,12 +197,63 @@ fn despawn_sim_entities(
     mut commands: Commands,
     gate_entities: Query<Entity, With<crate::sim::GateComponent>>,
     conn_entities: Query<Entity, With<crate::sim::ConnectionLine>>,
+    bg_entities: Query<Entity, With<crate::sim::systems::SimBackground>>,
     mut grid: ResMut<SpatialGrid>,
     mut cache: ResMut<SimCache>,
 ) {
-    for entity in gate_entities.iter().chain(conn_entities.iter()) {
+    for entity in gate_entities
+        .iter()
+        .chain(conn_entities.iter())
+        .chain(bg_entities.iter())
+    {
         commands.entity(entity).despawn();
     }
     grid.clear();
     cache.clear();
+}
+
+fn reset_sim_camera_system(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut cameras: Query<(&mut Projection, &mut Transform), With<MainCamera>>,
+    game_circuit: Res<crate::sim::GameCircuit>,
+) {
+    let (mut projection, mut transform) = match cameras.single_mut() {
+        Ok(query) => query,
+        Err(_) => return,
+    };
+    let window = match windows.single() {
+        Ok(window) => window,
+        Err(_) => return,
+    };
+
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for node in game_circuit.nodes.values() {
+        min_x = min_x.min(node.position.x);
+        max_x = max_x.max(node.position.x);
+        min_y = min_y.min(node.position.y);
+        max_y = max_y.max(node.position.y);
+    }
+    if !min_x.is_finite() || min_x == f32::INFINITY {
+        return;
+    }
+
+    let center_x = (min_x + max_x) * 0.5;
+    let center_y = (min_y + max_y) * 0.5;
+    let width = (max_x - min_x).max(1.0);
+    let height = (max_y - min_y).max(1.0);
+    let padding = 1.3_f32;
+    let window_width = window.width().max(1.0);
+    let window_height = window.height().max(1.0);
+    let mut fit_scale = (width / window_width).max(height / window_height) * padding;
+    fit_scale = fit_scale.clamp(0.1, 10.0);
+
+    if let Projection::Orthographic(ortho) = projection.as_mut() {
+        ortho.scale = fit_scale;
+        ortho.near = -10_000.0;
+        ortho.far = 10_000.0;
+    }
+    transform.translation = Vec3::new(center_x, center_y, 1000.0);
 }

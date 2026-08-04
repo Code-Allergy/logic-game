@@ -7,12 +7,12 @@ pub struct EventDrivenRunner {
     circuit: EventDrivenCircuit,
     wire_values: Vec<bool>,
     dirty_queue: VecDeque<usize>,
-    in_queue: Vec<bool>,
+    in_queue: Vec<u8>,
     /// Node indices for `NodeKind::Clock` nodes, which are time-driven rather than
     /// purely event-driven and must be re-evaluated every tick.
     clock_nodes: Vec<usize>,
     tick_count: u64,
-    previous_clock: Vec<bool>,
+    previous_clock: Vec<u8>,
 }
 
 impl EventDrivenRunner {
@@ -21,14 +21,14 @@ impl EventDrivenRunner {
         let node_count = circuit.nodes.len();
 
         let mut dirty_queue = VecDeque::with_capacity(node_count);
-        let mut in_queue = vec![true; node_count];
+        let mut in_queue = vec![1u8; node_count];
 
         // Seed initial queue with all non-input/non-output logic nodes once on startup
         for (n_idx, node) in circuit.nodes.iter().enumerate() {
             if !matches!(node.kind, NodeKind::Input | NodeKind::Output) {
                 dirty_queue.push_back(n_idx);
             } else {
-                in_queue[n_idx] = false;
+                in_queue[n_idx] = 0;
             }
         }
 
@@ -47,7 +47,7 @@ impl EventDrivenRunner {
             in_queue,
             clock_nodes,
             tick_count: 0,
-            previous_clock: vec![false; node_count],
+            previous_clock: vec![0u8; node_count],
         };
 
         // Run initial drain to establish steady-state logic level outputs. This does not
@@ -57,9 +57,9 @@ impl EventDrivenRunner {
     }
 
     #[inline]
-    fn enqueue_node_static(in_queue: &mut [bool], dirty_queue: &mut VecDeque<usize>, n_idx: usize) {
-        if n_idx < in_queue.len() && !in_queue[n_idx] {
-            in_queue[n_idx] = true;
+    fn enqueue_node_static(in_queue: &mut [u8], dirty_queue: &mut VecDeque<usize>, n_idx: usize) {
+        if n_idx < in_queue.len() && in_queue[n_idx] == 0 {
+            in_queue[n_idx] = 1;
             dirty_queue.push_back(n_idx);
         }
     }
@@ -125,18 +125,19 @@ impl EventDrivenRunner {
     fn evaluate_counter(&mut self, n_idx: usize, bits: usize) {
         let clock = self.input_value(n_idx, 0);
         let reset = self.input_value(n_idx, 1);
-        let falling = self.previous_clock[n_idx] && !clock;
-        self.previous_clock[n_idx] = clock;
-        let output_pins = self.circuit.nodes[n_idx].output_pins.clone();
+        let falling = self.previous_clock[n_idx] == 1 && !clock;
+        self.previous_clock[n_idx] = if clock { 1 } else { 0 };
         let observable = self.circuit.idx_to_wire.len();
         let mut carry = falling;
-        for (bit, pin) in output_pins.iter().take(bits).enumerate() {
-            let old = pin
-                .iter()
-                .find(|&&wire| wire < observable)
-                .or_else(|| pin.first())
-                .map(|&wire| self.wire_values[wire])
-                .unwrap_or(false);
+        for bit in 0..bits.min(self.circuit.nodes[n_idx].output_pins.len()) {
+            let old = {
+                let pin = &self.circuit.nodes[n_idx].output_pins[bit];
+                pin.iter()
+                    .find(|&&wire| wire < observable)
+                    .or_else(|| pin.first())
+                    .map(|&wire| self.wire_values[wire])
+                    .unwrap_or(false)
+            };
             let next = if reset { false } else { old ^ carry };
             carry &= old;
             self.set_logical_output_pin(n_idx, bit, next);
@@ -155,8 +156,7 @@ impl EventDrivenRunner {
     }
 
     fn process_node_outputs(&mut self, n_idx: usize) {
-        let kind = self.circuit.nodes[n_idx].kind.clone();
-        match &kind {
+        match &self.circuit.nodes[n_idx].kind {
             NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => {}
             NodeKind::And => {
                 let val = self.input_value(n_idx, 0) && self.input_value(n_idx, 1);
@@ -236,7 +236,7 @@ impl EventDrivenRunner {
     fn drain_queue(&mut self) {
         let mut iterations = 0;
         while let Some(n_idx) = self.dirty_queue.pop_front() {
-            self.in_queue[n_idx] = false;
+            self.in_queue[n_idx] = 0;
             self.process_node_outputs(n_idx);
 
             iterations += 1;
@@ -306,7 +306,7 @@ impl InspectableRunner for EventDrivenRunner {
 
     fn execution_state(&self) -> Vec<bool> {
         let mut state = self.wire_values.clone();
-        state.extend_from_slice(&self.previous_clock);
+        state.extend(self.previous_clock.iter().map(|&value| value != 0));
         state
     }
 
@@ -316,9 +316,11 @@ impl InspectableRunner for EventDrivenRunner {
         }
         let (wires, clocks) = state.split_at(self.wire_values.len());
         self.wire_values.copy_from_slice(wires);
-        self.previous_clock.copy_from_slice(clocks);
+        for (dst, src) in self.previous_clock.iter_mut().zip(clocks.iter()) {
+            *dst = u8::from(*src);
+        }
         self.dirty_queue.clear();
-        self.in_queue.fill(false);
+        self.in_queue.fill(0);
         true
     }
 

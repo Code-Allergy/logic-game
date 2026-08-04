@@ -16,6 +16,9 @@ use super::{
     TickRateMeter, calculate_connection_geometry, get_gate_sprite, spatial_grid::SpatialGrid,
 };
 
+#[derive(Component)]
+pub struct SimBackground;
+
 const UNLIMITED_THREADLESS_BATCH: u64 = 4_096;
 const MAX_THREADLESS_TICKS_PER_FRAME: u64 = 4_096;
 
@@ -92,6 +95,7 @@ pub fn draw_gates_system(game_circuit: Res<GameCircuit>, mut commands: Commands)
         let mut entity = commands.spawn((
             sprite,
             Transform::from_xyz(node.position.x, node.position.y, 0.0),
+            Visibility::Visible,
             GateComponent::new(node.id, node.position),
         ));
         if let GameNodeKind::Display { bits } = node.kind {
@@ -110,6 +114,27 @@ pub fn draw_gates_system(game_circuit: Res<GameCircuit>, mut commands: Commands)
             });
         }
     }
+}
+
+/// Draw a fallback background behind all simulation entities so the circuit is
+/// visible even if the scene is otherwise misconfigured at startup.
+pub fn draw_sim_background_system(mut commands: Commands, query: Query<Entity, With<SimBackground>>) {
+    if !query.is_empty() {
+        return;
+    }
+    commands.spawn((
+        SimBackground,
+        Sprite {
+            color: Color::srgba(0.050, 0.229, 0.793, 1.000),
+            ..Default::default()
+        },
+        Transform {
+            translation: Vec3::new(0.0, 0.0, -1000.0),
+            scale: Vec3::new(8000.0, 6000.0, 1.0),
+            ..Default::default()
+        },
+        Visibility::Visible,
+    ));
 }
 
 /// Format multi-bit display inputs as a fixed-width hexadecimal value.
@@ -164,6 +189,7 @@ pub fn draw_connections_system(
                 rotation: rot,
                 scale: Vec3::ONE,
             },
+            Visibility::Visible,
             ConnectionLine {
                 id: wire.id,
                 source_node: wire.source_node,

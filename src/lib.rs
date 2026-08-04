@@ -72,7 +72,11 @@ impl Default for GameSettings {
 }
 
 pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
-    commands.spawn((Camera2d, MainCamera));
+    commands.spawn((
+        Camera2d,
+        MainCamera,
+        Transform::from_xyz(0.0, 0.0, 1000.0),
+    ));
 }
 
 pub fn configure_camera_scaling(
@@ -80,7 +84,7 @@ pub fn configure_camera_scaling(
     mut cameras: Query<&mut Projection, With<MainCamera>>,
 ) -> Result {
     let window = windows.single()?;
-    let height = window.height();
+    let height = window.height().max(1.0);
     let mut projection = cameras.single_mut()?;
 
     if let Projection::Orthographic(ortho) = projection.as_mut() {
