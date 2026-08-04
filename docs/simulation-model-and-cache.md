@@ -106,7 +106,14 @@ The model stores this as one UUID-addressed wire. The simulator currently execut
 
 ### Saved representation
 
-`SavedSimulation` wraps a `GameCircuit` with a schema version. Runtime IDs, cached values, Bevy entities, and runner state are deliberately not serialized.
+`SavedSimulation` (version `1`) remains supported for backward compatibility when reading legacy single-file workspaces.
+
+Current workspace persistence uses a folder package format:
+- `workspaces/<name>/manifest.json` stores metadata and root circuit ID.
+- `workspaces/<name>/<circuit-id>.json` stores each circuit independently.
+- `SubCircuit` links are serialized as `circuit_id` references, not nested full copies.
+
+This avoids repeatedly serializing identical nested subcircuits and makes incremental diffs easier to reason about while keeping load/store behavior stable for editor operations.
 
 ## Stage 2: executable simulator representation
 

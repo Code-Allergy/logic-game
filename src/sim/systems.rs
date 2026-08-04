@@ -7,21 +7,19 @@
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io;
-use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::{
     editor::{LoadWorkspaceEvent, OpenSubcircuitEvent, SaveWorkspaceEvent},
     temp::GateComponentSelectionEvent,
-    DEFAULT_WORKSPACE_EXT, SAVE_FILE_NAME, UiPointerState, WORKSPACE_DIR,
+    editor::workspace::save_workspace_to_disk,
+    UiPointerState,
 };
 
 use super::{
     ConnectionLine, GameCircuit, GameNode, GameNodeKind, GateComponent, LogicDisplay,
     SimNodeInputs, SimNodeOutputs, SimWireValue,
-    SavedSimulation, WireKind,
+    WireKind,
     Selected, SelectedGate, SimBridge, SimCache, SimulationConfig, ThreadlessStepper,
     TickRateMeter, calculate_connection_geometry, get_gate_sprite, spatial_grid::SpatialGrid,
 };
@@ -866,14 +864,16 @@ pub fn save_on_exit_system(
     mut exit_events: MessageReader<AppExit>,
     game_circuit: Res<GameCircuit>,
 ) {
-    if exit_events.read().next().is_some()
-        && let Ok(file) = std::fs::File::create(SAVE_FILE_NAME)
-    {
-        let saved = SavedSimulation::new(game_circuit.clone());
-        if let Err(e) = serde_json::to_writer_pretty(file, &saved) {
-            eprintln!("Failed to save simulation: {e}");
+    if exit_events.read().next().is_some() {
+        let name = if game_circuit.name.trim().is_empty() {
+            "simulation"
         } else {
-            info!("Saved simulation to {SAVE_FILE_NAME}");
+            game_circuit.name.as_str()
+        };
+        if let Err(err) = save_workspace_to_disk(name, &game_circuit) {
+            eprintln!("Failed to save simulation: {err}");
+        } else {
+            info!("Saved simulation workspace: {name}");
         }
     }
 }
@@ -1066,19 +1066,6 @@ fn interface_node_label(node: &GameNode) -> String {
         .unwrap_or_else(|| format!("{}-{}", node.kind.display_name(), &node.id.to_string()[..8]))
 }
 
-fn save_workspace_to_disk(name: &str, circuit: &GameCircuit) -> io::Result<()> {
-    let workspace_dir = Path::new(WORKSPACE_DIR);
-    if !workspace_dir.exists() {
-        fs::create_dir_all(workspace_dir)?;
-    }
-
-    let path = workspace_path(name);
-    let file = File::create(path)?;
-    let saved = SavedSimulation::new(circuit.clone());
-    serde_json::to_writer_pretty(file, &saved).map_err(io::Error::other)?;
-    Ok(())
-}
-
 fn apply_power_on_reset(bridge: &mut SimBridge, game_circuit: &GameCircuit) {
     let Some(reset_node) = game_circuit.nodes.values().find(|node| {
         matches!(node.kind, GameNodeKind::Input | GameNodeKind::Input8 | GameNodeKind::Input64)
@@ -1103,17 +1090,4 @@ fn apply_power_on_reset(bridge: &mut SimBridge, game_circuit: &GameCircuit) {
         bridge.set_input(reset_node.id, pin as u8, false);
     }
     bridge.resume();
-}
-
-fn workspace_path(name: &str) -> PathBuf {
-    Path::new(WORKSPACE_DIR).join(format!("{}{}", sanitize_workspace_name(name), DEFAULT_WORKSPACE_EXT))
-}
-
-fn sanitize_workspace_name(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c => c,
-        })
-        .collect()
 }

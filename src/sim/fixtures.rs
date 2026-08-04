@@ -181,10 +181,12 @@ pub fn build_8bit_counter_subcircuit() -> GameCircuit {
     let reset_id = circuit.add_node(reset);
 
     let mut current_clk = increment_id;
-    let output_bus_id = circuit.add_node(GameNode::new(
+    let mut output_bus = GameNode::new(
         GameNodeKind::Output8,
         Vec2::new(150.0, 120.0),
-    ));
+    );
+    output_bus.label = Some("Output8".to_string());
+    let output_bus_id = circuit.add_node(output_bus);
 
     for i in 0..8 {
         let ff_pos = Vec2::new(-200.0 + (i as f32) * 200.0, 0.0);
@@ -260,10 +262,12 @@ fn build_64bit_counter_subcircuits_with_increment(
     let mut reset = GameNode::new(GameNodeKind::Input, Vec2::new(-650.0, -120.0));
     reset.label = Some("Reset".into());
     let reset_id = circuit.add_node(reset);
-    let display_id = circuit.add_node(GameNode::new(
+    let mut display = GameNode::new(
         GameNodeKind::Display { bits: 64 },
         Vec2::new(650.0, 0.0),
-    ));
+    );
+    display.label = Some("Display64".to_string());
+    let display_id = circuit.add_node(display);
     let mut output_bus = GameNode::new(
         GameNodeKind::Output64,
         Vec2::new(650.0, -180.0),
@@ -322,10 +326,12 @@ pub fn build_nested_64bit_counter() -> GameCircuit {
     counter.label = Some("64-Bit Counter".to_string());
     let counter_id = circuit.add_node(counter);
 
-    let display_id = circuit.add_node(GameNode::new(
+    let mut display = GameNode::new(
         GameNodeKind::Display { bits: 64 },
         Vec2::new(650.0, 0.0),
-    ));
+    );
+    display.label = Some("Display64".to_string());
+    let display_id = circuit.add_node(display);
 
     circuit.add_wire(GameWire::new(increment_id, 0, counter_id, 0));
     circuit.add_wire(GameWire::new(reset_id, 0, counter_id, 1));
@@ -406,10 +412,12 @@ pub fn build_8bit_counter_subcircuit_wrapper() -> GameCircuit {
     counter.label = Some("8-Bit Counter".to_string());
     let counter_id = circuit.add_node(counter);
 
-    let display_id = circuit.add_node(GameNode::new(
+    let mut display = GameNode::new(
         GameNodeKind::Display { bits: 8 },
         Vec2::new(650.0, 0.0),
-    ));
+    );
+    display.label = Some("Display8".to_string());
+    let display_id = circuit.add_node(display);
 
     circuit.add_wire(GameWire::new(increment_id, 0, counter_id, 0));
     circuit.add_wire(GameWire::new(reset_id, 0, counter_id, 1));
@@ -455,10 +463,12 @@ pub fn build_8bit_bus_counter_wrapper() -> GameCircuit {
     output_bus.label = Some("Output8".to_string());
     let output_bus_id = circuit.add_node(output_bus);
 
-    let display_id = circuit.add_node(GameNode::new(
+    let mut display = GameNode::new(
         GameNodeKind::Display { bits: 8 },
         Vec2::new(650.0, 0.0),
-    ));
+    );
+    display.label = Some("Display8".to_string());
+    let display_id = circuit.add_node(display);
 
     circuit.add_wire(GameWire::new(increment_id, 0, counter_id, 0));
     circuit.add_wire(GameWire::new(reset_id, 0, counter_id, 1));
@@ -506,10 +516,12 @@ pub fn build_64bit_bus_counter_wrapper() -> GameCircuit {
     output_bus.label = Some("Output64".to_string());
     let output_bus_id = circuit.add_node(output_bus);
 
-    let display_id = circuit.add_node(GameNode::new(
+    let mut display = GameNode::new(
         GameNodeKind::Display { bits: 64 },
         Vec2::new(750.0, 0.0),
-    ));
+    );
+    display.label = Some("Display64".to_string());
+    let display_id = circuit.add_node(display);
 
     circuit.add_wire(GameWire::new(increment_id, 0, counter_id, 0));
     circuit.add_wire(GameWire::new(reset_id, 0, counter_id, 1));
@@ -558,10 +570,12 @@ pub fn build_64bit_vector_counter_wrapper() -> GameCircuit {
     output_bus.label = Some("Output64".to_string());
     let output_bus_id = circuit.add_node(output_bus);
 
-    let display_id = circuit.add_node(GameNode::new(
+    let mut display = GameNode::new(
         GameNodeKind::Display { bits: 64 },
         Vec2::new(750.0, 0.0),
-    ));
+    );
+    display.label = Some("Display64".to_string());
+    let display_id = circuit.add_node(display);
 
     circuit.add_wire(GameWire::new(increment_id, 0, counter_id, 0));
     circuit.add_wire(GameWire::new(reset_id, 0, counter_id, 1));

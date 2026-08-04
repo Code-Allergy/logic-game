@@ -100,7 +100,6 @@ impl Plugin for SimulationRuntimePlugin {
         let state = self.state.clone();
         let game_circuit = fixtures::build_64bit_counter_subcircuits();
         let mut sim_bridge = SimBridge::from_circuit_with_runtime(&game_circuit, self.runtime);
-        power_on_reset(&mut sim_bridge, &game_circuit);
 
         app
             .insert_resource(game_circuit)
@@ -108,7 +107,11 @@ impl Plugin for SimulationRuntimePlugin {
             .init_resource::<SimulationConfig>()
             .init_resource::<TickRateMeter>()
             .init_resource::<ThreadlessStepper>()
-            .add_systems(OnEnter(state.clone()), resume_bridge_system)
+            .add_systems(Startup, pause_bridge_system)
+            .add_systems(
+                OnEnter(state.clone()),
+                (power_on_reset_system, resume_bridge_system),
+            )
             .add_systems(OnExit(state.clone()), pause_bridge_system)
             .add_systems(PreUpdate, bridge_flush_system)
             .add_systems(
@@ -218,6 +221,10 @@ fn power_on_reset(bridge: &mut SimBridge, circuit: &crate::sim::GameCircuit) {
     }
     bridge.set_input(reset.id, 0, false);
     bridge.resume();
+}
+
+fn power_on_reset_system(mut bridge: ResMut<SimBridge>, game_circuit: Res<crate::sim::GameCircuit>) {
+    power_on_reset(&mut bridge, &game_circuit);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

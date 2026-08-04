@@ -11,7 +11,7 @@ name = "gate_quest"
 
 [dependencies]
 logi-sim = { path = "logi-sim" }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # egui
 bevy = { version = "0.19.0", features = ["dynamic_linking", "wayland"] }

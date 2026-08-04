@@ -27,7 +27,7 @@ use logi_sim::circuit::Circuit;
 use logi_sim::engine::{RunnerType, SimEvent};
 use logi_sim::prelude::{InputRef, NodeId, OutputRef, WireId};
 
-use super::model::{GameCircuit, GameNode, GameWire};
+use super::model::{GameCircuit, GameNode, GameNodeKind, GameWire};
 
 /// Represents a pending `AddNode` command awaiting a `NodeId` response from the worker.
 struct PendingNode {
@@ -159,7 +159,97 @@ impl SimBridge {
         HashMap<Uuid, NodeId>,
         HashMap<Uuid, Vec<WireSegment>>,
     ) {
-        Self::build_sim_circuit_internal(game_circuit, true)
+        let mut runtime_circuit = game_circuit.clone();
+        Self::assign_runtime_ids(&mut runtime_circuit, true);
+
+        let (circuit, runtime_node_by_uuid, runtime_wire_by_uuid) =
+            Self::build_sim_circuit_internal(&runtime_circuit, true);
+
+        let root_node_ids: std::collections::HashSet<_> =
+            game_circuit.nodes.keys().cloned().collect();
+        let root_wire_ids: std::collections::HashSet<_> =
+            game_circuit.wires.keys().cloned().collect();
+
+        let mut node_by_uuid = HashMap::new();
+        for (runtime_node_id, sim_node_id) in runtime_node_by_uuid {
+            if !root_node_ids.contains(&runtime_node_id) {
+                continue;
+            }
+
+            if node_by_uuid
+                .insert(runtime_node_id, sim_node_id)
+                .is_some()
+            {
+                warn!(
+                    "SimBridge runtime remap produced duplicate game node id {}; keeping first mapping",
+                    runtime_node_id
+                );
+            }
+        }
+
+        let mut wire_by_uuid = HashMap::new();
+        for (runtime_wire_id, segments) in runtime_wire_by_uuid {
+            if !root_wire_ids.contains(&runtime_wire_id) {
+                continue;
+            }
+
+            if wire_by_uuid
+                .insert(runtime_wire_id, segments)
+                .is_some()
+            {
+                warn!(
+                    "SimBridge runtime remap produced duplicate game wire id {}; keeping first mapping",
+                    runtime_wire_id
+                );
+            }
+        }
+
+        (circuit, node_by_uuid, wire_by_uuid)
+    }
+
+    fn assign_runtime_ids(circuit: &mut GameCircuit, is_root: bool) {
+        let old_nodes = std::mem::take(&mut circuit.nodes);
+        let old_wires = std::mem::take(&mut circuit.wires);
+
+        let mut node_id_map: HashMap<Uuid, Uuid> = HashMap::with_capacity(old_nodes.len());
+        let mut remapped_nodes = HashMap::with_capacity(old_nodes.len());
+
+        for (_, mut node) in old_nodes {
+            if let GameNodeKind::SubCircuit { circuit: nested } = &mut node.kind {
+                Self::assign_runtime_ids(nested, false);
+            }
+
+            let old_id = node.id;
+            let runtime_id = if is_root { old_id } else { Uuid::new_v4() };
+            node_id_map.insert(old_id, runtime_id);
+            node.id = runtime_id;
+            remapped_nodes.insert(runtime_id, node);
+        }
+
+        let mut remapped_wires = HashMap::with_capacity(old_wires.len());
+        for (_, mut wire) in old_wires {
+            let source_node = match node_id_map.get(&wire.source_node) {
+                Some(id) => *id,
+                None => continue,
+            };
+            let sink_node = match node_id_map.get(&wire.sink_node) {
+                Some(id) => *id,
+                None => continue,
+            };
+
+            let runtime_id = if is_root { wire.id } else { Uuid::new_v4() };
+            wire.id = runtime_id;
+            wire.source_node = source_node;
+            wire.sink_node = sink_node;
+            remapped_wires.insert(runtime_id, wire);
+        }
+
+        if !is_root {
+            circuit.id = Uuid::new_v4();
+        }
+
+        circuit.nodes = remapped_nodes;
+        circuit.wires = remapped_wires;
     }
 
     fn build_sim_circuit_internal(

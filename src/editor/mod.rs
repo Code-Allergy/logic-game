@@ -5,17 +5,20 @@
 //! - `systems`: node placement, wire creation, and selection-state handling.
 //! - `workspace`: catalog initialization and on-disk workspace helpers.
 
+mod systems;
+mod ui;
+
+pub mod workspace;
+
 use bevy::prelude::*;
 use bevy_egui::EguiPrimaryContextPass;
 use uuid::Uuid;
 
 use crate::sim::{GameCircuit, GameNodeKind, WireKind};
 
-mod systems;
-mod ui;
-mod workspace;
-
-pub use systems::{apply_connection_events_system, handle_connection_creation, process_gate_placement};
+pub use systems::{
+    apply_connection_events_system, handle_connection_creation, process_gate_placement,
+};
 pub use ui::editor_ui_system;
 pub use workspace::catalog_init_system;
 

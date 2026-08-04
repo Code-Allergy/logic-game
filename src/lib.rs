@@ -29,7 +29,6 @@ pub mod temp {
     }
 }
 
-pub const SAVE_FILE_NAME: &str = "./simulation.json";
 pub const WORKSPACE_DIR: &str = "./workspaces";
 pub const DEFAULT_WORKSPACE_EXT: &str = ".json";
 pub const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.15);

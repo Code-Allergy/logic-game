@@ -16,6 +16,13 @@ use uuid::Uuid;
 
 use logi_sim::prelude::NodeKind;
 
+const CIRCUIT_TEMPLATE_NAMESPACE: Uuid =
+    Uuid::from_u128(0x6b2f8d8ff0a147dbbf4a2c7d9e3f6b5d);
+
+fn circuit_template_signature_from_structure(signature: &str) -> Uuid {
+    Uuid::new_v5(&CIRCUIT_TEMPLATE_NAMESPACE, signature.as_bytes())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Node kind serialization shim
 //
@@ -238,6 +245,45 @@ impl GameNodeKind {
             GameNodeKind::SubCircuit { .. } => "SUBCIRCUIT",
         }
     }
+
+    fn structural_signature_internal(&self, visited: &mut HashMap<Uuid, String>) -> String {
+        match self {
+            GameNodeKind::SubCircuit { circuit } => circuit.structural_signature_internal(visited),
+            GameNodeKind::Input => "Input".to_string(),
+            GameNodeKind::Input8 => "Input8".to_string(),
+            GameNodeKind::Input64 => "Input64".to_string(),
+            GameNodeKind::Output => "Output".to_string(),
+            GameNodeKind::Output8 => "Output8".to_string(),
+            GameNodeKind::Output64 => "Output64".to_string(),
+            GameNodeKind::Display { bits } => format!("Display({bits})"),
+            GameNodeKind::Expand8 => "Expand8".to_string(),
+            GameNodeKind::Expand64 => "Expand64".to_string(),
+            GameNodeKind::ReduceOr8 => "ReduceOr8".to_string(),
+            GameNodeKind::ReduceOr64 => "ReduceOr64".to_string(),
+            GameNodeKind::And => "And".to_string(),
+            GameNodeKind::Or => "Or".to_string(),
+            GameNodeKind::Not => "Not".to_string(),
+            GameNodeKind::Xor => "Xor".to_string(),
+            GameNodeKind::Nand => "Nand".to_string(),
+            GameNodeKind::Nor => "Nor".to_string(),
+            GameNodeKind::Xnor => "Xnor".to_string(),
+            GameNodeKind::Buffer => "Buffer".to_string(),
+            GameNodeKind::Mux => "Mux".to_string(),
+            GameNodeKind::Demux => "Demux".to_string(),
+            GameNodeKind::TriStateBuffer => "TriStateBuffer".to_string(),
+            GameNodeKind::Counter8 => "Counter8".to_string(),
+            GameNodeKind::Clock {
+                period_ticks,
+                duty_ticks,
+            } => format!("Clock({period_ticks}:{duty_ticks})"),
+        }
+    }
+
+    pub fn structural_signature(&self) -> String {
+        let mut visited = HashMap::new();
+        self.structural_signature_internal(&mut visited)
+    }
+
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -405,6 +451,121 @@ impl GameCircuit {
         let id = wire.id;
         self.wires.insert(id, wire);
         id
+    }
+
+    /// Reassign fresh UUIDs to every node/wire in this circuit and all
+    /// nested subcircuits. This is used to materialize reusable subcircuit
+    /// templates into unique world instances.
+    pub fn remap_instance_ids(&mut self) {
+        let old_nodes = std::mem::take(&mut self.nodes);
+        let old_wires = std::mem::take(&mut self.wires);
+
+        let mut node_id_map = HashMap::with_capacity(old_nodes.len());
+        let mut new_nodes = HashMap::with_capacity(old_nodes.len());
+
+        for (_, mut node) in old_nodes {
+            if let GameNodeKind::SubCircuit { circuit } = &mut node.kind {
+                circuit.remap_instance_ids();
+                circuit.id = Uuid::new_v4();
+            }
+
+            let old_id = node.id;
+            let new_id = Uuid::new_v4();
+            node_id_map.insert(old_id, new_id);
+            node.id = new_id;
+            new_nodes.insert(new_id, node);
+        }
+
+        self.nodes = new_nodes;
+        for (_, mut wire) in old_wires {
+            let source_node = match node_id_map.get(&wire.source_node) {
+                Some(id) => *id,
+                None => continue,
+            };
+            let sink_node = match node_id_map.get(&wire.sink_node) {
+                Some(id) => *id,
+                None => continue,
+            };
+
+            wire.id = Uuid::new_v4();
+            wire.source_node = source_node;
+            wire.sink_node = sink_node;
+            self.wires.insert(wire.id, wire);
+        }
+
+        self.id = Uuid::new_v4();
+    }
+
+    /// Build a deterministic signature for this circuit that ignores concrete IDs.
+    /// Useful for detecting accidental duplication of identical circuit structures.
+    pub fn structural_signature(&self) -> String {
+        let mut visited = HashMap::new();
+        self.structural_signature_internal(&mut visited)
+    }
+
+    /// Canonical template ID derived from structure-only content.
+    ///
+    /// This is stable across sessions and allows de-duplicating templates in
+    /// workspace bundles when circuit structure is identical.
+    pub fn template_uuid(&self) -> Uuid {
+        circuit_template_signature_from_structure(&self.structural_signature())
+    }
+
+    fn structural_signature_internal(&self, visited: &mut HashMap<Uuid, String>) -> String {
+        if let Some(sig) = visited.get(&self.id) {
+            return sig.clone();
+        }
+
+        let mut node_signatures: Vec<String> = Vec::with_capacity(self.nodes.len());
+        let mut node_kind_by_id: HashMap<Uuid, String> = HashMap::with_capacity(self.nodes.len());
+        let mut node_signature_cache = HashMap::new();
+
+        for node in self.nodes.values() {
+            let kind_sig = match &node.kind {
+                GameNodeKind::SubCircuit { circuit } => {
+                    if let Some(sig) = visited.get(&circuit.id) {
+                        format!("SubCircuit({sig})")
+                    } else {
+                        let sig = circuit.structural_signature_internal(visited);
+                        format!("SubCircuit({sig})")
+                    }
+                }
+                _ => node.kind.structural_signature_internal(&mut node_signature_cache),
+            };
+
+            let node_sig = format!("{kind_sig}|in:{}|out:{}", node.kind.input_count(), node.kind.output_count());
+            node_kind_by_id.insert(node.id, node_sig.clone());
+            node_signatures.push(node_sig);
+        }
+
+        node_signatures.sort_unstable();
+
+        let mut wire_signatures: Vec<String> = Vec::with_capacity(self.wires.len());
+        for wire in self.wires.values() {
+            let source = node_kind_by_id
+                .get(&wire.source_node)
+                .cloned()
+                .unwrap_or_else(|| "missing-node".to_string());
+            let sink = node_kind_by_id
+                .get(&wire.sink_node)
+                .cloned()
+                .unwrap_or_else(|| "missing-node".to_string());
+            let kind_sig = wire.kind.display_name();
+            wire_signatures.push(format!(
+                "{source}:{}->{sink}:{}:{}",
+                wire.source_pin, wire.sink_pin, kind_sig
+            ));
+        }
+
+        wire_signatures.sort_unstable();
+        let signature = format!(
+            "nodes=[{}]; wires=[{}]",
+            node_signatures.join("|"),
+            wire_signatures.join("|")
+        );
+
+        visited.insert(self.id, signature.clone());
+        signature
     }
 
     /// Remove a node and all wires connected to it.
