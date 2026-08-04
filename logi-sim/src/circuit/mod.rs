@@ -7,7 +7,10 @@ pub mod utils;
 pub mod wire;
 
 pub use {
-    bit_packed::{BitPackedCircuit, SimdGateInstruction, SimdOp},
+    bit_packed::{
+        BitPackedCircuit, SimdBinaryInstruction, SimdBlock, SimdClock, SimdDemuxInstruction,
+        SimdIndex, SimdOp, SimdProgram, SimdPrograms, SimdTernaryInstruction, SimdUnaryInstruction,
+    },
     event_driven::EventDrivenCircuit,
     flattened::FlattenedCircuit,
     node::{Node, NodeId, NodeKind},

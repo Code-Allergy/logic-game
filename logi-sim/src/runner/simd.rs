@@ -1,8 +1,9 @@
-use crate::circuit::{BitPackedCircuit, NodeId, SimdOp, WireId};
+use crate::circuit::{
+    BitPackedCircuit, NodeId, SimdIndex, SimdOp, SimdProgram, SimdPrograms, WireId,
+};
 use crate::runner::{InspectableRunner, Runner};
 use wide::u64x4;
 
-/// Evaluates a Level 3 `BitPackedCircuit` using guaranteed 256-bit hardware SIMD vector registers (`wide::u64x4`).
 pub struct SimdRunner {
     circuit: BitPackedCircuit,
     wire_values: Vec<u64x4>,
@@ -19,100 +20,137 @@ impl SimdRunner {
         }
     }
 
-    /// Sets a 256-bit SIMD vector (`u64x4`) for a specific input node & pin.
     pub fn set_input_u64x4(&mut self, node: NodeId, pin: u8, vector: u64x4) {
-        if let Some(w_indices) = self.circuit.node_output_pins.get(&(node, pin)) {
-            for &w_idx in w_indices {
-                self.wire_values[w_idx] = vector;
+        if let Some(wires) = self.circuit.node_output_pins.get(&(node, pin)) {
+            for &wire in wires {
+                self.wire_values[wire] = vector;
             }
         }
     }
 
-    /// Reads the 256-bit SIMD vector (`u64x4`) for an output node & pin.
     pub fn output_u64x4(&self, node: NodeId, pin: u8) -> u64x4 {
-        if let Some(&w_idx) = self.circuit.node_input_pins.get(&(node, pin)) {
-            self.wire_values[w_idx]
-        } else {
-            u64x4::ZERO
-        }
+        self.circuit
+            .node_input_pins
+            .get(&(node, pin))
+            .map_or(u64x4::ZERO, |&wire| self.wire_values[wire])
     }
 
-    /// Sets a 64-bit vector for the first SIMD lane of an input node & pin.
     pub fn set_input_u64(&mut self, node: NodeId, pin: u8, val: u64) {
-        let arr = [val, 0, 0, 0];
-        self.set_input_u64x4(node, pin, u64x4::from(arr));
+        self.set_input_u64x4(node, pin, u64x4::from([val, 0, 0, 0]));
     }
 
-    /// Reads a 64-bit vector from the first SIMD lane of an output node & pin.
     pub fn output_u64(&self, node: NodeId, pin: u8) -> u64 {
-        let arr: [u64; 4] = self.output_u64x4(node, pin).into();
-        arr[0]
+        let lanes: [u64; 4] = self.output_u64x4(node, pin).into();
+        lanes[0]
+    }
+}
+
+#[inline(always)]
+fn execute_program<I: SimdIndex>(program: &SimdProgram<I>, wires: &mut [u64x4], tick_count: u64) {
+    for clock in &program.clocks {
+        let elapsed =
+            tick_count.wrapping_add(clock.phase as u64) % clock.period_ticks.max(1) as u64;
+        let value = elapsed < clock.duty_ticks.max(1) as u64;
+        wires[clock.output.as_usize()] = u64x4::splat(if value { u64::MAX } else { 0 });
+    }
+
+    for block in &program.blocks {
+        let start = block.start as usize;
+        let end = start + block.len as usize;
+        match block.op {
+            SimdOp::And => {
+                for inst in &program.binary[start..end] {
+                    wires[inst.output.as_usize()] =
+                        wires[inst.in0.as_usize()] & wires[inst.in1.as_usize()];
+                }
+            }
+            SimdOp::Or => {
+                for inst in &program.binary[start..end] {
+                    wires[inst.output.as_usize()] =
+                        wires[inst.in0.as_usize()] | wires[inst.in1.as_usize()];
+                }
+            }
+            SimdOp::Xor => {
+                for inst in &program.binary[start..end] {
+                    wires[inst.output.as_usize()] =
+                        wires[inst.in0.as_usize()] ^ wires[inst.in1.as_usize()];
+                }
+            }
+            SimdOp::Nand => {
+                for inst in &program.binary[start..end] {
+                    wires[inst.output.as_usize()] =
+                        !(wires[inst.in0.as_usize()] & wires[inst.in1.as_usize()]);
+                }
+            }
+            SimdOp::Nor => {
+                for inst in &program.binary[start..end] {
+                    wires[inst.output.as_usize()] =
+                        !(wires[inst.in0.as_usize()] | wires[inst.in1.as_usize()]);
+                }
+            }
+            SimdOp::Xnor => {
+                for inst in &program.binary[start..end] {
+                    wires[inst.output.as_usize()] =
+                        !(wires[inst.in0.as_usize()] ^ wires[inst.in1.as_usize()]);
+                }
+            }
+            SimdOp::TriStateBuffer => {
+                for inst in &program.binary[start..end] {
+                    wires[inst.output.as_usize()] =
+                        wires[inst.in0.as_usize()] & wires[inst.in1.as_usize()];
+                }
+            }
+            SimdOp::Not => {
+                for inst in &program.unary[start..end] {
+                    wires[inst.output.as_usize()] = !wires[inst.input.as_usize()];
+                }
+            }
+            SimdOp::Buffer => {
+                for inst in &program.unary[start..end] {
+                    wires[inst.output.as_usize()] = wires[inst.input.as_usize()];
+                }
+            }
+            SimdOp::Mux => {
+                for inst in &program.ternary[start..end] {
+                    let in0 = wires[inst.in0.as_usize()];
+                    let in1 = wires[inst.in1.as_usize()];
+                    let select = wires[inst.in2.as_usize()];
+                    wires[inst.output.as_usize()] = (in1 & select) | (in0 & !select);
+                }
+            }
+            SimdOp::Demux => {
+                for inst in &program.demux[start..end] {
+                    let input = wires[inst.input.as_usize()];
+                    let select = wires[inst.select.as_usize()];
+                    wires[inst.out_false.as_usize()] = input & !select;
+                    wires[inst.out_true.as_usize()] = input & select;
+                }
+            }
+        }
     }
 }
 
 impl Runner for SimdRunner {
     fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
-        let bitmask = if value { u64::MAX } else { 0 };
-        self.set_input_u64x4(node, pin, u64x4::splat(bitmask));
+        let mask = if value { u64::MAX } else { 0 };
+        self.set_input_u64x4(node, pin, u64x4::splat(mask));
     }
 
     fn tick(&mut self) {
-        for clock in &self.circuit.clocks {
-            let elapsed =
-                self.tick_count.wrapping_add(clock.phase as u64) % clock.period_ticks.max(1) as u64;
-            let val = elapsed < clock.duty_ticks.max(1) as u64;
-            let vec_val = u64x4::splat(if val { u64::MAX } else { 0 });
-            for &out_w_idx in &clock.outputs {
-                self.wire_values[out_w_idx as usize] = vec_val;
+        match &self.circuit.programs {
+            SimdPrograms::Compact(program) => {
+                execute_program(program, &mut self.wire_values, self.tick_count)
             }
-        }
-
-        // Tight 256-bit SIMD vector execution loop over contiguous memory
-        for inst in &self.circuit.instructions {
-            let in0 = self.wire_values[inst.in0 as usize];
-            let in1 = self.wire_values[inst.in1 as usize];
-            let in2 = self.wire_values[inst.in2 as usize];
-
-            match inst.op {
-                SimdOp::Demux => {
-                    let sig = in0;
-                    let sel = in1;
-                    let out0 = sig & !sel;
-                    let out1 = sig & sel;
-                    if let Some(&w0) = inst.outputs.first() {
-                        self.wire_values[w0 as usize] = out0;
-                    }
-                    if let Some(&w1) = inst.outputs.get(1) {
-                        self.wire_values[w1 as usize] = out1;
-                    }
-                    continue;
-                }
-                _ => {}
-            }
-
-            let out = match inst.op {
-                SimdOp::And => in0 & in1,
-                SimdOp::Or => in0 | in1,
-                SimdOp::Not => !in0,
-                SimdOp::Xor => in0 ^ in1,
-                SimdOp::Nand => !(in0 & in1),
-                SimdOp::Nor => !(in0 | in1),
-                SimdOp::Xnor => !(in0 ^ in1),
-                SimdOp::Buffer => in0,
-                SimdOp::Mux => (in1 & in2) | (in0 & !in2),
-                SimdOp::TriStateBuffer => in0 & in1,
-                SimdOp::Demux => unreachable!(),
-            };
-            for &out_w_idx in &inst.outputs {
-                self.wire_values[out_w_idx as usize] = out;
+            SimdPrograms::Wide(program) => {
+                execute_program(program, &mut self.wire_values, self.tick_count)
             }
         }
         self.tick_count += 1;
     }
 
     fn output(&self, node: NodeId, pin: u8) -> bool {
-        let arr: [u64; 4] = self.output_u64x4(node, pin).into();
-        (arr[0] & 1) != 0
+        let lanes: [u64; 4] = self.output_u64x4(node, pin).into();
+        (lanes[0] & 1) != 0
     }
 
     fn current_tick(&self) -> u64 {
@@ -122,18 +160,16 @@ impl Runner for SimdRunner {
 
 impl InspectableRunner for SimdRunner {
     fn wire_value(&self, wire: WireId) -> bool {
-        if let Some(&w_idx) = self.circuit.wire_to_idx.get(&wire) {
-            let arr: [u64; 4] = self.wire_values[w_idx].into();
-            (arr[0] & 1) != 0
-        } else {
-            false
-        }
+        self.circuit.wire_to_idx.get(&wire).is_some_and(|&index| {
+            let lanes: [u64; 4] = self.wire_values[index].into();
+            (lanes[0] & 1) != 0
+        })
     }
 
     fn for_each_wire(&self, f: &mut dyn FnMut(WireId, bool)) {
-        for (w_idx, &wire_id) in self.circuit.idx_to_wire.iter().enumerate() {
-            let arr: [u64; 4] = self.wire_values[w_idx].into();
-            f(wire_id, (arr[0] & 1) != 0);
+        for (index, &wire) in self.circuit.idx_to_wire.iter().enumerate() {
+            let lanes: [u64; 4] = self.wire_values[index].into();
+            f(wire, (lanes[0] & 1) != 0);
         }
     }
 }
