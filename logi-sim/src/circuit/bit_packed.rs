@@ -20,7 +20,9 @@ pub enum SimdOp {
 }
 
 pub trait SimdIndex: Copy + std::fmt::Debug + Send + Sync + 'static {
+    #[inline(always)]
     fn from_usize(value: usize) -> Self;
+    #[inline(always)]
     fn as_usize(self) -> usize;
 }
 
@@ -80,9 +82,9 @@ pub struct SimdDemuxInstruction<I> {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct SimdClock<I> {
-    pub period_ticks: u32,
-    pub duty_ticks: u32,
-    pub phase: u32,
+    pub period_ticks: u64,
+    pub duty_ticks: u64,
+    pub phase: u64,
     pub output: I,
 }
 
@@ -181,15 +183,12 @@ fn node_op(kind: &NodeKind) -> Option<SimdOp> {
 
 fn push_block(blocks: &mut Vec<SimdBlock>, op: SimdOp, start: usize) {
     if let Some(last) = blocks.last_mut()
-        && last.op == op && last.start + last.len == start
+        && last.op == op
+        && last.start + last.len == start
     {
         last.len += 1;
     } else {
-        blocks.push(SimdBlock {
-            op,
-            start,
-            len: 1,
-        });
+        blocks.push(SimdBlock { op, start, len: 1 });
     }
 }
 
@@ -255,9 +254,9 @@ fn build_program<I: SimdIndex>(
                 .filter(|&&wire| wire < observable_wire_count || !wire_listeners[wire].is_empty())
             {
                 program.clocks.push(SimdClock {
-                    period_ticks,
-                    duty_ticks,
-                    phase,
+                    period_ticks: period_ticks.max(1) as u64,
+                    duty_ticks: duty_ticks.max(1) as u64,
+                    phase: (phase as u64) % period_ticks.max(1) as u64,
                     output: I::from_usize(output),
                 });
             }
@@ -287,7 +286,10 @@ fn build_program<I: SimdIndex>(
                         .collect::<SmallVec<[I; 2]>>()
                 })
                 .collect();
-            if node.inputs.len() >= 2 && outputs.len() >= bits {
+            if node.inputs.len() >= 2
+                && outputs.len() >= bits
+                && outputs.iter().any(|pin| !pin.is_empty())
+            {
                 program.counters.push(SimdCounterInstruction {
                     increment: I::from_usize(node.inputs[0]),
                     reset: I::from_usize(node.inputs[1]),
@@ -311,21 +313,24 @@ fn build_program<I: SimdIndex>(
                         .collect::<SmallVec<[I; 2]>>()
                 };
                 let start = program.adders.len();
-                program.adders.push(SimdAdder {
-                    a: node.inputs[..bits]
-                        .iter()
-                        .copied()
-                        .map(I::from_usize)
-                        .collect(),
-                    b: node.inputs[bits..bits * 2]
-                        .iter()
-                        .copied()
-                        .map(I::from_usize)
-                        .collect(),
-                    carry_in: carry_in.then(|| I::from_usize(node.inputs[bits * 2])),
-                    outputs: node.output_pins[..=bits].iter().map(convert_pin).collect(),
-                });
-                push_block(&mut program.blocks, SimdOp::Adder, start);
+                let outputs: Vec<_> = node.output_pins[..=bits].iter().map(convert_pin).collect();
+                if outputs.iter().any(|pin| !pin.is_empty()) {
+                    program.adders.push(SimdAdder {
+                        a: node.inputs[..bits]
+                            .iter()
+                            .copied()
+                            .map(I::from_usize)
+                            .collect(),
+                        b: node.inputs[bits..bits * 2]
+                            .iter()
+                            .copied()
+                            .map(I::from_usize)
+                            .collect(),
+                        carry_in: carry_in.then(|| I::from_usize(node.inputs[bits * 2])),
+                        outputs,
+                    });
+                    push_block(&mut program.blocks, SimdOp::Adder, start);
+                }
             }
             continue;
         }
