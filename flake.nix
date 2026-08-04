@@ -12,17 +12,15 @@
     };
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      flake-utils,
-      rust-overlay,
-    }:
+  outputs = {
+    self,
+    nixpkgs,
+    flake-utils,
+    rust-overlay,
+  }:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        overlays = [ (import rust-overlay) ];
+      system: let
+        overlays = [(import rust-overlay)];
         pkgs = import nixpkgs {
           inherit system overlays;
           config = {
@@ -45,8 +43,7 @@
           ];
         };
         androidPkgs = pkgs.androidenv.androidPkgs;
-      in
-      {
+      in {
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.perf
@@ -73,6 +70,8 @@
 
           buildInputs = [
             rustVersion
+            pkgs.cargo-flamegraph
+            pkgs.perf
             pkgs.cargo-pgo
           ];
 
@@ -80,10 +79,10 @@
             pkgs.pkg-config
             pkgs.libudev-zero
             pkgs.alsa-lib
-            pkgs.xorg.libX11
-            pkgs.xorg.libXrandr
-            pkgs.xorg.libXcursor
-            pkgs.xorg.libXi
+            pkgs.libX11
+            pkgs.libXrandr
+            pkgs.libXcursor
+            pkgs.libXi
             pkgs.libxkbcommon
             pkgs.libglvnd
             pkgs.wayland

@@ -124,7 +124,10 @@ struct MappedRunner {
 /// Unlimited simulation can run many logical ticks between rendered frames.
 /// Publish observable wire state in batches so snapshotting does not cost more
 /// than the simulation itself.
-const UNLIMITED_SNAPSHOT_INTERVAL_TICKS: u32 = 256;
+/// Work quantum for unlimited mode. Commands and observable wire state are
+/// synchronized between batches, keeping latency bounded without putting any
+/// clock reads or scheduler syscalls in the hot loop.
+const UNLIMITED_BATCH_TICKS: u32 = 4_096;
 const MAX_RATE_CATCH_UP_TICKS: u32 = 4_096;
 const SCHEDULER_SPIN_THRESHOLD: std::time::Duration = std::time::Duration::from_micros(200);
 const SLOW_SIMULATION_LAG: std::time::Duration = std::time::Duration::from_millis(100);
@@ -349,6 +352,7 @@ impl SimulationEngine {
                                 );
                             }
                             next_tick_time = std::time::Instant::now();
+                            last_snapshot_time = next_tick_time;
                         }
                         SimCommand::SetInput { node, pin, value } => {
                             if needs_rebuild {
@@ -462,7 +466,7 @@ impl SimulationEngine {
                             }
                         }
                     } else {
-                        ticks_to_run = UNLIMITED_SNAPSHOT_INTERVAL_TICKS;
+                        ticks_to_run = UNLIMITED_BATCH_TICKS;
                     }
 
                     if ticks_to_run > 0 {
@@ -478,15 +482,17 @@ impl SimulationEngine {
                             .fetch_add(ticks_to_run as u64, Ordering::Relaxed);
                         ticks_since_snapshot = ticks_since_snapshot.saturating_add(ticks_to_run);
 
-                        let now = std::time::Instant::now();
-                        if ticks_since_snapshot >= UNLIMITED_SNAPSHOT_INTERVAL_TICKS
-                            || now.duration_since(last_snapshot_time) >= MAX_SNAPSHOT_INTERVAL
-                        {
+                        if tick_rate.is_none() {
+                            // Deliberately timer- and syscall-free. This is the
+                            // only synchronization point in unlimited mode.
                             publish_wire_states(&shared, runner.as_ref());
                             ticks_since_snapshot = 0;
-                            last_snapshot_time = now;
-                            if tick_rate.is_none() {
-                                std::thread::yield_now();
+                        } else {
+                            let now = std::time::Instant::now();
+                            if now.duration_since(last_snapshot_time) >= MAX_SNAPSHOT_INTERVAL {
+                                publish_wire_states(&shared, runner.as_ref());
+                                ticks_since_snapshot = 0;
+                                last_snapshot_time = now;
                             }
                         }
                     }
