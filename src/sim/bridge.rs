@@ -248,11 +248,11 @@ impl SimBridge {
             let source_kind = game_circuit
                 .nodes
                 .get(&wire.source_node)
-                .map(|node| format!("{:?}", node.kind));
+                .map(|node| node.kind.display_name());
             let sink_kind = game_circuit
                 .nodes
                 .get(&wire.sink_node)
-                .map(|node| format!("{:?}", node.kind));
+                .map(|node| node.kind.display_name());
             let source_width = Self::width_from_game_node(
                 game_circuit,
                 wire.source_node,
@@ -271,8 +271,8 @@ impl SimBridge {
                     "Invalid wire {:?}: kind {} from {source_node_label}({}) -> {sink_node_label}({}) ; src width {source_width}, sink width {sink_width}, but bit width {}",
                     wire.id,
                     wire.kind.display_name(),
-                    source_kind.as_deref().unwrap_or("unknown"),
-                    sink_kind.as_deref().unwrap_or("unknown"),
+                    source_kind.unwrap_or("unknown"),
+                    sink_kind.unwrap_or("unknown"),
                     wire.kind.bit_width()
                 );
                 continue;
@@ -308,7 +308,7 @@ impl SimBridge {
                     warn!(
                         "Skipping vector wire {:?}: source node {source_node_label} ({}) has {} output pins, attempted {} (bit {})",
                         wire.id,
-                        source_kind.as_deref().unwrap_or("unknown"),
+                        source_kind.unwrap_or("unknown"),
                         src_outputs,
                         source_pin,
                         bit
@@ -319,7 +319,7 @@ impl SimBridge {
                     warn!(
                         "Skipping vector wire {:?}: sink node {sink_node_label} ({}) has {} input pins, attempted {} (bit {})",
                         wire.id,
-                        sink_kind.as_deref().unwrap_or("unknown"),
+                        sink_kind.unwrap_or("unknown"),
                         snk_inputs,
                         sink_pin,
                         bit
@@ -653,33 +653,10 @@ impl SimBridge {
         self.service.drain_events()
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // ID lookup helpers
-    // ─────────────────────────────────────────────────────────────────────
-
-    pub(crate) fn node_id(&self, uuid: Uuid) -> Option<NodeId> {
-        self.node_by_uuid.get(&uuid).copied()
-    }
-
-    pub(crate) fn node_uuid(&self, id: NodeId) -> Option<Uuid> {
-        self.uuid_by_node.get(&id).copied()
-    }
-
-    pub(crate) fn wire_id(&self, uuid: Uuid) -> Option<WireId> {
-        self.wire_by_uuid
-            .get(&uuid)
-            .and_then(|segments| segments.first())
-            .map(|segment| segment.wire_id)
-    }
-
     pub(crate) fn wire_segments(&self, uuid: Uuid) -> Option<&[WireSegment]> {
         self.wire_by_uuid
             .get(&uuid)
             .map(|segments| segments.as_slice())
-    }
-
-    pub(crate) fn wire_uuid(&self, id: WireId) -> Option<Uuid> {
-        self.uuid_by_wire.get(&id).copied()
     }
 
     pub fn node_ready(&self, uuid: Uuid) -> bool {

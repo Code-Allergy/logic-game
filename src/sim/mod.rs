@@ -24,7 +24,10 @@ pub mod systems;
 pub use bridge::SimBridge;
 pub use cache::SimCache;
 pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation, WireKind};
-pub use plugin::SimulationPlugin;
+pub use plugin::{
+    SimulationPlugin, SimulationProjectionPlugin, SimulationRuntimePlugin,
+    SimulationViewPlugin,
+};
 pub use service::{SimExecutionService, SimRuntime};
 
 use bevy::prelude::*;

@@ -78,7 +78,7 @@ fn counter_64_fixture_chains_bytes_and_connects_every_display_pin() {
     let bridge = SimBridge::from_circuit(&circuit);
     for wire in circuit.wires.values() {
         assert!(
-            bridge.wire_id(wire.id).is_some(),
+            bridge.wire_ready(wire.id),
             "wire {} was not translated",
             wire.id
         );
@@ -120,24 +120,18 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
         thread::yield_now();
     }
 
-    let sim_wires: Vec<_> = display_wires
-        .iter()
-        .map(|(_, wire)| bridge.wire_id(*wire).unwrap())
-        .collect();
-    let mut any_set = false;
-    bridge.snapshot_wire_states(&mut |wire, value| {
-        any_set |= value && sim_wires.contains(&wire);
-    });
-    assert!(!any_set, "power-on reset did not clear the display");
+    let mut cache = SimCache::default();
+    cache.rebuild_index(&circuit, &bridge);
+    cache.update_from_snapshot(&bridge);
+    assert_eq!(
+        cache.node_input_bits(display),
+        0,
+        "power-on reset did not clear the display"
+    );
 
-    let display_value = |bridge: &SimBridge| {
-        let mut value = 0_u64;
-        bridge.snapshot_wire_states(&mut |wire, set| {
-            if set && let Some(bit) = sim_wires.iter().position(|candidate| *candidate == wire) {
-                value |= 1_u64 << bit;
-            }
-        });
-        value
+    let display_value = |bridge: &SimBridge, cache: &mut SimCache| {
+        cache.update_from_snapshot(bridge);
+        cache.node_input_bits(display)
     };
     bridge.set_input(reset, 0, false);
     let mut previous = 0_u64;
@@ -148,7 +142,7 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
         while bridge.tick_count() < target && Instant::now() < deadline {
             thread::yield_now();
         }
-        let current = display_value(&bridge);
+        let current = display_value(&bridge, &mut cache);
         assert!(
             current == previous || current == previous + 1,
             "counter fluctuated from {previous:#x} to {current:#x} at step {step}"
@@ -160,7 +154,7 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
         "counter remained at zero after reset was released"
     );
 
-    let before_switch = display_value(&bridge);
+    let before_switch = display_value(&bridge, &mut cache);
 
     bridge.set_runner_type(RunnerType::EventDrivenOptimized);
     let switch_deadline = Instant::now() + Duration::from_secs(2);
@@ -175,7 +169,7 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
         assert!(Instant::now() < switch_deadline, "runner switch timed out");
         thread::yield_now();
     }
-    assert_eq!(display_value(&bridge), before_switch);
+    assert_eq!(display_value(&bridge, &mut cache), before_switch);
 
     let continued_target = bridge.tick_count() + 8;
     for _ in 0..8 {
@@ -185,7 +179,7 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
         thread::yield_now();
     }
     assert_ne!(
-        display_value(&bridge),
+        display_value(&bridge, &mut cache),
         0,
         "counter state was lost after ticking the replacement runner"
     );
@@ -201,7 +195,7 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
         RunnerType::NaiveOptimized,
         RunnerType::Naive,
     ] {
-        let before = display_value(&bridge);
+        let before = display_value(&bridge, &mut cache);
         bridge.set_runner_type(runner);
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -216,7 +210,7 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
             thread::yield_now();
         }
         assert_eq!(
-            display_value(&bridge),
+            display_value(&bridge, &mut cache),
             before,
             "state changed switching to {runner}"
         );
@@ -228,7 +222,7 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
             while bridge.tick_count() < target && Instant::now() < deadline {
                 thread::yield_now();
             }
-            let current = display_value(&bridge);
+            let current = display_value(&bridge, &mut cache);
             assert!(
                 current == previous || current == previous + 1,
                 "{runner} counter fluctuated from {previous:#x} to {current:#x}"
@@ -335,19 +329,16 @@ fn bridge_api_translates_recursive_subcircuit_output_fanout() {
     bridge.set_tick_rate(None);
     bridge.set_input(fixture.input, 0, true);
 
-    let wire_a = bridge.wire_id(fixture.output_wire_a).unwrap();
-    let wire_b = bridge.wire_id(fixture.output_wire_b).unwrap();
+    let mut cache = SimCache::default();
+    cache.rebuild_index(&fixture.circuit, &bridge);
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut values = (false, false);
     while Instant::now() < deadline {
-        bridge.snapshot_wire_states(&mut |wire, value| {
-            if wire == wire_a {
-                values.0 = value;
-            }
-            if wire == wire_b {
-                values.1 = value;
-            }
-        });
+        cache.update_from_snapshot(&bridge);
+        values = (
+            cache.wire_value(fixture.output_wire_a),
+            cache.wire_value(fixture.output_wire_b),
+        );
         if values == (true, true) {
             break;
         }

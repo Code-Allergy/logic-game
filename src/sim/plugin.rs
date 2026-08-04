@@ -40,6 +40,28 @@ pub struct SimulationPlugin {
     pub runtime: SimRuntime,
 }
 
+/// Installs the simulation runner, UUID bridge, and ECS state projection.
+///
+/// This plugin intentionally contains no rendering, picking, or egui systems,
+/// so headless tools and tests can run the same simulation integration layer.
+pub struct SimulationRuntimePlugin {
+    pub state: GameState,
+    pub runtime: SimRuntime,
+}
+
+/// Projects runner state into UUID-addressed Bevy components once per frame.
+/// This is the sole scheduling boundary between runtime IDs and game ECS data.
+pub struct SimulationProjectionPlugin {
+    pub state: GameState,
+}
+
+/// Installs the Bevy presentation and interaction systems for a simulation.
+/// It expects [`SimulationRuntimePlugin`] to have installed the authoritative
+/// circuit, bridge, and cache resources first.
+pub struct SimulationViewPlugin {
+    pub state: GameState,
+}
+
 impl SimulationPlugin {
     pub fn new(state: GameState) -> Self {
         Self {
@@ -58,56 +80,91 @@ impl SimulationPlugin {
 
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
-        let state = self.state.clone();
-        let runtime = self.runtime;
+        app.add_plugins((
+            SimulationRuntimePlugin {
+                state: self.state.clone(),
+                runtime: self.runtime,
+            },
+            SimulationProjectionPlugin {
+                state: self.state.clone(),
+            },
+            SimulationViewPlugin {
+                state: self.state.clone(),
+            },
+        ));
+    }
+}
 
-        // ── Resources inserted at startup so Bevy param validation never sees
-        //    a missing resource, regardless of which GameState is active.
-        //    (Bevy 0.19 validates Res<T> params *before* evaluating run_if.)
+impl Plugin for SimulationRuntimePlugin {
+    fn build(&self, app: &mut App) {
+        let state = self.state.clone();
         let game_circuit = fixtures::build_64bit_counter_subcircuits();
-        let mut sim_bridge = SimBridge::from_circuit_with_runtime(&game_circuit, runtime);
+        let mut sim_bridge = SimBridge::from_circuit_with_runtime(&game_circuit, self.runtime);
         power_on_reset(&mut sim_bridge, &game_circuit);
 
         app
-            // ── Core resources (always present) ─────────────────────────────────────────
             .insert_resource(game_circuit)
             .insert_resource(sim_bridge)
             .init_resource::<SimulationConfig>()
             .init_resource::<TickRateMeter>()
             .init_resource::<ThreadlessStepper>()
-            .init_resource::<SelectedGate>()
-            .init_resource::<SimCache>()
+            .add_systems(OnEnter(state.clone()), resume_bridge_system)
+            .add_systems(OnExit(state.clone()), pause_bridge_system)
+            .add_systems(PreUpdate, bridge_flush_system)
+            .add_systems(
+                Update,
+                update_tickrate_system.run_if(in_state(state.clone())),
+            );
+
+        if self.runtime == SimRuntime::Threadless {
+            app.add_systems(
+                Update,
+                drive_threadless_simulation.run_if(in_state(state.clone())),
+            );
+        }
+    }
+}
+
+impl Plugin for SimulationProjectionPlugin {
+    fn build(&self, app: &mut App) {
+        let state = self.state.clone();
+
+        app.init_resource::<SimCache>()
+            .add_systems(
+                OnEnter(state.clone()),
+                (
+                    configure_cache_trace_system,
+                    rebuild_cache_index_system.after(configure_cache_trace_system),
+                ),
+            )
+            .add_systems(
+                PreUpdate,
+                sync_sim_cache_system
+                    .after(bridge_flush_system)
+                    .run_if(in_state(state)),
+            );
+    }
+}
+
+impl Plugin for SimulationViewPlugin {
+    fn build(&self, app: &mut App) {
+        let state = self.state.clone();
+
+        app.init_resource::<SelectedGate>()
             .insert_resource(SpatialGrid::new(100.0))
             .add_message::<crate::editor::LoadWorkspaceEvent>()
             .add_message::<crate::editor::SaveWorkspaceEvent>()
-            // ── On-enter: resume bridge + spawn visuals + prime cache index ───────────────
             .add_systems(
                 OnEnter(state.clone()),
                 (
                     reset_sim_camera_system,
-                    resume_bridge_system,
                     draw_sim_background_system,
                     draw_gates_system,
                     draw_connections_system.after(draw_gates_system),
                     rebuild_spatial_grid_system.after(draw_gates_system),
-                    configure_cache_trace_system.after(draw_gates_system),
-                    rebuild_cache_index_system.after(configure_cache_trace_system),
                 ),
             )
-            // ── On-exit: pause bridge + despawn visuals ──────────────────────
-            .add_systems(
-                OnExit(state.clone()),
-                (pause_bridge_system, despawn_sim_entities),
-            )
-            // ── PreUpdate: drain bridge pending responses ────────────────────
-            // No run_if here – bridge_flush_system is cheap and safe to call
-            // in any state; it's a no-op when there are no pending items.
-            .add_systems(PreUpdate, bridge_flush_system)
-            .add_systems(
-                PreUpdate,
-                sync_sim_cache_system.run_if(in_state(state.clone())),
-            )
-            // ── Update: interaction + visuals (state-gated) ──────────────────
+            .add_systems(OnExit(state.clone()), despawn_sim_entities)
             .add_systems(
                 Update,
                 (
@@ -120,28 +177,14 @@ impl Plugin for SimulationPlugin {
                     update_spatial_grid_system,
                     update_inputs_on_left_click,
                     update_selected_gate,
-                    update_tickrate_system,
                 )
                     .run_if(in_state(state.clone())),
             )
-            // ── Egui UI ──────────────────────────────────────────────────────
-            // Must run in EguiPrimaryContextPass to access EguiContexts.
-            // State filtering happens inside the systems because run_if in
-            // this pass can be brittle on Bevy 0.19.
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
                 (simulation_config_ui_system, ui_for_selected_gate),
             )
-            // ── Save on exit ─────────────────────────────────────────────────
-            // Runs independently of state so that it always fires when closing
             .add_systems(Update, save_on_exit_system);
-
-        if runtime == SimRuntime::Threadless {
-            app.add_systems(
-                Update,
-                drive_threadless_simulation.run_if(in_state(state.clone())),
-            );
-        }
     }
 }
 

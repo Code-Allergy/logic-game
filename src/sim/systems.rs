@@ -171,9 +171,13 @@ pub fn draw_sim_background_system(mut commands: Commands, query: Query<Entity, W
 
 /// Format multi-bit display inputs as a fixed-width hexadecimal value.
 pub fn update_logic_displays_system(
-    mut displays: Query<(&mut Text2d, &LogicDisplay, &SimNodeInputs)>,
+    mut displays: Query<(&mut Text2d, &LogicDisplay, &ChildOf)>,
+    gate_inputs: Query<&SimNodeInputs>,
 ) {
-    for (mut text, display, inputs) in displays.iter_mut() {
+    for (mut text, display, child_of) in displays.iter_mut() {
+        let Ok(inputs) = gate_inputs.get(child_of.parent()) else {
+            continue;
+        };
         let mut value = 0_u64;
         for bit in 0..display.bits.min(64) {
             if (inputs.bits >> bit) & 1 != 0 {

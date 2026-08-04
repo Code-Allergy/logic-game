@@ -241,15 +241,20 @@ pub fn build_8bit_counter_block() -> GameCircuit {
 /// Builds eight byte counter subcircuits chained into a 64-bit ripple counter.
 /// The 64 scalar simulation wires terminate at one hexadecimal display node.
 pub fn build_64bit_counter_subcircuits() -> GameCircuit {
+    build_64bit_counter_subcircuits_with_increment(GameNodeKind::Clock {
+        period_ticks: 4,
+        duty_ticks: 2,
+    })
+}
+
+/// Reusable 64-bit counter implementation. Wrappers use an external input so
+/// both Increment and Reset become real subcircuit interface pins.
+fn build_64bit_counter_subcircuits_with_increment(
+    increment_kind: GameNodeKind,
+) -> GameCircuit {
     let mut circuit = GameCircuit::new("64-Bit Counter (8 x 8-Bit Subcircuits)");
 
-    let mut increment = GameNode::new(
-        GameNodeKind::Clock {
-            period_ticks: 4,
-            duty_ticks: 2,
-        },
-        Vec2::new(-650.0, 120.0),
-    );
+    let mut increment = GameNode::new(increment_kind, Vec2::new(-650.0, 120.0));
     increment.label = Some("Increment Clock".into());
     let increment_id = circuit.add_node(increment);
     let mut reset = GameNode::new(GameNodeKind::Input, Vec2::new(-650.0, -120.0));
@@ -308,7 +313,9 @@ pub fn build_nested_64bit_counter() -> GameCircuit {
 
     let mut counter = GameNode::new(
         GameNodeKind::SubCircuit {
-            circuit: Box::new(build_64bit_counter_subcircuits()),
+            circuit: Box::new(build_64bit_counter_subcircuits_with_increment(
+                GameNodeKind::Input,
+            )),
         },
         Vec2::new(-50.0, 0.0),
     );
@@ -483,7 +490,9 @@ pub fn build_64bit_bus_counter_wrapper() -> GameCircuit {
 
     let mut counter = GameNode::new(
         GameNodeKind::SubCircuit {
-            circuit: Box::new(build_64bit_counter_subcircuits()),
+            circuit: Box::new(build_64bit_counter_subcircuits_with_increment(
+                GameNodeKind::Input,
+            )),
         },
         Vec2::new(-150.0, 0.0),
     );
@@ -533,7 +542,9 @@ pub fn build_64bit_vector_counter_wrapper() -> GameCircuit {
 
     let mut counter = GameNode::new(
         GameNodeKind::SubCircuit {
-            circuit: Box::new(build_64bit_counter_subcircuits()),
+            circuit: Box::new(build_64bit_counter_subcircuits_with_increment(
+                GameNodeKind::Input,
+            )),
         },
         Vec2::new(-150.0, 0.0),
     );

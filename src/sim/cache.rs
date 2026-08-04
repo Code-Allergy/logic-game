@@ -202,10 +202,10 @@ impl SimCache {
         bridge.snapshot_wire_states(&mut |wire_id, val| {
             if let Some(entries) = self.wire_reverse.get(&wire_id) {
                 mapped += 1;
-                for entry in entries {
                 if entries.len() > 1 {
                     multi_pin_wires += 1;
                 }
+                for entry in entries {
                     match self.wire_values.entry(entry.wire_uuid) {
                         Entry::Occupied(mut existing) => {
                             *existing.get_mut() |= val;
@@ -228,7 +228,7 @@ impl SimCache {
             }
         });
 
-            if self.trace_mapping && (missing > 0 || multi_pin_wires > 0) {
+        if self.trace_mapping && (missing > 0 || multi_pin_wires > 0) {
             info!(
                 "SimCache trace: snapshot wires mapped {mapped}, unmapped {missing}, multi-pin wires {multi_pin_wires}"
             );
