@@ -113,6 +113,46 @@ fn test_subcircuit_simd_runner() {
     verify_subcircuit_runner(runner, in0, in1, sum, carry);
 }
 
+fn build_nested_buffer_with_fanout() -> (Circuit, NodeId, NodeId, NodeId) {
+    let mut leaf = Circuit::new();
+    let leaf_in = leaf.input();
+    let buffer = leaf.buffer();
+    let leaf_out = leaf.output();
+    leaf.connect((leaf_in, 0), (buffer, 0));
+    leaf.connect((buffer, 0), (leaf_out, 0));
+
+    let mut wrapper = Circuit::new();
+    let wrapper_in = wrapper.input();
+    let leaf_node = wrapper.add_subcircuit(leaf);
+    let wrapper_out = wrapper.output();
+    wrapper.connect((wrapper_in, 0), (leaf_node, 0));
+    wrapper.connect((leaf_node, 0), (wrapper_out, 0));
+
+    let mut root = Circuit::new();
+    let input = root.input();
+    let nested = root.add_subcircuit(wrapper);
+    let output_a = root.output();
+    let output_b = root.output();
+    root.connect((input, 0), (nested, 0));
+    root.connect((nested, 0), (output_a, 0));
+    root.connect((nested, 0), (output_b, 0));
+
+    (root, input, output_a, output_b)
+}
+
+#[test]
+fn optimized_flat_runner_preserves_nested_output_fanout() {
+    let (circuit, input, output_a, output_b) = build_nested_buffer_with_fanout();
+    let optimized = Compiler::optimize(&circuit);
+    let mut runner = FlatRunner::new(FlattenedCircuit::compile(&optimized));
+
+    runner.set_input(input, 0, true);
+    runner.tick();
+
+    assert!(runner.output(output_a, 0));
+    assert!(runner.output(output_b, 0));
+}
+
 #[test]
 fn test_recursive_16bit_adder_all_runners() {
     let fixture = logi_sim::fixtures::recursive_16bit_adder();

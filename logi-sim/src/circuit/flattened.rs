@@ -54,6 +54,11 @@ impl FlattenCtx {
         external_outputs: &[SmallVec<[usize; 2]>],
     ) {
         let mut local_wire_map: HashMap<WireId, usize> = HashMap::new();
+        // A wire inside a nested circuit can cross the circuit boundary and
+        // drive more than one wire in its parent.  Keep those parent targets
+        // as aliases instead of replacing the local wire mapping with the
+        // last target we happen to visit.
+        let mut output_aliases: HashMap<WireId, SmallVec<[usize; 2]>> = HashMap::new();
 
         for (wire_id, _) in &circuit.wires {
             let global_w_idx = self.wire_count;
@@ -108,9 +113,10 @@ impl FlattenCtx {
                         if let Some(ext_out_wires) = external_outputs.get(output_idx) {
                             for pin in &node.inputs {
                                 if let Some(w) = pin.wire {
-                                    for &ext_w_idx in ext_out_wires {
-                                        local_wire_map.insert(w, ext_w_idx);
-                                    }
+                                    output_aliases
+                                        .entry(w)
+                                        .or_default()
+                                        .extend(ext_out_wires.iter().copied());
                                 }
                             }
                         }
@@ -191,6 +197,9 @@ impl FlattenCtx {
                         for w in &pin.wires {
                             if let Some(&w_idx) = local_wire_map.get(w) {
                                 out_wires.push(w_idx);
+                                if let Some(aliases) = output_aliases.get(w) {
+                                    out_wires.extend(aliases.iter().copied());
+                                }
                             }
                         }
                         if self.is_root {
@@ -230,6 +239,10 @@ impl FlattenCtx {
                             if let Some(&w_idx) = local_wire_map.get(w) {
                                 outputs.push(w_idx);
                                 out_wires.push(w_idx);
+                                if let Some(aliases) = output_aliases.get(w) {
+                                    outputs.extend(aliases.iter().copied());
+                                    out_wires.extend(aliases.iter().copied());
+                                }
                             }
                         }
                         if self.is_root {
