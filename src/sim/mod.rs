@@ -21,6 +21,7 @@ pub mod spatial_grid;
 pub mod systems;
 
 pub use bridge::SimBridge;
+pub use bridge::SimRuntime;
 pub use cache::SimCache;
 pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation};
 pub use plugin::SimulationPlugin;
@@ -111,6 +112,11 @@ impl Default for TickRateMeter {
             average_hz: None,
         }
     }
+}
+
+#[derive(Resource, Default)]
+pub struct ThreadlessStepper {
+    pending_ticks: f64,
 }
 
 impl TickRateMeter {

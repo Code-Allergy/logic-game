@@ -243,6 +243,27 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
 }
 
 #[test]
+fn threadless_bridge_steps_without_a_worker() {
+    let fixture = super::fixtures::build_8bit_counter_block();
+    let mut bridge = SimBridge::from_circuit_threadless(&fixture);
+
+    let start = bridge.tick_count();
+    bridge.step_many(10);
+    assert_eq!(bridge.tick_count(), start + 10);
+
+    bridge.set_runner_type(RunnerType::SimdOptimized);
+    bridge.step_many(5);
+    assert_eq!(bridge.tick_count(), start + 15);
+
+    let mut observed = Vec::new();
+    bridge.snapshot_wire_states(&mut |wire, value| observed.push((wire, value)));
+    assert!(
+        !observed.is_empty(),
+        "snapshot should include wire state in threadless mode"
+    );
+}
+
+#[test]
 fn tick_rate_uses_si_units() {
     assert_eq!(super::systems::format_si_hz(999.0), "999.0 Hz");
     assert_eq!(super::systems::format_si_hz(12_345.0), "12.3 kHz");

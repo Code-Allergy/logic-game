@@ -11,9 +11,12 @@ use crate::{SAVE_FILE_NAME, temp::GateComponentSelectionEvent};
 
 use super::{
     ConnectionLine, GameCircuit, GameNodeKind, GateComponent, LogicDisplay, SavedSimulation,
-    Selected, SelectedGate, SimBridge, SimCache, SimulationConfig, TickRateMeter,
-    calculate_connection_geometry, get_gate_sprite, spatial_grid::SpatialGrid,
+    Selected, SelectedGate, SimBridge, SimCache, SimRuntime, SimulationConfig, ThreadlessStepper,
+    TickRateMeter, calculate_connection_geometry, get_gate_sprite, spatial_grid::SpatialGrid,
 };
+
+const UNLIMITED_THREADLESS_BATCH: u64 = 4_096;
+const MAX_THREADLESS_TICKS_PER_FRAME: u64 = 4_096;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Bridge flush (PreUpdate)
@@ -35,6 +38,7 @@ pub fn bridge_flush_system(
     if game_circuit.is_changed() {
         cache.rebuild_index(&game_circuit, &bridge);
     }
+    cache.is_running = bridge.is_running;
 
     // Snapshot all wire states in one RwLock::read() — O(N wires), independent
     // of how many simulation ticks ran this frame.
@@ -44,6 +48,39 @@ pub fn bridge_flush_system(
     // handled by the snapshot above).
     let events = bridge.drain_events();
     cache.apply_events(&events, &mut sim_config);
+}
+
+/// Drive threadless simulation mode by stepping the bridge directly from Bevy's
+/// main loop. This keeps wasm and other single-thread targets responsive while
+/// preserving the same externally-visible bridge APIs.
+pub fn drive_threadless_simulation(
+    mut bridge: ResMut<SimBridge>,
+    time: Res<Time>,
+    mut stepper: ResMut<ThreadlessStepper>,
+    sim_config: Res<SimulationConfig>,
+) {
+    if bridge.runtime() == SimRuntime::Threaded {
+        return;
+    }
+    if !bridge.is_running {
+        return;
+    }
+
+    if sim_config.unlimited_tick_rate {
+        bridge.step_many(UNLIMITED_THREADLESS_BATCH);
+        return;
+    }
+
+    let tick_rate = sim_config.tick_rate.max(0.1);
+    stepper.pending_ticks += time.delta_secs_f64() * tick_rate;
+    let mut due_ticks = stepper.pending_ticks.floor() as u64;
+    if due_ticks > MAX_THREADLESS_TICKS_PER_FRAME {
+        due_ticks = MAX_THREADLESS_TICKS_PER_FRAME;
+    }
+    if due_ticks > 0 {
+        bridge.step_many(due_ticks);
+        stepper.pending_ticks -= due_ticks as f64;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -405,7 +442,12 @@ pub fn simulation_config_ui_system(
     mut contexts: EguiContexts,
     mut bridge: ResMut<SimBridge>,
     cache: Res<SimCache>,
+    game_state: Res<State<crate::GameState>>,
 ) -> Result<(), BevyError> {
+    if game_state.get() != &crate::GameState::Simulating {
+        return Ok(());
+    }
+
     let tick_count = bridge.tick_count();
     tick_rate_meter.sample(tick_count);
 
@@ -443,6 +485,7 @@ pub fn simulation_config_ui_system(
             });
 
         if selected_runner != sim_config.current_runner {
+            sim_config.current_runner = selected_runner;
             bridge.set_runner_type(selected_runner);
         }
 
@@ -488,7 +531,12 @@ pub fn ui_for_selected_gate(
     game_circuit: ResMut<GameCircuit>,
     bridge: Res<SimBridge>,
     cache: Res<SimCache>,
+    game_state: Res<State<crate::GameState>>,
 ) -> Result<(), BevyError> {
+    if game_state.get() != &crate::GameState::Simulating {
+        return Ok(());
+    }
+
     let ctx = contexts.ctx_mut()?;
     if let Some((_entity, node_id)) = sel.0 {
         // Clone what we need to avoid borrow conflicts in the closure.

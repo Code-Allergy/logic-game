@@ -5,6 +5,7 @@ pub use atomic_state::SharedState;
 use crate::circuit::{Circuit, InputRef, NodeId, NodeKind, OutputRef, WireId};
 use crate::runner::{InspectableRunner, NaiveRunner};
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -112,12 +113,61 @@ pub struct SimulationEngine {
     pub circuit: Circuit,
     pub shared_state: Arc<SharedState>,
     runner_type: RunnerType,
+    sync_runner: RefCell<Option<SyncRunnerState>>,
     command_tx: Option<Sender<SimCommand>>,
     /// Internal event receiver when the caller hasn't provided an external Sender.
     event_rx: Option<Receiver<SimEvent>>,
     /// External event sender provided by the caller (e.g. SimBridge).
     external_event_tx: Option<Sender<SimEvent>>,
     worker_handle: Option<JoinHandle<()>>,
+}
+
+struct SyncRunnerState {
+    circuit: Circuit,
+    runner_type: RunnerType,
+    runner: Box<dyn InspectableRunner>,
+    needs_rebuild: bool,
+}
+
+impl SyncRunnerState {
+    fn new(circuit: Circuit, runner_type: RunnerType) -> Self {
+        let runner = build_runner(&circuit, runner_type);
+        Self {
+            circuit,
+            runner_type,
+            runner,
+            needs_rebuild: false,
+        }
+    }
+
+    fn set_runner_type(&mut self, runner_type: RunnerType) {
+        let compatible_layout =
+            is_optimized_runner(self.runner_type) == is_optimized_runner(runner_type);
+        let tick = self.runner.current_tick();
+        let execution_state = self.runner.execution_state();
+        let mut observable_state = Vec::new();
+        self.runner.for_each_wire(&mut |wire, value| {
+            observable_state.push((wire, value));
+        });
+
+        self.runner_type = runner_type;
+        let mut replacement = build_runner(&self.circuit, self.runner_type);
+        if !compatible_layout || !replacement.restore_execution_state(&execution_state) {
+            for (wire, value) in observable_state {
+                replacement.restore_wire_value(wire, value);
+            }
+        }
+        replacement.set_current_tick(tick);
+        self.runner = replacement;
+        self.needs_rebuild = false;
+    }
+
+    fn ensure_runner(&mut self) {
+        if self.needs_rebuild {
+            self.runner = build_runner(&self.circuit, self.runner_type);
+            self.needs_rebuild = false;
+        }
+    }
 }
 
 struct MappedRunner {
@@ -317,6 +367,7 @@ impl SimulationEngine {
             circuit,
             shared_state: Arc::new(SharedState::new()),
             runner_type: RunnerType::default(),
+            sync_runner: RefCell::new(None),
             command_tx: None,
             event_rx: None,
             external_event_tx: None,
@@ -333,6 +384,7 @@ impl SimulationEngine {
             circuit,
             shared_state: Arc::new(SharedState::new()),
             runner_type: RunnerType::default(),
+            sync_runner: RefCell::new(None),
             command_tx: None,
             event_rx: None,
             external_event_tx: Some(event_tx),
@@ -348,6 +400,163 @@ impl SimulationEngine {
     /// Returns the command sender channel to send commands to the worker thread.
     pub fn command_sender(&self) -> Option<Sender<SimCommand>> {
         self.command_tx.clone()
+    }
+
+    fn sync_state(&self) -> std::cell::RefMut<'_, SyncRunnerState> {
+        let mut slot = self.sync_runner.borrow_mut();
+        if slot.is_none() {
+            slot.replace(SyncRunnerState::new(self.circuit.clone(), self.runner_type));
+        }
+
+        std::cell::RefMut::map(slot, |state| {
+            state.as_mut().expect("sync state initialized above")
+        })
+    }
+
+    fn refresh_sync_circuit_from_main(&self) {
+        let mut slot = self.sync_runner.borrow_mut();
+        if let Some(state) = slot.as_mut() {
+            state.circuit = self.circuit.clone();
+            state.needs_rebuild = true;
+        }
+    }
+
+    fn apply_command_sync(&self, cmd: SimCommand) {
+        let event_sender = self.external_event_tx.as_ref().cloned();
+        let shared = Arc::clone(&self.shared_state);
+
+        match cmd {
+            SimCommand::SetRunner(rt) => {
+                let mut state = self.sync_state();
+                state.set_runner_type(rt);
+                publish_wire_states(&shared, state.runner.as_ref());
+                Self::send_event_or_ignore(event_sender.as_ref(), SimEvent::RunnerSet(rt));
+            }
+            SimCommand::SetTickRate(rate) => {
+                let _ = rate;
+            }
+            SimCommand::SetInput { node, pin, value } => {
+                let mut state = self.sync_state();
+                if state.needs_rebuild {
+                    state.ensure_runner();
+                }
+                state.runner.set_input(node, pin, value);
+            }
+            SimCommand::AddNode {
+                temp_id: _,
+                kind: _,
+                inputs: _,
+                outputs: _,
+                response_tx: _,
+            } => {}
+            SimCommand::AddWire {
+                temp_id: _,
+                source: _,
+                sink: _,
+                response_tx: _,
+            } => {}
+            SimCommand::RemoveNode { node: _ } => {}
+            SimCommand::RemoveWire { wire: _ } => {}
+            SimCommand::RebuildCircuit {
+                circuit: _,
+                response_tx: _,
+            } => {}
+            SimCommand::Pause => {
+                self.shared_state.is_running.store(false, Ordering::Relaxed);
+                Self::send_event_or_ignore(
+                    event_sender.as_ref(),
+                    SimEvent::StatusChanged { is_running: false },
+                );
+            }
+            SimCommand::Resume => {
+                self.shared_state.is_running.store(true, Ordering::Relaxed);
+                Self::send_event_or_ignore(
+                    event_sender.as_ref(),
+                    SimEvent::StatusChanged { is_running: true },
+                );
+            }
+            SimCommand::Step => {
+                let mut state = self.sync_state();
+                if state.needs_rebuild {
+                    state.ensure_runner();
+                    state.needs_rebuild = false;
+                }
+                state.runner.tick();
+                shared.tick_count.fetch_add(1, Ordering::Relaxed);
+                publish_wire_states(&shared, state.runner.as_ref());
+                Self::send_event_or_ignore(
+                    event_sender.as_ref(),
+                    SimEvent::TickCompleted {
+                        tick_count: shared.tick_count.load(Ordering::Relaxed),
+                    },
+                );
+            }
+            SimCommand::Stop => {
+                self.shared_state.is_running.store(false, Ordering::Relaxed);
+                Self::send_event_or_ignore(
+                    event_sender.as_ref(),
+                    SimEvent::StatusChanged { is_running: false },
+                );
+            }
+        }
+    }
+
+    fn send_event_or_ignore(sender: Option<&Sender<SimEvent>>, event: SimEvent) {
+        if let Some(tx) = sender {
+            let _ = tx.send(event);
+        }
+    }
+
+    /// Runs a fixed number of ticks synchronously on the current thread.
+    ///
+    /// This is the primary direct mode API for threadless hosts.
+    pub fn step_many(&mut self, ticks: u64) {
+        for _ in 0..ticks {
+            if self.command_tx.is_none() {
+                self.apply_command_sync(SimCommand::Step);
+            } else if let Some(tx) = &self.command_tx {
+                let _ = tx.send(SimCommand::Step);
+            }
+        }
+    }
+
+    /// Adds a node in threadless mode, mutating local circuit state and tagging the
+    /// runnable for rebuild on the next tick.
+    ///
+    /// In worker mode this is still supported for API parity but should not be
+    /// used for high-frequency edits.
+    pub fn add_node(&mut self, kind: NodeKind, inputs: usize, outputs: usize) -> NodeId {
+        let node = self.circuit.add_node(kind, inputs, outputs);
+        self.refresh_sync_circuit_from_main();
+        node
+    }
+
+    /// Adds a wire in threadless mode, mutating local circuit state and tagging
+    /// the runnable for rebuild on the next tick.
+    pub fn add_wire(&mut self, source: OutputRef, sink: InputRef) -> WireId {
+        let wire = self
+            .circuit
+            .connect((source.node, source.pin), (sink.node, sink.pin));
+        self.refresh_sync_circuit_from_main();
+        wire
+    }
+
+    /// Removes a node from the threadless circuit state.
+    pub fn remove_node(&mut self, node: NodeId) {
+        self.circuit.nodes.remove(node);
+        self.refresh_sync_circuit_from_main();
+    }
+
+    /// Removes a wire from the threadless circuit state.
+    pub fn remove_wire(&mut self, wire: WireId) {
+        self.circuit.wires.remove(wire);
+        self.refresh_sync_circuit_from_main();
+    }
+
+    /// Replaces the simulation circuit in threadless mode.
+    pub fn rebuild_circuit(&mut self, circuit: Circuit) {
+        self.circuit = circuit;
+        self.refresh_sync_circuit_from_main();
     }
 
     /// Spawns a background thread that continuously ticks the simulation as fast as possible.
@@ -604,7 +813,9 @@ impl SimulationEngine {
         self.runner_type = runner_type;
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(SimCommand::SetRunner(runner_type));
+            return;
         }
+        self.apply_command_sync(SimCommand::SetRunner(runner_type));
     }
 
     pub fn stop_worker(&mut self) {
@@ -614,13 +825,16 @@ impl SimulationEngine {
         if let Some(handle) = self.worker_handle.take() {
             let _ = handle.join();
         }
+        self.shared_state.is_running.store(false, Ordering::Relaxed);
     }
 
     /// Set an input pin value. Thread-safe when worker is active.
     pub fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(SimCommand::SetInput { node, pin, value });
+            return;
         }
+        self.apply_command_sync(SimCommand::SetInput { node, pin, value });
     }
 
     /// Atomically read the output state of a node's output pin.
@@ -661,36 +875,47 @@ impl SimulationEngine {
     pub fn pause(&self) {
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(SimCommand::Pause);
+            return;
         }
+        self.apply_command_sync(SimCommand::Pause);
     }
 
     /// Resume simulation worker.
     pub fn resume(&self) {
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(SimCommand::Resume);
+            return;
         }
+        self.apply_command_sync(SimCommand::Resume);
+    }
+
+    /// Toggle simulation running state when using a direct (threadless) runtime.
+    /// Returns the current shared-running value for compatibility checks.
+    pub fn is_running(&self) -> bool {
+        self.shared_state.is_running.load(Ordering::Relaxed)
     }
 
     /// Step simulation worker by 1 tick manually.
     pub fn step(&self) {
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(SimCommand::Step);
+            return;
         }
+        self.apply_command_sync(SimCommand::Step);
     }
 
     /// Set the simulation tick rate (Hz) for the worker thread, or None for unlimited.
     pub fn set_tick_rate(&self, tick_rate: Option<f64>) {
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(SimCommand::SetTickRate(tick_rate));
+            return;
         }
+        self.apply_command_sync(SimCommand::SetTickRate(tick_rate));
     }
 
     /// Step simulation synchronously on current thread (when worker thread is not running).
     pub fn step_sync(&mut self) {
-        let mut runner = build_runner(&self.circuit, self.runner_type);
-        runner.tick();
-        self.shared_state.tick_count.fetch_add(1, Ordering::Relaxed);
-        publish_wire_states(&self.shared_state, runner.as_ref());
+        self.apply_command_sync(SimCommand::Step);
     }
 }
 

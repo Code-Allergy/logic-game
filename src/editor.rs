@@ -80,8 +80,7 @@ impl Plugin for EditorPlugin {
                     editor_ui_system,
                     process_gate_placement,
                     handle_connection_creation,
-                )
-                    .run_if(in_state(GameState::Simulating)),
+                ),
             );
     }
 }
@@ -97,7 +96,12 @@ pub fn editor_ui_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     button_input: Res<ButtonInput<MouseButton>>,
+    game_state: Res<State<GameState>>,
 ) -> Result<(), BevyError> {
+    if game_state.get() != &GameState::Simulating {
+        return Ok(());
+    }
+
     let ctx = contexts.ctx_mut()?;
     let Ok(window) = q_window.single() else {
         return Ok(());
@@ -223,7 +227,12 @@ pub fn process_gate_placement(
     mut bridge: ResMut<SimBridge>,
     mut grid: ResMut<SpatialGrid>,
     mut create_gate_events: MessageReader<CreateGateEvent>,
+    game_state: Res<State<GameState>>,
 ) {
+    if game_state.get() != &GameState::Simulating {
+        return;
+    }
+
     for event in create_gate_events.read() {
         // 1. Add to frontend model.
         let node = GameNode::new(event.kind.clone(), event.position);
@@ -258,7 +267,12 @@ pub fn handle_connection_creation(
     mut create_connection_events: MessageWriter<CreateConnectionEvent>,
     mut selection_events: MessageReader<GateComponentSelectionEvent>,
     gate_query: Query<(&Transform, &GateComponent)>,
+    game_state: Res<State<GameState>>,
 ) {
+    if game_state.get() != &GameState::Simulating {
+        return;
+    }
+
     if !editor_state.connection_mode {
         return;
     }

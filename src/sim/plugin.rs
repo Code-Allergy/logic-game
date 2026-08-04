@@ -4,13 +4,14 @@ use bevy::prelude::*;
 
 use crate::GameState;
 use crate::sim::{
-    SelectedGate, SimBridge, SimCache, SimulationConfig, TickRateMeter,
+    SelectedGate, SimBridge, SimCache, SimulationConfig, ThreadlessStepper, TickRateMeter,
     systems::{
         bridge_flush_system, drag_selected_system, draw_connections_system, draw_gates_system,
-        gate_selection_system, rebuild_spatial_grid_system, save_on_exit_system,
-        simulation_config_ui_system, ui_for_selected_gate, update_connections_system,
-        update_input_colours_system, update_inputs_on_left_click, update_logic_displays_system,
-        update_selected_gate, update_spatial_grid_system, update_tickrate_system,
+        drive_threadless_simulation, gate_selection_system, rebuild_spatial_grid_system,
+        save_on_exit_system, simulation_config_ui_system, ui_for_selected_gate,
+        update_connections_system, update_input_colours_system, update_inputs_on_left_click,
+        update_logic_displays_system, update_selected_gate, update_spatial_grid_system,
+        update_tickrate_system,
     },
 };
 
@@ -44,6 +45,7 @@ impl Plugin for SimulationPlugin {
             .insert_resource(sim_bridge)
             .init_resource::<SimulationConfig>()
             .init_resource::<TickRateMeter>()
+            .init_resource::<ThreadlessStepper>()
             .init_resource::<SelectedGate>()
             .init_resource::<SimCache>()
             .insert_resource(SpatialGrid::new(100.0))
@@ -71,6 +73,7 @@ impl Plugin for SimulationPlugin {
             .add_systems(
                 Update,
                 (
+                    drive_threadless_simulation,
                     update_input_colours_system,
                     update_logic_displays_system,
                     gate_selection_system.before(drag_selected_system),
@@ -85,11 +88,11 @@ impl Plugin for SimulationPlugin {
             )
             // ── Egui UI ──────────────────────────────────────────────────────
             // Must run in EguiPrimaryContextPass to access EguiContexts.
-            // run_if is safe here because SimBridge now always exists (inserted
-            // at plugin build time).
+            // State filtering happens inside the systems because run_if in
+            // this pass can be brittle on Bevy 0.19.
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
-                (simulation_config_ui_system, ui_for_selected_gate).run_if(in_state(state.clone())),
+                (simulation_config_ui_system, ui_for_selected_gate),
             )
             // ── Save on exit ─────────────────────────────────────────────────
             // Runs independently of state so that it always fires when closing

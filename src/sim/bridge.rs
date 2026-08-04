@@ -38,8 +38,14 @@ use super::model::{GameCircuit, GameNode, GameWire};
 
 struct SimInner {
     engine: SimulationEngine,
-    command_tx: Sender<SimCommand>,
-    event_rx: Receiver<SimEvent>,
+    command_tx: Option<Sender<SimCommand>>,
+    event_rx: Option<Receiver<SimEvent>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimRuntime {
+    Threaded,
+    Threadless,
 }
 
 /// Represents a pending `AddNode` command awaiting a `NodeId` response from the worker.
@@ -85,6 +91,7 @@ pub struct SimBridge {
 
     // ── Shared atomic state (Arc<RwLock<...>>, Send+Sync) ──────────────────
     shared_state: Arc<SharedState>,
+    runtime: SimRuntime,
 
     // ── Metadata ───────────────────────────────────────────────────────────
     next_temp_id: u64,
@@ -96,22 +103,49 @@ impl SimBridge {
     // Construction
     // ─────────────────────────────────────────────────────────────────────
 
-    /// Build a `SimBridge` from a [`GameCircuit`], immediately starting the
-    /// background simulation worker.
+    /// Build a `SimBridge` from a [`GameCircuit`] using the platform default
+    /// runtime (threaded on native targets, threadless on wasm).
     pub fn from_circuit(game_circuit: &GameCircuit) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let runtime = SimRuntime::Threaded;
+        #[cfg(target_arch = "wasm32")]
+        let runtime = SimRuntime::Threadless;
+        Self::from_circuit_with_runtime(game_circuit, runtime)
+    }
+
+    pub fn from_circuit_threaded(game_circuit: &GameCircuit) -> Self {
+        Self::from_circuit_with_runtime(game_circuit, SimRuntime::Threaded)
+    }
+
+    pub fn from_circuit_threadless(game_circuit: &GameCircuit) -> Self {
+        Self::from_circuit_with_runtime(game_circuit, SimRuntime::Threadless)
+    }
+
+    pub fn from_circuit_with_runtime(game_circuit: &GameCircuit, runtime: SimRuntime) -> Self {
         let (sim_circuit, node_by_uuid, wire_by_uuid) = Self::build_sim_circuit(game_circuit);
         let uuid_by_node: HashMap<NodeId, Uuid> =
             node_by_uuid.iter().map(|(u, n)| (*n, *u)).collect();
         let uuid_by_wire: HashMap<WireId, Uuid> =
             wire_by_uuid.iter().map(|(u, w)| (*w, *u)).collect();
 
-        let (event_tx, event_rx) = mpsc::channel::<SimEvent>();
-        let mut engine = SimulationEngine::new_with_event_channel(sim_circuit, event_tx);
+        let mut engine = match runtime {
+            SimRuntime::Threaded => {
+                let (event_tx, _event_rx) = mpsc::channel::<SimEvent>();
+                let mut engine = SimulationEngine::new_with_event_channel(sim_circuit, event_tx);
+                engine.start_worker();
+                engine
+            }
+            SimRuntime::Threadless => {
+                let engine = SimulationEngine::new(sim_circuit);
+                engine
+            }
+        };
+
+        let (command_tx, event_rx) = match runtime {
+            SimRuntime::Threaded => (engine.command_sender(), engine.take_event_receiver()),
+            SimRuntime::Threadless => (None, None),
+        };
         let shared_state = Arc::clone(&engine.shared_state);
-        engine.start_worker();
-        let command_tx = engine
-            .command_sender()
-            .expect("worker should be running after start_worker");
 
         Self {
             inner: Mutex::new(SimInner {
@@ -126,6 +160,7 @@ impl SimBridge {
             wire_by_uuid,
             uuid_by_wire,
             shared_state,
+            runtime,
             next_temp_id: 0,
             is_running: true,
         }
@@ -142,9 +177,56 @@ impl SimBridge {
         self.inner.lock().expect("SimBridge inner mutex poisoned")
     }
 
+    pub fn runtime(&self) -> SimRuntime {
+        self.runtime
+    }
+
     fn send_cmd(&self, cmd: SimCommand) {
-        let inner = self.inner();
-        let _ = inner.command_tx.send(cmd);
+        let mut inner = self.inner();
+        if let Some(tx) = &inner.command_tx {
+            let _ = tx.send(cmd);
+            return;
+        }
+
+        match cmd {
+            SimCommand::SetRunner(runner_type) => {
+                inner.engine.set_runner(runner_type);
+            }
+            SimCommand::SetInput { node, pin, value } => inner.engine.set_input(node, pin, value),
+            SimCommand::SetTickRate(tick_rate) => inner.engine.set_tick_rate(tick_rate),
+            SimCommand::AddNode {
+                temp_id,
+                kind,
+                inputs,
+                outputs,
+                response_tx,
+            } => {
+                let node_id = inner.engine.add_node(kind, inputs, outputs);
+                let _ = response_tx.send((temp_id, node_id));
+            }
+            SimCommand::AddWire {
+                temp_id,
+                source,
+                sink,
+                response_tx,
+            } => {
+                let wire_id = inner.engine.add_wire(source, sink);
+                let _ = response_tx.send((temp_id, wire_id));
+            }
+            SimCommand::RemoveNode { node } => inner.engine.remove_node(node),
+            SimCommand::RemoveWire { wire } => inner.engine.remove_wire(wire),
+            SimCommand::RebuildCircuit {
+                circuit,
+                response_tx,
+            } => {
+                inner.engine.rebuild_circuit(circuit);
+                let _ = response_tx.send(());
+            }
+            SimCommand::Pause => inner.engine.pause(),
+            SimCommand::Resume => inner.engine.resume(),
+            SimCommand::Step => inner.engine.step(),
+            SimCommand::Stop => inner.engine.stop_worker(),
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -226,19 +308,31 @@ impl SimBridge {
         self.wire_by_uuid = wire_by_uuid;
         self.uuid_by_wire = self.wire_by_uuid.iter().map(|(u, w)| (*w, *u)).collect();
 
-        let (event_tx, event_rx) = mpsc::channel::<SimEvent>();
-        let mut engine = SimulationEngine::new_with_event_channel(sim_circuit, event_tx);
-        self.shared_state = Arc::clone(&engine.shared_state);
-        engine.start_worker();
-        let command_tx = engine
-            .command_sender()
-            .expect("worker should be running after start_worker");
-
-        *self.inner() = SimInner {
-            engine,
-            command_tx,
-            event_rx,
-        };
+        match self.runtime {
+            SimRuntime::Threaded => {
+                let (event_tx, event_rx) = mpsc::channel::<SimEvent>();
+                let mut engine = SimulationEngine::new_with_event_channel(sim_circuit, event_tx);
+                engine.start_worker();
+                let command_tx = engine
+                    .command_sender()
+                    .expect("worker should be running after start_worker");
+                self.shared_state = Arc::clone(&engine.shared_state);
+                *self.inner() = SimInner {
+                    engine,
+                    command_tx: Some(command_tx),
+                    event_rx: Some(event_rx),
+                };
+            }
+            SimRuntime::Threadless => {
+                let engine = SimulationEngine::new(sim_circuit);
+                self.shared_state = Arc::clone(&engine.shared_state);
+                *self.inner() = SimInner {
+                    engine,
+                    command_tx: None,
+                    event_rx: None,
+                };
+            }
+        }
         self.is_running = true;
     }
 
@@ -355,6 +449,22 @@ impl SimBridge {
         self.send_cmd(SimCommand::Step);
     }
 
+    /// Run multiple simulation ticks synchronously in threadless mode, or enqueue
+    /// each tick as a command in threaded mode.
+    pub fn step_many(&self, ticks: u64) {
+        if self.runtime() == SimRuntime::Threadless {
+            let mut inner = self.inner();
+            for _ in 0..ticks {
+                inner.engine.step();
+            }
+            return;
+        }
+
+        for _ in 0..ticks {
+            self.send_cmd(SimCommand::Step);
+        }
+    }
+
     pub fn stop(&mut self) {
         self.is_running = false;
         self.inner().engine.stop_worker();
@@ -440,7 +550,10 @@ impl SimBridge {
     pub fn drain_events(&self) -> Vec<SimEvent> {
         let mut events = Vec::new();
         let inner = self.inner();
-        while let Ok(evt) = inner.event_rx.try_recv() {
+        let Some(event_rx) = &inner.event_rx else {
+            return events;
+        };
+        while let Ok(evt) = event_rx.try_recv() {
             events.push(evt);
         }
         events
