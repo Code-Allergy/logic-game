@@ -323,6 +323,7 @@ impl SimulationEngine {
             let mut running = true;
             let mut needs_rebuild = false;
             let mut ticks_since_snapshot = 0_u32;
+            let mut pending_cmd = None;
 
             let mut tick_rate = Some(10.0);
             let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
@@ -337,7 +338,11 @@ impl SimulationEngine {
 
             loop {
                 // Process all queued commands from main thread
-                while let Ok(cmd) = rx_cmd.try_recv() {
+                loop {
+                    let cmd = pending_cmd.take().or_else(|| rx_cmd.try_recv().ok());
+                    let Some(cmd) = cmd else {
+                        break;
+                    };
                     match cmd {
                         SimCommand::SetRunner(rt) => {
                             current_runner_type = rt;
@@ -460,7 +465,11 @@ impl SimulationEngine {
                         } else {
                             let remaining = next_tick_time.saturating_duration_since(now);
                             if remaining > SCHEDULER_SPIN_THRESHOLD {
-                                std::thread::sleep(remaining - SCHEDULER_SPIN_THRESHOLD);
+                                match rx_cmd.recv_timeout(remaining - SCHEDULER_SPIN_THRESHOLD) {
+                                    Ok(cmd) => pending_cmd = Some(cmd),
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                                }
                             } else {
                                 std::hint::spin_loop();
                             }
@@ -489,7 +498,14 @@ impl SimulationEngine {
                             ticks_since_snapshot = 0;
                         } else {
                             let now = std::time::Instant::now();
-                            if now.duration_since(last_snapshot_time) >= MAX_SNAPSHOT_INTERVAL {
+                            // Slow rate-limited simulations must publish every
+                            // tick. Otherwise an immediately due 0.1 Hz tick
+                            // can remain invisible until the next tick ten
+                            // seconds later. At high rates, retain the bounded
+                            // publication interval to amortize observation.
+                            if tick_duration >= MAX_SNAPSHOT_INTERVAL
+                                || now.duration_since(last_snapshot_time) >= MAX_SNAPSHOT_INTERVAL
+                            {
                                 publish_wire_states(&shared, runner.as_ref());
                                 ticks_since_snapshot = 0;
                                 last_snapshot_time = now;
@@ -497,7 +513,10 @@ impl SimulationEngine {
                         }
                     }
                 } else {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    match rx_cmd.recv() {
+                        Ok(cmd) => pending_cmd = Some(cmd),
+                        Err(_) => return,
+                    }
                 }
             }
         });

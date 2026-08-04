@@ -1,6 +1,6 @@
-use logi_sim::prelude::*;
+use logi_sim::{engine::RunnerType, prelude::*};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn test_simulation_engine_synchronous() {
@@ -93,6 +93,45 @@ fn rate_limited_scheduler_batches_ticks_to_recover_from_os_jitter() {
         completed >= 1_000,
         "rate-limited scheduler completed only {completed} ticks"
     );
+}
+
+#[test]
+fn every_runner_publishes_results_across_the_supported_rate_range() {
+    const RATES: [f64; 5] = [0.1, 10.0, 1_000.0, 100_000.0, 10_000_000.0];
+
+    for &runner_type in RunnerType::ALL {
+        for rate in RATES {
+            let mut circuit = Circuit::new();
+            let input = circuit.input();
+            let buffer = circuit.buffer();
+            let output = circuit.output();
+            circuit.connect((input, 0), (buffer, 0));
+            circuit.connect((buffer, 0), (output, 0));
+
+            let mut engine = SimulationEngine::new(circuit);
+            engine.set_runner(runner_type);
+            engine.start_worker();
+            // Queue a deterministic configuration boundary. Resume schedules
+            // an immediate tick even at 0.1 Hz, so this test does not need to
+            // wait for a full ten-second period.
+            engine.pause();
+            engine.set_tick_rate(Some(rate));
+            engine.set_input(input, 0, true);
+            engine.resume();
+
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while !engine.get_input(output, 0) && Instant::now() < deadline {
+                sleep(Duration::from_millis(1));
+            }
+            let output_value = engine.get_input(output, 0);
+            engine.stop_worker();
+
+            assert!(
+                output_value,
+                "{runner_type} did not publish its output at {rate} Hz"
+            );
+        }
+    }
 }
 
 #[test]
