@@ -14,6 +14,9 @@ pub struct FlatNode {
 #[derive(Clone, Debug)]
 pub struct FlattenedCircuit {
     pub nodes: Vec<FlatNode>,
+    /// Indices of nodes that execute logic during a tick. Interface nodes stay
+    /// in `nodes` for ID/pin lookup but are excluded from the hot loop.
+    pub executable_nodes: Vec<usize>,
     pub wire_count: usize,
     pub node_to_idx: HashMap<NodeId, usize>,
     pub wire_to_idx: HashMap<WireId, usize>,
@@ -267,9 +270,22 @@ impl FlattenedCircuit {
     pub fn compile(circuit: &Circuit) -> Self {
         let mut ctx = FlattenCtx::new();
         ctx.inline_circuit(circuit, &[], &[]);
+        let executable_nodes = ctx
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, node)| {
+                (!matches!(
+                    node.kind,
+                    NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_)
+                ))
+                .then_some(idx)
+            })
+            .collect();
 
         Self {
             nodes: ctx.nodes,
+            executable_nodes,
             wire_count: ctx.wire_count,
             node_to_idx: ctx.node_to_idx,
             wire_to_idx: ctx.wire_to_idx,

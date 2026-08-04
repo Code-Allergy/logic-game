@@ -118,7 +118,7 @@ struct MappedRunner {
     inner: Box<dyn InspectableRunner>,
     node_map: std::collections::HashMap<NodeId, NodeId>,
     wire_map: std::collections::HashMap<WireId, WireId>,
-    reverse_wire_map: std::collections::HashMap<WireId, WireId>,
+    reverse_wire_map: std::collections::HashMap<WireId, Vec<WireId>>,
 }
 
 /// Unlimited simulation can run many logical ticks between rendered frames.
@@ -169,8 +169,10 @@ impl InspectableRunner for MappedRunner {
 
     fn for_each_wire(&self, f: &mut dyn FnMut(WireId, bool)) {
         self.inner.for_each_wire(&mut |mapped_wire, value| {
-            if let Some(&raw_wire) = self.reverse_wire_map.get(&mapped_wire) {
-                f(raw_wire, value);
+            if let Some(raw_wires) = self.reverse_wire_map.get(&mapped_wire) {
+                for &raw_wire in raw_wires {
+                    f(raw_wire, value);
+                }
             }
         });
     }
@@ -190,12 +192,15 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
 
     if is_optimized {
         let (opt_circuit, node_map, wire_map) =
-            crate::compiler::dead_code::cull_dead_nodes_with_map(circuit);
+            crate::compiler::Compiler::optimize_with_maps(circuit);
 
         let mut reverse_wire_map = std::collections::HashMap::new();
 
         for (&raw_wire_id, &opt_wire_id) in &wire_map {
-            reverse_wire_map.insert(opt_wire_id, raw_wire_id);
+            reverse_wire_map
+                .entry(opt_wire_id)
+                .or_insert_with(Vec::new)
+                .push(raw_wire_id);
         }
 
         let inner: Box<dyn InspectableRunner> = match runner_type {

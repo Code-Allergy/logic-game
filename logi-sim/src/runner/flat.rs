@@ -52,7 +52,8 @@ impl Runner for FlatRunner {
     }
 
     fn tick(&mut self) {
-        for n_idx in 0..self.circuit.nodes.len() {
+        for executable_idx in 0..self.circuit.executable_nodes.len() {
+            let n_idx = self.circuit.executable_nodes[executable_idx];
             let kind = &self.circuit.nodes[n_idx].kind;
             match kind {
                 NodeKind::Input | NodeKind::Output | NodeKind::SubCircuit(_) => continue,
