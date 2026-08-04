@@ -368,6 +368,83 @@ fn bench_factory<F: BenchmarkRunnerFactory>(c: &mut Criterion) {
     );
 }
 
+fn bench_simd_fast_large_dense_throughput(c: &mut Criterion) {
+    let large_fixture = large_throughput_fixture();
+    let opt_large_fixture = Compiler::optimize(&large_fixture.circuit);
+    let bit_packed = BitPackedCircuit::compile(&opt_large_fixture);
+    let node_output_pins = bit_packed.node_output_pins.clone();
+    let mut fast_runner = SimdRunner::new(bit_packed);
+
+    let mut input_wires = Vec::with_capacity(large_fixture.input_nodes.len());
+    for node in &large_fixture.input_nodes {
+        if let Some(wires) = node_output_pins.get(&(*node, 0)) {
+            if let Some(&wire) = wires.first() {
+                input_wires.push(wire);
+            }
+        }
+    }
+
+    let mut previous_bits = vec![false; input_wires.len()];
+    let mut changed_inputs: Vec<(usize, u64)> = Vec::with_capacity(input_wires.len() / 2);
+
+    const LARGE_BATCH_TICKS: u32 = 64;
+    c.bench_function(
+        "SimdRunner-optimized/large_dense_fast_input_throughput_tick",
+        |b| {
+            b.iter_custom(|iters| {
+                let start = std::time::Instant::now();
+                let mut lfsr = 0x9E3779B97F4A7C15u64;
+                for _ in 0..iters {
+                    for _ in 0..LARGE_BATCH_TICKS {
+                        let mut cursor = 0usize;
+                        for chunk in input_wires.chunks(64) {
+                            lfsr ^= lfsr << 7;
+                            lfsr ^= lfsr >> 9;
+                            lfsr ^= lfsr << 8;
+                            let chunk_bits = lfsr;
+                            for (slot, wire) in chunk.iter().enumerate() {
+                                let new_state = (chunk_bits >> slot) & 1 != 0;
+                                let index = cursor + slot;
+                                if previous_bits[index] != new_state {
+                                    previous_bits[index] = new_state;
+                                    changed_inputs
+                                        .push((*wire, if new_state { u64::MAX } else { 0 }));
+                                }
+                            }
+                            cursor += chunk.len();
+                        }
+
+                        fast_runner.set_input_scalar_wire_values(&changed_inputs);
+                        changed_inputs.clear();
+                        fast_runner.tick();
+                    }
+                }
+                start.elapsed() / LARGE_BATCH_TICKS
+            });
+        },
+    );
+}
+
+fn bench_simd_large_dense_tick_only(c: &mut Criterion) {
+    let large_fixture = large_throughput_fixture();
+    let opt_large_fixture = Compiler::optimize(&large_fixture.circuit);
+    let bit_packed = BitPackedCircuit::compile(&opt_large_fixture);
+    let mut fast_runner = SimdRunner::new(bit_packed);
+
+    const LARGE_BATCH_TICKS: u32 = 64;
+    c.bench_function("SimdRunner-optimized/large_dense_tick_only", |b| {
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for _ in 0..LARGE_BATCH_TICKS {
+                    fast_runner.tick();
+                }
+            }
+            start.elapsed() / LARGE_BATCH_TICKS
+        });
+    });
+}
+
 // ... runner factories ...
 
 pub struct EventDrivenRunnerBenchWrapper(EventDrivenRunner);
@@ -467,6 +544,8 @@ fn runner_benchmarks(c: &mut Criterion) {
     bench_factory::<EventDrivenOptimizedBenchFactory>(c);
     bench_factory::<SimdUnoptimizedBenchFactory>(c);
     bench_factory::<SimdOptimizedBenchFactory>(c);
+    bench_simd_fast_large_dense_throughput(c);
+    bench_simd_large_dense_tick_only(c);
 }
 
 fn fast_criterion() -> Criterion {

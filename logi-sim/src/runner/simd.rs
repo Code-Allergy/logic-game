@@ -2,8 +2,8 @@ use crate::circuit::{
     BitPackedCircuit, NodeId, SimdIndex, SimdOp, SimdProgram, SimdPrograms, WireId,
 };
 use crate::runner::{InspectableRunner, Runner};
+use slotmap::SecondaryMap;
 use smallvec::SmallVec;
-use std::collections::HashMap;
 use wide::u64x4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,13 +14,17 @@ enum SimdLaneMode {
 
 pub struct SimdRunner {
     circuit: BitPackedCircuit,
+    is_wide: bool,
+    has_clocks: bool,
+    has_counters: bool,
     wire_values: Vec<u64x4>,
     wire_values_scalar: Vec<u64>,
     tick_count: u64,
     previous_clock: Vec<u64x4>,
     previous_clock_scalar: Vec<u64>,
     clock_phase: Vec<u64>,
-    pin0_input_cache: HashMap<NodeId, SmallVec<[usize; 2]>>,
+    pin0_input_cache_single: SecondaryMap<NodeId, usize>,
+    pin0_input_cache_multi: SecondaryMap<NodeId, SmallVec<[usize; 2]>>,
     lane_mode: SimdLaneMode,
 }
 
@@ -37,21 +41,44 @@ impl SimdRunner {
                 program.clocks.iter().map(|clock| clock.phase).collect(),
             ),
         };
-        let mut pin0_input_cache = HashMap::new();
+        let (is_wide, has_clocks, has_counters) = match &circuit.programs {
+            SimdPrograms::Compact(program) => (
+                false,
+                !program.clocks.is_empty(),
+                !program.counters.is_empty(),
+            ),
+            SimdPrograms::Wide(program) => (
+                true,
+                !program.clocks.is_empty(),
+                !program.counters.is_empty(),
+            ),
+        };
+        let mut pin0_input_cache_single = SecondaryMap::new();
+        let mut pin0_input_cache_multi = SecondaryMap::new();
         for ((node, pin), wires) in &circuit.node_output_pins {
             if *pin == 0 {
-                pin0_input_cache.insert(*node, wires.clone());
+                if wires.len() == 1 {
+                    if let Some(&wire) = wires.first() {
+                        pin0_input_cache_single.insert(*node, wire);
+                    }
+                } else {
+                    pin0_input_cache_multi.insert(*node, wires.clone());
+                }
             }
         }
         Self {
             circuit,
+            is_wide,
+            has_clocks,
+            has_counters,
             wire_values: vec![u64x4::ZERO; wire_count],
             wire_values_scalar: vec![0; wire_count],
             tick_count: 0,
             previous_clock: vec![u64x4::ZERO; counter_count],
             previous_clock_scalar: vec![0; counter_count],
             clock_phase,
-            pin0_input_cache,
+            pin0_input_cache_single,
+            pin0_input_cache_multi,
             lane_mode: SimdLaneMode::Scalar,
         }
     }
@@ -81,17 +108,19 @@ impl SimdRunner {
     pub fn set_input_u64x4(&mut self, node: NodeId, pin: u8, vector: u64x4) {
         if let Some(value) = maybe_uniform_vector_first_lane(vector) {
             if self.lane_mode == SimdLaneMode::Scalar {
-                if self.set_input_u64_scalar(node, pin, value) {
+                if pin == 0 && self.set_input_u64_scalar_cached(node, pin, value) {
                     return;
                 }
-                if let Some(wires) = self.circuit.node_output_pins.get(&(node, pin)) {
-                    for &wire in wires {
-                        self.wire_values_scalar[wire] = value;
+                if pin != 0 {
+                    if let Some(wires) = self.circuit.node_output_pins.get(&(node, pin)) {
+                        for &wire in wires {
+                            self.wire_values_scalar[wire] = value;
+                        }
                     }
                 }
             } else {
                 let vector = u64x4::splat(value);
-                if self.set_input_u64x4_cached(node, pin, vector) {
+                if pin == 0 && self.set_input_u64x4_cached(node, pin, vector) {
                     return;
                 }
                 if let Some(wires) = self.circuit.node_output_pins.get(&(node, pin)) {
@@ -147,21 +176,27 @@ impl SimdRunner {
         }
     }
 
+    /// Set a small batch of pin0 scalar inputs using pre-resolved wire indices.
+    ///
+    /// This bypasses `NodeId` lookups and is intended for internal high-throughput
+    /// paths that can precompute wire slots once.
     #[inline(always)]
-    fn set_input_u64_scalar(&mut self, node: NodeId, pin: u8, value: u64) -> bool {
-        if self.lane_mode != SimdLaneMode::Scalar {
-            return false;
+    pub fn set_input_scalar_by_wires(&mut self, updates: &[(usize, bool)]) {
+        for &(wire, on) in updates {
+            self.wire_values_scalar[wire] = if on { u64::MAX } else { 0 };
         }
-        if self.set_input_u64_scalar_cached(node, pin, value) {
-            return true;
+    }
+
+    /// Set a batch of scalar wire values using pre-resolved wire indices.
+    ///
+    /// The provided value is interpreted as raw packed wire value so this can be
+    /// used by high-throughput paths where callers already normalize booleans to
+    /// this representation.
+    #[inline(always)]
+    pub fn set_input_scalar_wire_values(&mut self, updates: &[(usize, u64)]) {
+        for &(wire, value) in updates {
+            self.wire_values_scalar[wire] = value;
         }
-        if let Some(wires) = self.circuit.node_output_pins.get(&(node, pin)) {
-            for &wire in wires {
-                self.wire_values_scalar[wire] = value;
-            }
-            return true;
-        }
-        false
     }
 
     #[inline(always)]
@@ -169,7 +204,11 @@ impl SimdRunner {
         if pin != 0 {
             return false;
         }
-        if let Some(wires) = self.pin0_input_cache.get(&node) {
+        if let Some(&wire) = self.pin0_input_cache_single.get(node) {
+            self.wire_values_scalar[wire] = value;
+            return true;
+        }
+        if let Some(wires) = self.pin0_input_cache_multi.get(node) {
             for &wire in wires {
                 self.wire_values_scalar[wire] = value;
             }
@@ -186,7 +225,11 @@ impl SimdRunner {
         if self.lane_mode != SimdLaneMode::Vector {
             return false;
         }
-        if let Some(wires) = self.pin0_input_cache.get(&node) {
+        if let Some(&wire) = self.pin0_input_cache_single.get(node) {
+            self.wire_values[wire] = value;
+            return true;
+        }
+        if let Some(wires) = self.pin0_input_cache_multi.get(node) {
             for &wire in wires {
                 self.wire_values[wire] = value;
             }
@@ -221,14 +264,14 @@ impl SimdRunner {
 }
 
 #[inline(always)]
-fn execute_program<I: SimdIndex>(
+fn execute_program<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdIndex>(
     program: &SimdProgram<I>,
     wires: &mut [u64x4],
     previous_clock: &mut [u64x4],
     clock_phase: &mut [u64],
 ) {
     let wires_ptr = wires.as_mut_ptr();
-    if !program.clocks.is_empty() {
+    if HAS_CLOCKS {
         let ones = u64x4::splat(u64::MAX);
         for (clock, phase) in program.clocks.iter().zip(clock_phase.iter_mut()) {
             let output = *phase < clock.duty_ticks;
@@ -242,7 +285,7 @@ fn execute_program<I: SimdIndex>(
         }
     }
 
-    if !program.counters.is_empty() {
+    if HAS_COUNTERS {
         for (counter, previous) in program.counters.iter().zip(previous_clock) {
             let counter_clock = unsafe { *wires_ptr.add(counter.increment.as_usize()) };
             let counter_reset = unsafe { *wires_ptr.add(counter.reset.as_usize()) };
@@ -403,14 +446,14 @@ fn execute_program<I: SimdIndex>(
 }
 
 #[inline(always)]
-fn execute_program_scalar<I: SimdIndex>(
+fn execute_program_scalar<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdIndex>(
     program: &SimdProgram<I>,
     wires: &mut [u64],
     previous_clock: &mut [u64],
     clock_phase: &mut [u64],
 ) {
     let wires_ptr = wires.as_mut_ptr();
-    if !program.clocks.is_empty() {
+    if HAS_CLOCKS {
         for (clock, phase) in program.clocks.iter().zip(clock_phase.iter_mut()) {
             let output = *phase < clock.duty_ticks;
             unsafe {
@@ -423,7 +466,7 @@ fn execute_program_scalar<I: SimdIndex>(
         }
     }
 
-    if !program.counters.is_empty() {
+    if HAS_COUNTERS {
         for (counter, previous) in program.counters.iter().zip(previous_clock) {
             let counter_clock = unsafe { *wires_ptr.add(counter.increment.as_usize()) };
             let counter_reset = unsafe { *wires_ptr.add(counter.reset.as_usize()) };
@@ -657,7 +700,14 @@ impl Runner for SimdRunner {
     fn set_input(&mut self, node: NodeId, pin: u8, value: bool) {
         let value = if value { u64::MAX } else { 0 };
         if self.lane_mode == SimdLaneMode::Scalar {
-            if self.set_input_u64_scalar(node, pin, value) {
+            if pin == 0 {
+                if self.set_input_u64_scalar_cached(node, pin, value) {
+                    return;
+                }
+            } else if let Some(wires) = self.circuit.node_output_pins.get(&(node, pin)) {
+                for &wire in wires {
+                    self.wire_values_scalar[wire] = value;
+                }
                 return;
             }
             return;
@@ -675,39 +725,122 @@ impl Runner for SimdRunner {
 
     fn tick(&mut self) {
         let scalar_mode = self.lane_mode == SimdLaneMode::Scalar;
-        match &self.circuit.programs {
-            SimdPrograms::Compact(program) => {
-                if scalar_mode {
-                    execute_program_scalar(
+        if self.is_wide {
+            let SimdPrograms::Wide(program) = &self.circuit.programs else {
+                unreachable!()
+            };
+            if scalar_mode {
+                match (self.has_clocks, self.has_counters) {
+                    (false, false) => execute_program_scalar::<false, false, u32>(
                         program,
                         &mut self.wire_values_scalar,
                         &mut self.previous_clock_scalar,
                         &mut self.clock_phase,
-                    )
-                } else {
-                    execute_program(
+                    ),
+                    (false, true) => execute_program_scalar::<false, true, u32>(
+                        program,
+                        &mut self.wire_values_scalar,
+                        &mut self.previous_clock_scalar,
+                        &mut self.clock_phase,
+                    ),
+                    (true, false) => execute_program_scalar::<true, false, u32>(
+                        program,
+                        &mut self.wire_values_scalar,
+                        &mut self.previous_clock_scalar,
+                        &mut self.clock_phase,
+                    ),
+                    (true, true) => execute_program_scalar::<true, true, u32>(
+                        program,
+                        &mut self.wire_values_scalar,
+                        &mut self.previous_clock_scalar,
+                        &mut self.clock_phase,
+                    ),
+                }
+            } else {
+                match (self.has_clocks, self.has_counters) {
+                    (false, false) => execute_program::<false, false, u32>(
                         program,
                         &mut self.wire_values,
                         &mut self.previous_clock,
                         &mut self.clock_phase,
-                    )
+                    ),
+                    (false, true) => execute_program::<false, true, u32>(
+                        program,
+                        &mut self.wire_values,
+                        &mut self.previous_clock,
+                        &mut self.clock_phase,
+                    ),
+                    (true, false) => execute_program::<true, false, u32>(
+                        program,
+                        &mut self.wire_values,
+                        &mut self.previous_clock,
+                        &mut self.clock_phase,
+                    ),
+                    (true, true) => execute_program::<true, true, u32>(
+                        program,
+                        &mut self.wire_values,
+                        &mut self.previous_clock,
+                        &mut self.clock_phase,
+                    ),
                 }
             }
-            SimdPrograms::Wide(program) => {
-                if scalar_mode {
-                    execute_program_scalar(
+        } else {
+            let SimdPrograms::Compact(program) = &self.circuit.programs else {
+                unreachable!()
+            };
+            if scalar_mode {
+                match (self.has_clocks, self.has_counters) {
+                    (false, false) => execute_program_scalar::<false, false, u16>(
                         program,
                         &mut self.wire_values_scalar,
                         &mut self.previous_clock_scalar,
                         &mut self.clock_phase,
-                    )
-                } else {
-                    execute_program(
+                    ),
+                    (false, true) => execute_program_scalar::<false, true, u16>(
+                        program,
+                        &mut self.wire_values_scalar,
+                        &mut self.previous_clock_scalar,
+                        &mut self.clock_phase,
+                    ),
+                    (true, false) => execute_program_scalar::<true, false, u16>(
+                        program,
+                        &mut self.wire_values_scalar,
+                        &mut self.previous_clock_scalar,
+                        &mut self.clock_phase,
+                    ),
+                    (true, true) => execute_program_scalar::<true, true, u16>(
+                        program,
+                        &mut self.wire_values_scalar,
+                        &mut self.previous_clock_scalar,
+                        &mut self.clock_phase,
+                    ),
+                }
+            } else {
+                match (self.has_clocks, self.has_counters) {
+                    (false, false) => execute_program::<false, false, u16>(
                         program,
                         &mut self.wire_values,
                         &mut self.previous_clock,
                         &mut self.clock_phase,
-                    )
+                    ),
+                    (false, true) => execute_program::<false, true, u16>(
+                        program,
+                        &mut self.wire_values,
+                        &mut self.previous_clock,
+                        &mut self.clock_phase,
+                    ),
+                    (true, false) => execute_program::<true, false, u16>(
+                        program,
+                        &mut self.wire_values,
+                        &mut self.previous_clock,
+                        &mut self.clock_phase,
+                    ),
+                    (true, true) => execute_program::<true, true, u16>(
+                        program,
+                        &mut self.wire_values,
+                        &mut self.previous_clock,
+                        &mut self.clock_phase,
+                    ),
                 }
             }
         }

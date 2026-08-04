@@ -1,5 +1,8 @@
+use logi_sim::circuit::{BitPackedCircuit, SimdPrograms};
 use logi_sim::fixtures;
 use logi_sim::prelude::*;
+use std::collections::HashMap;
+use std::mem::size_of;
 
 #[test]
 fn floating_binary_gates_compile_without_panicking() {
@@ -10,8 +13,6 @@ fn floating_binary_gates_compile_without_panicking() {
     let mut runner = SimdRunner::new(BitPackedCircuit::compile(&circuit));
     runner.tick();
 }
-use std::collections::HashMap;
-use std::mem::size_of;
 
 #[test]
 fn test_simd_64_parallel_runs() {
