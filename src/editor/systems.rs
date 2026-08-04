@@ -7,6 +7,8 @@ use crate::sim::{
     SimBridge,
 };
 use crate::sim::{ConnectionLine, GameNode};
+use crate::sim::{GateAuthoringBundle, WireAuthoringBundle, WireCollection, WorkspaceRevision, configuration_components};
+use crate::sim::{ActiveCircuit, GateLabel, GateType};
 use crate::temp::GateComponentSelectionEvent;
 use crate::sim::gate_display_name;
 
@@ -18,7 +20,9 @@ use super::{CreateConnectionEvent, CreateGateEvent, EditorState};
 
 pub fn process_gate_placement(
     mut commands: Commands,
-    mut game_circuit: ResMut<GameCircuit>,
+    active_circuit: Res<ActiveCircuit>,
+    existing_gates: Query<(&GateType, &GateLabel)>,
+    mut revision: ResMut<WorkspaceRevision>,
     mut bridge: ResMut<SimBridge>,
     mut grid: ResMut<crate::sim::spatial_grid::SpatialGrid>,
     mut create_gate_events: MessageReader<CreateGateEvent>,
@@ -32,33 +36,39 @@ pub fn process_gate_placement(
         let mut label = event.label.clone();
         if is_input_or_output_node(&event.kind) && label.as_ref().is_none_or(|value| value.trim().is_empty())
         {
-            label = Some(generate_required_port_label(&game_circuit, &event.kind));
+            label = Some(generate_required_port_label(&existing_gates, &event.kind));
         }
 
         let mut node = GameNode::new(event.kind.clone(), event.position);
         if let Some(label) = label {
             node.label = Some(label);
         }
-        let node_uuid = game_circuit.add_node(node.clone());
+        let node_uuid = node.id;
 
         bridge.add_node(&node);
 
         let sprite = get_gate_sprite(&event.kind);
-        let entity = commands
+        let mut entity_commands = commands
             .spawn((
                 sprite,
                 Transform::from_xyz(event.position.x, event.position.y, 0.0),
                 Visibility::Visible,
                 Name::new(gate_display_name(node_uuid, &node.label, &event.kind)),
                 GateComponent::new(&node),
-            ))
-            .id();
+                GateAuthoringBundle::new(&node, active_circuit.uuid),
+            ));
+        let (clock, display, subcircuit) = configuration_components(&node);
+        if let Some(config) = clock { entity_commands.insert(config); }
+        if let Some(config) = display { entity_commands.insert(config); }
+        if let Some(config) = subcircuit { entity_commands.insert(config); }
+        let entity = entity_commands.id();
 
         grid.insert(entity, event.position);
+        revision.mark_dirty();
     }
 }
 
-fn generate_required_port_label(game_circuit: &GameCircuit, kind: &GameNodeKind) -> String {
+fn generate_required_port_label(existing_gates: &Query<(&GateType, &GateLabel)>, kind: &GameNodeKind) -> String {
     let base = match kind {
         GameNodeKind::Input => "Input",
         GameNodeKind::Input8 => "Input8",
@@ -68,11 +78,11 @@ fn generate_required_port_label(game_circuit: &GameCircuit, kind: &GameNodeKind)
         GameNodeKind::Output64 => "Output64",
         _ => "IO",
     };
-    let existing = game_circuit
-        .nodes
-        .values()
-        .filter(|node| &node.kind == kind)
-        .filter_map(|node| node.label.as_ref())
+    let kind_tag = crate::sim::GateKindTag::from_node_kind(kind);
+    let existing = existing_gates
+        .iter()
+        .filter(|(gate_type, _)| gate_type.kind == kind_tag)
+        .map(|(_, label)| label.value.as_str())
         .filter_map(|label| {
             label
                 .strip_prefix(&format!("{base} "))
@@ -177,10 +187,13 @@ pub fn handle_connection_creation(
 
 pub fn apply_connection_events_system(
     mut commands: Commands,
-    mut game_circuit: ResMut<GameCircuit>,
+    game_circuit: Res<GameCircuit>,
+    active_circuit: Res<ActiveCircuit>,
+    mut revision: ResMut<WorkspaceRevision>,
     mut bridge: ResMut<SimBridge>,
     mut create_connection_events: MessageReader<CreateConnectionEvent>,
     gate_query: Query<(&Transform, &GateComponent)>,
+    wire_roots: Query<Entity, With<WireCollection>>,
     game_state: Res<State<crate::GameState>>,
 ) {
     if game_state.get() != &crate::GameState::Simulating {
@@ -264,8 +277,6 @@ pub fn apply_connection_events_system(
             event.sink_pin,
             event.wire_kind.clone(),
         );
-        game_circuit.add_wire(wire.clone());
-
         if is_supported && bridge.add_wire(&wire).is_none() {
             continue;
         }
@@ -284,7 +295,8 @@ pub fn apply_connection_events_system(
             } else {
                 Color::srgba(0.8, 0.6, 0.2, 1.0)
             };
-            commands.spawn((
+            let wire_root = wire_roots.iter().next();
+            let mut wire_entity = commands.spawn((
                 Sprite {
                     color: line_color,
                     custom_size: Some(Vec2::new(dist, 2.0)),
@@ -306,8 +318,11 @@ pub fn apply_connection_events_system(
                     value: false,
                     wire_kind: event.wire_kind.clone(),
                 },
+                WireAuthoringBundle::new(&wire, active_circuit.uuid),
                 Name::new(format!("Wire {}", wire.id)),
             ));
+            if let Some(root) = wire_root { wire_entity.insert(ChildOf(root)); }
+            revision.mark_dirty();
         }
     }
 }

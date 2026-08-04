@@ -10,6 +10,7 @@ use crate::sim::{
     TickRateMeter,
     systems::{
         bridge_flush_system,
+        apply_authoring_messages_system,
         drag_selected_system,
         draw_connections_system,
         draw_gates_system,
@@ -18,6 +19,9 @@ use crate::sim::{
         gate_selection_system,
         sync_sim_cache_system,
         sync_gate_components_to_model_system,
+        rebuild_circuit_snapshot_from_ecs_system,
+        rebuild_bridge_after_authoring_change_system,
+        track_authoring_component_changes_system,
         rebuild_spatial_grid_system,
         save_on_exit_system,
         workspace_io_system,
@@ -100,11 +104,14 @@ impl Plugin for SimulationRuntimePlugin {
     fn build(&self, app: &mut App) {
         let state = self.state.clone();
         let game_circuit = fixtures::build_64bit_counter_subcircuits();
-        let mut sim_bridge = SimBridge::from_circuit_with_runtime(&game_circuit, self.runtime);
+        let sim_bridge = SimBridge::from_circuit_with_runtime(&game_circuit, self.runtime);
+        let active_circuit = crate::sim::ActiveCircuit::from_circuit(&game_circuit);
 
         app
             .insert_resource(game_circuit)
+            .insert_resource(active_circuit)
             .insert_resource(sim_bridge)
+            .init_resource::<crate::sim::WorkspaceRevision>()
             .init_resource::<SimulationConfig>()
             .init_resource::<TickRateMeter>()
             .init_resource::<ThreadlessStepper>()
@@ -158,12 +165,37 @@ impl Plugin for SimulationViewPlugin {
             .insert_resource(SpatialGrid::new(100.0))
             .add_message::<crate::editor::LoadWorkspaceEvent>()
             .add_message::<crate::editor::SaveWorkspaceEvent>()
-            .register_type::<crate::sim::ConnectionLine>()
-            .register_type::<crate::sim::GateComponent>()
+            .register_type::<crate::sim::WireCollection>()
             .register_type::<crate::sim::GateKindTag>()
             .register_type::<crate::sim::LogicDisplay>()
             .register_type::<crate::sim::SimNodeOutputs>()
             .register_type::<crate::sim::SimNodeInputs>()
+            .register_type::<crate::sim::ActiveCircuit>()
+            .register_type::<crate::sim::WorkspaceRevision>()
+            .register_type::<crate::sim::CircuitMember>()
+            .register_type::<crate::sim::CircuitLayer>()
+            .register_type::<crate::sim::GateIdentity>()
+            .register_type::<crate::sim::GateLabel>()
+            .register_type::<crate::sim::GateType>()
+            .register_type::<crate::sim::GatePorts>()
+            .register_type::<crate::sim::GatePinState>()
+            .register_type::<crate::sim::PersistentGateData>()
+            .register_type::<crate::sim::ClockConfig>()
+            .register_type::<crate::sim::DisplayConfig>()
+            .register_type::<crate::sim::DisplayRadix>()
+            .register_type::<crate::sim::SubCircuitInstance>()
+            .register_type::<crate::sim::PortDirection>()
+            .register_type::<crate::sim::InterfacePort>()
+            .register_type::<crate::sim::WireIdentity>()
+            .register_type::<crate::sim::WireEndpoints>()
+            .register_type::<crate::sim::WireProperties>()
+            .register_type::<crate::sim::WireState>()
+            .add_message::<crate::sim::GateLabelChanged>()
+            .add_message::<crate::sim::ClockConfigChanged>()
+            .add_message::<crate::sim::DisplayConfigChanged>()
+            .add_message::<crate::sim::GateMoved>()
+            .add_message::<crate::sim::EntityLayerChanged>()
+            .add_message::<crate::sim::AuthoringTopologyChanged>()
             .add_systems(
                 OnEnter(state.clone()),
                 (
@@ -178,7 +210,18 @@ impl Plugin for SimulationViewPlugin {
             .add_systems(
                 Update,
                 (
+                    apply_authoring_messages_system,
+                    track_authoring_component_changes_system,
+                    rebuild_circuit_snapshot_from_ecs_system,
+                    rebuild_bridge_after_authoring_change_system,
                     workspace_io_system,
+                )
+                    .chain()
+                    .run_if(in_state(state.clone())),
+            )
+            .add_systems(
+                Update,
+                (
                     sync_gate_components_to_model_system,
                     update_input_colours_system,
                     update_logic_displays_system,
@@ -195,7 +238,10 @@ impl Plugin for SimulationViewPlugin {
                 bevy_egui::EguiPrimaryContextPass,
                 (simulation_config_ui_system, ui_for_selected_gate),
             )
-            .add_systems(Update, save_on_exit_system);
+            .add_systems(
+                Update,
+                save_on_exit_system.after(rebuild_circuit_snapshot_from_ecs_system),
+            );
     }
 }
 

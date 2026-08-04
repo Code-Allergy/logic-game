@@ -28,10 +28,11 @@ pub enum RunnerType {
 
 impl Default for RunnerType {
     fn default() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        return RunnerType::SimdOptimized;
-        #[cfg(target_arch = "wasm32")]
-        return RunnerType::EventDrivenOptimized;
+        // Event-driven execution performs delta-cycle propagation until the
+        // circuit settles before advancing simulation time. This is required
+        // for gate-level feedback cells and ripple counters. Single-pass flat
+        // and SIMD runners remain available as explicit performance choices.
+        RunnerType::EventDrivenOptimized
     }
 }
 
@@ -165,8 +166,12 @@ impl SyncRunnerState {
     }
 
     fn set_runner_type(&mut self, runner_type: RunnerType) {
-        let compatible_layout =
-            is_optimized_runner(self.runner_type) == is_optimized_runner(runner_type);
+        let compatible_layout = effective_runner_type(&self.circuit, self.runner_type)
+            == effective_runner_type(&self.circuit, runner_type);
+        if compatible_layout {
+            self.runner_type = runner_type;
+            return;
+        }
         let tick = self.runner.current_tick();
         let execution_state = self.runner.execution_state();
         let mut observable_state = Vec::new();
@@ -315,7 +320,15 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
                 .push(raw_wire_id);
         }
 
+        let needs_delta_cycles = contains_nested_state(&opt_circuit)
+            || has_feedback_cycles(&opt_circuit);
         let inner: Box<dyn InspectableRunner> = match runner_type {
+            runner if needs_delta_cycles
+                && !matches!(runner, RunnerType::EventDrivenOptimized) =>
+            {
+                let evt = EventDrivenCircuit::compile(&opt_circuit);
+                Box::new(EventDrivenRunner::new(evt))
+            }
             RunnerType::NaiveOptimized if contains_nested_state(&opt_circuit) => {
                 Box::new(FlatRunner::new(FlattenedCircuit::compile(&opt_circuit)))
             }
@@ -348,7 +361,14 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
             reverse_wire_map,
         })
     } else {
+        let optimized_for_detection = crate::compiler::Compiler::optimize(circuit);
+        let needs_delta_cycles = contains_nested_state(&optimized_for_detection)
+            || has_feedback_cycles(circuit);
         match runner_type {
+            runner if needs_delta_cycles && !matches!(runner, RunnerType::EventDriven) => {
+                let evt = EventDrivenCircuit::compile(circuit);
+                Box::new(EventDrivenRunner::new(evt))
+            }
             RunnerType::Naive if contains_nested_state(circuit) => {
                 Box::new(FlatRunner::new(FlattenedCircuit::compile(circuit)))
             }
@@ -381,6 +401,7 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
 /// discard sequential state.
 fn contains_nested_state(circuit: &Circuit) -> bool {
     circuit.nodes.values().any(|node| match &node.kind {
+        NodeKind::Counter8 | NodeKind::Counter64 => true,
         NodeKind::SubCircuit(child) => {
             child
                 .nodes
@@ -390,6 +411,53 @@ fn contains_nested_state(circuit: &Circuit) -> bool {
         }
         _ => false,
     })
+}
+
+/// Resolve requests to the backend layout that can preserve this circuit's
+/// semantics. Feedback/sequential cells require event-driven delta cycles.
+fn effective_runner_type(circuit: &Circuit, requested: RunnerType) -> RunnerType {
+    let detection_circuit = crate::compiler::Compiler::optimize(circuit);
+    if !contains_nested_state(&detection_circuit) && !has_feedback_cycles(circuit) {
+        return requested;
+    }
+    let _ = requested;
+    RunnerType::EventDrivenOptimized
+}
+
+fn has_feedback_cycles(circuit: &Circuit) -> bool {
+    if circuit.nodes.values().any(|node| match &node.kind {
+        NodeKind::SubCircuit(child) => has_feedback_cycles(child),
+        _ => false,
+    }) {
+        return true;
+    }
+
+    fn visit(
+        circuit: &Circuit,
+        node: NodeId,
+        states: &mut std::collections::HashMap<NodeId, u8>,
+    ) -> bool {
+        match states.get(&node).copied().unwrap_or(0) {
+            1 => return true,
+            2 => return false,
+            _ => {}
+        }
+        states.insert(node, 1);
+        for output in &circuit.nodes[node].outputs {
+            for wire in &output.wires {
+                for sink in &circuit.wires[*wire].sinks {
+                    if visit(circuit, sink.node, states) {
+                        return true;
+                    }
+                }
+            }
+        }
+        states.insert(node, 2);
+        false
+    }
+
+    let mut states = std::collections::HashMap::new();
+    circuit.nodes.keys().any(|node| visit(circuit, node, &mut states))
 }
 
 impl SimulationEngine {
@@ -647,8 +715,15 @@ impl SimulationEngine {
                         };
                         match cmd {
                             SimCommand::SetRunner(rt) => {
-                                let compatible_layout = is_optimized_runner(current_runner_type)
-                                    == is_optimized_runner(rt);
+                                let compatible_layout = effective_runner_type(
+                                    &circuit,
+                                    current_runner_type,
+                                ) == effective_runner_type(&circuit, rt);
+                                if compatible_layout {
+                                    current_runner_type = rt;
+                                    let _ = tx_evt.send(SimEvent::RunnerSet(rt));
+                                    continue;
+                                }
                                 let tick = runner.current_tick();
                                 let execution_state = runner.execution_state();
                                 let mut observable_state = Vec::new();
@@ -989,26 +1064,6 @@ fn validate_runner_support(runner_type: RunnerType) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn validate_runner_support(_runner_type: RunnerType) {}
-
-#[cfg(target_arch = "wasm32")]
-fn is_optimized_runner(runner: RunnerType) -> bool {
-    matches!(
-        runner,
-        RunnerType::NaiveOptimized | RunnerType::FlatOptimized | RunnerType::EventDrivenOptimized
-    )
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn is_optimized_runner(runner: RunnerType) -> bool {
-    matches!(
-        runner,
-        RunnerType::NaiveOptimized
-            | RunnerType::FlatOptimized
-            | RunnerType::ThreadedFlatOptimized
-            | RunnerType::SimdOptimized
-            | RunnerType::EventDrivenOptimized
-    )
-}
 
 impl Drop for SimulationEngine {
     fn drop(&mut self) {

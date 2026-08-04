@@ -24,7 +24,7 @@ use crate::sim::fixtures::fixture_workspace_catalog;
 use crate::editor::EditorState;
 
 const WORKSPACE_MANIFEST_FILE: &str = "manifest.json";
-const BUNDLE_VERSION: u32 = 3;
+const BUNDLE_VERSION: u32 = 4;
 
 pub fn catalog_init_system(mut editor_state: ResMut<EditorState>) {
     if editor_state.workspace_catalog.is_empty() {
@@ -79,7 +79,7 @@ pub fn read_workspace_from_disk(name: &str) -> io::Result<GameCircuit> {
                 "unsupported save format version",
             ));
         }
-        let mut circuit = saved.circuit;
+        let circuit = saved.circuit;
         validate_required_io_labels(&circuit)?;
         return Ok(circuit);
     }
@@ -106,7 +106,7 @@ pub fn read_workspace_from_disk(name: &str) -> io::Result<GameCircuit> {
     let root_template_id = manifest
         .root_circuit_template_id
         .unwrap_or(manifest.root_circuit_id);
-    let mut circuit = restore_circuit(
+    let circuit = restore_circuit(
         &workspace_path,
         manifest.root_circuit_id,
         root_template_id,

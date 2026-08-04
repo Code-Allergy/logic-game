@@ -20,7 +20,7 @@
 //! that reverse lookup from the game-side [`GameCircuit`] + [`SimBridge`] ID
 //! maps whenever the circuit changes.
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::HashMap;
 
 use bevy::log::{info, trace};
 use bevy::prelude::*;
@@ -55,6 +55,7 @@ struct WirePinEntry {
     direction: PinDirection,
     /// UUID of the wire itself (for `wire_values` updates).
     wire_uuid: Uuid,
+    wire_bit: u8,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,8 +70,8 @@ struct WirePinEntry {
 #[derive(Resource, Default)]
 pub struct SimCache {
     // ── Internal per-frame snapshot (opaque to callers) ─────────────────────
-    /// Current boolean state of each wire, keyed by game-side wire UUID.
-    wire_values: HashMap<Uuid, bool>,
+    /// Current packed state of each logical wire, keyed by game-side UUID.
+    wire_values: HashMap<Uuid, u64>,
 
     /// Current output-pin state for each node, keyed by `(node_uuid, pin_index)`.
     node_outputs: HashMap<(Uuid, u8), bool>,
@@ -135,7 +136,11 @@ impl SimCache {
 
     /// Return a cached wire value.
     pub fn wire_value(&self, wire_id: Uuid) -> bool {
-        self.wire_values.get(&wire_id).copied().unwrap_or(false)
+        self.wire_bits(wire_id) != 0
+    }
+
+    pub fn wire_bits(&self, wire_id: Uuid) -> u64 {
+        self.wire_values.get(&wire_id).copied().unwrap_or(0)
     }
 
     pub(crate) fn set_running(&mut self, running: bool) {
@@ -162,19 +167,22 @@ impl SimCache {
                 continue;
             };
 
-            for segment in segments {
+            for (wire_bit, segment) in segments.iter().enumerate() {
+                let wire_bit = u8::try_from(wire_bit).unwrap_or(63).min(63);
                 let entries = self.wire_reverse.entry(segment.wire_id).or_default();
                 entries.push(WirePinEntry {
                     node_uuid: wire.source_node,
                     pin: segment.source_pin,
                     direction: PinDirection::Output,
                     wire_uuid: wire.id,
+                    wire_bit,
                 });
                 entries.push(WirePinEntry {
                     node_uuid: wire.sink_node,
                     pin: segment.sink_pin,
                     direction: PinDirection::Input,
                     wire_uuid: wire.id,
+                    wire_bit,
                 });
             }
         }
@@ -206,13 +214,9 @@ impl SimCache {
                     multi_pin_wires += 1;
                 }
                 for entry in entries {
-                    match self.wire_values.entry(entry.wire_uuid) {
-                        Entry::Occupied(mut existing) => {
-                            *existing.get_mut() |= val;
-                        }
-                        Entry::Vacant(vacant) => {
-                            vacant.insert(val);
-                        }
+                    if val {
+                        *self.wire_values.entry(entry.wire_uuid).or_default() |=
+                            1_u64 << entry.wire_bit;
                     }
                     match entry.direction {
                         PinDirection::Output => {

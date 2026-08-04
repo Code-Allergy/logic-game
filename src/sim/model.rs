@@ -381,6 +381,11 @@ pub struct GameWire {
     /// Logical width for this wire.
     #[serde(default)]
     pub kind: WireKind,
+    /// Stable authoring layer membership. Nil in legacy files means default.
+    #[serde(default)]
+    pub layer_uuid: Uuid,
+    #[serde(default)]
+    pub layer_order: i32,
 }
 
 impl GameWire {
@@ -408,6 +413,8 @@ impl GameWire {
             sink_node,
             sink_pin,
             kind,
+            layer_uuid: crate::sim::DEFAULT_LAYER_UUID,
+            layer_order: 0,
         }
     }
 }

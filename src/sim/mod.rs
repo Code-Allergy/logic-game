@@ -14,6 +14,7 @@ mod plugin;
 mod tests;
 
 pub mod bridge;
+pub mod authoring;
 pub mod cache;
 pub mod fixtures;
 pub mod model;
@@ -22,6 +23,7 @@ pub mod spatial_grid;
 pub mod systems;
 
 pub use bridge::SimBridge;
+pub use authoring::*;
 pub use cache::SimCache;
 pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation, WireKind};
 pub use plugin::{
@@ -40,8 +42,7 @@ use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Bevy component that links a rendered entity to a [`GameNode`] by UUID.
-#[derive(Component, Debug, Clone, Reflect)]
-#[reflect(Component)]
+#[derive(Component, Debug, Clone)]
 pub struct GateComponent {
     pub id: Uuid,
     pub label: String,
@@ -175,8 +176,7 @@ pub fn gate_display_name(node_id: Uuid, label: &Option<String>, kind: &GameNodeK
 }
 
 /// Bevy component representing a rendered wire between two nodes.
-#[derive(Component, Debug, Clone, Reflect)]
-#[reflect(Component)]
+#[derive(Component, Debug, Clone)]
 pub struct ConnectionLine {
     pub id: Uuid,
     pub source_node: Uuid,
@@ -185,9 +185,13 @@ pub struct ConnectionLine {
     pub sink_pin: u8,
     pub bit_width: u8,
     pub value: bool,
-    #[reflect(ignore)]
     pub wire_kind: WireKind,
 }
+
+/// Inspector-only hierarchy root for logical wire entities.
+#[derive(Component, Debug, Reflect)]
+#[reflect(Component)]
+pub struct WireCollection;
 
 /// Per-gate snapshot of all output pin states (bits 0..63).
 #[derive(Component, Debug, Clone, Copy, Default, Reflect)]
