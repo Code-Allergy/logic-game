@@ -12,6 +12,14 @@ use crate::sim::{
     systems::bridge_flush_system,
 };
 
+#[test]
+fn tick_rate_uses_si_units() {
+    assert_eq!(super::systems::format_si_hz(999.0), "999.0 Hz");
+    assert_eq!(super::systems::format_si_hz(12_345.0), "12.3 kHz");
+    assert_eq!(super::systems::format_si_hz(12_345_678.0), "12.3 MHz");
+    assert_eq!(super::systems::format_si_hz(1_500_000_000.0), "1.5 GHz");
+}
+
 struct NestedFixture {
     circuit: GameCircuit,
     input: uuid::Uuid,

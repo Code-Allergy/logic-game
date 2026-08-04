@@ -125,6 +125,11 @@ struct MappedRunner {
 /// Publish observable wire state in batches so snapshotting does not cost more
 /// than the simulation itself.
 const UNLIMITED_SNAPSHOT_INTERVAL_TICKS: u32 = 256;
+const MAX_RATE_CATCH_UP_TICKS: u32 = 4_096;
+const SCHEDULER_SPIN_THRESHOLD: std::time::Duration = std::time::Duration::from_micros(200);
+const SLOW_SIMULATION_LAG: std::time::Duration = std::time::Duration::from_millis(100);
+const SLOW_WARNING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const MAX_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
 
 fn publish_wire_states(shared: &SharedState, runner: &dyn InspectableRunner) {
     if let Ok(mut lock) = shared.wire_states.write() {
@@ -319,6 +324,8 @@ impl SimulationEngine {
             let mut tick_rate = Some(10.0);
             let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
             let mut next_tick_time = std::time::Instant::now();
+            let mut last_snapshot_time = std::time::Instant::now();
+            let mut last_slow_warning = None;
 
             // Perform initial wire state sync
             publish_wire_states(&shared, runner.as_ref());
@@ -337,8 +344,9 @@ impl SimulationEngine {
                         SimCommand::SetTickRate(rate) => {
                             tick_rate = rate;
                             if let Some(r) = rate {
-                                tick_duration =
-                                    std::time::Duration::from_secs_f64(1.0 / r.max(0.001));
+                                tick_duration = std::time::Duration::from_secs_f64(
+                                    1.0 / r.clamp(0.001, 1_000_000_000.0),
+                                );
                             }
                             next_tick_time = std::time::Instant::now();
                         }
@@ -407,6 +415,7 @@ impl SimulationEngine {
                             let tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
                             publish_wire_states(&shared, runner.as_ref());
                             ticks_since_snapshot = 0;
+                            last_snapshot_time = std::time::Instant::now();
                             let _ = tx_evt.send(SimEvent::TickCompleted { tick_count: tc });
                         }
                         SimCommand::Stop => {
@@ -418,42 +427,64 @@ impl SimulationEngine {
                 }
 
                 if running {
-                    let mut should_tick = false;
+                    let mut ticks_to_run = 0_u32;
 
-                    if let Some(_) = tick_rate {
+                    if let Some(rate) = tick_rate {
                         let now = std::time::Instant::now();
                         if now >= next_tick_time {
-                            if now > next_tick_time + tick_duration * 2 {
-                                log::warn!("Simulation running too slowly! Skipping ticks.");
+                            let lag = now.saturating_duration_since(next_tick_time);
+                            if lag >= SLOW_SIMULATION_LAG {
+                                let should_warn = last_slow_warning.is_none_or(|last| {
+                                    now.duration_since(last) >= SLOW_WARNING_INTERVAL
+                                });
+                                if should_warn {
+                                    log::warn!(
+                                        "Simulation cannot sustain requested {rate:.0} Hz; dropping {:.1} ms of backlog",
+                                        lag.as_secs_f64() * 1_000.0
+                                    );
+                                    last_slow_warning = Some(now);
+                                }
                                 next_tick_time = now;
                             }
-                            next_tick_time += tick_duration;
-                            should_tick = true;
+
+                            let duration_ns = tick_duration.as_nanos().max(1);
+                            let due = (now.saturating_duration_since(next_tick_time).as_nanos()
+                                / duration_ns)
+                                + 1;
+                            ticks_to_run = due.min(MAX_RATE_CATCH_UP_TICKS as u128) as u32;
+                            next_tick_time += tick_duration * ticks_to_run;
                         } else {
                             let remaining = next_tick_time.saturating_duration_since(now);
-                            if remaining > std::time::Duration::from_millis(2) {
-                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            if remaining > SCHEDULER_SPIN_THRESHOLD {
+                                std::thread::sleep(remaining - SCHEDULER_SPIN_THRESHOLD);
                             } else {
-                                std::thread::yield_now();
+                                std::hint::spin_loop();
                             }
                         }
                     } else {
-                        should_tick = true;
+                        ticks_to_run = UNLIMITED_SNAPSHOT_INTERVAL_TICKS;
                     }
 
-                    if should_tick {
+                    if ticks_to_run > 0 {
                         if needs_rebuild {
                             runner = build_runner(&circuit, current_runner_type);
                             needs_rebuild = false;
                         }
-                        runner.tick();
-                        let _tc = shared.tick_count.fetch_add(1, Ordering::Relaxed) + 1;
-                        ticks_since_snapshot += 1;
-                        if tick_rate.is_some()
-                            || ticks_since_snapshot >= UNLIMITED_SNAPSHOT_INTERVAL_TICKS
+                        for _ in 0..ticks_to_run {
+                            runner.tick();
+                        }
+                        shared
+                            .tick_count
+                            .fetch_add(ticks_to_run as u64, Ordering::Relaxed);
+                        ticks_since_snapshot = ticks_since_snapshot.saturating_add(ticks_to_run);
+
+                        let now = std::time::Instant::now();
+                        if ticks_since_snapshot >= UNLIMITED_SNAPSHOT_INTERVAL_TICKS
+                            || now.duration_since(last_snapshot_time) >= MAX_SNAPSHOT_INTERVAL
                         {
                             publish_wire_states(&shared, runner.as_ref());
                             ticks_since_snapshot = 0;
+                            last_snapshot_time = now;
                             if tick_rate.is_none() {
                                 std::thread::yield_now();
                             }

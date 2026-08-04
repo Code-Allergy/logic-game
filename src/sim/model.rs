@@ -114,8 +114,11 @@ impl GameNodeKind {
             GameNodeKind::Mux => Some(NodeKind::Mux),
             GameNodeKind::Demux => Some(NodeKind::Demux),
             GameNodeKind::TriStateBuffer => Some(NodeKind::TriStateBuffer),
-            GameNodeKind::Clock { period_ticks, duty_ticks } => Some(NodeKind::Clock {
-                    duty_ticks: *duty_ticks,
+            GameNodeKind::Clock {
+                period_ticks,
+                duty_ticks,
+            } => Some(NodeKind::Clock {
+                duty_ticks: *duty_ticks,
                 period_ticks: *period_ticks,
 
                 phase: 0,

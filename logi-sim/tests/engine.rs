@@ -73,6 +73,29 @@ fn test_threaded_simulation_engine_atomic_queries() {
 }
 
 #[test]
+fn rate_limited_scheduler_batches_ticks_to_recover_from_os_jitter() {
+    let mut circuit = Circuit::new();
+    let input = circuit.input();
+    let output = circuit.output();
+    circuit.connect((input, 0), (output, 0));
+
+    let mut engine = SimulationEngine::new(circuit);
+    engine.start_worker();
+    engine.set_tick_rate(Some(100_000.0));
+    sleep(Duration::from_millis(50));
+
+    let completed = engine.tick_count();
+    engine.stop_worker();
+
+    // A one-tick-per-scheduler-wakeup loop typically completes fewer than 100
+    // ticks here. Leave ample headroom for loaded CI while verifying catch-up.
+    assert!(
+        completed >= 1_000,
+        "rate-limited scheduler completed only {completed} ticks"
+    );
+}
+
+#[test]
 fn test_flat_runner_equivalence() {
     let mut c = Circuit::new();
     let in_a = c.input();

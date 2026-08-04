@@ -11,8 +11,8 @@ use crate::{SAVE_FILE_NAME, temp::GateComponentSelectionEvent};
 
 use super::{
     ConnectionLine, GameCircuit, GameNodeKind, GateComponent, SavedSimulation, Selected,
-    SelectedGate, SimBridge, SimCache, SimulationConfig, calculate_connection_geometry,
-    get_gate_sprite, spatial_grid::SpatialGrid,
+    SelectedGate, SimBridge, SimCache, SimulationConfig, TickRateMeter,
+    calculate_connection_geometry, get_gate_sprite, spatial_grid::SpatialGrid,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -364,18 +364,34 @@ pub fn drag_selected_system(
 
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
+    mut tick_rate_meter: ResMut<TickRateMeter>,
     mut contexts: EguiContexts,
     mut bridge: ResMut<SimBridge>,
     cache: Res<SimCache>,
 ) -> Result<(), BevyError> {
+    let tick_count = bridge.tick_count();
+    tick_rate_meter.sample(tick_count);
+
     egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (Hz)");
 
-        ui.checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate");
+        if ui
+            .checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate")
+            .changed()
+        {
+            tick_rate_meter.reset(tick_count);
+        }
+
+        if sim_config.unlimited_tick_rate {
+            ui.label(match tick_rate_meter.average_hz {
+                Some(rate) => format!("Average tick rate: {}", format_si_hz(rate)),
+                None => "Average tick rate: measuring…".to_owned(),
+            });
+        }
 
         ui.add_enabled(
             !sim_config.unlimited_tick_rate,
-            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=1_000_000.0).text("Tick Rate"),
+            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=10_000_000.0).text("Tick Rate"),
         );
 
         ui.separator();
@@ -394,7 +410,7 @@ pub fn simulation_config_ui_system(
         }
 
         ui.separator();
-        ui.label(format!("Sim ticks: {}", bridge.tick_count()));
+        ui.label(format!("Sim ticks: {tick_count}"));
         ui.label(format!("Running: {}", cache.is_running));
         ui.horizontal(|ui| {
             if ui
@@ -413,6 +429,20 @@ pub fn simulation_config_ui_system(
         });
     });
     Ok(())
+}
+
+pub(crate) fn format_si_hz(rate: f64) -> String {
+    const UNITS: [(&str, f64); 4] = [
+        ("GHz", 1_000_000_000.0),
+        ("MHz", 1_000_000.0),
+        ("kHz", 1_000.0),
+        ("Hz", 1.0),
+    ];
+    let (unit, scale) = UNITS
+        .into_iter()
+        .find(|(_, scale)| rate >= *scale)
+        .unwrap_or(("Hz", 1.0));
+    format!("{:.1} {unit}", rate / scale)
 }
 
 pub fn ui_for_selected_gate(

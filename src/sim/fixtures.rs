@@ -142,7 +142,10 @@ pub fn build_8bit_counter_subcircuit() -> GameCircuit {
     let mut circuit = GameCircuit::new("8-Bit Counter (Subcircuits)");
 
     let mut clock = GameNode::new(
-        GameNodeKind::Clock { period_ticks: 4, duty_ticks: 1 },
+        GameNodeKind::Clock {
+            period_ticks: 4,
+            duty_ticks: 1,
+        },
         Vec2::new(-400.0, 100.0),
     );
     clock.label = Some("Clock".to_string());
@@ -186,7 +189,10 @@ pub fn build_8bit_counter() -> GameCircuit {
     let mut circuit = GameCircuit::new("8-Bit Counter");
 
     let clock = GameNode::new(
-        GameNodeKind::Clock { period_ticks: 4, duty_ticks: 1 },
+        GameNodeKind::Clock {
+            period_ticks: 4,
+            duty_ticks: 1,
+        },
         Vec2::new(-400.0, 100.0),
     );
     let clock_id = circuit.add_node(clock);
