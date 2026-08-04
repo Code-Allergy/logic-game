@@ -1,2 +1,5 @@
 [build]
+
+# Keep native builds tuned for this machine, but don't pass host-specific CPU flags to wasm32.
+[target.'cfg(not(target_arch = "wasm32"))']
 rustflags = ["-C", "target-cpu=native"]

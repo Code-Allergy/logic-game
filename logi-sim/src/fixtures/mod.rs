@@ -622,10 +622,10 @@ pub fn cpu_subsystem_8bit() -> Fixture {
     }
 
     let mut current_flag_node = xnor_nodes[0];
-    for bit in 1..8 {
+    for xnor_node in xnor_nodes.iter().skip(1) {
         let and_flag = alu_8bit.and();
         alu_8bit.connect((current_flag_node, 0), (and_flag, 0));
-        alu_8bit.connect((xnor_nodes[bit], 0), (and_flag, 1));
+        alu_8bit.connect((*xnor_node, 0), (and_flag, 1));
         current_flag_node = and_flag;
     }
     let equal_flag_out = alu_8bit.output();
@@ -640,9 +640,9 @@ pub fn cpu_subsystem_8bit() -> Fixture {
     let reg_enable = reg_8bit.input();
 
     let mut reg_q_out = Vec::new();
-    for bit in 0..8 {
+    for d_in in reg_d_in.iter().take(8) {
         let tri = reg_8bit.tristate();
-        reg_8bit.connect((reg_d_in[bit], 0), (tri, 0));
+        reg_8bit.connect((*d_in, 0), (tri, 0));
         reg_8bit.connect((reg_enable, 0), (tri, 1));
 
         let q_out = reg_8bit.output();
@@ -664,14 +664,14 @@ pub fn cpu_subsystem_8bit() -> Fixture {
     reg_file.connect((rf_write_sel, 0), (demux_decoder, 1));
 
     let r0_sub = reg_file.add_subcircuit(reg_8bit.clone());
-    for bit in 0..8 {
-        reg_file.connect((rf_data_in[bit], 0), (r0_sub, bit as u8));
+    for (bit, data_pin) in rf_data_in.iter().enumerate().take(8) {
+        reg_file.connect((*data_pin, 0), (r0_sub, bit as u8));
     }
     reg_file.connect((demux_decoder, 0), (r0_sub, 8));
 
     let r1_sub = reg_file.add_subcircuit(reg_8bit.clone());
-    for bit in 0..8 {
-        reg_file.connect((rf_data_in[bit], 0), (r1_sub, bit as u8));
+    for (bit, data_pin) in rf_data_in.iter().enumerate().take(8) {
+        reg_file.connect((*data_pin, 0), (r1_sub, bit as u8));
     }
     reg_file.connect((demux_decoder, 1), (r1_sub, 8));
 

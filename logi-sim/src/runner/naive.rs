@@ -78,7 +78,7 @@ impl NaiveRunner {
     fn evaluate_node(&mut self, node_id: NodeId) {
         let node_kind = self.circuit.nodes[node_id].kind.clone();
         match &node_kind {
-            NodeKind::Input | NodeKind::Output => return, // no evaluation needed
+            NodeKind::Input | NodeKind::Output => {}
             NodeKind::And => {
                 let val = self.input_value(node_id, 0) && self.input_value(node_id, 1);
                 self.set_output(node_id, 0, val);

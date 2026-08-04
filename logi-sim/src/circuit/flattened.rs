@@ -93,17 +93,14 @@ impl FlattenCtx {
 
         // 1. Process Input nodes first to map external input wires
         for (node_id, node) in &circuit.nodes {
-            if matches!(node.kind, NodeKind::Input) {
-                if !self.is_root {
-                    if let Some(input_idx) = child_input_nodes.iter().position(|&id| id == node_id)
-                    {
-                        if let Some(&ext_w_idx) = external_inputs.get(input_idx) {
-                            for pin in &node.outputs {
-                                for w in &pin.wires {
-                                    local_wire_map.insert(*w, ext_w_idx);
-                                }
-                            }
-                        }
+            if matches!(node.kind, NodeKind::Input)
+                && !self.is_root
+                && let Some(input_idx) = child_input_nodes.iter().position(|&id| id == node_id)
+                && let Some(&ext_w_idx) = external_inputs.get(input_idx)
+            {
+                for pin in &node.outputs {
+                    for w in &pin.wires {
+                        local_wire_map.insert(*w, ext_w_idx);
                     }
                 }
             }
@@ -111,21 +108,17 @@ impl FlattenCtx {
 
         // 1.5 Process Output nodes first to map external output wires
         for (node_id, node) in &circuit.nodes {
-            if matches!(node.kind, NodeKind::Output) {
-                if !self.is_root {
-                    if let Some(output_idx) =
-                        child_output_nodes.iter().position(|&id| id == node_id)
-                    {
-                        if let Some(ext_out_wires) = external_outputs.get(output_idx) {
-                            for pin in &node.inputs {
-                                if let Some(w) = pin.wire {
-                                    output_aliases
-                                        .entry(w)
-                                        .or_default()
-                                        .extend(ext_out_wires.iter().copied());
-                                }
-                            }
-                        }
+            if matches!(node.kind, NodeKind::Output)
+                && !self.is_root
+                && let Some(output_idx) = child_output_nodes.iter().position(|&id| id == node_id)
+                && let Some(ext_out_wires) = external_outputs.get(output_idx)
+            {
+                for pin in &node.inputs {
+                    if let Some(w) = pin.wire {
+                        output_aliases
+                            .entry(w)
+                            .or_default()
+                            .extend(ext_out_wires.iter().copied());
                     }
                 }
             }
@@ -169,11 +162,11 @@ impl FlattenCtx {
 
                         let mut inputs = SmallVec::new();
                         for (pin_idx, pin) in node.inputs.iter().enumerate() {
-                            if let Some(w) = pin.wire {
-                                if let Some(&w_idx) = local_wire_map.get(&w) {
-                                    inputs.push(w_idx);
-                                    self.node_input_pins.insert((node_id, pin_idx as u8), w_idx);
-                                }
+                            if let Some(w) = pin.wire
+                                && let Some(&w_idx) = local_wire_map.get(&w)
+                            {
+                                inputs.push(w_idx);
+                                self.node_input_pins.insert((node_id, pin_idx as u8), w_idx);
                             }
                         }
 
@@ -190,12 +183,12 @@ impl FlattenCtx {
                     let mut sub_ext_inputs: SmallVec<[usize; 4]> = SmallVec::new();
 
                     for (pin_idx, pin) in node.inputs.iter().enumerate() {
-                        if let Some(w) = pin.wire {
-                            if let Some(&w_idx) = local_wire_map.get(&w) {
-                                sub_ext_inputs.push(w_idx);
-                                if self.is_root {
-                                    self.node_input_pins.insert((node_id, pin_idx as u8), w_idx);
-                                }
+                        if let Some(w) = pin.wire
+                            && let Some(&w_idx) = local_wire_map.get(&w)
+                        {
+                            sub_ext_inputs.push(w_idx);
+                            if self.is_root {
+                                self.node_input_pins.insert((node_id, pin_idx as u8), w_idx);
                             }
                         }
                     }
@@ -232,12 +225,12 @@ impl FlattenCtx {
 
                     let mut inputs = SmallVec::new();
                     for (pin_idx, pin) in node.inputs.iter().enumerate() {
-                        if let Some(w) = pin.wire {
-                            if let Some(&w_idx) = local_wire_map.get(&w) {
-                                inputs.push(w_idx);
-                                if self.is_root {
-                                    self.node_input_pins.insert((node_id, pin_idx as u8), w_idx);
-                                }
+                        if let Some(w) = pin.wire
+                            && let Some(&w_idx) = local_wire_map.get(&w)
+                        {
+                            inputs.push(w_idx);
+                            if self.is_root {
+                                self.node_input_pins.insert((node_id, pin_idx as u8), w_idx);
                             }
                         }
                     }

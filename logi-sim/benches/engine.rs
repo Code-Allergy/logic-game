@@ -1,9 +1,14 @@
 use std::{hint::black_box, thread, time::Duration};
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use logi_sim::{engine::SimulationEngine, fixtures, prelude::*};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use logi_sim::{
+    engine::{RunnerType, SimulationEngine},
+    fixtures,
+    prelude::*,
+};
 
 const TICKS_PER_SAMPLE: u64 = 100_000;
+const DIRECT_TICKS_PER_SAMPLE: u64 = 10_000;
 
 fn unlimited_worker(c: &mut Criterion) {
     let fixture = fixtures::cpu_subsystem_8bit();
@@ -50,6 +55,38 @@ fn common_cell_hot_path(c: &mut Criterion) {
     group.finish();
 }
 
+fn direct_service_stepping(c: &mut Criterion) {
+    let fixture = fixtures::cpu_subsystem_8bit();
+
+    let mut group = c.benchmark_group("engine");
+    group.throughput(Throughput::Elements(DIRECT_TICKS_PER_SAMPLE));
+    group.sample_size(20);
+
+    for &runner_type in RunnerType::ALL {
+        group.bench_function(
+            BenchmarkId::new("direct_service_step", format!("{runner_type}")),
+            |b| {
+                b.iter_batched(
+                    || {
+                        let mut engine = SimulationEngine::new(fixture.circuit.clone());
+                        engine.set_runner(runner_type);
+                        engine
+                    },
+                    |mut engine| {
+                        for _ in 0..DIRECT_TICKS_PER_SAMPLE {
+                            engine.step_sync();
+                        }
+                        black_box(engine.tick_count())
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn config() -> Criterion {
     Criterion::default()
         .warm_up_time(Duration::from_millis(300))
@@ -60,6 +97,6 @@ fn config() -> Criterion {
 criterion_group! {
     name = benches;
     config = config();
-    targets = unlimited_worker, common_cell_hot_path
+    targets = unlimited_worker, common_cell_hot_path, direct_service_stepping
 }
 criterion_main!(benches);

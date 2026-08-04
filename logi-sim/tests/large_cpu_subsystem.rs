@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop, clippy::bool_assert_comparison)]
+
 use logi_sim::prelude::*;
 use std::collections::HashMap;
 

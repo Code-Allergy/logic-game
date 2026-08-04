@@ -309,7 +309,7 @@ impl ThreadedFlatRunner {
                             NodeKind::Demux => {
                                 let sig = wire_values[circuit.nodes[node_idx].inputs[0]];
                                 let sel = wire_values[circuit.nodes[node_idx].inputs[1]];
-                                if let Some(wires) = circuit.nodes[node_idx].output_pins.get(0) {
+                                if let Some(wires) = circuit.nodes[node_idx].output_pins.first() {
                                     for &wire in wires {
                                         updates
                                             .wire_updates
@@ -334,20 +334,20 @@ impl ThreadedFlatRunner {
                             }
                             NodeKind::Counter8 => {
                                 evaluate_counter_threaded(
-                                    &circuit,
+                                    circuit,
                                     node_idx,
-                                    &wire_values,
-                                    &previous_clock,
+                                    wire_values,
+                                    previous_clock,
                                     8,
                                     &mut updates,
                                 );
                             }
                             NodeKind::Counter64 => {
                                 evaluate_counter_threaded(
-                                    &circuit,
+                                    circuit,
                                     node_idx,
-                                    &wire_values,
-                                    &previous_clock,
+                                    wire_values,
+                                    previous_clock,
                                     64,
                                     &mut updates,
                                 );
@@ -541,10 +541,10 @@ fn build_node_levels(circuit: &FlattenedCircuit, executable_nodes: &[usize]) -> 
     for &node_idx in executable_nodes {
         let mut level = 0;
         for &in_wire in &circuit.nodes[node_idx].inputs {
-            if let Some(&src_idx) = source_of_wire.get(in_wire) {
-                if src_idx < node_level.len() {
-                    level = level.max(node_level[src_idx] + 1);
-                }
+            if let Some(&src_idx) = source_of_wire.get(in_wire)
+                && src_idx < node_level.len()
+            {
+                level = level.max(node_level[src_idx] + 1);
             }
         }
         node_level[node_idx] = level;

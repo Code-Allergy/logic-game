@@ -1,6 +1,59 @@
-use logi_sim::{engine::RunnerType, prelude::*};
+#![allow(clippy::bool_assert_comparison, clippy::needless_range_loop)]
+
+use logi_sim::{engine::RunnerType, fixtures, prelude::*};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+
+fn run_cpu_subsystem_fixture_once(
+    engine: &mut SimulationEngine,
+    tick_batch: impl Fn(&mut SimulationEngine, usize),
+) {
+    let fixture = fixtures::cpu_subsystem_8bit();
+    let bus_enable = fixture.nodes["Bus_Enable"];
+    let alu_op = fixture.nodes["ALU_OpSel"];
+    let zero_flag = fixture.nodes["ZeroFlag"];
+    let a_bits = [false, false, true, true, false, false, true, true];
+    let b_bits = [false, true, false, true, false, true, false, true];
+
+    engine.set_input(bus_enable, 0, true);
+    engine.set_input(alu_op, 0, false);
+
+    for bit in 0..8 {
+        let a_node = *fixture.nodes.get(format!("A_{bit}").as_str()).unwrap();
+        let b_node = *fixture.nodes.get(format!("B_{bit}").as_str()).unwrap();
+        engine.set_input(a_node, 0, a_bits[bit]);
+        engine.set_input(b_node, 0, b_bits[bit]);
+    }
+    tick_batch(engine, 20);
+
+    let expected_and = [false, false, false, true, false, false, false, true];
+    for bit in 0..8 {
+        let bus_node = *fixture.nodes.get(format!("Bus_{bit}").as_str()).unwrap();
+        assert_eq!(
+            engine.get_input(bus_node, 0),
+            expected_and[bit],
+            "Bus output mismatch for A != B"
+        );
+    }
+    assert_eq!(
+        engine.get_input(zero_flag, 0),
+        false,
+        "ZeroFlag mismatch for A != B"
+    );
+
+    for bit in 0..8 {
+        let a_node = *fixture.nodes.get(format!("A_{bit}").as_str()).unwrap();
+        let b_node = *fixture.nodes.get(format!("B_{bit}").as_str()).unwrap();
+        engine.set_input(a_node, 0, b_bits[bit]);
+        engine.set_input(b_node, 0, b_bits[bit]);
+    }
+    tick_batch(engine, 20);
+    assert_eq!(
+        engine.get_input(zero_flag, 0),
+        true,
+        "ZeroFlag mismatch for A == B"
+    );
+}
 
 #[test]
 fn test_simulation_engine_synchronous() {
@@ -131,6 +184,48 @@ fn every_runner_publishes_results_across_the_supported_rate_range() {
                 "{runner_type} did not publish its output at {rate} Hz"
             );
         }
+    }
+}
+
+#[test]
+fn each_runner_direct_mode_matches_cpu_fixture() {
+    for &runner_type in RunnerType::ALL {
+        let mut engine = SimulationEngine::new(fixtures::cpu_subsystem_8bit().circuit);
+        engine.set_runner(runner_type);
+
+        run_cpu_subsystem_fixture_once(&mut engine, |engine, ticks| {
+            for _ in 0..ticks {
+                engine.step_sync();
+            }
+        });
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn each_runner_threaded_mode_matches_cpu_fixture() {
+    for &runner_type in RunnerType::ALL {
+        let mut engine = SimulationEngine::new(fixtures::cpu_subsystem_8bit().circuit);
+        engine.set_runner(runner_type);
+        engine.start_worker();
+        engine.pause();
+        engine.set_tick_rate(Some(10.0));
+
+        run_cpu_subsystem_fixture_once(&mut engine, |engine, ticks| {
+            let start = engine.tick_count();
+            let target = start + ticks as u64;
+            engine.step_many(ticks as u64);
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while engine.tick_count() < target {
+                sleep(Duration::from_millis(1));
+                assert!(
+                    Instant::now() < deadline,
+                    "timeout waiting for worker ticks for {runner_type}"
+                );
+            }
+        });
+
+        engine.stop_worker();
     }
 }
 

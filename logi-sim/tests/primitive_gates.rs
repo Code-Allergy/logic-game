@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use logi_sim::circuit::Circuit;
 use logi_sim::prelude::*;
 

@@ -1,3 +1,5 @@
+#![allow(clippy::bool_assert_comparison)]
+
 use logi_sim::circuit::{Circuit, NodeId};
 use logi_sim::prelude::*;
 

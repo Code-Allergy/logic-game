@@ -249,63 +249,54 @@ pub(crate) fn isomorphic(candidate: &Circuit, template: &Circuit) -> bool {
     order.sort_by_key(|&index| options[index].len());
     let mut mapping = vec![usize::MAX; expected.len()];
     let mut used = vec![false; actual.len()];
-    search_mapping(
-        0,
-        &order,
-        &options,
-        &mut mapping,
-        &mut used,
-        &actual,
-        &expected,
+    let mut context = SearchContext {
+        order: &order,
+        options: &options,
+        mapping: &mut mapping,
+        used: &mut used,
+        actual: &actual,
+        expected: &expected,
         candidate,
         template,
-    )
+    };
+    search_mapping(0, &mut context)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn search_mapping(
-    depth: usize,
-    order: &[usize],
-    options: &[Vec<usize>],
-    mapping: &mut [usize],
-    used: &mut [bool],
-    actual: &[(NodeId, &Node)],
-    expected: &[(NodeId, &Node)],
-    candidate: &Circuit,
-    template: &Circuit,
-) -> bool {
-    if depth == order.len() {
-        let inverse: HashMap<_, _> = mapping
+struct SearchContext<'a> {
+    order: &'a [usize],
+    options: &'a [Vec<usize>],
+    mapping: &'a mut [usize],
+    used: &'a mut [bool],
+    actual: &'a [(NodeId, &'a Node)],
+    expected: &'a [(NodeId, &'a Node)],
+    candidate: &'a Circuit,
+    template: &'a Circuit,
+}
+
+fn search_mapping(depth: usize, ctx: &mut SearchContext<'_>) -> bool {
+    if depth == ctx.order.len() {
+        let inverse: HashMap<_, _> = ctx
+            .mapping
             .iter()
             .enumerate()
-            .map(|(expected_index, &actual_index)| (actual[actual_index].0, expected_index))
+            .map(|(expected_index, &actual_index)| (ctx.actual[actual_index].0, expected_index))
             .collect();
-        return edge_set(candidate, |node| inverse[&node])
-            == edge_set(template, |node| {
-                expected.iter().position(|(id, _)| *id == node).unwrap()
+        return edge_set(ctx.candidate, |node| inverse[&node])
+            == edge_set(ctx.template, |node| {
+                ctx.expected.iter().position(|(id, _)| *id == node).unwrap()
             });
     }
-    let expected_index = order[depth];
-    for &actual_index in &options[expected_index] {
-        if used[actual_index] {
+    let expected_index = ctx.order[depth];
+    for &actual_index in &ctx.options[expected_index] {
+        if ctx.used[actual_index] {
             continue;
         }
-        mapping[expected_index] = actual_index;
-        used[actual_index] = true;
-        if search_mapping(
-            depth + 1,
-            order,
-            options,
-            mapping,
-            used,
-            actual,
-            expected,
-            candidate,
-            template,
-        ) {
+        ctx.mapping[expected_index] = actual_index;
+        ctx.used[actual_index] = true;
+        if search_mapping(depth + 1, ctx) {
             return true;
         }
-        used[actual_index] = false;
+        ctx.used[actual_index] = false;
     }
     false
 }

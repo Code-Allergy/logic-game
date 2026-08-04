@@ -85,6 +85,7 @@ pub fn draw_selection_box(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn finalize_selection(
     mut sel: ResMut<SelectionState>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
@@ -120,14 +121,13 @@ pub fn finalize_selection(
     let mut selected = Vec::new();
     for (ent, tf) in query.iter() {
         // project world → viewport coords
-        if let Ok(screen_pos) = camera.world_to_viewport(cam_tf, tf.translation()) {
-            if screen_pos.x >= min.x
-                && screen_pos.x <= max.x
-                && screen_pos.y >= min.y
-                && screen_pos.y <= max.y
-            {
-                selected.push(ent);
-            }
+        if let Ok(screen_pos) = camera.world_to_viewport(cam_tf, tf.translation())
+            && screen_pos.x >= min.x
+            && screen_pos.x <= max.x
+            && screen_pos.y >= min.y
+            && screen_pos.y <= max.y
+        {
+            selected.push(ent);
         }
     }
 

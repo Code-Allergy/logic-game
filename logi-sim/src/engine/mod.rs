@@ -277,6 +277,8 @@ impl InspectableRunner for MappedRunner {
 }
 
 fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn InspectableRunner> {
+    validate_runner_support(runner_type);
+
     use crate::circuit::{BitPackedCircuit, EventDrivenCircuit, FlattenedCircuit};
     #[cfg(target_arch = "wasm32")]
     use crate::runner::{EventDrivenRunner, FlatRunner};
@@ -360,14 +362,6 @@ fn build_runner(circuit: &Circuit, runner_type: RunnerType) -> Box<dyn Inspectab
             RunnerType::Simd => {
                 let bp = BitPackedCircuit::compile(circuit);
                 Box::new(SimdRunner::new(bp))
-            }
-            #[cfg(target_arch = "wasm32")]
-            RunnerType::ThreadedFlat
-            | RunnerType::ThreadedFlatOptimized
-            | RunnerType::Simd
-            | RunnerType::SimdOptimized => {
-                let flat = FlattenedCircuit::compile(circuit);
-                Box::new(FlatRunner::new(flat))
             }
             _ => unreachable!(),
         }
@@ -859,6 +853,7 @@ impl SimulationEngine {
 
     /// Stops the background worker thread if active.
     pub fn set_runner(&mut self, runner_type: RunnerType) {
+        validate_runner_support(runner_type);
         self.runner_type = runner_type;
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(SimCommand::SetRunner(runner_type));
@@ -891,24 +886,22 @@ impl SimulationEngine {
 
     /// Atomically read the output state of a node's output pin.
     pub fn get_output(&self, node: NodeId, pin: u8) -> bool {
-        if let Some(node_ref) = self.circuit.nodes.get(node) {
-            if (pin as usize) < node_ref.outputs.len() {
-                if let Some(wire) = node_ref.outputs[pin as usize].wires.first() {
-                    return self.shared_state.get_wire(*wire);
-                }
-            }
+        if let Some(node_ref) = self.circuit.nodes.get(node)
+            && (pin as usize) < node_ref.outputs.len()
+            && let Some(wire) = node_ref.outputs[pin as usize].wires.first()
+        {
+            return self.shared_state.get_wire(*wire);
         }
         false
     }
 
     /// Atomically read the input state of a node's input pin.
     pub fn get_input(&self, node: NodeId, pin: u8) -> bool {
-        if let Some(node_ref) = self.circuit.nodes.get(node) {
-            if (pin as usize) < node_ref.inputs.len() {
-                if let Some(wire) = node_ref.inputs[pin as usize].wire {
-                    return self.shared_state.get_wire(wire);
-                }
-            }
+        if let Some(node_ref) = self.circuit.nodes.get(node)
+            && (pin as usize) < node_ref.inputs.len()
+            && let Some(wire) = node_ref.inputs[pin as usize].wire
+        {
+            return self.shared_state.get_wire(wire);
         }
         false
     }
@@ -970,6 +963,24 @@ impl SimulationEngine {
         self.apply_command_sync(SimCommand::Step);
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+fn validate_runner_support(runner_type: RunnerType) {
+    if matches!(
+        runner_type,
+        RunnerType::ThreadedFlat
+            | RunnerType::ThreadedFlatOptimized
+            | RunnerType::Simd
+            | RunnerType::SimdOptimized
+    ) {
+        panic!(
+            "Runner `{runner_type}` is not supported on wasm32 targets. Use `Naive`, `Flat`, or `EventDriven` variants."
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_runner_support(_runner_type: RunnerType) {}
 
 #[cfg(target_arch = "wasm32")]
 fn is_optimized_runner(runner: RunnerType) -> bool {

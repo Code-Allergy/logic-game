@@ -256,18 +256,18 @@ impl SimExecutionService for ThreadedSimService {
     }
 
     fn snapshot_wire_states(&self, f: &mut dyn FnMut(WireId, bool)) {
-        if let Ok(engine) = self.engine.lock() {
-            if let Ok(states) = engine.shared_state.wire_states.read() {
-                for (wire, val) in states.iter() {
-                    f(wire, *val);
-                }
+        if let Ok(engine) = self.engine.lock()
+            && let Ok(states) = engine.shared_state.wire_states.read()
+        {
+            for (wire, val) in states.iter() {
+                f(wire, *val);
             }
         }
     }
 
     fn drain_events(&self) -> Vec<SimEvent> {
         let mut events = Vec::new();
-        let mut event_rx = match self.event_rx.lock() {
+        let event_rx = match self.event_rx.lock() {
             Ok(rx) => rx,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -298,7 +298,7 @@ pub struct DirectSimService {
 
 impl DirectSimService {
     pub fn new(circuit: Circuit) -> Self {
-        let mut engine = SimulationEngine::new(circuit);
+        let engine = SimulationEngine::new(circuit);
         // The direct mode owns stepping on the main thread.
         engine.resume();
         Self {
@@ -398,11 +398,11 @@ impl SimExecutionService for DirectSimService {
     }
 
     fn snapshot_wire_states(&self, f: &mut dyn FnMut(WireId, bool)) {
-        if let Ok(engine) = self.engine.lock() {
-            if let Ok(states) = engine.shared_state.wire_states.read() {
-                for (wire, val) in states.iter() {
-                    f(wire, *val);
-                }
+        if let Ok(engine) = self.engine.lock()
+            && let Ok(states) = engine.shared_state.wire_states.read()
+        {
+            for (wire, val) in states.iter() {
+                f(wire, *val);
             }
         }
     }

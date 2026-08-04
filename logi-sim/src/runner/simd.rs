@@ -111,11 +111,11 @@ impl SimdRunner {
                 if pin == 0 && self.set_input_u64_scalar_cached(node, pin, value) {
                     return;
                 }
-                if pin != 0 {
-                    if let Some(wires) = self.circuit.node_output_pins.get(&(node, pin)) {
-                        for &wire in wires {
-                            self.wire_values_scalar[wire] = if value != 0 { 1 } else { 0 };
-                        }
+                if pin != 0
+                    && let Some(wires) = self.circuit.node_output_pins.get(&(node, pin))
+                {
+                    for &wire in wires {
+                        self.wire_values_scalar[wire] = if value != 0 { 1 } else { 0 };
                     }
                 }
             } else {
@@ -382,12 +382,12 @@ fn execute_program<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdInde
     while block_idx < program.blocks.len() {
         let block = unsafe { &*blocks.add(block_idx) };
         let start = block.start;
-        let mut remaining = block.len;
+        let remaining = block.len;
         match block.op {
             SimdOp::And => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_and_block_vector(
                     wires_ptr,
                     binary_in0_cursor,
@@ -397,9 +397,9 @@ fn execute_program<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdInde
                 );
             },
             SimdOp::Or => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_or_block_vector(
                     wires_ptr,
                     binary_in0_cursor,
@@ -409,9 +409,9 @@ fn execute_program<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdInde
                 );
             },
             SimdOp::Xor => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_xor_block_vector(
                     wires_ptr,
                     binary_in0_cursor,
@@ -421,9 +421,9 @@ fn execute_program<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdInde
                 );
             },
             SimdOp::Nand => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_nand_block_vector(
                     wires_ptr,
                     binary_in0_cursor,
@@ -433,9 +433,9 @@ fn execute_program<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdInde
                 );
             },
             SimdOp::Nor => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_nor_block_vector(
                     wires_ptr,
                     binary_in0_cursor,
@@ -445,9 +445,9 @@ fn execute_program<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdInde
                 );
             },
             SimdOp::Xnor => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_xnor_block_vector(
                     wires_ptr,
                     binary_in0_cursor,
@@ -457,9 +457,9 @@ fn execute_program<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdInde
                 );
             },
             SimdOp::TriStateBuffer => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_tri_state_buffer_block_vector(
                     wires_ptr,
                     binary_in0_cursor,
@@ -469,23 +469,23 @@ fn execute_program<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: SimdInde
                 );
             },
             SimdOp::Not => unsafe {
-                let mut unary_cursor = unary.as_ptr().add(start);
+                let unary_cursor = unary.as_ptr().add(start);
                 execute_not_block_vector(wires_ptr, unary_cursor, remaining);
             },
             SimdOp::Buffer => unsafe {
-                let mut unary_cursor = unary.as_ptr().add(start);
+                let unary_cursor = unary.as_ptr().add(start);
                 execute_buffer_block_vector(wires_ptr, unary_cursor, remaining);
             },
             SimdOp::Mux => unsafe {
-                let mut ternary_cursor = ternary.as_ptr().add(start);
+                let ternary_cursor = ternary.as_ptr().add(start);
                 execute_mux_block_vector(wires_ptr, ternary_cursor, remaining);
             },
             SimdOp::Demux => unsafe {
-                let mut demux_cursor = demux.as_ptr().add(start);
+                let demux_cursor = demux.as_ptr().add(start);
                 execute_demux_block_vector(wires_ptr, demux_cursor, remaining);
             },
             SimdOp::Adder => unsafe {
-                let mut adders_cursor = adders.as_ptr().add(start);
+                let adders_cursor = adders.as_ptr().add(start);
                 execute_adder_block_vector(wires_ptr, adders_cursor, remaining);
             },
         }
@@ -526,12 +526,12 @@ fn execute_program_scalar<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: S
     while block_idx < program.blocks.len() {
         let block = unsafe { &*blocks.add(block_idx) };
         let start = block.start;
-        let mut remaining = block.len;
+        let remaining = block.len;
         match block.op {
             SimdOp::And => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_and_block_scalar(
                     wires_ptr,
                     binary_in0_cursor,
@@ -541,9 +541,9 @@ fn execute_program_scalar<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: S
                 );
             },
             SimdOp::Or => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_or_block_scalar(
                     wires_ptr,
                     binary_in0_cursor,
@@ -553,9 +553,9 @@ fn execute_program_scalar<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: S
                 );
             },
             SimdOp::Xor => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_xor_block_scalar(
                     wires_ptr,
                     binary_in0_cursor,
@@ -565,9 +565,9 @@ fn execute_program_scalar<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: S
                 );
             },
             SimdOp::Nand => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_nand_block_scalar(
                     wires_ptr,
                     binary_in0_cursor,
@@ -577,9 +577,9 @@ fn execute_program_scalar<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: S
                 );
             },
             SimdOp::Nor => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_nor_block_scalar(
                     wires_ptr,
                     binary_in0_cursor,
@@ -589,9 +589,9 @@ fn execute_program_scalar<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: S
                 );
             },
             SimdOp::Xnor => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_xnor_block_scalar(
                     wires_ptr,
                     binary_in0_cursor,
@@ -601,9 +601,9 @@ fn execute_program_scalar<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: S
                 );
             },
             SimdOp::TriStateBuffer => unsafe {
-                let mut binary_in0_cursor = binary_in0.add(start);
-                let mut binary_in1_cursor = binary_in1.add(start);
-                let mut binary_out_cursor = binary_out.add(start);
+                let binary_in0_cursor = binary_in0.add(start);
+                let binary_in1_cursor = binary_in1.add(start);
+                let binary_out_cursor = binary_out.add(start);
                 execute_tri_state_buffer_block_scalar(
                     wires_ptr,
                     binary_in0_cursor,
@@ -613,23 +613,23 @@ fn execute_program_scalar<const HAS_CLOCKS: bool, const HAS_COUNTERS: bool, I: S
                 );
             },
             SimdOp::Not => unsafe {
-                let mut unary_cursor = unary.as_ptr().add(start);
+                let unary_cursor = unary.as_ptr().add(start);
                 execute_not_block_scalar(wires_ptr, unary_cursor, remaining);
             },
             SimdOp::Buffer => unsafe {
-                let mut unary_cursor = unary.as_ptr().add(start);
+                let unary_cursor = unary.as_ptr().add(start);
                 execute_buffer_block_scalar(wires_ptr, unary_cursor, remaining);
             },
             SimdOp::Mux => unsafe {
-                let mut ternary_cursor = ternary.as_ptr().add(start);
+                let ternary_cursor = ternary.as_ptr().add(start);
                 execute_mux_block_scalar(wires_ptr, ternary_cursor, remaining);
             },
             SimdOp::Demux => unsafe {
-                let mut demux_cursor = demux.as_ptr().add(start);
+                let demux_cursor = demux.as_ptr().add(start);
                 execute_demux_block_scalar(wires_ptr, demux_cursor, remaining);
             },
             SimdOp::Adder => unsafe {
-                let mut adders_cursor = adders.as_ptr().add(start);
+                let adders_cursor = adders.as_ptr().add(start);
                 execute_adder_block_scalar(wires_ptr, adders_cursor, remaining);
             },
         }
@@ -642,10 +642,12 @@ unsafe fn first_wire_or_zero<I: SimdIndex>(
     wires: *const u64x4,
     outputs: &SmallVec<[I; 2]>,
 ) -> u64x4 {
-    if outputs.is_empty() {
-        u64x4::ZERO
-    } else {
-        unsafe { *wires.add(outputs[0].as_usize()) }
+    unsafe {
+        if outputs.is_empty() {
+            u64x4::ZERO
+        } else {
+            *wires.add(outputs[0].as_usize())
+        }
     }
 }
 
@@ -656,19 +658,21 @@ unsafe fn execute_clock_block_vector<I: SimdIndex>(
     wires_ptr: *mut u64x4,
     clock_phase: &mut [u64],
 ) {
-    let ones = u64x4::splat(u64::MAX);
-    let clocks = program.clocks.as_ptr();
-    let mut clock_idx = 0;
-    while clock_idx < program.clocks.len() {
-        let clock = &*clocks.add(clock_idx);
-        let phase = clock_phase.get_unchecked_mut(clock_idx);
-        let output = *phase < clock.duty_ticks;
-        *wires_ptr.add(clock.output.as_usize()) = if output { ones } else { u64x4::ZERO };
-        *phase += 1;
-        if *phase >= clock.period_ticks {
-            *phase = 0;
+    unsafe {
+        let ones = u64x4::splat(u64::MAX);
+        let clocks = program.clocks.as_ptr();
+        let mut clock_idx = 0;
+        while clock_idx < program.clocks.len() {
+            let clock = &*clocks.add(clock_idx);
+            let phase = clock_phase.get_unchecked_mut(clock_idx);
+            let output = *phase < clock.duty_ticks;
+            *wires_ptr.add(clock.output.as_usize()) = if output { ones } else { u64x4::ZERO };
+            *phase += 1;
+            if *phase >= clock.period_ticks {
+                *phase = 0;
+            }
+            clock_idx += 1;
         }
-        clock_idx += 1;
     }
 }
 
@@ -679,25 +683,27 @@ unsafe fn execute_counter_block_vector<I: SimdIndex>(
     wires_ptr: *mut u64x4,
     previous_clock: &mut [u64x4],
 ) {
-    let counters = program.counters.as_ptr();
-    let mut counter_idx = 0;
-    while counter_idx < program.counters.len() {
-        let counter = &*counters.add(counter_idx);
-        let previous = previous_clock.get_unchecked_mut(counter_idx);
-        let counter_clock = *wires_ptr.add(counter.increment.as_usize());
-        let counter_reset = *wires_ptr.add(counter.reset.as_usize());
-        let mut carry = *previous & !counter_clock;
-        let mut outputs_idx = 0;
-        while outputs_idx < counter.outputs.len() {
-            let outputs = &counter.outputs[outputs_idx];
-            let old = first_wire_or_zero(wires_ptr, outputs);
-            let next = (old ^ carry) & !counter_reset;
-            write_outputs(wires_ptr, outputs, next);
-            carry &= old;
-            outputs_idx += 1;
+    unsafe {
+        let counters = program.counters.as_ptr();
+        let mut counter_idx = 0;
+        while counter_idx < program.counters.len() {
+            let counter = &*counters.add(counter_idx);
+            let previous = previous_clock.get_unchecked_mut(counter_idx);
+            let counter_clock = *wires_ptr.add(counter.increment.as_usize());
+            let counter_reset = *wires_ptr.add(counter.reset.as_usize());
+            let mut carry = *previous & !counter_clock;
+            let mut outputs_idx = 0;
+            while outputs_idx < counter.outputs.len() {
+                let outputs = &counter.outputs[outputs_idx];
+                let old = first_wire_or_zero(wires_ptr, outputs);
+                let next = (old ^ carry) & !counter_reset;
+                write_outputs(wires_ptr, outputs, next);
+                carry &= old;
+                outputs_idx += 1;
+            }
+            *previous = counter_clock;
+            counter_idx += 1;
         }
-        *previous = counter_clock;
-        counter_idx += 1;
     }
 }
 
@@ -1317,35 +1323,33 @@ unsafe fn first_wire_or_zero_scalar<I: SimdIndex>(
     wires: *const u8,
     outputs: &SmallVec<[I; 2]>,
 ) -> u8 {
-    if outputs.is_empty() {
-        0
-    } else {
-        unsafe { *wires.add(outputs[0].as_usize()) }
+    unsafe {
+        if outputs.is_empty() {
+            0
+        } else {
+            *wires.add(outputs[0].as_usize())
+        }
     }
 }
 
 #[inline(always)]
 unsafe fn write_outputs<I: SimdIndex>(wires: *mut u64x4, outputs: &SmallVec<[I; 2]>, value: u64x4) {
-    let len = outputs.len();
-    if len == 0 {
-        return;
-    }
-    let first = outputs[0];
     unsafe {
+        let len = outputs.len();
+        if len == 0 {
+            return;
+        }
+        let first = outputs[0];
         *wires.add(first.as_usize()) = value;
-    }
-    if len == 1 {
-        return;
-    }
-    let second = outputs[1];
-    unsafe {
+        if len == 1 {
+            return;
+        }
+        let second = outputs[1];
         *wires.add(second.as_usize()) = value;
-    }
-    if len == 2 {
-        return;
-    }
-    for &output in &outputs[2..] {
-        unsafe {
+        if len == 2 {
+            return;
+        }
+        for &output in &outputs[2..] {
             *wires.add(output.as_usize()) = value;
         }
     }
@@ -1357,26 +1361,22 @@ unsafe fn write_outputs_scalar<I: SimdIndex>(
     outputs: &SmallVec<[I; 2]>,
     value: u8,
 ) {
-    let len = outputs.len();
-    if len == 0 {
-        return;
-    }
-    let first = outputs[0];
     unsafe {
+        let len = outputs.len();
+        if len == 0 {
+            return;
+        }
+        let first = outputs[0];
         *wires.add(first.as_usize()) = value;
-    }
-    if len == 1 {
-        return;
-    }
-    let second = outputs[1];
-    unsafe {
+        if len == 1 {
+            return;
+        }
+        let second = outputs[1];
         *wires.add(second.as_usize()) = value;
-    }
-    if len == 2 {
-        return;
-    }
-    for &output in &outputs[2..] {
-        unsafe {
+        if len == 2 {
+            return;
+        }
+        for &output in &outputs[2..] {
             *wires.add(output.as_usize()) = value;
         }
     }

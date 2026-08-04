@@ -45,7 +45,7 @@ fn compact_simd_records_have_fixed_specialized_sizes() {
     assert_eq!(size_of::<SimdBinaryInstruction<u16>>(), 6);
     assert_eq!(size_of::<SimdTernaryInstruction<u16>>(), 8);
     assert_eq!(size_of::<SimdDemuxInstruction<u16>>(), 8);
-    assert_eq!(size_of::<SimdClock<u16>>(), 16);
+    assert_eq!(size_of::<SimdClock<u16>>(), 32);
 }
 
 #[test]

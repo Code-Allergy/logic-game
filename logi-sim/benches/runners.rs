@@ -312,10 +312,10 @@ fn bench_simd_fast_large_dense_throughput(c: &mut Criterion) {
 
     let mut input_wires = Vec::with_capacity(large_fixture.input_nodes.len());
     for node in &large_fixture.input_nodes {
-        if let Some(wires) = node_output_pins.get(&(*node, 0)) {
-            if let Some(&wire) = wires.first() {
-                input_wires.push(wire);
-            }
+        if let Some(wires) = node_output_pins.get(&(*node, 0))
+            && let Some(&wire) = wires.first()
+        {
+            input_wires.push(wire);
         }
     }
 

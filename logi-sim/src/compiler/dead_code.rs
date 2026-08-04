@@ -27,14 +27,13 @@ pub fn cull_dead_nodes_with_map(
     while let Some(node_id) = queue.pop_front() {
         let node = &circuit.nodes[node_id];
         for input_pin in &node.inputs {
-            if let Some(wire_id) = input_pin.wire {
-                if live_wires.insert(wire_id) {
-                    if let Some(wire) = circuit.wires.get(wire_id) {
-                        let source_node = wire.source.node;
-                        if live_nodes.insert(source_node) {
-                            queue.push_back(source_node);
-                        }
-                    }
+            if let Some(wire_id) = input_pin.wire
+                && live_wires.insert(wire_id)
+                && let Some(wire) = circuit.wires.get(wire_id)
+            {
+                let source_node = wire.source.node;
+                if live_nodes.insert(source_node) {
+                    queue.push_back(source_node);
                 }
             }
         }
@@ -54,31 +53,30 @@ pub fn cull_dead_nodes_with_map(
     }
 
     for (wire_id, wire) in &circuit.wires {
-        if live_wires.contains(&wire_id) {
-            if let Some(&new_source) = node_map.get(&wire.source.node) {
-                let mut rebuilt_wire = None;
-                for sink in &wire.sinks {
-                    if let Some(&new_sink) = node_map.get(&sink.node) {
-                        if let Some(new_wire_id) = rebuilt_wire {
-                            optimized.wires[new_wire_id]
-                                .sinks
-                                .push(crate::circuit::InputRef {
-                                    node: new_sink,
-                                    pin: sink.pin,
-                                });
-                            optimized.nodes[new_sink].inputs[sink.pin as usize].wire =
-                                Some(new_wire_id);
-                        } else {
-                            rebuilt_wire = Some(
-                                optimized
-                                    .connect((new_source, wire.source.pin), (new_sink, sink.pin)),
-                            );
-                        }
+        if live_wires.contains(&wire_id)
+            && let Some(&new_source) = node_map.get(&wire.source.node)
+        {
+            let mut rebuilt_wire = None;
+            for sink in &wire.sinks {
+                if let Some(&new_sink) = node_map.get(&sink.node) {
+                    if let Some(new_wire_id) = rebuilt_wire {
+                        optimized.wires[new_wire_id]
+                            .sinks
+                            .push(crate::circuit::InputRef {
+                                node: new_sink,
+                                pin: sink.pin,
+                            });
+                        optimized.nodes[new_sink].inputs[sink.pin as usize].wire =
+                            Some(new_wire_id);
+                    } else {
+                        rebuilt_wire = Some(
+                            optimized.connect((new_source, wire.source.pin), (new_sink, sink.pin)),
+                        );
                     }
                 }
-                if let Some(new_wire_id) = rebuilt_wire {
-                    wire_map.insert(wire_id, new_wire_id);
-                }
+            }
+            if let Some(new_wire_id) = rebuilt_wire {
+                wire_map.insert(wire_id, new_wire_id);
             }
         }
     }

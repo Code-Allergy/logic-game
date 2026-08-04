@@ -163,7 +163,7 @@ impl SimCache {
         for event in events {
             match event {
                 SimEvent::RunnerSet(runner_type) => {
-                    sim_config.current_runner = runner_type.clone();
+                    sim_config.current_runner = *runner_type;
                 }
                 SimEvent::StatusChanged { is_running } => {
                     self.is_running = *is_running;

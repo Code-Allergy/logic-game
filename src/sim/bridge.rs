@@ -129,6 +129,12 @@ impl SimBridge {
         self.runtime
     }
 
+    /// Whether this bridge is currently stepping/ticking.
+    #[inline]
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Circuit building helpers
     // ─────────────────────────────────────────────────────────────────────

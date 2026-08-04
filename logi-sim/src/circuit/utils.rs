@@ -1,4 +1,4 @@
-const DEFAULT_PIN_NAMES: [&'static str; 8] = ["A", "B", "C", "D", "E", "F", "G", "H"];
+const DEFAULT_PIN_NAMES: [&str; 8] = ["A", "B", "C", "D", "E", "F", "G", "H"];
 
 fn get_pin_name(prefix: &str, idx: usize) -> String {
     DEFAULT_PIN_NAMES

@@ -139,10 +139,10 @@ fn profile_slow_input_dense_simd(
 
     let mut input_wires = Vec::with_capacity(fixture.input_nodes.len());
     for node in &fixture.input_nodes {
-        if let Some(wires) = node_output_pins.get(&(*node, 0)) {
-            if let Some(&wire) = wires.first() {
-                input_wires.push(wire);
-            }
+        if let Some(wires) = node_output_pins.get(&(*node, 0))
+            && let Some(&wire) = wires.first()
+        {
+            input_wires.push(wire);
         }
     }
 

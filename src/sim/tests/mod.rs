@@ -133,10 +133,8 @@ fn counter_64_power_on_reset_starts_at_zero_then_counts() {
     let display_value = |bridge: &SimBridge| {
         let mut value = 0_u64;
         bridge.snapshot_wire_states(&mut |wire, set| {
-            if set {
-                if let Some(bit) = sim_wires.iter().position(|candidate| *candidate == wire) {
-                    value |= 1_u64 << bit;
-                }
+            if set && let Some(bit) = sim_wires.iter().position(|candidate| *candidate == wire) {
+                value |= 1_u64 << bit;
             }
         });
         value

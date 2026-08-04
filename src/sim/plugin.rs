@@ -49,10 +49,7 @@ impl Plugin for SimulationPlugin {
         //    a missing resource, regardless of which GameState is active.
         //    (Bevy 0.19 validates Res<T> params *before* evaluating run_if.)
         let game_circuit = fixtures::build_64bit_counter_subcircuits();
-        let mut sim_bridge = match runtime {
-            SimRuntime::Threaded => SimBridge::from_circuit_threaded(&game_circuit),
-            SimRuntime::Threadless => SimBridge::from_circuit_threadless(&game_circuit),
-        };
+        let mut sim_bridge = SimBridge::from_circuit_with_runtime(&game_circuit, runtime);
         power_on_reset(&mut sim_bridge, &game_circuit);
 
         app
@@ -89,7 +86,6 @@ impl Plugin for SimulationPlugin {
             .add_systems(
                 Update,
                 (
-                    drive_threadless_simulation,
                     update_input_colours_system,
                     update_logic_displays_system,
                     gate_selection_system.before(drag_selected_system),
@@ -113,6 +109,13 @@ impl Plugin for SimulationPlugin {
             // ── Save on exit ─────────────────────────────────────────────────
             // Runs independently of state so that it always fires when closing
             .add_systems(Update, save_on_exit_system);
+
+        if runtime == SimRuntime::Threadless {
+            app.add_systems(
+                Update,
+                drive_threadless_simulation.run_if(in_state(state.clone())),
+            );
+        }
     }
 }
 
@@ -168,7 +171,7 @@ fn rebuild_cache_index_system(
     // Seed is_running from the bridge's synchronously-maintained flag so the
     // Pause/Play button is correct on the very first frame, before any
     // StatusChanged event arrives from the worker.
-    cache.is_running = bridge.is_running;
+    cache.is_running = bridge.is_running();
 }
 
 /// Despawn all gate / connection-line entities when leaving the sim state.

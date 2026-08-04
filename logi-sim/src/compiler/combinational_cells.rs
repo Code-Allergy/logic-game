@@ -56,7 +56,7 @@ fn lower_ripple_adder(circuit: &Circuit) -> Option<Circuit> {
     }
     let inputs = interface_nodes(circuit, true);
     let outputs = interface_nodes(circuit, false);
-    if inputs.len() < 3 || inputs.len() % 2 == 0 || outputs.len() * 2 != inputs.len() + 1 {
+    if inputs.len() < 3 || inputs.len().is_multiple_of(2) || outputs.len() * 2 != inputs.len() + 1 {
         return None;
     }
     let bits = outputs.len() - 1;

@@ -6,12 +6,13 @@
 
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
+use std::collections::HashMap;
 
 use crate::{SAVE_FILE_NAME, temp::GateComponentSelectionEvent};
 
 use super::{
     ConnectionLine, GameCircuit, GameNodeKind, GateComponent, LogicDisplay, SavedSimulation,
-    Selected, SelectedGate, SimBridge, SimCache, SimRuntime, SimulationConfig, ThreadlessStepper,
+    Selected, SelectedGate, SimBridge, SimCache, SimulationConfig, ThreadlessStepper,
     TickRateMeter, calculate_connection_geometry, get_gate_sprite, spatial_grid::SpatialGrid,
 };
 
@@ -38,7 +39,7 @@ pub fn bridge_flush_system(
     if game_circuit.is_changed() {
         cache.rebuild_index(&game_circuit, &bridge);
     }
-    cache.is_running = bridge.is_running;
+    cache.is_running = bridge.is_running();
 
     // Snapshot all wire states in one RwLock::read() — O(N wires), independent
     // of how many simulation ticks ran this frame.
@@ -54,15 +55,12 @@ pub fn bridge_flush_system(
 /// main loop. This keeps wasm and other single-thread targets responsive while
 /// preserving the same externally-visible bridge APIs.
 pub fn drive_threadless_simulation(
-    mut bridge: ResMut<SimBridge>,
+    bridge: ResMut<SimBridge>,
     time: Res<Time>,
     mut stepper: ResMut<ThreadlessStepper>,
     sim_config: Res<SimulationConfig>,
 ) {
-    if bridge.runtime() == SimRuntime::Threaded {
-        return;
-    }
-    if !bridge.is_running {
+    if !bridge.is_running() {
         return;
     }
 
@@ -241,13 +239,13 @@ pub fn update_input_colours_system(
 }
 
 /// Update connection-line transform when gates move and change color from cached wire state.
-#[allow(clippy::type_complexity)]
 pub fn update_connections_system(
     gate_query: Query<(&Transform, &GateComponent)>,
     mut line_query: Query<(&mut Transform, &mut Sprite, &ConnectionLine), Without<GateComponent>>,
     cache: Res<SimCache>,
 ) {
-    let positions: std::collections::HashMap<_, _> = gate_query
+    type GatePositions = HashMap<uuid::Uuid, Vec3>;
+    let positions: GatePositions = gate_query
         .iter()
         .map(|(t, gc)| (gc.id, t.translation))
         .collect();
@@ -442,6 +440,7 @@ pub fn simulation_config_ui_system(
     mut contexts: EguiContexts,
     mut bridge: ResMut<SimBridge>,
     cache: Res<SimCache>,
+    time: Res<Time>,
     game_state: Res<State<crate::GameState>>,
 ) -> Result<(), BevyError> {
     if game_state.get() != &crate::GameState::Simulating {
@@ -449,7 +448,7 @@ pub fn simulation_config_ui_system(
     }
 
     let tick_count = bridge.tick_count();
-    tick_rate_meter.sample(tick_count);
+    tick_rate_meter.sample(tick_count, time.delta_secs_f64());
 
     egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (Hz)");
@@ -581,19 +580,18 @@ pub fn ui_for_selected_gate(
 // Save / Load
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 pub fn save_on_exit_system(
     mut exit_events: MessageReader<AppExit>,
     game_circuit: Res<GameCircuit>,
 ) {
-    if exit_events.read().next().is_some() {
-        if let Ok(file) = std::fs::File::create(SAVE_FILE_NAME) {
-            let saved = SavedSimulation::new(game_circuit.clone());
-            if let Err(e) = serde_json::to_writer_pretty(file, &saved) {
-                eprintln!("Failed to save simulation: {e}");
-            } else {
-                info!("Saved simulation to {SAVE_FILE_NAME}");
-            }
+    if exit_events.read().next().is_some()
+        && let Ok(file) = std::fs::File::create(SAVE_FILE_NAME)
+    {
+        let saved = SavedSimulation::new(game_circuit.clone());
+        if let Err(e) = serde_json::to_writer_pretty(file, &saved) {
+            eprintln!("Failed to save simulation: {e}");
+        } else {
+            info!("Saved simulation to {SAVE_FILE_NAME}");
         }
     }
 }

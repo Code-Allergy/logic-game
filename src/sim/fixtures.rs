@@ -299,18 +299,20 @@ pub fn build_8bit_counter() -> GameCircuit {
 pub fn build_half_adder() -> GameCircuit {
     let mut circuit = GameCircuit::new("Half Adder");
 
-    let mut create_node = |kind, x, y| {
-        let node = GameNode::new(kind, Vec2::new(x, y));
-        circuit.add_node(node.clone());
-        node.id
+    // Gates
+    let xor_id = {
+        let node = GameNode::new(GameNodeKind::Xor, Vec2::new(0.0, 50.0));
+        let id = node.id;
+        circuit.add_node(node);
+        id
     };
 
-    // Gates
-    let xor_id = create_node(GameNodeKind::Xor, 0.0, 50.0);
-    let and_id = create_node(GameNodeKind::And, 0.0, -50.0);
-
-    // Drop the closure before adding nodes manually to satisfy borrow checker
-    drop(create_node);
+    let and_id = {
+        let node = GameNode::new(GameNodeKind::And, Vec2::new(0.0, -50.0));
+        let id = node.id;
+        circuit.add_node(node);
+        id
+    };
 
     // Inputs
     let mut a_node = GameNode::new(GameNodeKind::Input, Vec2::new(-200.0, 50.0));

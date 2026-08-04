@@ -29,7 +29,6 @@ pub use service::{SimExecutionService, SimRuntime};
 
 use bevy::prelude::*;
 use logi_sim::engine::RunnerType;
-use std::time::Instant;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,7 +100,7 @@ impl Default for SimulationConfig {
 #[derive(Resource, Debug)]
 pub struct TickRateMeter {
     last_tick_count: u64,
-    last_sample: Instant,
+    sample_window_secs: f64,
     pub average_hz: Option<f64>,
 }
 
@@ -109,7 +108,7 @@ impl Default for TickRateMeter {
     fn default() -> Self {
         Self {
             last_tick_count: 0,
-            last_sample: Instant::now(),
+            sample_window_secs: 0.0,
             average_hz: None,
         }
     }
@@ -123,25 +122,27 @@ pub struct ThreadlessStepper {
 impl TickRateMeter {
     pub fn reset(&mut self, tick_count: u64) {
         self.last_tick_count = tick_count;
-        self.last_sample = Instant::now();
+        self.sample_window_secs = 0.0;
         self.average_hz = None;
     }
 
-    pub fn sample(&mut self, tick_count: u64) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_sample);
-        if elapsed < std::time::Duration::from_millis(250) {
+    pub fn sample(&mut self, tick_count: u64, delta_secs: f64) {
+        if delta_secs <= 0.0 {
+            return;
+        }
+        self.sample_window_secs += delta_secs;
+        if self.sample_window_secs < 0.250 {
             return;
         }
 
         let ticks = tick_count.saturating_sub(self.last_tick_count);
-        let current_hz = ticks as f64 / elapsed.as_secs_f64();
+        let current_hz = ticks as f64 / self.sample_window_secs;
         self.average_hz = Some(match self.average_hz {
             Some(average) => average * 0.75 + current_hz * 0.25,
             None => current_hz,
         });
         self.last_tick_count = tick_count;
-        self.last_sample = now;
+        self.sample_window_secs = 0.0;
     }
 }
 

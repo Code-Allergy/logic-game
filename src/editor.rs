@@ -110,107 +110,108 @@ pub fn editor_ui_system(
         return Ok(());
     };
 
-    egui::SidePanel::left("editor_panel")
-        .resizable(true)
-        .show(ctx, |ui| {
-            ui.heading("Component Editor");
-            ui.separator();
+    #[allow(deprecated)]
+    egui::CentralPanel::default().show(ctx, |root_ui| {
+        egui::Panel::left("editor_panel")
+            .resizable(true)
+            .show_inside(root_ui, |ui| {
+                ui.heading("Component Editor");
+                ui.separator();
 
-            // Connection mode toggle
-            if ui
-                .button(if editor_state.connection_mode {
-                    "✓ Connection Mode"
+                // Connection mode toggle
+                if ui
+                    .button(if editor_state.connection_mode {
+                        "✓ Connection Mode"
+                    } else {
+                        "Connection Mode"
+                    })
+                    .clicked()
+                {
+                    editor_state.connection_mode = !editor_state.connection_mode;
+                    if editor_state.connection_mode {
+                        editor_state.selected_gate_type = None;
+                    } else {
+                        editor_state.connection_source = None;
+                    }
+                }
+
+                ui.separator();
+                ui.heading("Add Components");
+
+                // Basic gate buttons
+                ui.horizontal(|ui| {
+                    for kind in [GameNodeKind::And, GameNodeKind::Or, GameNodeKind::Not] {
+                        if ui.button(kind.display_name()).clicked() {
+                            editor_state.selected_gate_type = Some(kind);
+                            editor_state.connection_mode = false;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    for kind in [GameNodeKind::Xor, GameNodeKind::Nand, GameNodeKind::Nor] {
+                        if ui.button(kind.display_name()).clicked() {
+                            editor_state.selected_gate_type = Some(kind);
+                            editor_state.connection_mode = false;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    for kind in [GameNodeKind::Input, GameNodeKind::Output] {
+                        if ui.button(kind.display_name()).clicked() {
+                            editor_state.selected_gate_type = Some(kind);
+                            editor_state.connection_mode = false;
+                        }
+                    }
+                    if ui.button("CLOCK").clicked() {
+                        editor_state.selected_gate_type = Some(GameNodeKind::Clock {
+                            period_ticks: 10,
+                            duty_ticks: 5,
+                        });
+                        editor_state.connection_mode = false;
+                    }
+                });
+
+                ui.separator();
+
+                // Status
+                if let Some(ref kind) = editor_state.selected_gate_type {
+                    ui.label(format!("Selected: {}", kind.display_name()));
+                    ui.label("Left-click in world to place");
+                } else if editor_state.connection_mode {
+                    match editor_state.connection_source {
+                        Some(src) => {
+                            ui.label(format!("From: {src}"));
+                            ui.label("Click destination gate");
+                        }
+                        None => {
+                            ui.label("Connection Mode: pick source gate");
+                        }
+                    }
                 } else {
-                    "Connection Mode"
-                })
-                .clicked()
-            {
-                editor_state.connection_mode = !editor_state.connection_mode;
-                if editor_state.connection_mode {
-                    editor_state.selected_gate_type = None;
-                } else {
-                    editor_state.connection_source = None;
+                    ui.label("Select a component or mode");
                 }
-            }
 
-            ui.separator();
-            ui.heading("Add Components");
-
-            // Basic gate buttons
-            ui.horizontal(|ui| {
-                for kind in [GameNodeKind::And, GameNodeKind::Or, GameNodeKind::Not] {
-                    if ui.button(kind.display_name()).clicked() {
-                        editor_state.selected_gate_type = Some(kind);
-                        editor_state.connection_mode = false;
-                    }
-                }
+                ui.separator();
+                ui.label("Tips:");
+                ui.label("• Right-click: drag gates");
+                ui.label("• Left-click: select/toggle inputs");
+                ui.label("• Connection Mode: wire output → input");
             });
-            ui.horizontal(|ui| {
-                for kind in [GameNodeKind::Xor, GameNodeKind::Nand, GameNodeKind::Nor] {
-                    if ui.button(kind.display_name()).clicked() {
-                        editor_state.selected_gate_type = Some(kind);
-                        editor_state.connection_mode = false;
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                for kind in [GameNodeKind::Input, GameNodeKind::Output] {
-                    if ui.button(kind.display_name()).clicked() {
-                        editor_state.selected_gate_type = Some(kind);
-                        editor_state.connection_mode = false;
-                    }
-                }
-                if ui.button("CLOCK").clicked() {
-                    editor_state.selected_gate_type = Some(GameNodeKind::Clock {
-                        period_ticks: 10,
-                        duty_ticks: 5,
-                    });
-                    editor_state.connection_mode = false;
-                }
-            });
-
-            ui.separator();
-
-            // Status
-            if let Some(ref kind) = editor_state.selected_gate_type {
-                ui.label(format!("Selected: {}", kind.display_name()));
-                ui.label("Left-click in world to place");
-            } else if editor_state.connection_mode {
-                match editor_state.connection_source {
-                    Some(src) => {
-                        ui.label(format!("From: {src}"));
-                        ui.label("Click destination gate");
-                    }
-                    None => {
-                        ui.label("Connection Mode: pick source gate");
-                    }
-                }
-            } else {
-                ui.label("Select a component or mode");
-            }
-
-            ui.separator();
-            ui.label("Tips:");
-            ui.label("• Right-click: drag gates");
-            ui.label("• Left-click: select/toggle inputs");
-            ui.label("• Connection Mode: wire output → input");
-        });
+    });
 
     // World placement on left-click
-    if let Some(kind) = editor_state.selected_gate_type.clone() {
-        if button_input.just_pressed(MouseButton::Left) {
-            if let Some(screen_pos) = window.cursor_position() {
-                if let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) {
-                    let d = -ray.origin.z / ray.direction.z;
-                    let world_pos = (ray.origin + ray.direction * d).truncate();
-                    if !ctx.is_pointer_over_egui() {
-                        create_gate_events.write(CreateGateEvent {
-                            kind,
-                            position: world_pos,
-                        });
-                    }
-                }
-            }
+    if let Some(kind) = editor_state.selected_gate_type.clone()
+        && button_input.just_pressed(MouseButton::Left)
+        && let Some(screen_pos) = window.cursor_position()
+        && let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos)
+    {
+        let d = -ray.origin.z / ray.direction.z;
+        let world_pos = (ray.origin + ray.direction * d).truncate();
+        if !ctx.is_pointer_over_egui() {
+            create_gate_events.write(CreateGateEvent {
+                kind,
+                position: world_pos,
+            });
         }
     }
 
@@ -259,6 +260,7 @@ pub fn process_gate_placement(
 // Wire creation
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_connection_creation(
     mut commands: Commands,
     mut editor_state: ResMut<EditorState>,
@@ -284,57 +286,56 @@ pub fn handle_connection_creation(
             // First click: pick source.
             editor_state.connection_source = Some(clicked_uuid);
             editor_state.connection_source_pin = 0; // default output pin 0
-        } else if let Some(src_uuid) = editor_state.connection_source {
-            if src_uuid != clicked_uuid {
-                let sink_uuid = clicked_uuid;
-                let src_pin = editor_state.connection_source_pin;
-                let sink_pin = 0u8; // default input pin 0
+        } else if let Some(src_uuid) = editor_state.connection_source
+            && src_uuid != clicked_uuid
+        {
+            let sink_uuid = clicked_uuid;
+            let src_pin = editor_state.connection_source_pin;
+            let sink_pin = 0u8; // default input pin 0
 
-                // 1. Add wire to frontend model.
-                let wire = GameWire::new(src_uuid, src_pin, sink_uuid, sink_pin);
-                game_circuit.add_wire(wire.clone());
+            // 1. Add wire to frontend model.
+            let wire = GameWire::new(src_uuid, src_pin, sink_uuid, sink_pin);
+            game_circuit.add_wire(wire.clone());
 
-                // 2. Send to simulator (async).
-                bridge.add_wire(&wire);
+            // 2. Send to simulator (async).
+            bridge.add_wire(&wire);
 
-                // 3. Broadcast event for other systems (e.g. spawn line sprite).
-                create_connection_events.write(CreateConnectionEvent {
-                    source_node: src_uuid,
-                    source_pin: src_pin,
-                    sink_node: sink_uuid,
-                    sink_pin,
-                });
+            // 3. Broadcast event for other systems (e.g. spawn line sprite).
+            create_connection_events.write(CreateConnectionEvent {
+                source_node: src_uuid,
+                source_pin: src_pin,
+                sink_node: sink_uuid,
+                sink_pin,
+            });
 
-                // 4. Spawn line sprite immediately.
-                let positions: std::collections::HashMap<_, _> = gate_query
-                    .iter()
-                    .map(|(t, gc)| (gc.id, t.translation))
-                    .collect();
-                if let (Some(&from), Some(&to)) =
-                    (positions.get(&src_uuid), positions.get(&sink_uuid))
-                {
-                    let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
-                    commands.spawn((
-                        Sprite {
-                            color: Color::WHITE,
-                            custom_size: Some(Vec2::new(dist, 2.0)),
-                            ..Default::default()
-                        },
-                        Transform {
-                            translation: mid,
-                            rotation: rot,
-                            scale: Vec3::ONE,
-                        },
-                        ConnectionLine {
-                            id: wire.id,
-                            source_node: src_uuid,
-                            sink_node: sink_uuid,
-                        },
-                    ));
-                }
-
-                editor_state.connection_source = None;
+            // 4. Spawn line sprite immediately.
+            let positions: std::collections::HashMap<_, _> = gate_query
+                .iter()
+                .map(|(t, gc)| (gc.id, t.translation))
+                .collect();
+            if let (Some(&from), Some(&to)) = (positions.get(&src_uuid), positions.get(&sink_uuid))
+            {
+                let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
+                commands.spawn((
+                    Sprite {
+                        color: Color::WHITE,
+                        custom_size: Some(Vec2::new(dist, 2.0)),
+                        ..Default::default()
+                    },
+                    Transform {
+                        translation: mid,
+                        rotation: rot,
+                        scale: Vec3::ONE,
+                    },
+                    ConnectionLine {
+                        id: wire.id,
+                        source_node: src_uuid,
+                        sink_node: sink_uuid,
+                    },
+                ));
             }
+
+            editor_state.connection_source = None;
         }
     }
 }

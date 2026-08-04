@@ -87,6 +87,11 @@ impl<I> SimdBinaryProgram<I> {
     }
 
     #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.output.is_empty()
+    }
+
+    #[inline(always)]
     pub fn push(&mut self, in0: I, in1: I, output: I) {
         self.in0.push(in0);
         self.in1.push(in1);
@@ -484,8 +489,8 @@ impl BitPackedCircuit {
                 }
             }
         }
-        for node_idx in 0..node_count {
-            if !visited[node_idx] {
+        for (node_idx, was_visited) in visited.iter().enumerate().take(node_count) {
+            if !*was_visited {
                 topo_order.push(node_idx);
             }
         }
