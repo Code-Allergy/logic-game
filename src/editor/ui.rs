@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     GameState,
     sim::{
-        ActiveCircuit, CircuitLibrary, CircuitView, CloseView, CreateGate, CreateWire,
+        ActiveCircuit, CircuitLibrary, CircuitView, CloseView, CreateGate, CreateWire, Demo,
         GateIdentity, GateKind, GateLabel, GateType, InstanceViewItem, OpenDefinitionView,
         RegisterDefinitions, WorkspaceDocument, demos,
         rtl::{ImportOptions, import_yosys_json},
@@ -171,8 +171,8 @@ pub fn editor_ui_system(
     let mut select_kind: Option<(GateKind, Option<String>)> = None;
     let catalog = demos::catalog();
     let open_demo = catalog.ok().and_then(|c| c.by_root(active.uuid));
-    let mut place_catalog: Option<usize> = None;
-    let mut open_catalog: Option<usize> = None;
+    let mut place_catalog: Option<&Demo> = None;
+    let mut open_catalog: Option<&Demo> = None;
     let mut copy_demo = false;
     let mut new_workspace = false;
     let mut import_rtl = false;
@@ -192,7 +192,14 @@ pub fn editor_ui_system(
             }
             if active.read_only {
                 if let Some(demo) = open_demo {
-                    ui.label(format!("Demo, level {}: {}", demo.level, demo.title));
+                    match (&demo.category, &catalog) {
+                        (Some(category), Ok(catalog)) => ui.label(format!(
+                            "Gallery, {}: {}",
+                            catalog.category_title(category),
+                            demo.title
+                        )),
+                        _ => ui.label(format!("Demo, level {}: {}", demo.level, demo.title)),
+                    };
                     ui.label(&demo.description);
                 }
                 ui.colored_label(
@@ -293,9 +300,9 @@ pub fn editor_ui_system(
             ui.label("Place a demo as a cell:");
             if let Ok(catalog) = catalog {
                 ui.horizontal_wrapped(|ui| {
-                    for (i, demo) in catalog.demos.iter().enumerate() {
+                    for demo in catalog.all() {
                         if ui.small_button(&demo.title).on_hover_text(&demo.description).clicked() {
-                            place_catalog = Some(i);
+                            place_catalog = Some(demo);
                         }
                     }
                 });
@@ -323,16 +330,31 @@ pub fn editor_ui_system(
                 Ok(catalog) => {
                     ui.label("From gates to a CPU: each level is built from the ones before it. Demos open read-only.");
                     let mut level = None;
-                    for (i, demo) in catalog.demos.iter().enumerate() {
+                    for demo in &catalog.demos {
                         if level != Some(demo.level) {
                             level = Some(demo.level);
                             ui.strong(format!("Level {}: {}", demo.level, catalog.level_title(demo.level)));
                         }
                         let open = open_demo.is_some_and(|d| d.id == demo.id);
                         if ui.selectable_label(open, &demo.title).on_hover_text(&demo.description).clicked() {
-                            open_catalog = Some(i);
+                            open_catalog = Some(demo);
                         }
                         ui.small(&demo.description);
+                    }
+                    ui.separator();
+                    ui.heading("Gallery");
+                    ui.label("More circuits, from simple to complex, built from the demos and from each other. They open read-only too.");
+                    let mut category = None;
+                    for item in &catalog.gallery {
+                        if category != item.category.as_deref() {
+                            category = item.category.as_deref();
+                            ui.strong(catalog.category_title(category.unwrap_or_default()));
+                        }
+                        let open = open_demo.is_some_and(|d| d.id == item.id);
+                        if ui.selectable_label(open, &item.title).on_hover_text(&item.description).clicked() {
+                            open_catalog = Some(item);
+                        }
+                        ui.small(&item.description);
                     }
                 }
                 Err(e) => {
@@ -427,8 +449,7 @@ pub fn editor_ui_system(
         editor_state.connection_mode = false;
         editor_state.clear_connection();
     };
-    if let (Some(i), Ok(catalog)) = (place_catalog, catalog) {
-        let demo = &catalog.demos[i];
+    if let Some(demo) = place_catalog {
         place(&mut editor_state, demo.title.clone(), &demo.workspace);
     }
     if let Some(name) = place_saved {
@@ -459,8 +480,7 @@ pub fn editor_ui_system(
         });
     };
 
-    if let (Some(i), Ok(catalog)) = (open_catalog, catalog) {
-        let demo = &catalog.demos[i];
+    if let Some(demo) = open_catalog {
         editor_state.status = None;
         open(
             &mut editor_state,

@@ -1,0 +1,88 @@
+{
+  "format": "gatequest-gallery",
+  "version": 1,
+  "categories": [
+    { "id": "combinational", "title": "Combinational logic" },
+    { "id": "sequential", "title": "Sequential logic" },
+    { "id": "systems", "title": "Systems" }
+  ],
+  "items": [
+    {
+      "id": "majority",
+      "category": "combinational",
+      "title": "Majority vote",
+      "description": "The output is 1 when at least two of the three inputs are 1: (A and B) or (B and C) or (A and C). Three copies of a signal voted this way outvote one faulty copy.",
+      "uses": []
+    },
+    {
+      "id": "comparator",
+      "category": "combinational",
+      "title": "One-bit comparator",
+      "description": "Compares two bits: Gt is A and not B, Lt is not A and B, and Eq is 1 when neither is, that is when A equals B. The magnitude comparator builds on it.",
+      "uses": []
+    },
+    {
+      "id": "magnitude",
+      "category": "combinational",
+      "title": "4-bit magnitude comparator",
+      "description": "Four one-bit comparators, one per bit. A > B if the highest bit where they differ has A = 1: the chain of AND and OR gates passes that decision up from bit 0 to bit 3. Shown beside the Eq and LtU primitives.",
+      "uses": ["comparator/cmp1"]
+    },
+    {
+      "id": "parity",
+      "category": "combinational",
+      "title": "Parity generator",
+      "description": "A tree of XOR gates tells whether an 8-bit word has an odd number of 1s. Sent with the word, this parity bit lets the receiver detect a single flipped bit. Shown beside the ReduceXor primitive.",
+      "uses": []
+    },
+    {
+      "id": "gray_code",
+      "category": "combinational",
+      "title": "Gray code",
+      "description": "In Gray code, neighbouring numbers differ in exactly one bit. Binary to Gray is B XOR (B shifted right by one); Gray to binary undoes it with a chain of XORs from the top bit down. The second circuit gets the original number back.",
+      "uses": []
+    },
+    {
+      "id": "priority_encoder",
+      "category": "combinational",
+      "title": "Priority encoder",
+      "description": "Y is the number of the highest input bit that is 1, and Valid says whether any is. A chain of multiplexers passes a number up from bit 0 to bit 7; every bit that is set replaces it with its own index, so the highest one wins.",
+      "uses": []
+    },
+    {
+      "id": "seven_segment",
+      "category": "combinational",
+      "title": "7-segment display",
+      "description": "A ROM holds the pattern of lit segments for each hex digit 0 to F; the seven outputs a to g are arranged like the segments of a digit. Change Digit and watch the figure change.",
+      "uses": []
+    },
+    {
+      "id": "bcd_to_binary",
+      "category": "combinational",
+      "title": "BCD to binary",
+      "description": "Turns two decimal digits (tens and ones, 4 bits each) into one binary number: Tens x 10 + Ones, where Tens x 10 is Tens x 8 + Tens x 2 and multiplying by a power of two is a shift. Uses two ripple-carry adders.",
+      "uses": ["ripple_adder/adder8"]
+    },
+    {
+      "id": "barrel_shifter",
+      "category": "combinational",
+      "title": "Barrel shifter",
+      "description": "Shifts A left by S places (0 to 7) in three stages: shift by 1 if bit 0 of S is set, then by 2 if bit 1 is set, then by 4 if bit 2 is set. Each stage is a word multiplexer choosing between its input and the shifted input.",
+      "uses": ["mux/mux2x8"]
+    },
+    {
+      "id": "cla_adder",
+      "category": "combinational",
+      "title": "Carry-lookahead adder",
+      "description": "A ripple adder waits for each carry to pass through every bit before it. The lookahead unit computes every carry at once from the generate (A and B) and propagate (A xor B) bits: carry k+1 is 1 if bit k generates one, or a lower bit generates one and every bit above it propagates. Shown beside a 4-bit ripple adder.",
+      "uses": ["full_adder/full_adder"]
+    },
+    {
+      "id": "multiplier",
+      "category": "combinational",
+      "title": "4x4 array multiplier",
+      "description": "Multiplies like long multiplication in binary: each bit of B either keeps a copy of A or zeroes it, giving four partial products. Three rows of 4-bit ripple adders add them, each row shifted one place; one bit of the product falls out of every row.",
+      "uses": ["cla_adder/ripple4"]
+    }
+  ]
+}

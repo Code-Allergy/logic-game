@@ -1,0 +1,32 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "majority",
+  "circuits": [
+    {
+      "name": "majority",
+      "title": "Majority vote",
+      "nodes": [
+        {"name": "A", "type": "Input", "at": [0, 80]},
+        {"name": "B", "type": "Input", "at": [0, 0]},
+        {"name": "C", "type": "Input", "at": [0, -80]},
+        {"name": "ab", "type": "And", "label": "A and B", "at": [160, 80]},
+        {"name": "bc", "type": "And", "label": "B and C", "at": [160, 0]},
+        {"name": "ac", "type": "And", "label": "A and C", "at": [160, -80]},
+        {"name": "any2", "type": "Or", "at": [300, 40]},
+        {"name": "vote", "type": "Or", "at": [440, 0]},
+        {"name": "Y", "type": "Output", "label": "Majority", "at": [580, 0]}
+      ],
+      "wires": [
+        ["A", "ab.a", "ac.a"],
+        ["B", "ab.b", "bc.a"],
+        ["C", "bc.b", "ac.b"],
+        ["ab", "any2.a"],
+        ["bc", "any2.b"],
+        ["any2", "vote.a"],
+        ["ac", "vote.b"],
+        ["vote", "Y"]
+      ]
+    }
+  ]
+}
