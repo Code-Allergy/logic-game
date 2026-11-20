@@ -56,8 +56,8 @@ messages handled in `Update` (`src/sim/authoring.rs`, `src/sim/view.rs`):
 entities to `NodeId`s, and in `PostUpdate` applies the frame's ECS changes
 through the `Design` mutation API (removed wires, removed gates, added or
 re-kinded gates, added or changed wires). If anything changed it sends the
-new revision to the engine: `engine_v2::Engine` on a worker thread
-natively, `engine_v2::LocalEngine` in-frame on wasm. The engine compiles
+new revision to the engine: `engine::Engine` on a worker thread
+natively, `engine::LocalEngine` in-frame on wasm. The engine compiles
 off the tick loop and carries register/RAM state across the swap. A
 compile error (e.g. a combinational loop) keeps the old program running
 and is published in `SimDiagnostics`.

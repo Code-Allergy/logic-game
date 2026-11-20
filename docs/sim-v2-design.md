@@ -428,8 +428,9 @@ ambiguous. Each is small and can be revisited.
       `Options::unoptimized()`, so the legacy comparison runs identical
       logic. The report's simplify section shows the reduction.
 18. **Engine v2 (M4).**
-    - **Location.** It lives in `logi_sim::engine_v2` until M6 deletes the
-      legacy `engine` and takes the name.
+    - **Location.** It was built as `logi_sim::engine_v2` beside the
+      legacy `engine`; M6 deleted the legacy module and renamed it to
+      `logi_sim::engine` (item 36).
     - **`EngineCore`** takes its clock as a parameter, so pacing works the
       same on native, on wasm (no `std::time::Instant` there) and under test.
       Both the threaded `Engine` and the in-frame `LocalEngine` wrap it.
@@ -599,7 +600,7 @@ ambiguous. Each is small and can be revisited.
     - **Debug reads.** A packed net with no plain slot is named in the
       `DebugMap` by a lane slot, `slot_count + 64 * k + lane`, meaning bit
       `lane` of `Program::lane_words[k]` (`Program::locate`). `Sim::read`,
-      `read_net` and the `engine_v2` probes resolve both kinds, so every
+      `read_net` and the `engine` probes resolve both kinds, so every
       net stays observable.
     - **Validation.** `Sim::try_new` checks every pack, gather and scatter
       slot, bit and lane, and every gather and scatter range.

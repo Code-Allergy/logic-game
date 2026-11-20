@@ -1,5 +1,5 @@
 //! `SimBridge`: maps the ECS authoring components onto a `logi_sim` v2
-//! [`Design`] and drives the v2 engine.
+//! [`Design`] and drives the engine.
 //!
 //! ## Mapping
 //!
@@ -53,8 +53,8 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use logi_sim::compile::{CompileError, NodePath, Options};
 #[cfg(not(target_arch = "wasm32"))]
-use logi_sim::engine_v2::Engine;
-use logi_sim::engine_v2::{EngineEvent, LocalEngine, Probe, ProbeFrame, Rate};
+use logi_sim::engine::Engine;
+use logi_sim::engine::{EngineEvent, LocalEngine, Probe, ProbeFrame, Rate};
 use logi_sim::netlist::{DefId, Design, NodeId, NodeKind, PinRef};
 use uuid::Uuid;
 
@@ -69,9 +69,9 @@ use super::{
 /// Which engine runs the simulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimRuntime {
-    /// `logi_sim::engine_v2::Engine` on a worker thread (native default).
+    /// `logi_sim::engine::Engine` on a worker thread (native default).
     Threaded,
-    /// `logi_sim::engine_v2::LocalEngine` run in-frame (wasm default).
+    /// `logi_sim::engine::LocalEngine` run in-frame (wasm default).
     Threadless,
 }
 

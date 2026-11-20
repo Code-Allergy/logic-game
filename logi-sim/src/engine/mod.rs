@@ -1,5 +1,5 @@
-//! Simulation engine for v2 (design doc section 7; issue #27). It replaces
-//! the legacy `engine` module in M6, and lives beside it until then.
+//! Simulation engine (design doc section 7; issue #27). Built as
+//! `engine_v2` beside the legacy engine, it took the name `engine` in M6.
 //!
 //! - [`EngineCore`] owns the [`Sim`] and does everything that is not
 //!   threading: rate pacing, single steps, batches sized by a time budget,

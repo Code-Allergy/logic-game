@@ -8,7 +8,7 @@
 //! - [`document`] – portable circuit documents (examples, save format,
 //!   subcircuit definitions) and the [`CircuitLibrary`].
 //! - [`bridge`] – `SimBridge`: maps the ECS onto a `logi_sim` v2 `Design`,
-//!   sends revisions to the v2 engine and reads probes back.
+//!   sends revisions to the engine and reads probes back.
 //! - [`view`] – instance views: opening a subcircuit shows its definition
 //!   with live values probed from the running root simulation.
 //! - [`visuals`] – change-driven gate and wire visuals, loop highlight.

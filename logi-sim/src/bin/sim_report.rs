@@ -236,9 +236,9 @@ fn main() {
         }
     }
 
-    println!("\n== Engine (engine_v2) ==");
+    println!("\n== Engine ==");
     {
-        use logi_sim::engine_v2::{Engine, Probe, ProbeFrame, Rate};
+        use logi_sim::engine::{Engine, Probe, ProbeFrame, Rate};
         let d = generate(&GenConfig::gates(
             5,
             if quick { 20_000 } else { 100_000 },
@@ -263,7 +263,7 @@ fn main() {
         drop(e);
 
         // Readback cost per published frame, by probe count.
-        let mut core = logi_sim::engine_v2::EngineCore::new(Options::debug());
+        let mut core = logi_sim::engine::EngineCore::new(Options::debug());
         core.load(&d, 1);
         let nets: Vec<_> = d.root_def().nets.keys().collect();
         let mut frame = ProbeFrame::default();
