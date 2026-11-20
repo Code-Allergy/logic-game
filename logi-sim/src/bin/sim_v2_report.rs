@@ -75,6 +75,13 @@ fn time_sim(p: &Arc<Program>, budget: Duration) -> f64 {
     })
 }
 
+/// Seconds per tick for `Sim::run` with no input changes (engine overhead
+/// baseline).
+fn time_sim_idle(p: &Arc<Program>, budget: Duration) -> f64 {
+    let mut sim = Sim::new(Arc::clone(p));
+    measure(budget, |n| sim.run(n))
+}
+
 fn row(label: &str, work: usize, unit: &str, secs_per_tick: f64) {
     let per_s = work as f64 / secs_per_tick;
     println!(
@@ -197,6 +204,43 @@ fn main() {
             if n == 1_000_000 && label == "gates1" {
                 gate_compile = Some(secs);
             }
+        }
+    }
+
+    println!("\n== Engine (engine_v2) ==");
+    {
+        use logi_sim::engine_v2::{Engine, Probe, ProbeFrame, Rate};
+        let d = generate(&GenConfig::gates(5, if quick { 20_000 } else { 100_000 }, 1)).design;
+        let (p, _) = compile_with(&d, &Options::debug());
+        let direct = 1.0 / time_sim_idle(&p, budget);
+        let e = Engine::spawn(Options::debug());
+        e.load(Arc::new(d.clone()), 1);
+        let _ = e.wait_event(Duration::from_secs(10));
+        e.set_rate(Rate::Unlimited);
+        e.sync();
+        let (t0, n0) = (Instant::now(), e.tick_count());
+        std::thread::sleep(budget * 2);
+        e.sync();
+        let engine = (e.tick_count() - n0) as f64 / t0.elapsed().as_secs_f64();
+        println!(
+            "unlimited: Sim::run {direct:.0} ticks/s, engine {engine:.0} ticks/s ({:.1}%)",
+            100.0 * engine / direct
+        );
+        drop(e);
+
+        // Readback cost per published frame, by probe count.
+        let mut core = logi_sim::engine_v2::EngineCore::new(Options::debug());
+        core.load(&d, 1);
+        let nets: Vec<_> = d.root_def().nets.keys().collect();
+        let mut frame = ProbeFrame::default();
+        for n in [16usize, 1_000, nets.len()] {
+            core.set_probes(nets.iter().take(n).map(|&net| Probe { path: vec![], net }).collect());
+            let t = measure(budget / 4, |k| {
+                for _ in 0..k {
+                    core.publish(&mut frame);
+                }
+            });
+            println!("publish {n:>7} probes ({} nets in design): {:>10.1} us/frame", nets.len(), t * 1e6);
         }
     }
 

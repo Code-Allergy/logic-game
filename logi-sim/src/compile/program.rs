@@ -152,6 +152,9 @@ pub struct Port {
     pub slot: u32,
     pub width: u8,
     pub name: Option<String>,
+    /// The root definition's port node. Stable across edits, so callers can
+    /// keep addressing a port after recompiling.
+    pub node: NodeId,
 }
 
 /// Root ports in port order. Outputs whose net is undriven or unconnected
@@ -168,6 +171,12 @@ impl PortMap {
     }
     pub fn output(&self, name: &str) -> Option<usize> {
         self.outputs.iter().position(|p| p.name.as_deref() == Some(name))
+    }
+    pub fn input_by_node(&self, node: NodeId) -> Option<usize> {
+        self.inputs.iter().position(|p| p.node == node)
+    }
+    pub fn output_by_node(&self, node: NodeId) -> Option<usize> {
+        self.outputs.iter().position(|p| p.node == node)
     }
 }
 

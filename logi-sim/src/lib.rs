@@ -2,6 +2,7 @@ pub mod circuit;
 pub mod compile;
 pub mod compiler;
 pub mod engine;
+pub mod engine_v2;
 pub mod fixtures;
 pub mod graphviz;
 pub mod netlist;

@@ -424,3 +424,17 @@ ambiguous. Each is small and can be revisited.
     - **Benchmarks.** Throughput benchmarks compile with
       `Options::unoptimized()`, so the legacy comparison runs identical
       logic. The report's simplify section shows the reduction.
+18. **Engine v2 (M4).**
+    - **Location.** It lives in `logi_sim::engine_v2` until M6 deletes the
+      legacy `engine` and takes the name.
+    - **`EngineCore`** takes its clock as a parameter, so pacing works the
+      same on native, on wasm (no `std::time::Instant` there) and under test.
+      Both the threaded `Engine` and the in-frame `LocalEngine` wrap it.
+    - **Inputs are addressed by root port node.** `Port` gains `node`.
+      Values persist across edits and are reapplied to the new program.
+    - **Compile options.** The engine compiles with `Options::debug()` by
+      default, so any net can be probed without a recompile.
+    - **Paced rates and stalls.** A paced rate drops debt beyond a quarter
+      second instead of bursting after a stall.
+    - **Probe frames.** They are published by swapping an `Arc` under one
+      mutex per batch, and their buffers are reused once readers drop them.
