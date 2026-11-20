@@ -97,8 +97,14 @@ impl DocWire {
     pub fn new(from: Uuid, from_pin: u8, to: Uuid, to_pin: u8) -> Self {
         Self {
             id: Uuid::new_v4(),
-            from: PinAddr { node: from, pin: from_pin },
-            to: PinAddr { node: to, pin: to_pin },
+            from: PinAddr {
+                node: from,
+                pin: from_pin,
+            },
+            to: PinAddr {
+                node: to,
+                pin: to_pin,
+            },
             layer: DEFAULT_LAYER_UUID,
             layer_order: 0,
         }
@@ -116,7 +122,12 @@ pub struct CircuitDocument {
 
 impl CircuitDocument {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { id: Uuid::new_v4(), name: name.into(), nodes: Vec::new(), wires: Vec::new() }
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            nodes: Vec::new(),
+            wires: Vec::new(),
+        }
     }
 
     /// Add a node and return its id.
@@ -141,10 +152,16 @@ impl CircuitDocument {
     /// id. Display nodes are not ports.
     pub fn interface(&self) -> (Vec<&DocNode>, Vec<&DocNode>) {
         let key = |n: &&DocNode| (n.label.clone().unwrap_or_default(), n.id);
-        let mut inputs: Vec<&DocNode> =
-            self.nodes.iter().filter(|n| matches!(n.kind, GateKind::Input { .. })).collect();
-        let mut outputs: Vec<&DocNode> =
-            self.nodes.iter().filter(|n| matches!(n.kind, GateKind::Output { .. })).collect();
+        let mut inputs: Vec<&DocNode> = self
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, GateKind::Input { .. }))
+            .collect();
+        let mut outputs: Vec<&DocNode> = self
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, GateKind::Output { .. }))
+            .collect();
         inputs.sort_by_key(key);
         outputs.sort_by_key(key);
         (inputs, outputs)
@@ -169,7 +186,10 @@ pub struct WorkspaceDocument {
 
 impl WorkspaceDocument {
     pub fn new(root: CircuitDocument) -> Self {
-        Self { root, definitions: HashMap::new() }
+        Self {
+            root,
+            definitions: HashMap::new(),
+        }
     }
 
     /// Register a definition and return its id.
@@ -225,7 +245,10 @@ impl CircuitLibrary {
                 let def = self.get(*definition)?;
                 let (ins, outs) = def.interface();
                 let width = |n: &&DocNode| n.kind.width().unwrap_or(1);
-                Some((ins.iter().map(width).collect(), outs.iter().map(width).collect()))
+                Some((
+                    ins.iter().map(width).collect(),
+                    outs.iter().map(width).collect(),
+                ))
             }
             k => k.primitive_pins(),
         }
@@ -239,14 +262,21 @@ impl CircuitLibrary {
             };
             let (ins, outs) = def.interface();
             let name = |n: &&DocNode| n.label.clone().unwrap_or_else(|| "?".into());
-            return (ins.iter().map(name).collect(), outs.iter().map(name).collect());
+            return (
+                ins.iter().map(name).collect(),
+                outs.iter().map(name).collect(),
+            );
         }
         let (ins, outs) = self.pins(kind).unwrap_or_default();
         let named = |names: &[&str], widths: &PinWidths| {
             widths
                 .iter()
                 .enumerate()
-                .map(|(i, _)| names.get(i).map_or_else(|| format!("in{i}"), |s| s.to_string()))
+                .map(|(i, _)| {
+                    names
+                        .get(i)
+                        .map_or_else(|| format!("in{i}"), |s| s.to_string())
+                })
                 .collect::<Vec<_>>()
         };
         let inputs = match kind {
@@ -284,10 +314,17 @@ impl CircuitLibrary {
     /// definition).
     /// `fallback_name` names `into` when it is not in the library (the
     /// root circuit).
-    pub fn recursion_error(&self, placing: Uuid, into: Uuid, fallback_name: &str) -> Option<String> {
+    pub fn recursion_error(
+        &self,
+        placing: Uuid,
+        into: Uuid,
+        fallback_name: &str,
+    ) -> Option<String> {
         let name = |id: Uuid| {
-            self.get(id)
-                .map_or_else(|| format!("\"{fallback_name}\""), |d| format!("\"{}\"", d.name))
+            self.get(id).map_or_else(
+                || format!("\"{fallback_name}\""),
+                |d| format!("\"{}\"", d.name),
+            )
         };
         if placing == into {
             return Some(format!(

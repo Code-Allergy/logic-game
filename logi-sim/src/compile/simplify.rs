@@ -24,9 +24,9 @@
 
 use std::collections::HashMap;
 
+use super::Options;
 use super::emit::Emitter;
 use super::program::*;
-use super::Options;
 use crate::netlist::mask;
 
 pub(super) fn simplify(
@@ -111,7 +111,15 @@ pub(super) fn simplify(
             let (mut a, mut b) = (ins.a, ins.b);
             let commutative = matches!(
                 op,
-                Op::And | Op::Or | Op::Xor | Op::Nand | Op::Nor | Op::Xnor | Op::Eq | Op::AddSum | Op::AddCarry
+                Op::And
+                    | Op::Or
+                    | Op::Xor
+                    | Op::Nand
+                    | Op::Nor
+                    | Op::Xnor
+                    | Op::Eq
+                    | Op::AddSum
+                    | Op::AddCarry
             );
             if commutative && a > b {
                 std::mem::swap(&mut a, &mut b);
@@ -137,7 +145,12 @@ pub(super) fn simplify(
                 if commit_read[dst as usize] && commit_written[t as usize] {
                     // Keep the value in its own slot (see module docs).
                     em.ops[k] = Op::Copy;
-                    em.instrs[k] = Instr { dst, a: t, b: ZERO_SLOT, c: ZERO_SLOT };
+                    em.instrs[k] = Instr {
+                        dst,
+                        a: t,
+                        b: ZERO_SLOT,
+                        c: ZERO_SLOT,
+                    };
                     em.imms[k] = 0;
                 } else {
                     repl[dst as usize] = t;
@@ -151,8 +164,16 @@ pub(super) fn simplify(
     // Apply replacements everywhere else.
     for c in &mut em.commits {
         *c = match *c {
-            Commit::Copy { state, next } => Commit::Copy { state, next: resolve(&mut repl, next) },
-            Commit::RamWrite { mem, we, addr, data } => Commit::RamWrite {
+            Commit::Copy { state, next } => Commit::Copy {
+                state,
+                next: resolve(&mut repl, next),
+            },
+            Commit::RamWrite {
+                mem,
+                we,
+                addr,
+                data,
+            } => Commit::RamWrite {
                 mem,
                 we: resolve(&mut repl, we),
                 addr: resolve(&mut repl, addr),
@@ -262,7 +283,13 @@ pub(super) fn simplify(
 
 /// Evaluate an instruction with constant operands. `None` for ops that are
 /// not constant even then (clocks, RAM reads).
-fn fold(op: Op, i: &Instr, imm: u64, c: &dyn Fn(u32) -> Option<u64>, mems: &[MemDesc]) -> Option<u64> {
+fn fold(
+    op: Op,
+    i: &Instr,
+    imm: u64,
+    c: &dyn Fn(u32) -> Option<u64>,
+    mems: &[MemDesc],
+) -> Option<u64> {
     let a = || c(i.a).unwrap_or(0);
     let b = || c(i.b).unwrap_or(0);
     let cc = || c(i.c).unwrap_or(0);
@@ -300,7 +327,11 @@ fn fold(op: Op, i: &Instr, imm: u64, c: &dyn Fn(u32) -> Option<u64>, mems: &[Mem
         Op::Concat => a() | (b() << i.c),
         Op::Sext => {
             let x = a();
-            if (x >> (i.b - 1)) & 1 == 1 { (x | !mask(i.b as u8)) & imm } else { x }
+            if (x >> (i.b - 1)) & 1 == 1 {
+                (x | !mask(i.b as u8)) & imm
+            } else {
+                x
+            }
         }
         Op::MemRead => {
             let m = &mems[i.b as usize];

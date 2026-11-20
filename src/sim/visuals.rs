@@ -113,7 +113,11 @@ pub fn wire_style(state: &WireState, on_loop: bool) -> (Color, f32) {
         Color::srgba(0.8, 0.6, 0.2, 1.0)
     } else if bus {
         // Buses: blue, brighter when any bit is set.
-        if state.value != 0 { Color::srgb(0.45, 0.85, 1.0) } else { Color::srgb(0.2, 0.45, 0.9) }
+        if state.value != 0 {
+            Color::srgb(0.45, 0.85, 1.0)
+        } else {
+            Color::srgb(0.2, 0.45, 0.9)
+        }
     } else if state.value != 0 {
         Color::srgb(0.0, 1.0, 0.0)
     } else {
@@ -124,7 +128,10 @@ pub fn wire_style(state: &WireState, on_loop: bool) -> (Color, f32) {
 
 /// `0x` and one hex digit per 4 bits.
 pub fn wire_label_text(value: u64, width: u8) -> String {
-    format!("0x{value:0digits$X}", digits = usize::from(width.max(1)).div_ceil(4))
+    format!(
+        "0x{value:0digits$X}",
+        digits = usize::from(width.max(1)).div_ceil(4)
+    )
 }
 
 /// Colour of a gate whose colour follows its value (inputs and outputs).
@@ -162,7 +169,9 @@ pub fn attach_gate_visuals_system(
                 commands.entity(child).despawn();
             }
         }
-        commands.entity(entity).try_insert(get_gate_sprite(&ty.kind));
+        commands
+            .entity(entity)
+            .try_insert(get_gate_sprite(&ty.kind));
         if matches!(ty.kind, GateKind::Output { .. } | GateKind::Display { .. }) {
             commands.spawn((
                 Text2d::new(""),
@@ -187,7 +196,11 @@ pub fn attach_wire_visuals_system(
     for entity in &wires {
         EntityWorkCounter::add(&work, 1);
         commands.entity(entity).try_insert((
-            Sprite { color: Color::WHITE, custom_size: Some(Vec2::new(1.0, WIRE_THICKNESS)), ..default() },
+            Sprite {
+                color: Color::WHITE,
+                custom_size: Some(Vec2::new(1.0, WIRE_THICKNESS)),
+                ..default()
+            },
             Transform::from_xyz(0.0, 0.0, crate::temp::CONNECTION_Z_LEVEL),
             Visibility::Visible,
         ));
@@ -202,7 +215,9 @@ pub fn attach_wire_visuals_system(
 /// loop, the gate ids of the open circuit on it. A node inside a nested
 /// instance is shown as that instance's gate.
 fn loops_in_view(diagnostics: &SimDiagnostics, view: &CircuitView) -> Vec<HashSet<Uuid>> {
-    let Some(error) = &diagnostics.compile_error else { return Vec::new() };
+    let Some(error) = &diagnostics.compile_error else {
+        return Vec::new();
+    };
     let here = if view.is_root() {
         Vec::new()
     } else {
@@ -243,7 +258,10 @@ pub fn apply_loop_highlight_system(
     outlines: Query<(Entity, &ChildOf), With<LoopOutline>>,
     work: Option<Res<EntityWorkCounter>>,
 ) {
-    if !diagnostics.is_changed() && !view.is_changed() && new_gates.is_empty() && new_wires.is_empty()
+    if !diagnostics.is_changed()
+        && !view.is_changed()
+        && new_gates.is_empty()
+        && new_wires.is_empty()
     {
         return;
     }
@@ -259,7 +277,11 @@ pub fn apply_loop_highlight_system(
             let size = ty.kind.size() + Vec2::splat(LOOP_OUTLINE_MARGIN);
             commands.entity(entity).insert(LoopHighlight);
             commands.spawn((
-                Sprite { color: LOOP_COLOR, custom_size: Some(size), ..default() },
+                Sprite {
+                    color: LOOP_COLOR,
+                    custom_size: Some(size),
+                    ..default()
+                },
                 Transform::from_xyz(0.0, 0.0, -0.5),
                 LoopOutline,
                 ChildOf(entity),
@@ -274,8 +296,9 @@ pub fn apply_loop_highlight_system(
         }
     }
     for (entity, ep, marked) in &wires {
-        let wanted =
-            loops.iter().any(|l| l.contains(&ep.source_gate) && l.contains(&ep.sink_gate));
+        let wanted = loops
+            .iter()
+            .any(|l| l.contains(&ep.source_gate) && l.contains(&ep.sink_gate));
         if wanted && !marked {
             commands.entity(entity).insert(LoopHighlight);
         } else if !wanted && marked {
@@ -305,8 +328,12 @@ pub fn update_gate_colours_system(
     }
 }
 
-type DisplaySourceChanged =
-    Or<(Changed<GateValues>, Changed<DisplayConfig>, Changed<GateType>, Changed<Children>)>;
+type DisplaySourceChanged = Or<(
+    Changed<GateValues>,
+    Changed<DisplayConfig>,
+    Changed<GateType>,
+    Changed<Children>,
+)>;
 
 /// Show output and display values as text. The text is formatted only when
 /// the value, width or display format changed.
@@ -323,7 +350,9 @@ pub fn update_logic_displays_system(
             config.copied().unwrap_or_default(),
         );
         for &child in children {
-            let Ok((mut text, mut displayed)) = texts.get_mut(child) else { continue };
+            let Ok((mut text, mut displayed)) = texts.get_mut(child) else {
+                continue;
+            };
             if displayed.0 == Some(shown) {
                 continue;
             }
@@ -363,10 +392,22 @@ pub fn update_wire_geometry_system(
     all_wires: Query<(Entity, &WireEndpoints)>,
     positions: Query<&Transform, (With<GateIdentity>, Without<WireEndpoints>)>,
     mut wires: Query<
-        (&WireEndpoints, &mut Transform, &mut Sprite, Option<&Children>),
+        (
+            &WireEndpoints,
+            &mut Transform,
+            &mut Sprite,
+            Option<&Children>,
+        ),
         Without<GateIdentity>,
     >,
-    mut labels: Query<&mut Transform, (With<WireValueLabel>, Without<WireEndpoints>, Without<GateIdentity>)>,
+    mut labels: Query<
+        &mut Transform,
+        (
+            With<WireValueLabel>,
+            Without<WireEndpoints>,
+            Without<GateIdentity>,
+        ),
+    >,
     work: Option<Res<EntityWorkCounter>>,
 ) {
     let removed = removed_gates.read().count() + removed_wires.read().count() > 0;
@@ -375,7 +416,11 @@ pub fn update_wire_geometry_system(
         index.gates = all_gates.iter().map(|(e, id)| (id.uuid, e)).collect();
         index.wires_of.clear();
         for (entity, ep) in &all_wires {
-            index.wires_of.entry(ep.source_gate).or_default().push(entity);
+            index
+                .wires_of
+                .entry(ep.source_gate)
+                .or_default()
+                .push(entity);
             if ep.sink_gate != ep.source_gate {
                 index.wires_of.entry(ep.sink_gate).or_default().push(entity);
             }
@@ -393,9 +438,17 @@ pub fn update_wire_geometry_system(
     }
     dirty.sort_unstable();
     dirty.dedup();
-    let position = |uuid: &Uuid| index.gates.get(uuid).and_then(|e| positions.get(*e).ok()).map(|t| t.translation);
+    let position = |uuid: &Uuid| {
+        index
+            .gates
+            .get(uuid)
+            .and_then(|e| positions.get(*e).ok())
+            .map(|t| t.translation)
+    };
     for entity in dirty {
-        let Ok((ep, mut transform, mut sprite, children)) = wires.get_mut(entity) else { continue };
+        let Ok((ep, mut transform, mut sprite, children)) = wires.get_mut(entity) else {
+            continue;
+        };
         EntityWorkCounter::add(&work, 1);
         let (Some(from), Some(to)) = (position(&ep.source_gate), position(&ep.sink_gate)) else {
             continue;
@@ -423,7 +476,10 @@ pub fn update_wire_geometry_system(
     }
 }
 
-type WireStyleChanged = (With<WireEndpoints>, Or<(Changed<WireState>, Added<LoopHighlight>)>);
+type WireStyleChanged = (
+    With<WireEndpoints>,
+    Or<(Changed<WireState>, Added<LoopHighlight>)>,
+);
 
 /// Colour wires by value and width, draw loop wires in red, and keep the
 /// hex value label of multi-bit wires (its text changes only when the
@@ -433,7 +489,13 @@ pub fn update_wire_style_system(
     mut commands: Commands,
     changed: Query<Entity, WireStyleChanged>,
     mut unmarked: RemovedComponents<LoopHighlight>,
-    mut wires: Query<(&WireState, Has<LoopHighlight>, &Transform, &mut Sprite, Option<&Children>)>,
+    mut wires: Query<(
+        &WireState,
+        Has<LoopHighlight>,
+        &Transform,
+        &mut Sprite,
+        Option<&Children>,
+    )>,
     mut labels: Query<(&mut WireValueLabel, &mut Text2d)>,
     work: Option<Res<EntityWorkCounter>>,
 ) {
@@ -458,9 +520,15 @@ pub fn update_wire_style_system(
             sprite.custom_size = size;
         }
 
-        let wanted = (state.width > 1 && state.connected)
-            .then_some(WireValueLabel { value: state.value, width: state.width });
-        let existing = children.into_iter().flatten().copied().find(|c| labels.contains(*c));
+        let wanted = (state.width > 1 && state.connected).then_some(WireValueLabel {
+            value: state.value,
+            width: state.width,
+        });
+        let existing = children
+            .into_iter()
+            .flatten()
+            .copied()
+            .find(|c| labels.contains(*c));
         match (wanted, existing) {
             (Some(want), Some(label)) => {
                 let (mut shown, mut text) = labels.get_mut(label).expect("label");

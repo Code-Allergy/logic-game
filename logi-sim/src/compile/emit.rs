@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use slotmap::SecondaryMap;
 
+use super::Options;
 use super::elaborate::Elab;
 use super::program::*;
 use super::simplify::simplify;
-use super::Options;
 use crate::netlist::{NetId, NodeKind, mask};
 
 const UNASSIGNED: u32 = u32::MAX;
@@ -39,7 +39,12 @@ impl Emitter {
 
     fn mem(&mut self, addr_bits: u8, width: u8, init: &[u64], writable: bool) -> u32 {
         let init: Arc<[u64]> = init.iter().map(|v| v & mask(width)).collect();
-        self.mems.push(MemDesc { addr_bits, width, init, writable });
+        self.mems.push(MemDesc {
+            addr_bits,
+            width,
+            init,
+            writable,
+        });
         (self.mems.len() - 1) as u32
     }
 }
@@ -102,7 +107,8 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
             NodeKind::Output { w } => w,
             _ => unreachable!("validated"),
         };
-        let slot = root_def.nodes[port].inputs[0].map_or(ZERO_SLOT, |net| net_slot[e.global(0, net) as usize]);
+        let slot = root_def.nodes[port].inputs[0]
+            .map_or(ZERO_SLOT, |net| net_slot[e.global(0, net) as usize]);
         ports.outputs.push(Port {
             slot,
             width: w,
@@ -149,7 +155,14 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         for (id, node) in &def.nodes {
             let i = |k: usize| node.inputs[k].map_or(ZERO_SLOT, slot);
             let o = |k: usize| slot(node.outputs[k]);
-            let key = |loc, width| StateKey { path: NodePath { instances: e.path(inst), node: id }, loc, width };
+            let key = |loc, width| StateKey {
+                path: NodePath {
+                    instances: e.path(inst),
+                    node: id,
+                },
+                loc,
+                width,
+            };
             lower(&mut em, &node.kind, &i, &o, key);
         }
     }
@@ -166,7 +179,16 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
     }
 
     // ── Levelize and group into blocks ─────────────────────────────────────
-    let Emitter { widths, ops, instrs, imms, consts, commits, mems, state_keys } = em;
+    let Emitter {
+        widths,
+        ops,
+        instrs,
+        imms,
+        consts,
+        commits,
+        mems,
+        state_keys,
+    } = em;
     let (ranks, order) = levelize(&ops, &instrs, widths.len());
     let mut sorted: Vec<u32> = order;
     sorted.sort_by_key(|&i| (ranks[i as usize], ops[i as usize], i));
@@ -178,7 +200,12 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         let (op, rank) = (ops[i as usize], ranks[i as usize]);
         match blocks.last_mut() {
             Some(b) if b.op == op && b.rank == rank => b.len += 1,
-            _ => blocks.push(Block { op, rank, start: out.len() as u32, len: 1 }),
+            _ => blocks.push(Block {
+                op,
+                rank,
+                start: out.len() as u32,
+                len: 1,
+            }),
         }
         out.push(instrs[i as usize]);
         out_imms.push(imms[i as usize]);
@@ -233,7 +260,10 @@ fn renumber(p: &mut Program, ops: &[Op]) {
     // the zero slot's class, which is already slot 0.
     let m = |s: u32| {
         let n = map[s as usize];
-        assert_ne!(n, UNASSIGNED, "internal error: slot {s} read but never produced");
+        assert_ne!(
+            n, UNASSIGNED,
+            "internal error: slot {s} read but never produced"
+        );
         n
     };
     for (ins, &op) in p.instrs.iter_mut().zip(ops) {
@@ -254,10 +284,21 @@ fn renumber(p: &mut Program, ops: &[Op]) {
     }
     for c in &mut p.commits {
         *c = match *c {
-            Commit::Copy { state, next } => Commit::Copy { state: m(state), next: m(next) },
-            Commit::RamWrite { mem, we, addr, data } => {
-                Commit::RamWrite { mem, we: m(we), addr: m(addr), data: m(data) }
-            }
+            Commit::Copy { state, next } => Commit::Copy {
+                state: m(state),
+                next: m(next),
+            },
+            Commit::RamWrite {
+                mem,
+                we,
+                addr,
+                data,
+            } => Commit::RamWrite {
+                mem,
+                we: m(we),
+                addr: m(addr),
+                data: m(data),
+            },
         };
     }
     for port in p.ports.inputs.iter_mut().chain(p.ports.outputs.iter_mut()) {
@@ -338,8 +379,16 @@ fn lower(
                 em.push(Op::Copy, o(0), i(0), z, z, 0);
             }
         }
-        K::Clock { period, duty, phase } => em.push(Op::Clock, o(0), *period, *duty, *phase, 0),
-        K::Rom { addr_bits, w, contents } => {
+        K::Clock {
+            period,
+            duty,
+            phase,
+        } => em.push(Op::Clock, o(0), *period, *duty, *phase, 0),
+        K::Rom {
+            addr_bits,
+            w,
+            contents,
+        } => {
             let m = em.mem(*addr_bits, *w, contents, false);
             em.push(Op::MemRead, o(0), i(0), m, z, 0);
         }
@@ -377,7 +426,12 @@ fn lower(
             em.push(Op::Copy, we, i(1), z, z, 0);
             em.push(Op::Copy, addr, i(0), z, z, 0);
             em.push(Op::Copy, data, i(2), z, z, 0);
-            em.commits.push(Commit::RamWrite { mem: m, we, addr, data });
+            em.commits.push(Commit::RamWrite {
+                mem: m,
+                we,
+                addr,
+                data,
+            });
             em.state_keys.push(key(StateLoc::Mem(m), *w));
         }
     }
@@ -437,6 +491,10 @@ fn levelize(ops: &[Op], instrs: &[Instr], slots: usize) -> (Vec<u32>, Vec<u32>) 
             }
         }
     }
-    assert_eq!(order.len(), n, "internal error: instruction cycle after loop check");
+    assert_eq!(
+        order.len(),
+        n,
+        "internal error: instruction cycle after loop check"
+    );
     (rank, order)
 }

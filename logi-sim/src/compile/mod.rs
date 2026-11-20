@@ -11,8 +11,8 @@
 mod elaborate;
 mod emit;
 mod loops;
-mod simplify;
 pub mod program;
+mod simplify;
 
 #[cfg(test)]
 mod tests;
@@ -46,19 +46,36 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { debug: false, const_fold: true, alias: true, cse: true, dce: true, probes: Vec::new() }
+        Self {
+            debug: false,
+            const_fold: true,
+            alias: true,
+            cse: true,
+            dce: true,
+            probes: Vec::new(),
+        }
     }
 }
 
 impl Options {
     /// Every pass off: one instruction per primitive, every net observable.
     pub fn unoptimized() -> Self {
-        Self { debug: true, const_fold: false, alias: false, cse: false, dce: false, probes: Vec::new() }
+        Self {
+            debug: true,
+            const_fold: false,
+            alias: false,
+            cse: false,
+            dce: false,
+            probes: Vec::new(),
+        }
     }
 
     /// All passes except dead-code elimination; every net observable.
     pub fn debug() -> Self {
-        Self { debug: true, ..Self::default() }
+        Self {
+            debug: true,
+            ..Self::default()
+        }
     }
 }
 
@@ -77,7 +94,11 @@ impl fmt::Display for CompileError {
         match self {
             CompileError::Invalid(e) => write!(f, "invalid design: {e:?}"),
             CompileError::CombinationalLoop { nodes } => {
-                write!(f, "combinational loop through {} node(s): {nodes:?}", nodes.len())
+                write!(
+                    f,
+                    "combinational loop through {} node(s): {nodes:?}",
+                    nodes.len()
+                )
             }
         }
     }
@@ -88,9 +109,11 @@ impl std::error::Error for CompileError {}
 /// Compile a design. Returns every validation error, or every combinational
 /// loop, found.
 pub fn compile(design: &Design, options: &Options) -> Result<Program, Vec<CompileError>> {
-    design
-        .validate()
-        .map_err(|errs| errs.into_iter().map(CompileError::Invalid).collect::<Vec<_>>())?;
+    design.validate().map_err(|errs| {
+        errs.into_iter()
+            .map(CompileError::Invalid)
+            .collect::<Vec<_>>()
+    })?;
     let elab = elaborate::Elab::new(design);
     let loops = loops::find_loops(&elab);
     if !loops.is_empty() {

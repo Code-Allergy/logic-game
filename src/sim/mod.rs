@@ -38,8 +38,10 @@ pub use document::{
     WorkspaceDocument,
 };
 pub use kind::GateKind;
-pub use view::{CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame};
 pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin};
+pub use view::{
+    CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame,
+};
 pub use visuals::{EntityWorkCounter, LoopHighlight, SimulationVisualsPlugin};
 
 use bevy::prelude::*;
@@ -66,7 +68,10 @@ pub struct SimulationConfig {
 
 impl Default for SimulationConfig {
     fn default() -> Self {
-        Self { tick_rate: DEFAULT_TICK_RATE, unlimited_tick_rate: false }
+        Self {
+            tick_rate: DEFAULT_TICK_RATE,
+            unlimited_tick_rate: false,
+        }
     }
 }
 
@@ -107,7 +112,11 @@ impl TickRateMeter {
 
 /// Returns the base [`Sprite`] for a gate kind.
 pub fn get_gate_sprite(kind: &GateKind) -> Sprite {
-    Sprite { color: kind.color(), custom_size: Some(kind.size()), ..Default::default() }
+    Sprite {
+        color: kind.color(),
+        custom_size: Some(kind.size()),
+        ..Default::default()
+    }
 }
 
 /// Compute midpoint, rotation quaternion, and length for a connection line sprite.
@@ -124,7 +133,9 @@ pub fn calculate_connection_geometry(from: &Vec3, to: &Vec3) -> (Vec3, Quat, f32
 pub fn format_value(value: u64, width: u8, config: &DisplayConfig) -> String {
     let width = usize::from(width.max(1));
     match (config.radix, config.leading_zeroes) {
-        (DisplayRadix::Hexadecimal, true) => format!("0x{value:0digits$X}", digits = width.div_ceil(4)),
+        (DisplayRadix::Hexadecimal, true) => {
+            format!("0x{value:0digits$X}", digits = width.div_ceil(4))
+        }
         (DisplayRadix::Hexadecimal, false) => format!("0x{value:X}"),
         (DisplayRadix::Binary, true) => format!("0b{value:0width$b}"),
         (DisplayRadix::Binary, false) => format!("0b{value:b}"),

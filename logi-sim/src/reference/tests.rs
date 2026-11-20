@@ -46,7 +46,14 @@ type BinOp = fn(u64, u64) -> u64;
 /// Sample operand values for width `w`, including the edges.
 fn samples(w: u8) -> Vec<u64> {
     let m = mask(w);
-    let mut v = vec![0, 1, m, m >> 1, 0x5555_5555_5555_5555 & m, 0xA5C3_0F96_1234_8001 & m];
+    let mut v = vec![
+        0,
+        1,
+        m,
+        m >> 1,
+        0x5555_5555_5555_5555 & m,
+        0xA5C3_0F96_1234_8001 & m,
+    ];
     v.dedup();
     v
 }
@@ -89,7 +96,11 @@ fn bitwise_ops_wide() {
             let mut r = single(kind.clone());
             for &a in &samples(w) {
                 for &b in &samples(w) {
-                    assert_eq!(apply(&mut r, &[a, b]), vec![f(a, b) & m], "{kind:?} {a:#x} {b:#x}");
+                    assert_eq!(
+                        apply(&mut r, &[a, b]),
+                        vec![f(a, b) & m],
+                        "{kind:?} {a:#x} {b:#x}"
+                    );
                 }
             }
         }
@@ -99,8 +110,14 @@ fn bitwise_ops_wide() {
         }
     }
     // Hand-checked 8-bit values.
-    assert_eq!(comb(NodeKind::And { w: 8 }, &[0b1100_1010, 0b1010_0110]), vec![0b1000_0010]);
-    assert_eq!(comb(NodeKind::Nor { w: 8 }, &[0b1100_1010, 0b1010_0110]), vec![0b0001_0001]);
+    assert_eq!(
+        comb(NodeKind::And { w: 8 }, &[0b1100_1010, 0b1010_0110]),
+        vec![0b1000_0010]
+    );
+    assert_eq!(
+        comb(NodeKind::Nor { w: 8 }, &[0b1100_1010, 0b1010_0110]),
+        vec![0b0001_0001]
+    );
     assert_eq!(comb(NodeKind::Not { w: 64 }, &[0]), vec![u64::MAX]);
 }
 
@@ -170,38 +187,142 @@ fn reductions() {
 
 #[test]
 fn split_merge_extend() {
-    assert_eq!(comb(NodeKind::Split { w: 8, lo: 2, len: 3 }, &[0b1011_0100]), vec![0b101]);
-    assert_eq!(comb(NodeKind::Split { w: 64, lo: 63, len: 1 }, &[1 << 63]), vec![1]);
-    assert_eq!(comb(NodeKind::Split { w: 64, lo: 0, len: 64 }, &[u64::MAX]), vec![u64::MAX]);
-    assert_eq!(comb(NodeKind::Split { w: 1, lo: 0, len: 1 }, &[1]), vec![1]);
     assert_eq!(
-        comb(NodeKind::Merge { widths: smallvec![1, 8, 3] }, &[1, 0xAB, 0b101]),
+        comb(
+            NodeKind::Split {
+                w: 8,
+                lo: 2,
+                len: 3
+            },
+            &[0b1011_0100]
+        ),
+        vec![0b101]
+    );
+    assert_eq!(
+        comb(
+            NodeKind::Split {
+                w: 64,
+                lo: 63,
+                len: 1
+            },
+            &[1 << 63]
+        ),
+        vec![1]
+    );
+    assert_eq!(
+        comb(
+            NodeKind::Split {
+                w: 64,
+                lo: 0,
+                len: 64
+            },
+            &[u64::MAX]
+        ),
+        vec![u64::MAX]
+    );
+    assert_eq!(
+        comb(
+            NodeKind::Split {
+                w: 1,
+                lo: 0,
+                len: 1
+            },
+            &[1]
+        ),
+        vec![1]
+    );
+    assert_eq!(
+        comb(
+            NodeKind::Merge {
+                widths: smallvec![1, 8, 3]
+            },
+            &[1, 0xAB, 0b101]
+        ),
         vec![0b1011_0101_0111]
     );
     assert_eq!(
-        comb(NodeKind::Merge { widths: smallvec![32, 32] }, &[0xDEAD_BEEF, 0x0123_4567]),
+        comb(
+            NodeKind::Merge {
+                widths: smallvec![32, 32]
+            },
+            &[0xDEAD_BEEF, 0x0123_4567]
+        ),
         vec![0x0123_4567_DEAD_BEEF]
     );
-    assert_eq!(comb(NodeKind::Extend { from: 8, to: 64, signed: false }, &[0x80]), vec![0x80]);
     assert_eq!(
-        comb(NodeKind::Extend { from: 8, to: 64, signed: true }, &[0x80]),
+        comb(
+            NodeKind::Extend {
+                from: 8,
+                to: 64,
+                signed: false
+            },
+            &[0x80]
+        ),
+        vec![0x80]
+    );
+    assert_eq!(
+        comb(
+            NodeKind::Extend {
+                from: 8,
+                to: 64,
+                signed: true
+            },
+            &[0x80]
+        ),
         vec![0xFFFF_FFFF_FFFF_FF80]
     );
-    assert_eq!(comb(NodeKind::Extend { from: 8, to: 16, signed: true }, &[0x7F]), vec![0x7F]);
-    assert_eq!(comb(NodeKind::Extend { from: 1, to: 8, signed: true }, &[1]), vec![0xFF]);
-    assert_eq!(comb(NodeKind::Extend { from: 64, to: 64, signed: true }, &[1 << 63]), vec![1 << 63]);
+    assert_eq!(
+        comb(
+            NodeKind::Extend {
+                from: 8,
+                to: 16,
+                signed: true
+            },
+            &[0x7F]
+        ),
+        vec![0x7F]
+    );
+    assert_eq!(
+        comb(
+            NodeKind::Extend {
+                from: 1,
+                to: 8,
+                signed: true
+            },
+            &[1]
+        ),
+        vec![0xFF]
+    );
+    assert_eq!(
+        comb(
+            NodeKind::Extend {
+                from: 64,
+                to: 64,
+                signed: true
+            },
+            &[1 << 63]
+        ),
+        vec![1 << 63]
+    );
 }
 
 #[test]
 fn const_is_masked() {
     for w in WIDTHS {
-        assert_eq!(comb(NodeKind::Const { w, value: u64::MAX }, &[]), vec![mask(w)]);
+        assert_eq!(
+            comb(NodeKind::Const { w, value: u64::MAX }, &[]),
+            vec![mask(w)]
+        );
     }
 }
 
 #[test]
 fn clock_is_a_function_of_tick_count() {
-    let mut r = single(NodeKind::Clock { period: 4, duty: 1, phase: 0 });
+    let mut r = single(NodeKind::Clock {
+        period: 4,
+        duty: 1,
+        phase: 0,
+    });
     let mut seen = vec![r.output(0)];
     for _ in 0..8 {
         r.tick().unwrap();
@@ -209,7 +330,11 @@ fn clock_is_a_function_of_tick_count() {
     }
     assert_eq!(seen, vec![1, 0, 0, 0, 1, 0, 0, 0, 1]);
 
-    let mut r = single(NodeKind::Clock { period: 2, duty: 1, phase: 1 });
+    let mut r = single(NodeKind::Clock {
+        period: 2,
+        duty: 1,
+        phase: 1,
+    });
     let mut seen = vec![r.output(0)];
     r.run(1).unwrap();
     seen.push(r.output(0));
@@ -220,7 +345,11 @@ fn clock_is_a_function_of_tick_count() {
 fn rom_reads_combinationally() {
     for w in WIDTHS {
         let contents: Arc<[u64]> = Arc::from(vec![u64::MAX, 2, 3]);
-        let mut r = single(NodeKind::Rom { addr_bits: 2, w, contents });
+        let mut r = single(NodeKind::Rom {
+            addr_bits: 2,
+            w,
+            contents,
+        });
         assert_eq!(apply(&mut r, &[0]), vec![mask(w)]);
         assert_eq!(apply(&mut r, &[2]), vec![3 & mask(w)]);
         assert_eq!(apply(&mut r, &[3]), vec![0], "past the end reads 0");
@@ -458,7 +587,14 @@ fn ram_address_is_combinational_but_write_data_is_not() {
     let mut b = d.builder(r);
     let addr = b.input("addr", 2);
     let we = b.one();
-    let ram = b.node(NodeKind::Ram { addr_bits: 2, w: 2, init: Arc::from(vec![]) }, &[Some(addr), Some(we)]);
+    let ram = b.node(
+        NodeKind::Ram {
+            addr_bits: 2,
+            w: 2,
+            init: Arc::from(vec![]),
+        },
+        &[Some(addr), Some(we)],
+    );
     let q = b.out(ram, 0);
     let inc = b.inc(q);
     b.connect(inc, (ram, 2));
@@ -471,7 +607,11 @@ fn ram_address_is_combinational_but_write_data_is_not() {
     let mut d = Design::new("top");
     let r = d.root;
     let mut b = d.builder(r);
-    let (ram, q) = b.state_placeholder(NodeKind::Ram { addr_bits: 2, w: 2, init: Arc::from(vec![]) });
+    let (ram, q) = b.state_placeholder(NodeKind::Ram {
+        addr_bits: 2,
+        w: 2,
+        init: Arc::from(vec![]),
+    });
     b.connect(q, (ram, 0));
     assert!(matches!(
         Reference::new(&d),
@@ -606,5 +746,8 @@ fn invalid_designs_are_rejected() {
     let r = d.root;
     let g = d.add_node(r, NodeKind::And { w: 1 }).unwrap();
     d.defs[r].nodes[g].inputs.pop();
-    assert!(matches!(Reference::new(&d), Err(ReferenceError::Invalid(_))));
+    assert!(matches!(
+        Reference::new(&d),
+        Err(ReferenceError::Invalid(_))
+    ));
 }

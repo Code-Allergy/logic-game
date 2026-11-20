@@ -45,7 +45,10 @@ pub enum WorkspaceError {
     Io(io::Error),
     Parse(serde_json::Error),
     /// A workspace in an older (or unknown) format.
-    UnsupportedVersion { name: String, found: Option<u64> },
+    UnsupportedVersion {
+        name: String,
+        found: Option<u64>,
+    },
     Invalid(String),
 }
 
@@ -55,7 +58,10 @@ impl fmt::Display for WorkspaceError {
             WorkspaceError::Io(e) => write!(f, "{e}"),
             WorkspaceError::Parse(e) => write!(f, "workspace file is not valid: {e}"),
             WorkspaceError::UnsupportedVersion { name, found } => {
-                let found = found.map_or_else(|| "an unknown version".to_string(), |v| format!("version {v}"));
+                let found = found.map_or_else(
+                    || "an unknown version".to_string(),
+                    |v| format!("version {v}"),
+                );
                 write!(
                     f,
                     "Workspace \"{name}\" was saved in save format {found}, which this version of \
@@ -123,10 +129,18 @@ pub fn list_workspaces_in(dir: &Path) -> io::Result<Vec<String>> {
         let name = if path.is_dir() {
             path.join(WORKSPACE_MANIFEST_FILE)
                 .exists()
-                .then(|| path.file_name().and_then(|v| v.to_str()).map(str::to_string))
+                .then(|| {
+                    path.file_name()
+                        .and_then(|v| v.to_str())
+                        .map(str::to_string)
+                })
                 .flatten()
-        } else if path.extension().and_then(|e| e.to_str()) == Some(DEFAULT_WORKSPACE_EXT.trim_start_matches('.')) {
-            path.file_stem().and_then(|v| v.to_str()).map(str::to_string)
+        } else if path.extension().and_then(|e| e.to_str())
+            == Some(DEFAULT_WORKSPACE_EXT.trim_start_matches('.'))
+        {
+            path.file_stem()
+                .and_then(|v| v.to_str())
+                .map(str::to_string)
         } else {
             None
         };
@@ -150,8 +164,8 @@ pub fn read_workspace_in(dir: &Path, name: &str) -> Result<WorkspaceDocument, Wo
         let legacy = folder.with_extension(DEFAULT_WORKSPACE_EXT.trim_start_matches('.'));
         if legacy.exists() {
             // Pre-bundle single-file save (format version 1).
-            let value: serde_json::Value = serde_json::from_slice(&fs::read(legacy)?)
-                .unwrap_or(serde_json::Value::Null);
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(legacy)?).unwrap_or(serde_json::Value::Null);
             return Err(WorkspaceError::UnsupportedVersion {
                 name: name.to_string(),
                 found: version_of(&value).or(Some(1)),
@@ -168,7 +182,10 @@ pub fn read_workspace_in(dir: &Path, name: &str) -> Result<WorkspaceDocument, Wo
     if found != Some(u64::from(WORKSPACE_VERSION))
         || value.get("format").and_then(|v| v.as_str()) != Some(WORKSPACE_FORMAT)
     {
-        return Err(WorkspaceError::UnsupportedVersion { name: name.to_string(), found });
+        return Err(WorkspaceError::UnsupportedVersion {
+            name: name.to_string(),
+            found,
+        });
     }
     let file: WorkspaceFile = serde_json::from_value(value)?;
 
@@ -193,9 +210,14 @@ pub fn read_workspace_in(dir: &Path, name: &str) -> Result<WorkspaceDocument, Wo
     }
     let workspace = WorkspaceDocument {
         root,
-        definitions: circuits.into_iter().map(|(id, c)| (id, Arc::new(c))).collect(),
+        definitions: circuits
+            .into_iter()
+            .map(|(id, c)| (id, Arc::new(c)))
+            .collect(),
     };
-    let library = CircuitLibrary { definitions: workspace.definitions.clone() };
+    let library = CircuitLibrary {
+        definitions: workspace.definitions.clone(),
+    };
     if let Some(id) = library.find_cycle() {
         let name = library.get(id).map_or_else(String::new, |d| d.name.clone());
         return Err(WorkspaceError::Invalid(format!(
@@ -206,7 +228,11 @@ pub fn read_workspace_in(dir: &Path, name: &str) -> Result<WorkspaceDocument, Wo
     Ok(workspace)
 }
 
-pub fn save_workspace_in(dir: &Path, name: &str, workspace: &WorkspaceDocument) -> Result<(), WorkspaceError> {
+pub fn save_workspace_in(
+    dir: &Path,
+    name: &str,
+    workspace: &WorkspaceDocument,
+) -> Result<(), WorkspaceError> {
     validate_required_io_labels(workspace)?;
     let folder = workspace_path_in(dir, name);
     if folder.is_file() {
@@ -236,7 +262,9 @@ pub fn save_workspace_in(dir: &Path, name: &str, workspace: &WorkspaceDocument) 
 /// Input, Output and Display nodes must be labelled (labels name ports).
 fn validate_required_io_labels(workspace: &WorkspaceDocument) -> Result<(), WorkspaceError> {
     let mut missing = Vec::new();
-    for circuit in std::iter::once(&workspace.root).chain(workspace.definitions.values().map(|d| &**d)) {
+    for circuit in
+        std::iter::once(&workspace.root).chain(workspace.definitions.values().map(|d| &**d))
+    {
         for node in &circuit.nodes {
             if node.kind.is_port() && node.label.as_deref().is_none_or(|v| v.trim().is_empty()) {
                 missing.push(format!(

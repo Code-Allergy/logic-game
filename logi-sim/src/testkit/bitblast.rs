@@ -23,8 +23,12 @@ pub fn bitblast(src: &Design) -> Design {
 
     // Ports.
     for (i, &port) in s.inputs.iter().enumerate() {
-        let NodeKind::Input { w } = s.nodes[port].kind else { unreachable!() };
-        let name = s.name_of(port).map_or_else(|| format!("in{i}"), str::to_string);
+        let NodeKind::Input { w } = s.nodes[port].kind else {
+            unreachable!()
+        };
+        let name = s
+            .name_of(port)
+            .map_or_else(|| format!("in{i}"), str::to_string);
         let net = b.input(name, w);
         bits.insert(s.nodes[port].outputs[0], b.bus_expand(net));
     }
@@ -73,7 +77,11 @@ pub fn bitblast(src: &Design) -> Design {
         }
         pending.insert(id, n);
     }
-    let mut ready: Vec<NodeId> = pending.iter().filter(|(_, n)| **n == 0).map(|(id, _)| id).collect();
+    let mut ready: Vec<NodeId> = pending
+        .iter()
+        .filter(|(_, n)| **n == 0)
+        .map(|(id, _)| id)
+        .collect();
     while let Some(id) = ready.pop() {
         let node = &s.nodes[id];
         let (ins, _) = node.kind.pins().expect("flat");
@@ -142,8 +150,12 @@ pub fn bitblast(src: &Design) -> Design {
     }
 
     for (i, &port) in s.outputs.iter().enumerate() {
-        let NodeKind::Output { w } = s.nodes[port].kind else { unreachable!() };
-        let name = s.name_of(port).map_or_else(|| format!("out{i}"), str::to_string);
+        let NodeKind::Output { w } = s.nodes[port].kind else {
+            unreachable!()
+        };
+        let name = s
+            .name_of(port)
+            .map_or_else(|| format!("out{i}"), str::to_string);
         let v = match s.nodes[port].inputs[0] {
             Some(net) => bits[net].clone(),
             None => vec![*zero.get_or_insert_with(|| b.zero(1)); w as usize],
@@ -156,7 +168,12 @@ pub fn bitblast(src: &Design) -> Design {
 
 /// Gate-level outputs (one bit vector per output pin) of one combinational
 /// node, given its input bit vectors.
-fn blast(b: &mut Builder<'_>, kind: &NodeKind, i: &[Vec<NetId>], zero: &mut Option<NetId>) -> Vec<Vec<NetId>> {
+fn blast(
+    b: &mut Builder<'_>,
+    kind: &NodeKind,
+    i: &[Vec<NetId>],
+    zero: &mut Option<NetId>,
+) -> Vec<Vec<NetId>> {
     use NodeKind as K;
     let mut zero_bit = |b: &mut Builder<'_>| *zero.get_or_insert_with(|| b.zero(1));
     fn map2<'x>(
@@ -175,7 +192,11 @@ fn blast(b: &mut Builder<'_>, kind: &NodeKind, i: &[Vec<NetId>], zero: &mut Opti
         K::Nand { .. } => map2(b, i, Builder::nand),
         K::Nor { .. } => map2(b, i, Builder::nor),
         K::Xnor { .. } => map2(b, i, Builder::xnor),
-        K::Mux { .. } => i[1].iter().zip(&i[2]).map(|(&x, &y)| b.mux(i[0][0], x, y)).collect(),
+        K::Mux { .. } => i[1]
+            .iter()
+            .zip(&i[2])
+            .map(|(&x, &y)| b.mux(i[0][0], x, y))
+            .collect(),
         K::Switch { .. } => i[1].iter().map(|&d| b.and(i[0][0], d)).collect(),
         K::Add { .. } => {
             let mut carry = i[2][0];
@@ -211,7 +232,11 @@ fn blast(b: &mut Builder<'_>, kind: &NodeKind, i: &[Vec<NetId>], zero: &mut Opti
         K::Merge { .. } => i.concat(),
         K::Extend { from, to, signed } => {
             let mut v = i[0].clone();
-            let fill = if *signed { v[*from as usize - 1] } else { zero_bit(b) };
+            let fill = if *signed {
+                v[*from as usize - 1]
+            } else {
+                zero_bit(b)
+            };
             v.resize(*to as usize, fill);
             v
         }

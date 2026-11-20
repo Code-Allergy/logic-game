@@ -15,7 +15,10 @@ struct FakeClock {
 
 impl FakeClock {
     fn new() -> Self {
-        Self { now: Cell::new(Duration::ZERO), tick: Duration::from_micros(40) }
+        Self {
+            now: Cell::new(Duration::ZERO),
+            tick: Duration::from_micros(40),
+        }
     }
     fn read(&self) -> Duration {
         let t = self.now.get() + self.tick;
@@ -54,7 +57,16 @@ fn counter_design(extra: bool) -> (Design, NodeId, NetId, NetId) {
 }
 
 fn probes(q: NetId, mem: NetId) -> Vec<Probe> {
-    vec![Probe { path: vec![], net: q }, Probe { path: vec![], net: mem }]
+    vec![
+        Probe {
+            path: vec![],
+            net: q,
+        },
+        Probe {
+            path: vec![],
+            net: mem,
+        },
+    ]
 }
 
 // ── Core / LocalEngine (deterministic clock) ─────────────────────────────
@@ -77,7 +89,10 @@ fn paced_rate_matches_wall_time() {
         ticks += e.run_frame(Duration::from_millis(5), &c);
     }
     // Clock reads add a little time of their own.
-    assert!((99..=103).contains(&ticks), "{ticks} ticks in 1 s at 100 Hz");
+    assert!(
+        (99..=103).contains(&ticks),
+        "{ticks} ticks in 1 s at 100 Hz"
+    );
     assert_eq!(e.frame().tick, ticks);
 }
 
@@ -92,7 +107,10 @@ fn paced_rate_drops_debt_it_cannot_pay() {
     e.run_frame(Duration::from_millis(5), &c);
     clock.advance(Duration::from_secs(10)); // a 10 s stall
     let n = e.run_frame(Duration::from_secs(1), &c);
-    assert!(n <= 252, "caught up {n} ticks after a stall; at most ~0.25 s worth");
+    assert!(
+        n <= 252,
+        "caught up {n} ticks after a stall; at most ~0.25 s worth"
+    );
     clock.advance(Duration::from_millis(100));
     let n = e.run_frame(Duration::from_secs(1), &c);
     assert!((99..=103).contains(&n), "back to normal pacing: {n}");
@@ -107,7 +125,10 @@ fn steps_run_while_paused_and_probes_read_back() {
     e.load(&d, 7);
     e.core.set_input(en, 1);
     let mut ps = probes(q, mem);
-    ps.push(Probe { path: vec![NodeId::default()], net: q }); // no such instance
+    ps.push(Probe {
+        path: vec![NodeId::default()],
+        net: q,
+    }); // no such instance
     e.core.set_probes(ps);
     e.core.step(5);
     assert_eq!(e.run_frame(Duration::from_secs(1), &c), 5);
@@ -149,16 +170,33 @@ fn state_and_inputs_survive_an_edit() {
     assert_eq!(e.frame().values[0], 19);
 
     e.load(&d2, 2);
-    assert!(matches!(e.drain_events()[..], [EngineEvent::Loaded { revision: 1, .. }, EngineEvent::Loaded { revision: 2, .. }]));
+    assert!(matches!(
+        e.drain_events()[..],
+        [
+            EngineEvent::Loaded { revision: 1, .. },
+            EngineEvent::Loaded { revision: 2, .. }
+        ]
+    ));
     e.run_frame(Duration::from_secs(1), &c);
     let f = e.frame().clone();
-    assert_eq!((f.revision, f.tick, f.values[0]), (2, 20, 19), "register and tick kept");
+    assert_eq!(
+        (f.revision, f.tick, f.values[0]),
+        (2, 20, 19),
+        "register and tick kept"
+    );
     // Committed writes so far are counts 0..=18 (count 19's write is still
     // pending), so address 2 holds 18 and address 3 holds 3.
-    let ram = e.core.sim().unwrap().program().state_keys.iter().find_map(|k| match k.loc {
-        crate::compile::StateLoc::Mem(m) => Some(m),
-        _ => None,
-    });
+    let ram = e
+        .core
+        .sim()
+        .unwrap()
+        .program()
+        .state_keys
+        .iter()
+        .find_map(|k| match k.loc {
+            crate::compile::StateLoc::Mem(m) => Some(m),
+            _ => None,
+        });
     let ram = ram.unwrap();
     assert_eq!(&e.core.sim().unwrap().mem(ram)[2..4], &[18, 3]);
     // en is still 1 after the swap, and the pending write (recomputed by the
@@ -189,7 +227,9 @@ fn compile_errors_keep_the_old_program() {
     b.connect(y, (n, 0));
     e.load(&bad, 2);
     let events = e.drain_events();
-    assert!(matches!(&events[1], EngineEvent::CompileFailed { revision: 2, errors } if !errors.is_empty()));
+    assert!(
+        matches!(&events[1], EngineEvent::CompileFailed { revision: 2, errors } if !errors.is_empty())
+    );
     e.core.step(4);
     e.run_frame(Duration::from_secs(1), &c);
     assert_eq!((e.frame().revision, e.frame().values[0]), (1, 3));
@@ -313,7 +353,9 @@ mod threaded {
         e.sync();
         let engine_rate = (e.tick_count() - n0) as f64 / t0.elapsed().as_secs_f64();
         let ratio = engine_rate / direct_rate;
-        eprintln!("direct {direct_rate:.0} ticks/s, engine {engine_rate:.0} ticks/s, ratio {ratio:.3}");
+        eprintln!(
+            "direct {direct_rate:.0} ticks/s, engine {engine_rate:.0} ticks/s, ratio {ratio:.3}"
+        );
         assert!(ratio > 0.95, "engine overhead too high: {ratio:.3}");
     }
 }

@@ -82,7 +82,11 @@ fn gate(app: &mut App, label: &str) -> Entity {
 
 fn gate_of_kind(app: &mut App, pred: impl Fn(&GateKind) -> bool) -> Entity {
     let mut q = app.world_mut().query::<(Entity, &GateType)>();
-    let found: Vec<Entity> = q.iter(app.world()).filter(|(_, t)| pred(&t.kind)).map(|(e, _)| e).collect();
+    let found: Vec<Entity> = q
+        .iter(app.world())
+        .filter(|(_, t)| pred(&t.kind))
+        .map(|(e, _)| e)
+        .collect();
     assert_eq!(found.len(), 1, "expected exactly one matching gate");
     found[0]
 }
@@ -100,7 +104,9 @@ fn output_value(app: &App, entity: Entity, pin: usize) -> u64 {
 }
 
 fn wires(app: &mut App) -> Vec<(Entity, WireEndpoints, WireState)> {
-    let mut q = app.world_mut().query::<(Entity, &WireEndpoints, &WireState)>();
+    let mut q = app
+        .world_mut()
+        .query::<(Entity, &WireEndpoints, &WireState)>();
     q.iter(app.world()).map(|(e, ep, s)| (e, *ep, *s)).collect()
 }
 
@@ -110,17 +116,37 @@ fn set_input(app: &mut App, label: &str, value: u64) {
 }
 
 fn create_gate(app: &mut App, kind: GateKind, label: &str) -> Entity {
-    send(app, CreateGate { kind, position: Vec2::ZERO, label: Some(label.into()) });
+    send(
+        app,
+        CreateGate {
+            kind,
+            position: Vec2::ZERO,
+            label: Some(label.into()),
+        },
+    );
     gate(app, label)
 }
 
 fn create_wire(app: &mut App, from: Entity, from_pin: u8, to: Entity, to_pin: u8) {
     let (source_gate, sink_gate) = (uuid(app, from), uuid(app, to));
-    send(app, CreateWire { source_gate, source_pin: from_pin, sink_gate, sink_pin: to_pin });
+    send(
+        app,
+        CreateWire {
+            source_gate,
+            source_pin: from_pin,
+            sink_gate,
+            sink_pin: to_pin,
+        },
+    );
 }
 
 fn root_node_count(app: &App) -> usize {
-    app.world().resource::<SimBridge>().design().root_def().nodes.len()
+    app.world()
+        .resource::<SimBridge>()
+        .design()
+        .root_def()
+        .nodes
+        .len()
 }
 
 fn temp_dir() -> PathBuf {
@@ -149,7 +175,11 @@ fn add_connect_toggle_through_authoring_messages() {
     create_wire(&mut app, b, 0, xor, 1);
     create_wire(&mut app, xor, 0, y, 0);
     assert_eq!(root_node_count(&app), 4, "one design node per gate");
-    assert!(wires(&mut app).iter().all(|(_, _, s)| s.connected && s.width == 1));
+    assert!(
+        wires(&mut app)
+            .iter()
+            .all(|(_, _, s)| s.connected && s.width == 1)
+    );
 
     run(&mut app, 1);
     assert_eq!(input_value(&app, y, 0), 0);
@@ -158,9 +188,19 @@ fn add_connect_toggle_through_authoring_messages() {
     run(&mut app, 1);
     assert_eq!(output_value(&app, a, 0), 1);
     assert_eq!(input_value(&app, y, 0), 1);
-    assert!(wires(&mut app).iter().all(|(_, _, s)| s.value == 1 || s.value == 0));
-    let out_wire = wires(&mut app).into_iter().find(|(_, ep, _)| ep.sink_gate == uuid(&app, y)).unwrap();
-    assert_eq!(out_wire.2.value, 1, "wire value comes from the engine probe");
+    assert!(
+        wires(&mut app)
+            .iter()
+            .all(|(_, _, s)| s.value == 1 || s.value == 0)
+    );
+    let out_wire = wires(&mut app)
+        .into_iter()
+        .find(|(_, ep, _)| ep.sink_gate == uuid(&app, y))
+        .unwrap();
+    assert_eq!(
+        out_wire.2.value, 1,
+        "wire value comes from the engine probe"
+    );
 
     set_input(&mut app, "B", 1);
     run(&mut app, 1);
@@ -188,7 +228,12 @@ fn width_mismatch_is_refused() {
     let y = create_gate(&mut app, GateKind::Output { w: 4 }, "Y");
     create_wire(&mut app, a, 0, y, 0);
     assert!(wires(&mut app).is_empty());
-    assert!(app.world().resource::<crate::sim::AuthoringFeedback>().message.is_some());
+    assert!(
+        app.world()
+            .resource::<crate::sim::AuthoringFeedback>()
+            .message
+            .is_some()
+    );
 }
 
 #[test]
@@ -203,12 +248,22 @@ fn delete_wire_and_gate_end_to_end() {
     assert_eq!(input_value(&app, y, 0), 1);
 
     // Delete the wire into the output: the pin is disconnected and reads 0.
-    let (wire, ..) = wires(&mut app).into_iter().find(|(_, ep, _)| ep.sink_gate == uuid(&app, y)).unwrap();
+    let (wire, ..) = wires(&mut app)
+        .into_iter()
+        .find(|(_, ep, _)| ep.sink_gate == uuid(&app, y))
+        .unwrap();
     send(&mut app, DeleteWire { entity: wire });
     run(&mut app, 1);
     assert_eq!(input_value(&app, y, 0), 0);
     let y_node = app.world().resource::<SimBridge>().node_of(y).unwrap();
-    assert_eq!(app.world().resource::<SimBridge>().design().root_def().input_net(y_node, 0), None);
+    assert_eq!(
+        app.world()
+            .resource::<SimBridge>()
+            .design()
+            .root_def()
+            .input_net(y_node, 0),
+        None
+    );
 
     // Delete the NOT gate: its node and its remaining wire go too.
     send(&mut app, DeleteGate { entity: not });
@@ -223,8 +278,24 @@ fn delete_wire_and_gate_end_to_end() {
 fn word_wires_with_split_and_merge() {
     let mut app = app();
     let a = create_gate(&mut app, GateKind::Input { w: 8 }, "A");
-    let hi = create_gate(&mut app, GateKind::Split { w: 8, lo: 4, len: 4 }, "hi");
-    let lo = create_gate(&mut app, GateKind::Split { w: 8, lo: 0, len: 4 }, "lo");
+    let hi = create_gate(
+        &mut app,
+        GateKind::Split {
+            w: 8,
+            lo: 4,
+            len: 4,
+        },
+        "hi",
+    );
+    let lo = create_gate(
+        &mut app,
+        GateKind::Split {
+            w: 8,
+            lo: 0,
+            len: 4,
+        },
+        "lo",
+    );
     let swap = create_gate(&mut app, GateKind::Merge { widths: vec![4, 4] }, "swap");
     let y = create_gate(&mut app, GateKind::Output { w: 8 }, "Y");
     create_wire(&mut app, a, 0, hi, 0);
@@ -235,7 +306,11 @@ fn word_wires_with_split_and_merge() {
     set_input(&mut app, "A", 0xA5);
     run(&mut app, 1);
     assert_eq!(input_value(&app, y, 0), 0x5A);
-    assert!(wires(&mut app).iter().any(|(_, _, s)| s.width == 8 && s.value == 0xA5));
+    assert!(
+        wires(&mut app)
+            .iter()
+            .any(|(_, _, s)| s.width == 8 && s.value == 0xA5)
+    );
 }
 
 #[test]
@@ -248,12 +323,28 @@ fn changing_a_width_disconnects_mismatched_wires() {
     run(&mut app, 1);
     assert_eq!(input_value(&app, y, 0), 9);
 
-    send(&mut app, SetGateKind { entity: y, kind: GateKind::Output { w: 8 } });
+    send(
+        &mut app,
+        SetGateKind {
+            entity: y,
+            kind: GateKind::Output { w: 8 },
+        },
+    );
     assert!(!wires(&mut app)[0].2.connected);
-    send(&mut app, SetGateKind { entity: a, kind: GateKind::Input { w: 8 } });
+    send(
+        &mut app,
+        SetGateKind {
+            entity: a,
+            kind: GateKind::Input { w: 8 },
+        },
+    );
     assert!(wires(&mut app)[0].2.connected, "widths match again");
     run(&mut app, 1);
-    assert_eq!(input_value(&app, y, 0), 9, "the input keeps its driven value");
+    assert_eq!(
+        input_value(&app, y, 0),
+        9,
+        "the input keeps its driven value"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -273,7 +364,11 @@ fn register_state_survives_edits() {
     let extra = create_gate(&mut app, GateKind::Not { w: 1 }, "extra");
     let enable = gate(&mut app, "Enable");
     create_wire(&mut app, enable, 0, extra, 0);
-    assert_eq!(display_value(&mut app), before, "edit did not reset the register");
+    assert_eq!(
+        display_value(&mut app),
+        before,
+        "edit did not reset the register"
+    );
     send(&mut app, DeleteGate { entity: extra });
     assert_eq!(display_value(&mut app), before);
 
@@ -323,12 +418,21 @@ fn combinational_loop_is_reported_and_previous_program_keeps_running() {
     let y = create_gate(&mut app, GateKind::Output { w: 1 }, "Y");
     create_wire(&mut app, a, 0, y, 0);
     run(&mut app, 1);
-    assert!(app.world().resource::<SimDiagnostics>().compile_error.is_none());
+    assert!(
+        app.world()
+            .resource::<SimDiagnostics>()
+            .compile_error
+            .is_none()
+    );
 
     // A NOT gate feeding itself is a combinational loop.
     let not = create_gate(&mut app, GateKind::Not { w: 1 }, "loop");
     create_wire(&mut app, not, 0, not, 0);
-    let error = app.world().resource::<SimDiagnostics>().compile_error.clone();
+    let error = app
+        .world()
+        .resource::<SimDiagnostics>()
+        .compile_error
+        .clone();
     let error = error.expect("loop reported");
     assert_eq!(error.loop_gates, vec![not]);
     assert!(error.messages[0].contains("loop"), "{:?}", error.messages);
@@ -342,7 +446,12 @@ fn combinational_loop_is_reported_and_previous_program_keeps_running() {
     let delay = create_gate(&mut app, GateKind::Delay { w: 1 }, "delay");
     create_wire(&mut app, not, 0, delay, 0);
     create_wire(&mut app, delay, 0, not, 0);
-    assert!(app.world().resource::<SimDiagnostics>().compile_error.is_none());
+    assert!(
+        app.world()
+            .resource::<SimDiagnostics>()
+            .compile_error
+            .is_none()
+    );
     run(&mut app, 4);
     assert_eq!(input_value(&app, y, 0), 1, "state and inputs carried over");
 }
@@ -363,7 +472,12 @@ fn nested_fanout_fixture() -> WorkspaceDocument {
     let leaf_id = ws.define(leaf);
     let mut wrapper = CircuitDocument::new("wrapper");
     let wi = wrapper.add(DocNode::labeled(GateKind::Input { w: 1 }, Vec2::ZERO, "A"));
-    let wl = wrapper.add(DocNode::new(GateKind::SubCircuit { definition: leaf_id }, Vec2::ZERO));
+    let wl = wrapper.add(DocNode::new(
+        GateKind::SubCircuit {
+            definition: leaf_id,
+        },
+        Vec2::ZERO,
+    ));
     let wo = wrapper.add(DocNode::labeled(GateKind::Output { w: 1 }, Vec2::ZERO, "Y"));
     wrapper.connect(wi, 0, wl, 0);
     wrapper.connect(wl, 0, wo, 0);
@@ -371,9 +485,23 @@ fn nested_fanout_fixture() -> WorkspaceDocument {
 
     let root = &mut ws.root;
     let input = root.add(DocNode::labeled(GateKind::Input { w: 1 }, Vec2::ZERO, "A"));
-    let nested = root.add(DocNode::labeled(GateKind::SubCircuit { definition: wrapper_id }, Vec2::ZERO, "nested"));
-    let y1 = root.add(DocNode::labeled(GateKind::Output { w: 1 }, Vec2::ZERO, "Y1"));
-    let y2 = root.add(DocNode::labeled(GateKind::Output { w: 1 }, Vec2::ZERO, "Y2"));
+    let nested = root.add(DocNode::labeled(
+        GateKind::SubCircuit {
+            definition: wrapper_id,
+        },
+        Vec2::ZERO,
+        "nested",
+    ));
+    let y1 = root.add(DocNode::labeled(
+        GateKind::Output { w: 1 },
+        Vec2::ZERO,
+        "Y1",
+    ));
+    let y2 = root.add(DocNode::labeled(
+        GateKind::Output { w: 1 },
+        Vec2::ZERO,
+        "Y2",
+    ));
     root.connect(input, 0, nested, 0);
     root.connect(nested, 0, y1, 0);
     root.connect(nested, 0, y2, 0);
@@ -400,12 +528,17 @@ fn threaded_engine_runs_the_same_path() {
     let (y1, y2) = (gate(&mut app, "Y1"), gate(&mut app, "Y2"));
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        app.world_mut().resource_mut::<SimBridge>().wait_until_current(Duration::from_secs(5));
+        app.world_mut()
+            .resource_mut::<SimBridge>()
+            .wait_until_current(Duration::from_secs(5));
         app.update();
         if input_value(&app, y1, 0) == 1 && input_value(&app, y2, 0) == 1 {
             break;
         }
-        assert!(Instant::now() < deadline, "nested outputs never reached the ECS");
+        assert!(
+            Instant::now() < deadline,
+            "nested outputs never reached the ECS"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
 }
@@ -414,7 +547,11 @@ fn threaded_engine_runs_the_same_path() {
 fn counter_block_has_word_interface() {
     let ws = fixtures::build_8bit_counter_block();
     let (inputs, outputs) = ws.root.interface();
-    let names = |v: &[&DocNode]| v.iter().map(|n| n.label.clone().unwrap()).collect::<Vec<_>>();
+    let names = |v: &[&DocNode]| {
+        v.iter()
+            .map(|n| n.label.clone().unwrap())
+            .collect::<Vec<_>>()
+    };
     assert_eq!(names(&inputs), ["Increment", "Reset"]);
     assert_eq!(names(&outputs), ["Bits", "Ripple"]);
     assert_eq!(outputs[0].kind, GateKind::Output { w: 8 });
@@ -432,14 +569,26 @@ fn counter_examples_compile_start_at_zero_and_count() {
         let name = ws.root.name.clone();
         let mut app = app();
         load(&mut app, ws);
-        assert!(wires(&mut app).iter().all(|(_, _, s)| s.connected), "{name}: every wire simulated");
-        assert!(app.world().resource::<SimDiagnostics>().compile_error.is_none(), "{name} compiles");
+        assert!(
+            wires(&mut app).iter().all(|(_, _, s)| s.connected),
+            "{name}: every wire simulated"
+        );
+        assert!(
+            app.world()
+                .resource::<SimDiagnostics>()
+                .compile_error
+                .is_none(),
+            "{name} compiles"
+        );
         assert_eq!(display_value(&mut app), 0, "{name} powers up at 0");
         let mut previous = 0;
         for _ in 0..ticks {
             run(&mut app, 1);
             let v = display_value(&mut app);
-            assert!(v == previous || v == previous + 1, "{name}: {previous} -> {v}");
+            assert!(
+                v == previous || v == previous + 1,
+                "{name}: {previous} -> {v}"
+            );
             previous = v;
         }
         assert!(previous >= 8, "{name} counted to {previous}");
@@ -456,9 +605,24 @@ fn every_example_loads_and_compiles() {
     for (name, ws) in fixtures::fixture_workspace_catalog() {
         let mut app = app();
         load(&mut app, (*ws).clone());
-        assert!(app.world().resource::<SimDiagnostics>().compile_error.is_none(), "{name}");
-        assert!(app.world().resource::<SimDiagnostics>().running_revision.is_some(), "{name}");
-        assert!(wires(&mut app).iter().all(|(_, _, s)| s.connected), "{name}: wires");
+        assert!(
+            app.world()
+                .resource::<SimDiagnostics>()
+                .compile_error
+                .is_none(),
+            "{name}"
+        );
+        assert!(
+            app.world()
+                .resource::<SimDiagnostics>()
+                .running_revision
+                .is_some(),
+            "{name}"
+        );
+        assert!(
+            wires(&mut app).iter().all(|(_, _, s)| s.connected),
+            "{name}: wires"
+        );
     }
 }
 
@@ -467,7 +631,9 @@ fn every_example_loads_and_compiles() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn read_back(app: &mut App) -> WorkspaceDocument {
-    app.world_mut().run_system_once(|reader: CircuitReader| reader.workspace()).unwrap()
+    app.world_mut()
+        .run_system_once(|reader: CircuitReader| reader.workspace())
+        .unwrap()
 }
 
 #[test]
@@ -481,7 +647,11 @@ fn save_and_load_round_trip() {
 
     let loaded = read_workspace_in(&dir, "counter").unwrap();
     assert_eq!(loaded, saved);
-    assert_eq!(loaded.definitions.len(), 1, "the T flip-flop is stored once");
+    assert_eq!(
+        loaded.definitions.len(),
+        1,
+        "the T flip-flop is stored once"
+    );
 
     // Load into a fresh app; it simulates the same.
     let mut app = self::app();
@@ -560,12 +730,17 @@ fn bridge_systems_do_not_mark_simulation_config_changed_every_frame() {
     }
 
     let mut app = app();
-    app.init_resource::<ConfigChanges>().add_systems(Last, count_changes);
+    app.init_resource::<ConfigChanges>()
+        .add_systems(Last, count_changes);
     load(&mut app, nested_fanout_fixture());
     for _ in 0..20 {
         app.update();
     }
-    assert_eq!(app.world().resource::<ConfigChanges>().0, 1, "only the initial insert");
+    assert_eq!(
+        app.world().resource::<ConfigChanges>().0,
+        1,
+        "only the initial insert"
+    );
 }
 
 #[test]

@@ -67,7 +67,10 @@ fn gates_vs_legacy(c: &mut Criterion) {
     bench_sim(
         c,
         "sim_v2/gates1",
-        designs.iter().map(|(n, d)| (format!("{n}"), d.clone())).collect(),
+        designs
+            .iter()
+            .map(|(n, d)| (format!("{n}"), d.clone()))
+            .collect(),
     );
 
     let mut g = c.benchmark_group("legacy_simd/gates1");
@@ -133,5 +136,11 @@ fn compile_time(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, dags, gates_vs_legacy, cpu_and_datapath, compile_time);
+criterion_group!(
+    benches,
+    dags,
+    gates_vs_legacy,
+    cpu_and_datapath,
+    compile_time
+);
 criterion_main!(benches);

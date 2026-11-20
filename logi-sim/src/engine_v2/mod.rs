@@ -68,10 +68,17 @@ pub struct ProbeFrame {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
     /// A design revision compiled and is now running.
-    Loaded { revision: u64, instrs: usize, slots: u32 },
+    Loaded {
+        revision: u64,
+        instrs: usize,
+        slots: u32,
+    },
     /// A design revision failed to compile; the previous program (if any)
     /// keeps running.
-    CompileFailed { revision: u64, errors: Vec<CompileError> },
+    CompileFailed {
+        revision: u64,
+        errors: Vec<CompileError>,
+    },
 }
 
 /// Clock: monotonic time since an arbitrary origin.
@@ -174,7 +181,10 @@ impl EngineCore {
         self.probe_slots = match &self.sim {
             Some(sim) => {
                 let dbg = &sim.program().debug;
-                self.probes.iter().map(|p| dbg.slot(&p.path, p.net)).collect()
+                self.probes
+                    .iter()
+                    .map(|p| dbg.slot(&p.path, p.net))
+                    .collect()
             }
             None => vec![None; self.probes.len()],
         };
@@ -340,7 +350,11 @@ pub struct LocalEngine {
 
 impl LocalEngine {
     pub fn new(options: Options) -> Self {
-        Self { core: EngineCore::new(options), frame: ProbeFrame::default(), events: Vec::new() }
+        Self {
+            core: EngineCore::new(options),
+            frame: ProbeFrame::default(),
+            events: Vec::new(),
+        }
     }
 
     /// Compile and swap in a design revision (inline).
@@ -451,7 +465,13 @@ mod threaded {
                 .spawn(move || worker_loop(options, rx, compile_tx, ev_tx, worker_shared))
                 .expect("spawn worker thread");
 
-            Engine { tx, events, shared, worker: Some(worker), compiler: Some(compiler) }
+            Engine {
+                tx,
+                events,
+                shared,
+                worker: Some(worker),
+                compiler: Some(compiler),
+            }
         }
 
         /// Compile `design` off the tick loop and swap it in when ready.

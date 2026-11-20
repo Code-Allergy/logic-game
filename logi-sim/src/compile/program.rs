@@ -133,7 +133,12 @@ pub enum Commit {
     Copy { state: u32, next: u32 },
     /// `if slots[we] != 0 { mems[mem][slots[addr]] = slots[data] }`. The three
     /// slots are snapshots taken at the end of the settle.
-    RamWrite { mem: u32, we: u32, addr: u32, data: u32 },
+    RamWrite {
+        mem: u32,
+        we: u32,
+        addr: u32,
+        data: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,10 +172,14 @@ pub struct PortMap {
 
 impl PortMap {
     pub fn input(&self, name: &str) -> Option<usize> {
-        self.inputs.iter().position(|p| p.name.as_deref() == Some(name))
+        self.inputs
+            .iter()
+            .position(|p| p.name.as_deref() == Some(name))
     }
     pub fn output(&self, name: &str) -> Option<usize> {
-        self.outputs.iter().position(|p| p.name.as_deref() == Some(name))
+        self.outputs
+            .iter()
+            .position(|p| p.name.as_deref() == Some(name))
     }
     pub fn input_by_node(&self, node: NodeId) -> Option<usize> {
         self.inputs.iter().position(|p| p.node == node)

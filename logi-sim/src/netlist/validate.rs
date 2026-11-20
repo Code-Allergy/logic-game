@@ -11,9 +11,17 @@ pub enum ValidationError {
     /// `Design::root` names no definition.
     MissingRoot,
     /// The node's kind parameters are invalid.
-    BadParams { def: DefId, node: NodeId, reason: String },
+    BadParams {
+        def: DefId,
+        node: NodeId,
+        reason: String,
+    },
     /// An instance names a definition that does not exist.
-    MissingDefinition { def: DefId, node: NodeId, target: DefId },
+    MissingDefinition {
+        def: DefId,
+        node: NodeId,
+        target: DefId,
+    },
     /// The node has the wrong number of input or output pins for its kind
     /// (e.g. an instance whose definition's ports changed underneath it).
     PinCount {
@@ -25,11 +33,27 @@ pub enum ValidationError {
         outputs: usize,
     },
     /// An input pin is connected to a net of a different width.
-    WidthMismatch { def: DefId, node: NodeId, pin: u8, expected: u8, actual: u8 },
+    WidthMismatch {
+        def: DefId,
+        node: NodeId,
+        pin: u8,
+        expected: u8,
+        actual: u8,
+    },
     /// An output pin's net has the wrong width.
-    NetWidth { def: DefId, net: NetId, expected: u8, actual: u8 },
+    NetWidth {
+        def: DefId,
+        net: NetId,
+        expected: u8,
+        actual: u8,
+    },
     /// An input pin names a net that does not exist in this definition.
-    DanglingNet { def: DefId, node: NodeId, pin: u8, net: NetId },
+    DanglingNet {
+        def: DefId,
+        node: NodeId,
+        pin: u8,
+        net: NetId,
+    },
     /// A net's recorded driver does not drive it (or does not exist).
     BadDriver { def: DefId, net: NetId },
     /// A port list entry is missing, of the wrong kind, or duplicated, or a
@@ -62,14 +86,22 @@ impl Design {
 
         for (id, node) in &def.nodes {
             if let Err(reason) = node.kind.check_params() {
-                errs.push(E::BadParams { def: def_id, node: id, reason });
+                errs.push(E::BadParams {
+                    def: def_id,
+                    node: id,
+                    reason,
+                });
                 continue;
             }
             let (ins, outs) = match &node.kind {
                 NodeKind::Instance(target) => match self.defs.get(*target) {
                     Some(t) => t.signature(),
                     None => {
-                        errs.push(E::MissingDefinition { def: def_id, node: id, target: *target });
+                        errs.push(E::MissingDefinition {
+                            def: def_id,
+                            node: id,
+                            target: *target,
+                        });
                         continue;
                     }
                 },
@@ -89,7 +121,12 @@ impl Design {
             for (pin, (slot, &w)) in node.inputs.iter().zip(ins.iter()).enumerate() {
                 let Some(net) = *slot else { continue };
                 match def.nets.get(net) {
-                    None => errs.push(E::DanglingNet { def: def_id, node: id, pin: pin as u8, net }),
+                    None => errs.push(E::DanglingNet {
+                        def: def_id,
+                        node: id,
+                        pin: pin as u8,
+                        net,
+                    }),
                     Some(n) if n.width != w => errs.push(E::WidthMismatch {
                         def: def_id,
                         node: id,
@@ -104,7 +141,12 @@ impl Design {
                 match def.nets.get(net) {
                     Some(n) if n.driver == (id, pin as u8) => {
                         if n.width != w {
-                            errs.push(E::NetWidth { def: def_id, net, expected: w, actual: n.width });
+                            errs.push(E::NetWidth {
+                                def: def_id,
+                                net,
+                                expected: w,
+                                actual: n.width,
+                            });
                         }
                     }
                     _ => errs.push(E::BadDriver { def: def_id, net }),
@@ -119,7 +161,10 @@ impl Design {
                 .and_then(|n| n.outputs.get(net.driver.1 as usize))
                 == Some(&net_id);
             if !ok {
-                errs.push(E::BadDriver { def: def_id, net: net_id });
+                errs.push(E::BadDriver {
+                    def: def_id,
+                    net: net_id,
+                });
             }
         }
 
@@ -134,14 +179,20 @@ impl Design {
                     _ => false,
                 };
                 if !kind_ok || listed.insert(n, ()).is_some() {
-                    errs.push(E::BadPort { def: def_id, node: n });
+                    errs.push(E::BadPort {
+                        def: def_id,
+                        node: n,
+                    });
                 }
             }
         }
         for (id, node) in &def.nodes {
             let is_port = matches!(node.kind, NodeKind::Input { .. } | NodeKind::Output { .. });
             if is_port && !listed.contains_key(id) {
-                errs.push(E::BadPort { def: def_id, node: id });
+                errs.push(E::BadPort {
+                    def: def_id,
+                    node: id,
+                });
             }
         }
     }

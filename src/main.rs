@@ -16,7 +16,10 @@ use gate_quest::sim::SimulationPlugin;
 use gate_quest::temp::GateComponentSelectionEvent;
 use gate_quest::title::MainMenuPlugin;
 use gate_quest::zoom_camera;
-use gate_quest::{update_ui_pointer_state, GAME_TITLE, GAME_WEB_TAG, GameSettings, GameState, UiPointerState, initial_startup_system};
+use gate_quest::{
+    GAME_TITLE, GAME_WEB_TAG, GameSettings, GameState, UiPointerState, initial_startup_system,
+    update_ui_pointer_state,
+};
 
 fn main() {
     let disable_egui = env::var_os("GATEQUEST_DISABLE_EGUI").is_some();

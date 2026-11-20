@@ -281,7 +281,10 @@ fn register_and_ram_survive_an_unrelated_edit() {
         StateLoc::Mem(m) => Some(m),
         _ => None,
     });
-    assert_eq!(&s2.mem(ram.unwrap())[..14], &(0..14).collect::<Vec<u64>>()[..]);
+    assert_eq!(
+        &s2.mem(ram.unwrap())[..14],
+        &(0..14).collect::<Vec<u64>>()[..]
+    );
 }
 
 #[test]
@@ -304,7 +307,10 @@ fn unmatched_state_resets() {
     s2.import_state(&snap);
     assert_eq!(s2.get("q"), 0, "unmatched register resets");
     let m = s2.program().mems.len() as u32 - 1;
-    assert!(s2.mem(m).iter().all(|&w| w == 0), "geometry change resets RAM");
+    assert!(
+        s2.mem(m).iter().all(|&w| w == 0),
+        "geometry change resets RAM"
+    );
 }
 
 #[test]

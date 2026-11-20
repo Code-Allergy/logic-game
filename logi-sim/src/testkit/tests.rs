@@ -50,10 +50,25 @@ fn assert_equivalent(a: &Design, b: &Design, seed: u64, ticks: u64) {
 fn configs() -> Vec<GenConfig> {
     vec![
         GenConfig::default(),
-        GenConfig { max_width: 64, ..Default::default() },
-        GenConfig { max_width: 1, ..Default::default() },
-        GenConfig { max_depth: 5, child_defs: 6, instance_percent: 20, ..Default::default() },
-        GenConfig { state_percent: 50, unconnected_percent: 20, ..Default::default() },
+        GenConfig {
+            max_width: 64,
+            ..Default::default()
+        },
+        GenConfig {
+            max_width: 1,
+            ..Default::default()
+        },
+        GenConfig {
+            max_depth: 5,
+            child_defs: 6,
+            instance_percent: 20,
+            ..Default::default()
+        },
+        GenConfig {
+            state_percent: 50,
+            unconnected_percent: 20,
+            ..Default::default()
+        },
         GenConfig::dag(0, 200, 32),
     ]
 }
@@ -84,8 +99,14 @@ fn rng_is_deterministic() {
 #[test]
 fn generator_is_deterministic() {
     for cfg in configs() {
-        let a = generate(&GenConfig { seed: 99, ..cfg.clone() });
-        let b = generate(&GenConfig { seed: 99, ..cfg.clone() });
+        let a = generate(&GenConfig {
+            seed: 99,
+            ..cfg.clone()
+        });
+        let b = generate(&GenConfig {
+            seed: 99,
+            ..cfg.clone()
+        });
         assert_eq!(format!("{:?}", a.design), format!("{:?}", b.design));
         let c = generate(&GenConfig { seed: 100, ..cfg });
         assert_ne!(format!("{:?}", a.design), format!("{:?}", c.design));
@@ -97,12 +118,17 @@ fn generated_designs_validate_and_run() {
     let mut stats = (0usize, 0usize, 0usize, 0usize, 0usize); // nodes, state, instances, unconnected, defs
     for (ci, cfg) in configs().into_iter().enumerate() {
         for seed in 0..60 {
-            let cfg = GenConfig { seed: seed * 7 + ci as u64, ..cfg.clone() };
+            let cfg = GenConfig {
+                seed: seed * 7 + ci as u64,
+                ..cfg.clone()
+            };
             let g = generate(&cfg);
             assert!(g.injected_loop.is_none());
-            g.design.validate().unwrap_or_else(|e| panic!("cfg {ci} seed {seed}: {e:?}"));
-            let mut r = Reference::new(&g.design)
+            g.design
+                .validate()
                 .unwrap_or_else(|e| panic!("cfg {ci} seed {seed}: {e:?}"));
+            let mut r =
+                Reference::new(&g.design).unwrap_or_else(|e| panic!("cfg {ci} seed {seed}: {e:?}"));
             let mut rng = Rng::new(seed);
             run_random(&mut r, &mut rng, 20);
 
@@ -151,7 +177,11 @@ fn generated_designs_respect_max_depth() {
                     .unwrap_or(0);
                 depth.insert(def, below + 1);
             }
-            assert!(depth[&d.root] <= max_depth, "depth {} > {max_depth}", depth[&d.root]);
+            assert!(
+                depth[&d.root] <= max_depth,
+                "depth {} > {max_depth}",
+                depth[&d.root]
+            );
         }
     }
 }
@@ -160,12 +190,19 @@ fn generated_designs_respect_max_depth() {
 fn injected_loops_are_reported_with_their_nodes() {
     for (ci, cfg) in configs().into_iter().enumerate() {
         for seed in 0..30 {
-            let cfg = GenConfig { seed, inject_loop: true, ..cfg.clone() };
+            let cfg = GenConfig {
+                seed,
+                inject_loop: true,
+                ..cfg.clone()
+            };
             let g = generate(&cfg);
             let (def, mut want) = g.injected_loop.clone().unwrap();
             g.design.validate().unwrap();
             match Reference::new(&g.design) {
-                Err(ReferenceError::CombinationalLoop { def: got_def, mut nodes }) => {
+                Err(ReferenceError::CombinationalLoop {
+                    def: got_def,
+                    mut nodes,
+                }) => {
                     assert_eq!(got_def, def, "cfg {ci} seed {seed}");
                     nodes.sort();
                     want.sort();
@@ -185,13 +222,24 @@ fn adders_compute_sums() {
         for d in [adder(w), ripple_adder(w)] {
             let mut r = Reference::new(&d).unwrap();
             let m = mask(w);
-            for (a, b, c) in [(0, 0, 0), (m, 1, 0), (m, m, 1), (m >> 1, 1, 1), (5 & m, 3 & m, 0)] {
+            for (a, b, c) in [
+                (0, 0, 0),
+                (m, 1, 0),
+                (m, m, 1),
+                (m >> 1, 1, 1),
+                (5 & m, 3 & m, 0),
+            ] {
                 r.set("a", a);
                 r.set("b", b);
                 r.set("cin", c);
                 r.tick().unwrap();
                 let t = a as u128 + b as u128 + c as u128;
-                assert_eq!(r.get("sum"), (t as u64) & m, "{} {a}+{b}+{c}", d.root_def().name);
+                assert_eq!(
+                    r.get("sum"),
+                    (t as u64) & m,
+                    "{} {a}+{b}+{c}",
+                    d.root_def().name
+                );
                 assert_eq!(r.get("cout"), (t >> w) as u64 & 1);
             }
         }
@@ -293,7 +341,10 @@ fn cpu_runs_the_multiply_program() {
     assert_eq!(r.get("pc"), 18);
     // Halted stays halted.
     r.run(10).unwrap();
-    assert_eq!((r.get("pc"), r.get("acc"), r.get("halted")), (18, MULTIPLY_RESULT, 1));
+    assert_eq!(
+        (r.get("pc"), r.get("acc"), r.get("halted")),
+        (18, MULTIPLY_RESULT, 1)
+    );
 }
 
 #[test]
@@ -320,7 +371,13 @@ fn cpu_jumps_and_wraps() {
 
 #[test]
 fn gate_loop_latches_are_loop_errors() {
-    for f in [sr_latch_nor(), sr_latch_nand(), d_latch_gates(), ring_oscillator(1), ring_oscillator(5)] {
+    for f in [
+        sr_latch_nor(),
+        sr_latch_nand(),
+        d_latch_gates(),
+        ring_oscillator(1),
+        ring_oscillator(5),
+    ] {
         f.design.validate().unwrap();
         match Reference::new(&f.design) {
             Err(ReferenceError::CombinationalLoop { def, mut nodes }) => {
@@ -329,7 +386,11 @@ fn gate_loop_latches_are_loop_errors() {
                 want.sort();
                 assert_eq!((def, nodes), (f.def, want), "{}", f.design.root_def().name);
             }
-            other => panic!("{}: expected loop, got {:?}", f.design.root_def().name, other.err()),
+            other => panic!(
+                "{}: expected loop, got {:?}",
+                f.design.root_def().name,
+                other.err()
+            ),
         }
     }
 }
@@ -356,13 +417,23 @@ fn delayed_sr_latch_holds_state() {
 fn many_generated_designs_validate_and_run() {
     for (ci, cfg) in configs().into_iter().enumerate() {
         for seed in 0..2000u64 {
-            let g = generate(&GenConfig { seed, ..cfg.clone() });
-            let mut r = Reference::new(&g.design)
-                .unwrap_or_else(|e| panic!("cfg {ci} seed {seed}: {e:?}"));
+            let g = generate(&GenConfig {
+                seed,
+                ..cfg.clone()
+            });
+            let mut r =
+                Reference::new(&g.design).unwrap_or_else(|e| panic!("cfg {ci} seed {seed}: {e:?}"));
             run_random(&mut r, &mut Rng::new(seed), 10);
-            let g = generate(&GenConfig { seed, inject_loop: true, ..cfg.clone() });
+            let g = generate(&GenConfig {
+                seed,
+                inject_loop: true,
+                ..cfg.clone()
+            });
             assert!(
-                matches!(Reference::new(&g.design), Err(ReferenceError::CombinationalLoop { .. })),
+                matches!(
+                    Reference::new(&g.design),
+                    Err(ReferenceError::CombinationalLoop { .. })
+                ),
                 "cfg {ci} seed {seed}"
             );
         }
@@ -444,9 +515,9 @@ fn bitblasted_cpu_runs_the_program() {
 
 #[test]
 fn legacy_conversion_matches_sim() {
-    use crate::prelude::{Runner, SimdRunner};
     use crate::circuit::BitPackedCircuit;
     use crate::compile::{Options, compile};
+    use crate::prelude::{Runner, SimdRunner};
     use crate::sim::Sim;
     use std::sync::Arc;
 
@@ -465,7 +536,11 @@ fn legacy_conversion_matches_sim() {
             simd.tick();
             sim.tick();
             for (port, &node) in legacy.outputs.iter().enumerate() {
-                assert_eq!(simd.output(node, 0) as u64, sim.output(port), "seed {seed} tick {t} out {port}");
+                assert_eq!(
+                    simd.output(node, 0) as u64,
+                    sim.output(port),
+                    "seed {seed} tick {t} out {port}"
+                );
             }
         }
     }

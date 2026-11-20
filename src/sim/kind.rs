@@ -18,44 +18,112 @@ pub const MAX_WIDTH: u8 = logi_sim::netlist::MAX_WIDTH;
 #[serde(tag = "type")]
 pub enum GateKind {
     /// Circuit input port, driven from the editor.
-    Input { w: u8 },
+    Input {
+        w: u8,
+    },
     /// Circuit output port.
-    Output { w: u8 },
+    Output {
+        w: u8,
+    },
     /// A sink shown as a number. Behaves like an output in the root circuit
     /// and is omitted from subcircuit definitions (it is visual only).
-    Display { w: u8 },
-    Const { w: u8, value: u64 },
-    Not { w: u8 },
-    And { w: u8 },
-    Or { w: u8 },
-    Xor { w: u8 },
-    Nand { w: u8 },
-    Nor { w: u8 },
-    Xnor { w: u8 },
+    Display {
+        w: u8,
+    },
+    Const {
+        w: u8,
+        value: u64,
+    },
+    Not {
+        w: u8,
+    },
+    And {
+        w: u8,
+    },
+    Or {
+        w: u8,
+    },
+    Xor {
+        w: u8,
+    },
+    Nand {
+        w: u8,
+    },
+    Nor {
+        w: u8,
+    },
+    Xnor {
+        w: u8,
+    },
     /// `sel ? b : a`.
-    Mux { w: u8 },
+    Mux {
+        w: u8,
+    },
     /// `en ? d : 0` (replaces the old tri-state buffer).
-    Switch { w: u8 },
-    Add { w: u8 },
-    Eq { w: u8 },
-    LtU { w: u8 },
-    ReduceOr { w: u8 },
-    ReduceAnd { w: u8 },
-    ReduceXor { w: u8 },
+    Switch {
+        w: u8,
+    },
+    Add {
+        w: u8,
+    },
+    Eq {
+        w: u8,
+    },
+    LtU {
+        w: u8,
+    },
+    ReduceOr {
+        w: u8,
+    },
+    ReduceAnd {
+        w: u8,
+    },
+    ReduceXor {
+        w: u8,
+    },
     /// Bit slice `a[lo .. lo + len]`.
-    Split { w: u8, lo: u8, len: u8 },
+    Split {
+        w: u8,
+        lo: u8,
+        len: u8,
+    },
     /// Concatenation, input 0 in the lowest bits.
-    Merge { widths: Vec<u8> },
-    Extend { from: u8, to: u8, signed: bool },
-    Clock { period: u32, duty: u32, phase: u32 },
-    Rom { addr_bits: u8, w: u8, contents: Vec<u64> },
-    Delay { w: u8 },
-    Register { w: u8 },
-    DLatch { w: u8 },
+    Merge {
+        widths: Vec<u8>,
+    },
+    Extend {
+        from: u8,
+        to: u8,
+        signed: bool,
+    },
+    Clock {
+        period: u32,
+        duty: u32,
+        phase: u32,
+    },
+    Rom {
+        addr_bits: u8,
+        w: u8,
+        contents: Vec<u64>,
+    },
+    Delay {
+        w: u8,
+    },
+    Register {
+        w: u8,
+    },
+    DLatch {
+        w: u8,
+    },
     SrLatch,
-    Ram { addr_bits: u8, w: u8 },
+    Ram {
+        addr_bits: u8,
+        w: u8,
+    },
     /// An instance of a circuit definition in the [`super::CircuitLibrary`].
-    SubCircuit { definition: Uuid },
+    SubCircuit {
+        definition: Uuid,
+    },
 }
 
 impl GateKind {
@@ -84,19 +152,33 @@ impl GateKind {
             G::ReduceOr { w } => NodeKind::ReduceOr { w: *w },
             G::ReduceAnd { w } => NodeKind::ReduceAnd { w: *w },
             G::ReduceXor { w } => NodeKind::ReduceXor { w: *w },
-            G::Split { w, lo, len } => NodeKind::Split { w: *w, lo: *lo, len: *len },
-            G::Merge { widths } => NodeKind::Merge { widths: widths.iter().copied().collect() },
+            G::Split { w, lo, len } => NodeKind::Split {
+                w: *w,
+                lo: *lo,
+                len: *len,
+            },
+            G::Merge { widths } => NodeKind::Merge {
+                widths: widths.iter().copied().collect(),
+            },
             G::Extend { from, to, signed } => NodeKind::Extend {
                 from: *from,
                 to: *to,
                 signed: *signed,
             },
-            G::Clock { period, duty, phase } => NodeKind::Clock {
+            G::Clock {
+                period,
+                duty,
+                phase,
+            } => NodeKind::Clock {
                 period: *period,
                 duty: *duty,
                 phase: *phase,
             },
-            G::Rom { addr_bits, w, contents } => NodeKind::Rom {
+            G::Rom {
+                addr_bits,
+                w,
+                contents,
+            } => NodeKind::Rom {
                 addr_bits: *addr_bits,
                 w: *w,
                 contents: contents.as_slice().into(),
@@ -304,45 +386,74 @@ impl GateKind {
         use GateKind as G;
         let w = w.clamp(1, MAX_WIDTH);
         vec![
-            ("Ports", vec![
-                G::Input { w },
-                G::Output { w },
-                G::Display { w },
-                G::Const { w, value: 0 },
-                G::Clock { period: 10, duty: 5, phase: 0 },
-            ]),
-            ("Gates", vec![
-                G::Not { w },
-                G::And { w },
-                G::Or { w },
-                G::Xor { w },
-                G::Nand { w },
-                G::Nor { w },
-                G::Xnor { w },
-            ]),
-            ("Routing", vec![
-                G::Mux { w },
-                G::Switch { w },
-                G::Split { w, lo: 0, len: 1 },
-                G::Merge { widths: vec![1; usize::from(w.max(2))] },
-                G::Extend { from: 1, to: w, signed: false },
-            ]),
-            ("Arithmetic", vec![
-                G::Add { w },
-                G::Eq { w },
-                G::LtU { w },
-                G::ReduceOr { w },
-                G::ReduceAnd { w },
-                G::ReduceXor { w },
-            ]),
-            ("State", vec![
-                G::Delay { w },
-                G::Register { w },
-                G::DLatch { w },
-                G::SrLatch,
-                G::Ram { addr_bits: 4, w },
-                G::Rom { addr_bits: 4, w, contents: Vec::new() },
-            ]),
+            (
+                "Ports",
+                vec![
+                    G::Input { w },
+                    G::Output { w },
+                    G::Display { w },
+                    G::Const { w, value: 0 },
+                    G::Clock {
+                        period: 10,
+                        duty: 5,
+                        phase: 0,
+                    },
+                ],
+            ),
+            (
+                "Gates",
+                vec![
+                    G::Not { w },
+                    G::And { w },
+                    G::Or { w },
+                    G::Xor { w },
+                    G::Nand { w },
+                    G::Nor { w },
+                    G::Xnor { w },
+                ],
+            ),
+            (
+                "Routing",
+                vec![
+                    G::Mux { w },
+                    G::Switch { w },
+                    G::Split { w, lo: 0, len: 1 },
+                    G::Merge {
+                        widths: vec![1; usize::from(w.max(2))],
+                    },
+                    G::Extend {
+                        from: 1,
+                        to: w,
+                        signed: false,
+                    },
+                ],
+            ),
+            (
+                "Arithmetic",
+                vec![
+                    G::Add { w },
+                    G::Eq { w },
+                    G::LtU { w },
+                    G::ReduceOr { w },
+                    G::ReduceAnd { w },
+                    G::ReduceXor { w },
+                ],
+            ),
+            (
+                "State",
+                vec![
+                    G::Delay { w },
+                    G::Register { w },
+                    G::DLatch { w },
+                    G::SrLatch,
+                    G::Ram { addr_bits: 4, w },
+                    G::Rom {
+                        addr_bits: 4,
+                        w,
+                        contents: Vec::new(),
+                    },
+                ],
+            ),
         ]
     }
 
