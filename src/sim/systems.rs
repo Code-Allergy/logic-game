@@ -21,39 +21,65 @@ use super::{
     DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind, GateLabel, GateLabelChanged,
     GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected, SelectedGate, SetGateKind,
     SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter, WireEndpoints,
-    WireState, WorkspaceRevision,
+    WireState, WorkspaceRevision, art,
     spatial_grid::SpatialGrid,
     view::{CircuitView, InstanceViewItem, OpenInstanceView},
 };
 
+/// The bench: one quad with the dot-grid texture repeated across it.
 #[derive(Component)]
-pub struct SimBackground;
+pub struct SimBackground {
+    image: Handle<Image>,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Background and camera
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Draw a background behind all simulation entities.
+/// Draw the bench (the dot grid every 20 units) behind all simulation
+/// entities: a single mesh whose material repeats a small dot texture, so
+/// the grid costs one draw at any size.
 pub fn draw_sim_background_system(
     mut commands: Commands,
-    query: Query<Entity, With<SimBackground>>,
+    query: Query<(), With<SimBackground>>,
+    theme: Res<Theme>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    materials: Option<ResMut<Assets<ColorMaterial>>>,
+    images: Option<ResMut<Assets<Image>>>,
 ) {
     if !query.is_empty() {
         return;
     }
+    let (Some(mut meshes), Some(mut materials), Some(mut images)) = (meshes, materials, images)
+    else {
+        return;
+    };
+    let image = images.add(art::bench_image(&theme.palette));
+    let material = materials.add(art::bench_material(image.clone()));
     commands.spawn((
-        SimBackground,
-        Sprite {
-            color: Color::srgba(0.050, 0.229, 0.793, 1.000),
-            ..Default::default()
-        },
-        Transform {
-            translation: Vec3::new(0.0, 0.0, -1000.0),
-            scale: Vec3::new(8000.0, 6000.0, 1.0),
-            ..Default::default()
-        },
+        SimBackground { image },
+        Mesh2d(meshes.add(Rectangle::new(art::BENCH_SIZE, art::BENCH_SIZE))),
+        MeshMaterial2d(material),
+        Transform::from_xyz(0.0, 0.0, -1000.0),
         Visibility::Visible,
     ));
+}
+
+/// Repaint the bench texture when the theme changes.
+pub fn sync_bench_theme_system(
+    theme: Res<Theme>,
+    benches: Query<&SimBackground>,
+    images: Option<ResMut<Assets<Image>>>,
+) {
+    if !theme.is_changed() {
+        return;
+    }
+    let Some(mut images) = images else { return };
+    for bench in &benches {
+        if let Some(mut image) = images.get_mut(&bench.image) {
+            image.data = Some(art::bench_texels(&theme.palette));
+        }
+    }
 }
 
 /// Fit the camera to the circuit after a workspace load.

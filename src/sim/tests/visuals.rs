@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
+use crate::sim::art::PinLayout;
 use crate::sim::bridge::loop_message;
 use crate::sim::visuals::{DisplayedValue, LoopOutline, WireValueLabel};
 use crate::sim::{
@@ -302,9 +303,26 @@ fn dragging_a_gate_moves_only_its_wires_and_does_not_recompile() {
     );
     assert!(changes(&app).values.is_empty() && changes(&app).probes.is_empty());
 
-    // The wire sits between its gates.
-    let to = app.world().get::<Transform>(y).unwrap().translation;
-    let from = app.world().get::<Transform>(and).unwrap().translation;
+    // The wire runs from the driver's output pin to the sink's input pin.
+    let pin = |app: &App, gate: Entity, output: bool| {
+        let layout = app.world().get::<PinLayout>(gate).expect("pin layout");
+        let offset = if output {
+            layout.output(0)
+        } else {
+            layout.input(0)
+        };
+        app.world().get::<Transform>(gate).unwrap().translation + offset.extend(0.0)
+    };
+    let to = pin(&app, y, false);
+    let from = pin(&app, and, true);
+    assert_eq!(
+        to.x,
+        app.world().get::<Transform>(y).unwrap().translation.x - 25.0
+    );
+    assert_eq!(
+        from.x,
+        app.world().get::<Transform>(and).unwrap().translation.x + 25.0
+    );
     let wire = app.world().get::<Transform>(into_y).unwrap().translation;
     assert_eq!(wire.truncate(), ((from + to) / 2.0).truncate());
     let length = app
@@ -480,13 +498,13 @@ fn multi_bit_wires_are_thicker_and_show_their_value() {
         app.world().get::<Sprite>(bit).unwrap().color
     );
     let (label, text) = wire_label(&app, bus).expect("bus label");
-    assert_eq!(text, "0x000");
+    assert_eq!(text, "000");
     assert!(wire_label(&app, bit).is_none(), "1-bit wires have no label");
 
     set_input(&mut app, "A", 0xABC);
     clear_changes(&mut app);
     run(&mut app, 1);
-    assert_eq!(wire_label(&app, bus).unwrap().1, "0xABC");
+    assert_eq!(wire_label(&app, bus).unwrap().1, "ABC");
     assert_eq!(
         changed_texts::<WireValueLabel>(&app),
         HashSet::from([label])
@@ -563,7 +581,7 @@ fn loop_highlights_its_gates_and_wires_and_clears_when_fixed() {
         assert!(!highlighted(&app, e), "not on the loop");
     }
     assert_eq!(outline_count(&mut app), 2, "one outline per loop gate");
-    let loop_colour = crate::sim::visuals::LOOP_COLOR;
+    let loop_colour = app.world().resource::<crate::theme::Theme>().palette.fault;
     assert_eq!(app.world().get::<Sprite>(nx).unwrap().color, loop_colour);
     assert_ne!(app.world().get::<Sprite>(ax).unwrap().color, loop_colour);
 

@@ -107,15 +107,29 @@ nothing.
 
 `SimulationVisualsPlugin` (`src/sim/visuals.rs`) draws gates and wires
 from those components, driven by change detection, so an idle circuit
-costs no per-entity work:
+costs no per-entity work. The look ("Studio Workshop") comes from
+`src/sim/art.rs` and the `Theme` resource (`src/theme.rs`):
 
-- gate colours follow `GateValues`/`GateType` changes; display text is
-  re-formatted only when its value, width or format changes;
-- wire geometry is recomputed only for wires whose endpoints changed or
-  whose endpoint gate moved; dragging a gate touches only its wires and
-  never the `Design`;
-- multi-bit wires are thicker and blue, with a hex value label;
+- a gate is a tile: an ink outline with a solid bottom edge, a face tinted
+  by family (logic white, state violet, I/O sky), a symbol (AND, OR, XOR,
+  NOT and their inverses, MUX, clock) or a caption, and pins on the left
+  (inputs) and right (outputs) edges, pin 0 at the top (`PinLayout`). The
+  pieces are `Mesh2d` children built from cached meshes (`MeshKey`) with
+  materials shared by colour role (`Paint`), so a theme change rewrites
+  about twenty materials, not every entity;
+- pins, lamps and input switches follow `GateValues` by swapping shared
+  materials; display text is re-formatted only when its value, width or
+  format changes;
+- wires run from the driver's output pin to the sink's input pin; wire
+  geometry is recomputed only for wires whose endpoints changed or whose
+  endpoint gate moved (or got a new pin layout); dragging a gate touches
+  only its wires and never the `Design`;
+- a wire is cased: a core sprite (marigold on, slate off, teal or pale teal
+  for buses, thicker for buses) over an ink casing; wires are staggered in
+  depth so a crossing reads as an overpass. Buses carry a value pill;
 - a combinational-loop compile error (`SimDiagnostics::compile_error`,
   with `loops` as gate ids and instance paths) marks the gates and wires
-  on the loop in the open view with `LoopHighlight` (red), until a later
-  revision compiles. The previous program keeps running meanwhile.
+  on the loop in the open view with `LoopHighlight` (tomato), until a
+  later revision compiles. The previous program keeps running meanwhile;
+- the selected gate gets a halo; the bench is a single quad with a
+  repeating dot texture.

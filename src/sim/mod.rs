@@ -17,6 +17,9 @@
 //! - [`view`] – instance views: opening a subcircuit shows its definition
 //!   with live values probed from the running root simulation.
 //! - [`visuals`] – change-driven gate and wire visuals, loop highlight.
+//! - [`art`] – the Workshop art kit: theme-driven materials, cached tile,
+//!   pin and glyph meshes, fonts, the dot-grid bench.
+//! - [`shapes`] – triangle-list shapes (rounded rectangles, strokes).
 //! - [`systems`] – Bevy systems for picking, dragging and egui panels.
 //! - [`plugin`] – plugins that wire everything into Bevy.
 //! - [`spatial_grid`] – spatial acceleration for entity picking.
@@ -26,6 +29,7 @@ mod plugin;
 #[cfg(test)]
 mod tests;
 
+pub mod art;
 pub mod authoring;
 pub mod bridge;
 pub mod demos;
@@ -33,6 +37,7 @@ pub mod document;
 pub mod kind;
 pub mod layout;
 pub mod rtl;
+pub mod shapes;
 pub mod source;
 pub mod spatial_grid;
 pub mod systems;
@@ -116,15 +121,6 @@ impl TickRateMeter {
         });
         self.last_tick_count = tick_count;
         self.sample_window_secs = 0.0;
-    }
-}
-
-/// Returns the base [`Sprite`] for a gate kind.
-pub fn get_gate_sprite(kind: &GateKind) -> Sprite {
-    Sprite {
-        color: kind.color(),
-        custom_size: Some(kind.size()),
-        ..Default::default()
     }
 }
 

@@ -24,8 +24,8 @@ use crate::sim::{
     systems::{
         drag_selected_system, draw_sim_background_system, fit_camera_to_circuit_system,
         gate_selection_system, save_on_exit_system, simulation_config_ui_system,
-        ui_for_selected_gate, update_inputs_on_left_click, update_selected_gate,
-        update_spatial_grid_system, workspace_io_system,
+        sync_bench_theme_system, ui_for_selected_gate, update_inputs_on_left_click,
+        update_selected_gate, update_spatial_grid_system, workspace_io_system,
     },
     view::{
         CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView,
@@ -188,6 +188,7 @@ impl Plugin for SimulationViewPlugin {
                         .after(load_workspace_system)
                         .after(view_navigation_system),
                     workspace_io_system,
+                    sync_bench_theme_system,
                 ),
             )
             .add_systems(
