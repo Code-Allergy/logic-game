@@ -18,14 +18,12 @@ pub mod title;
 pub mod temp {
     use bevy::prelude::*;
 
-    use crate::sim::GateComponent;
+    pub const CONNECTION_Z_LEVEL: f32 = -10.0;
 
-    pub const CONNECTION_Z_LEVEL: f32 = 10.0;
-
+    /// A gate was clicked.
     #[derive(Message, Clone)]
     pub struct GateComponentSelectionEvent {
         pub entity: Entity,
-        pub component: GateComponent,
     }
 }
 

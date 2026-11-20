@@ -1,4 +1,4 @@
-use crate::sim::GateComponent;
+use crate::sim::GateIdentity;
 use crate::sim::Selected;
 use crate::UiPointerState;
 use bevy::input::mouse::MouseButton;
@@ -102,7 +102,7 @@ pub fn finalize_selection(
     camera_q: Query<(&Camera, &GlobalTransform)>,
     mut select_writer: MessageWriter<ComponentsSelected>,
     mut unselect_writer: MessageWriter<ComponentsUnselected>,
-    query: Query<(Entity, &GlobalTransform), With<GateComponent>>,
+    query: Query<(Entity, &GlobalTransform), With<GateIdentity>>,
     selection_box_query: Query<Entity, With<SelectionBox>>,
     mut commands: Commands,
     selected_query: Query<Entity, With<Selected>>,
