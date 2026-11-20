@@ -392,3 +392,18 @@ ambiguous. Each is small and can be revisited.
 14. **`Sim::try_new` validates every index in the program.** This lets the
     per-block loops skip bounds checks. `Sim::new` panics on a malformed
     program; programs from `compile` never fail this check.
+15. **Benchmark gate 2 runs on the legacy gate set.** The legacy runners
+    simulate only 1-bit gates, so the "3× the SIMD runner on the 1M mixed-op
+    DAG" gate is measured on a 1M-gate random DAG of `Not` and the 2-input
+    bitwise gates (`GenConfig::gates`), converted one-to-one into the legacy
+    `Circuit`. Word-level mixed-op DAGs are reported alongside, with no
+    legacy baseline. `cargo run -p logi-sim --release --bin sim_v2_report`
+    prints every case and the two gates.
+16. **Program layout for throughput (M3).**
+    - **`imm` moved out of `Instr`.** `Instr` is four `u32`s (16 bytes);
+      `imm` lives in the parallel `Program::imms`, read only by ops that use
+      it.
+    - **Slots are renumbered densely after emission:** zero, inputs,
+      constants, state, then destinations in execution order.
+    - **Effect.** Together these took the 1M-gate DAG from 2.7× to about 4×
+      the legacy SIMD runner.

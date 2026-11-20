@@ -176,36 +176,38 @@ impl Sim {
         let s = self.slots.as_mut_ptr();
         let tick = self.tick;
         for b in &p.blocks {
-            let ins = &p.instrs[b.start as usize..(b.start + b.len) as usize];
+            let range = b.start as usize..(b.start + b.len) as usize;
+            let ins = &p.instrs[range.clone()];
+            let imms = &p.imms[range];
             // SAFETY: every slot index in `ins` was checked against
             // `slot_count` in `check`, and `slots` has that length. Reads and
             // writes go through the raw pointer so `dst` may equal no operand
             // (it never does in a compiled program, but it would be sound).
             unsafe {
                 match b.op {
-                    Op::Copy => run1(s, ins, |a, _| a),
-                    Op::Not => run1(s, ins, |a, i| !a & i.imm),
-                    Op::And => run2(s, ins, |a, b, _| a & b),
-                    Op::Or => run2(s, ins, |a, b, _| a | b),
-                    Op::Xor => run2(s, ins, |a, b, _| a ^ b),
-                    Op::Nand => run2(s, ins, |a, b, i| !(a & b) & i.imm),
-                    Op::Nor => run2(s, ins, |a, b, i| !(a | b) & i.imm),
-                    Op::Xnor => run2(s, ins, |a, b, i| !(a ^ b) & i.imm),
-                    Op::Mux => run3(s, ins, |a, b, c, _| if a != 0 { c } else { b }),
-                    Op::Switch => run2(s, ins, |a, b, _| if a != 0 { b } else { 0 }),
-                    Op::AddSum => run3(s, ins, |a, b, c, i| a.wrapping_add(b).wrapping_add(c) & i.imm),
-                    Op::AddCarry => run3(s, ins, |a, b, c, i| {
-                        ((a as u128 + b as u128 + c as u128) >> i.imm) as u64 & 1
+                    Op::Copy => run1(s, ins, imms, |a, _, _| a),
+                    Op::Not => run1(s, ins, imms, |a, _, m| !a & m),
+                    Op::And => run2(s, ins, imms, |a, b, _, _| a & b),
+                    Op::Or => run2(s, ins, imms, |a, b, _, _| a | b),
+                    Op::Xor => run2(s, ins, imms, |a, b, _, _| a ^ b),
+                    Op::Nand => run2(s, ins, imms, |a, b, _, m| !(a & b) & m),
+                    Op::Nor => run2(s, ins, imms, |a, b, _, m| !(a | b) & m),
+                    Op::Xnor => run2(s, ins, imms, |a, b, _, m| !(a ^ b) & m),
+                    Op::Mux => run3(s, ins, imms, |a, b, c, _| if a != 0 { c } else { b }),
+                    Op::Switch => run2(s, ins, imms, |a, b, _, _| if a != 0 { b } else { 0 }),
+                    Op::AddSum => run3(s, ins, imms, |a, b, c, m| a.wrapping_add(b).wrapping_add(c) & m),
+                    Op::AddCarry => run3(s, ins, imms, |a, b, c, w| {
+                        ((a as u128 + b as u128 + c as u128) >> w) as u64 & 1
                     }),
-                    Op::Eq => run2(s, ins, |a, b, _| (a == b) as u64),
-                    Op::LtU => run2(s, ins, |a, b, _| (a < b) as u64),
-                    Op::ReduceOr => run1(s, ins, |a, _| (a != 0) as u64),
-                    Op::ReduceAnd => run1(s, ins, |a, i| (a == i.imm) as u64),
-                    Op::ReduceXor => run1(s, ins, |a, _| (a.count_ones() & 1) as u64),
-                    Op::Shr => run1(s, ins, |a, i| (a >> i.b) & i.imm),
-                    Op::Concat => run2(s, ins, |a, b, i| a | (b << i.c)),
-                    Op::Sext => run1(s, ins, |a, i| {
-                        if (a >> (i.b - 1)) & 1 == 1 { (a | !mask(i.b as u8)) & i.imm } else { a }
+                    Op::Eq => run2(s, ins, imms, |a, b, _, _| (a == b) as u64),
+                    Op::LtU => run2(s, ins, imms, |a, b, _, _| (a < b) as u64),
+                    Op::ReduceOr => run1(s, ins, imms, |a, _, _| (a != 0) as u64),
+                    Op::ReduceAnd => run1(s, ins, imms, |a, _, m| (a == m) as u64),
+                    Op::ReduceXor => run1(s, ins, imms, |a, _, _| (a.count_ones() & 1) as u64),
+                    Op::Shr => run1(s, ins, imms, |a, i, m| (a >> i.b) & m),
+                    Op::Concat => run2(s, ins, imms, |a, b, i, _| a | (b << i.c)),
+                    Op::Sext => run1(s, ins, imms, |a, i, m| {
+                        if (a >> (i.b - 1)) & 1 == 1 { (a | !mask(i.b as u8)) & m } else { a }
                     }),
                     Op::Clock => {
                         for i in ins {
@@ -220,7 +222,7 @@ impl Sim {
                             *s.add(i.dst as usize) = *m.get_unchecked(a);
                         }
                     }
-                    Op::SrNext => run3(s, ins, |a, b, c, _| {
+                    Op::SrNext => run3(s, ins, imms, |a, b, c, _| {
                         if b != 0 {
                             0
                         } else if a != 0 {
@@ -289,25 +291,42 @@ impl Sim {
 }
 
 #[inline(always)]
-unsafe fn run1(s: *mut u64, ins: &[Instr], f: impl Fn(u64, &Instr) -> u64) {
-    for i in ins {
-        unsafe { *s.add(i.dst as usize) = f(*s.add(i.a as usize), i) };
+unsafe fn run1(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, &Instr, u64) -> u64) {
+    for (k, i) in ins.iter().enumerate() {
+        unsafe { *s.add(i.dst as usize) = f(*s.add(i.a as usize), i, *imms.get_unchecked(k)) };
     }
 }
 
 #[inline(always)]
-unsafe fn run2(s: *mut u64, ins: &[Instr], f: impl Fn(u64, u64, &Instr) -> u64) {
-    for i in ins {
-        unsafe { *s.add(i.dst as usize) = f(*s.add(i.a as usize), *s.add(i.b as usize), i) };
-    }
-}
-
-#[inline(always)]
-unsafe fn run3(s: *mut u64, ins: &[Instr], f: impl Fn(u64, u64, u64, &Instr) -> u64) {
-    for i in ins {
+unsafe fn run2(
+    s: *mut u64,
+    ins: &[Instr],
+    imms: &[u64],
+    f: impl Fn(u64, u64, &Instr, u64) -> u64,
+) {
+    for (k, i) in ins.iter().enumerate() {
         unsafe {
             *s.add(i.dst as usize) =
-                f(*s.add(i.a as usize), *s.add(i.b as usize), *s.add(i.c as usize), i)
+                f(*s.add(i.a as usize), *s.add(i.b as usize), i, *imms.get_unchecked(k))
+        };
+    }
+}
+
+#[inline(always)]
+unsafe fn run3(
+    s: *mut u64,
+    ins: &[Instr],
+    imms: &[u64],
+    f: impl Fn(u64, u64, u64, u64) -> u64,
+) {
+    for (k, i) in ins.iter().enumerate() {
+        unsafe {
+            *s.add(i.dst as usize) = f(
+                *s.add(i.a as usize),
+                *s.add(i.b as usize),
+                *s.add(i.c as usize),
+                *imms.get_unchecked(k),
+            )
         };
     }
 }
@@ -320,13 +339,17 @@ fn check(p: &Program) -> Result<(), BadProgram> {
         return bad("no zero slot".into());
     }
     let slot_ok = |s: u32| s < n;
+    if p.imms.len() != p.instrs.len() {
+        return bad("imms and instrs differ in length".into());
+    }
     for b in &p.blocks {
         let end = b.start as u64 + b.len as u64;
         if end > p.instrs.len() as u64 {
             return bad(format!("block {b:?} out of range"));
         }
         let (sa, sb, sc) = b.op.slot_operands();
-        for i in &p.instrs[b.start as usize..end as usize] {
+        for (k, i) in p.instrs[b.start as usize..end as usize].iter().enumerate() {
+            let imm = p.imms[b.start as usize + k];
             if !slot_ok(i.dst) || i.dst == ZERO_SLOT {
                 return bad(format!("bad dst in {i:?}"));
             }
@@ -341,7 +364,7 @@ fn check(p: &Program) -> Result<(), BadProgram> {
                 Op::Sext if !(1..=64).contains(&i.b) => return bad(format!("bad sext in {i:?}")),
                 Op::Shr if i.b >= 64 => return bad(format!("bad shift in {i:?}")),
                 Op::Concat if i.c >= 64 => return bad(format!("bad shift in {i:?}")),
-                Op::AddCarry if i.imm > 64 => return bad(format!("bad width in {i:?}")),
+                Op::AddCarry if imm > 64 => return bad(format!("bad width in {i:?}")),
                 _ => {}
             }
         }

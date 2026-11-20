@@ -368,3 +368,105 @@ fn many_generated_designs_validate_and_run() {
         }
     }
 }
+
+// ── Bit-blasting and legacy conversion ───────────────────────────────────
+
+/// Same random inputs by port index; outputs must agree every tick.
+fn assert_equivalent_by_index(a: &Design, b: &Design, seed: u64, ticks: u64) {
+    let mut ra = Reference::new(a).unwrap();
+    let mut rb = Reference::new(b).unwrap();
+    let (ins, _) = a.root_def().signature();
+    assert_eq!(ins, b.root_def().signature().0);
+    let mut rng = Rng::new(seed);
+    assert_eq!(ra.outputs(), rb.outputs(), "tick 0");
+    for t in 1..=ticks {
+        for (port, &w) in ins.iter().enumerate() {
+            let v = rng.next_u64() & mask(w);
+            ra.set_input(port, v);
+            rb.set_input(port, v);
+        }
+        ra.tick().unwrap();
+        rb.tick().unwrap();
+        assert_eq!(ra.outputs(), rb.outputs(), "seed {seed} tick {t}");
+    }
+}
+
+#[test]
+fn bitblasted_designs_are_equivalent() {
+    for seed in 0..40 {
+        for max_width in [1, 8, 64] {
+            let cfg = GenConfig {
+                seed,
+                child_defs: 0,
+                max_depth: 1,
+                max_width,
+                state_percent: 20,
+                ..Default::default()
+            };
+            let d = generate(&cfg).design;
+            let bb = super::bitblast::bitblast(&d);
+            bb.validate().unwrap();
+            // Only 1-bit logic, apart from memories, clocks and wiring.
+            for n in bb.root_def().nodes.values() {
+                if let Some((ins, outs)) = n.kind.pins()
+                    && !matches!(
+                        n.kind,
+                        NodeKind::Split { .. }
+                            | NodeKind::Merge { .. }
+                            | NodeKind::Ram { .. }
+                            | NodeKind::Rom { .. }
+                            | NodeKind::Input { .. }
+                            | NodeKind::Output { .. }
+                    )
+                {
+                    assert!(ins.iter().chain(&outs).all(|&w| w == 1), "{:?}", n.kind);
+                }
+            }
+            assert_equivalent_by_index(&d, &bb, seed, 20);
+        }
+    }
+}
+
+#[test]
+fn bitblasted_cpu_runs_the_program() {
+    let d = cpu(&MULTIPLY_PROGRAM);
+    let bb = super::bitblast::bitblast(&d);
+    let mut r = Reference::new(&bb).unwrap();
+    let mut ticks = 0;
+    while r.get("halted") == 0 {
+        r.tick().unwrap();
+        ticks += 1;
+        assert!(ticks < 500);
+    }
+    assert_eq!(r.get("acc"), MULTIPLY_RESULT);
+    assert!(bb.root_def().nodes.len() > 5 * d.root_def().nodes.len());
+}
+
+#[test]
+fn legacy_conversion_matches_sim() {
+    use crate::prelude::{Runner, SimdRunner};
+    use crate::circuit::BitPackedCircuit;
+    use crate::compile::{Options, compile};
+    use crate::sim::Sim;
+    use std::sync::Arc;
+
+    for seed in 0..5 {
+        let d = generate(&GenConfig::gates(seed, 2000, 1)).design;
+        let legacy = super::legacy::to_legacy(&d);
+        let mut simd = SimdRunner::new(BitPackedCircuit::compile(&legacy.circuit));
+        let mut sim = Sim::new(Arc::new(compile(&d, &Options::default()).unwrap()));
+        let mut rng = Rng::new(seed);
+        for t in 0..50 {
+            for (port, &node) in legacy.inputs.iter().enumerate() {
+                let v = rng.coin();
+                simd.set_input(node, 0, v);
+                sim.set_input(port, v as u64);
+            }
+            simd.tick();
+            sim.tick();
+            for (port, &node) in legacy.outputs.iter().enumerate() {
+                assert_eq!(simd.output(node, 0) as u64, sim.output(port), "seed {seed} tick {t} out {port}");
+            }
+        }
+    }
+}
