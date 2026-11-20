@@ -9,10 +9,12 @@ use bevy::{
 use bevy_egui::EguiContexts;
 
 pub mod editor;
+pub mod fonts;
 pub mod selection;
 pub mod settings;
 pub mod settings_overlay;
 pub mod sim;
+pub mod theme;
 pub mod title;
 
 pub mod temp {
