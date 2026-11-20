@@ -367,7 +367,12 @@ enum Outcome {
 /// Identities with a constant operand, or with a constant result.
 fn const_identity(op: Op, i: &Instr, w: u8, c: &dyn Fn(u32) -> Option<u64>) -> Outcome {
     let m = mask(w);
-    let (ca, cb, cc) = (c(i.a), c(i.b), c(i.c));
+    // Only slot operands name slots: the others are immediates (a
+    // concatenation's shift, a slice's offset), which can exceed the slot
+    // count.
+    let (sa, sb, sc) = op.slot_operands();
+    let slot = |is_slot: bool, s: u32| if is_slot { c(s) } else { None };
+    let (ca, cb, cc) = (slot(sa, i.a), slot(sb, i.b), slot(sc, i.c));
     match op {
         Op::And => match (ca, cb) {
             (Some(0), _) | (_, Some(0)) => Outcome::Const(0),
