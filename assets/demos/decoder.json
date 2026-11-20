@@ -1,0 +1,35 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "decoder2",
+      "title": "2-to-4 decoder",
+      "nodes": [
+        {"name": "S", "type": "Input", "w": 2, "at": [-350, 0]},
+        {"name": "inv", "use": "gates/not", "at": [-180, 60], "count": 2, "step": [0, -120]},
+        {"name": "line", "use": "gates/and", "at": [50, 180], "count": 4, "step": [0, -120]},
+        {"name": "Y", "type": "Output", "w": 4, "at": [300, 0]}
+      ],
+      "wires": [
+        ["S", "inv.A"],
+        ["inv[0]", "line[0].A", "line[2].A"],
+        ["inv[1]", "line[0].B", "line[1].B"],
+        ["S:0", "line[1].A", "line[3].A"],
+        ["S:1", "line[2].B", "line[3].B"],
+        ["line.Y", "Y"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "Decoder",
+      "nodes": [
+        {"name": "S", "type": "Input", "w": 2, "at": [-300, 0]},
+        {"name": "dec", "use": "decoder2", "label": "2-to-4 decoder", "at": [0, 0]},
+        {"name": "Y", "type": "Output", "at": [300, 150], "count": 4, "step": [0, -100]}
+      ],
+      "wires": [["S", "dec.S"], ["dec", "Y"]]
+    }
+  ]
+}
