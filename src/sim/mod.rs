@@ -7,6 +7,8 @@
 //!   commands that edit them.
 //! - [`document`] – portable circuit documents (examples, save format,
 //!   subcircuit definitions) and the [`CircuitLibrary`].
+//! - [`source`] – save format version 6, the hand-editable authoring form
+//!   (names, arrays, bus wiring), and its expansion into documents.
 //! - [`bridge`] – `SimBridge`: maps the ECS onto a `logi_sim` v2 `Design`,
 //!   sends revisions to the engine and reads probes back.
 //! - [`view`] – instance views: opening a subcircuit shows its definition
@@ -26,6 +28,7 @@ pub mod bridge;
 pub mod document;
 pub mod fixtures;
 pub mod kind;
+pub mod source;
 pub mod spatial_grid;
 pub mod systems;
 pub mod view;
