@@ -14,7 +14,9 @@ use gate_quest::settings_overlay::{
 };
 use gate_quest::sim::SimulationPlugin;
 use gate_quest::temp::GateComponentSelectionEvent;
+use gate_quest::theme::{Theme, ThemePlugin};
 use gate_quest::title::MainMenuPlugin;
+use gate_quest::ui_style::WorkshopUiPlugin;
 use gate_quest::zoom_camera;
 use gate_quest::{
     GAME_TITLE, GAME_WEB_TAG, GameSettings, GameState, UiPointerState, initial_startup_system,
@@ -40,7 +42,7 @@ fn main() {
     }));
 
     if !disable_egui {
-        app = app.add_plugins(EguiPlugin::default());
+        app = app.add_plugins((EguiPlugin::default(), WorkshopUiPlugin));
     }
 
     #[cfg(feature = "inspector")]
@@ -48,10 +50,11 @@ fn main() {
         app = app.add_plugins(WorldInspectorPlugin::new());
     }
 
-    app.add_plugins(MainMenuPlugin {
-        state: GameState::MainMenu,
-    })
-    .add_plugins(SimulationPlugin::new(GameState::Simulating));
+    app.add_plugins(ThemePlugin)
+        .add_plugins(MainMenuPlugin {
+            state: GameState::MainMenu,
+        })
+        .add_plugins(SimulationPlugin::new(GameState::Simulating));
 
     if !disable_editor {
         app = app.add_plugins(EditorPlugin);
@@ -64,7 +67,7 @@ fn main() {
         .init_state::<GameState>()
         .insert_resource(UiPointerState::default())
         .add_message::<GateComponentSelectionEvent>()
-        .insert_resource(ClearColor(Color::srgba(0.050, 0.229, 0.793, 1.000)))
+        .insert_resource(ClearColor(Theme::default().palette.bench))
         .insert_resource(SettingsMenuOpen(false))
         .insert_resource(GameSettings::default())
         .add_systems(

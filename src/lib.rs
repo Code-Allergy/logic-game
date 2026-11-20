@@ -16,6 +16,7 @@ pub mod settings_overlay;
 pub mod sim;
 pub mod theme;
 pub mod title;
+pub mod ui_style;
 
 pub mod temp {
     use bevy::prelude::*;
