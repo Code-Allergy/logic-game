@@ -28,6 +28,8 @@ fn gate_name(label: &GateLabel, ty: &GateType) -> String {
     }
 }
 
+type ChangedRootGate = (Changed<GateType>, Without<InstanceViewItem>, Allow<Disabled>);
+
 /// The open view and the messages that change it, plus the root circuit's
 /// gates (also while parked behind a subcircuit view).
 #[derive(SystemParam)]
@@ -36,6 +38,22 @@ pub struct EditorViewParams<'w, 's> {
     close: MessageWriter<'w, CloseView>,
     open_definition: MessageWriter<'w, OpenDefinitionView>,
     root_gates: Query<'w, 's, &'static GateType, (Without<InstanceViewItem>, Allow<Disabled>)>,
+    changed_root_gates: Query<'w, 's, (), ChangedRootGate>,
+    removed_gates: RemovedComponents<'w, 's, GateType>,
+    /// The definition table, rebuilt only when the root's gates or the
+    /// library change.
+    table: Local<'s, Option<Vec<(Uuid, String, usize)>>>,
+}
+
+impl EditorViewParams<'_, '_> {
+    fn definition_table(&mut self, library: &Res<CircuitLibrary>) -> Vec<(Uuid, String, usize)> {
+        let removed = self.removed_gates.read().count() > 0;
+        if self.table.is_none() || removed || library.is_changed() || !self.changed_root_gates.is_empty()
+        {
+            *self.table = Some(definition_table(self.root_gates.iter().map(|t| &t.kind), library));
+        }
+        self.table.clone().unwrap_or_default()
+    }
 }
 
 /// Every definition the root circuit uses, with how many instances of it
@@ -123,7 +141,7 @@ pub fn editor_ui_system(
     let mut place_saved: Option<String> = None;
     let mut close_requested: Option<bool> = None;
     let mut open_definition: Option<Uuid> = None;
-    let table = definition_table(views.root_gates.iter().map(|t| &t.kind), &library);
+    let table = views.definition_table(&library);
 
     egui::Panel::left("editor_panel").resizable(true).show_inside(&mut root_ui, |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {

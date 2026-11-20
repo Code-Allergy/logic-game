@@ -3,6 +3,7 @@
 
 pub mod geometry_tests;
 mod instance_views;
+mod visuals;
 
 use std::path::PathBuf;
 use std::sync::Arc;

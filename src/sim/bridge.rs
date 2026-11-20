@@ -51,7 +51,7 @@ use std::sync::Arc;
 use bevy::ecs::entity_disabling::Disabled;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
-use logi_sim::compile::{CompileError, Options};
+use logi_sim::compile::{CompileError, NodePath, Options};
 #[cfg(not(target_arch = "wasm32"))]
 use logi_sim::engine_v2::Engine;
 use logi_sim::engine_v2::{EngineEvent, LocalEngine, Probe, ProbeFrame, Rate};
@@ -60,9 +60,10 @@ use uuid::Uuid;
 
 use super::document::{CircuitDocument, CircuitLibrary, DocNode};
 use super::view::{CircuitView, InstanceViewItem};
+use super::visuals::EntityWorkCounter;
 use super::{
-    GateIdentity, GateKind, GateProbes, GateType, GateValues, InputDrive, SimulationConfig,
-    WireEndpoints, WireState,
+    GateIdentity, GateKind, GateLabel, GateProbes, GateType, GateValues, InputDrive,
+    SimulationConfig, WireEndpoints, WireState,
 };
 
 /// Which engine runs the simulation.
@@ -149,6 +150,20 @@ pub struct CompileFailure {
     /// Gates on a combinational loop (root-level gates; a loop inside a
     /// subcircuit names the instance gate).
     pub loop_gates: Vec<Entity>,
+    /// The nodes of each combinational loop (one entry per loop the
+    /// compiler reported), by gate id and instance path. The editor
+    /// highlights them in the open view.
+    pub loops: Vec<Vec<LoopNode>>,
+}
+
+/// A node on a combinational loop, addressed by stable gate ids.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LoopNode {
+    /// Instance gates from the root to the circuit holding the node (empty
+    /// for a root gate).
+    pub path: Vec<Uuid>,
+    /// The gate itself, in the circuit at `path`.
+    pub gate: Uuid,
 }
 
 #[derive(Resource)]
@@ -415,9 +430,18 @@ impl SimBridge {
             warn!("Subcircuit definition {id} is missing from the library");
             return self.built.get(&id).map(|b| b.def);
         };
+        if let Some(b) = self.built.get(&id)
+            && Arc::ptr_eq(&b.doc, &doc)
+        {
+            done.insert(id);
+            return Some(b.def);
+        }
+        // Positions, layers and non-port labels are not part of the key: a
+        // move in an instance view updates the document without touching
+        // the design.
         let key = structure_key(&doc);
         if let Some(b) = self.built.get_mut(&id)
-            && (Arc::ptr_eq(&b.doc, &doc) || b.key == key)
+            && b.key == key
         {
             b.doc = doc;
             done.insert(id);
@@ -617,6 +641,36 @@ impl SimBridge {
                 break;
             }
         }
+    }
+
+    /// The stable gate ids of a compiled node path, as long as the design
+    /// still has those nodes.
+    pub fn resolve_node_path(&self, path: &NodePath) -> Option<LoopNode> {
+        let mut def = self.design.root;
+        let mut gates = Vec::with_capacity(path.instances.len());
+        for &instance in &path.instances {
+            gates.push(self.gate_uuid(def, instance)?);
+            def = match self.design.def(def).ok()?.nodes.get(instance)?.kind {
+                NodeKind::Instance(child) => child,
+                _ => return None,
+            };
+        }
+        Some(LoopNode { path: gates, gate: self.gate_uuid(def, path.node)? })
+    }
+
+    /// The document id of node `node` of design definition `def`.
+    fn gate_uuid(&self, def: DefId, node: NodeId) -> Option<Uuid> {
+        if def == self.design.root {
+            let entity = self.node_entity.get(&node)?;
+            return self.gates.get(entity).map(|g| g.uuid);
+        }
+        let built = self.built.get(self.def_ids.get(&def)?)?;
+        built.nodes.iter().find(|(_, (n, _))| *n == node).map(|(uuid, _)| *uuid)
+    }
+
+    /// The gate entity of a root gate id.
+    pub fn root_gate_entity(&self, uuid: Uuid) -> Option<Entity> {
+        self.node_by_uuid.get(&uuid).and_then(|node| self.entity_of(*node))
     }
 
     // ── Views ────────────────────────────────────────────────────────────
@@ -1001,8 +1055,11 @@ pub fn sync_design_system(
     mut wires: Query<(Entity, Ref<WireEndpoints>, &mut WireState), RootOnly>,
     mut gate_probes: Query<(Entity, &mut GateProbes), RootOnly>,
     mut view_bindings: ViewBindings,
+    work: Option<Res<EntityWorkCounter>>,
 ) {
-    bridge.set_view(&view);
+    if view.is_changed() {
+        bridge.set_view(&view);
+    }
     for entity in removed_wires.read() {
         bridge.remove_wire(entity);
     }
@@ -1059,6 +1116,7 @@ pub fn sync_design_system(
             if !touched {
                 continue;
             }
+            EntityWorkCounter::add(&work, 1);
             let (connected, width) = match bridge.connect_wire(entity, &ep) {
                 Ok(w) => (true, w),
                 Err(e) => {
@@ -1078,9 +1136,11 @@ pub fn sync_design_system(
     let rebound = bridge.flush();
     if bridge.view_open {
         if rebound || !view_bindings.changed.is_empty() {
+            EntityWorkCounter::add(&work, view_bindings.gates.iter().count() + view_bindings.wires.iter().count());
             view_bindings.bind(&bridge, &library);
         }
     } else if rebound {
+        EntityWorkCounter::add(&work, gate_probes.iter().count() + wires.iter().count());
         for (entity, mut probes) in &mut gate_probes {
             probes.set_if_neq(bridge.gate_probes(entity));
         }
@@ -1093,10 +1153,76 @@ pub fn sync_design_system(
     }
 }
 
+/// The most gate names a loop message lists.
+const LOOP_NAMES_SHOWN: usize = 8;
+
+/// `Kind "label"`, or the kind name for an unlabelled gate.
+fn gate_description(kind: &GateKind, label: Option<&str>) -> String {
+    match label.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(label) => format!("{} \"{label}\"", kind.display_name()),
+        None => kind.display_name().to_string(),
+    }
+}
+
+/// Names a loop node for the editor: `cell1 / Not "inv"` (instance gates
+/// by label, the gate by kind and label).
+fn loop_node_name(
+    node: &LoopNode,
+    bridge: &SimBridge,
+    library: &CircuitLibrary,
+    root_gates: &Query<(&GateLabel, &GateType), Allow<Disabled>>,
+) -> String {
+    // The circuit holding the current gate: `None` is the root.
+    let mut scope: Option<Uuid> = None;
+    let mut parts = Vec::with_capacity(node.path.len() + 1);
+    for (i, &gate) in node.path.iter().chain(std::iter::once(&node.gate)).enumerate() {
+        let found: Option<(GateKind, Option<String>)> = match scope {
+            None => bridge
+                .root_gate_entity(gate)
+                .and_then(|e| root_gates.get(e).ok())
+                .map(|(label, ty)| (ty.kind.clone(), Some(label.value.clone()))),
+            Some(def) => library
+                .get(def)
+                .and_then(|d| d.node(gate))
+                .map(|n| (n.kind.clone(), n.label.clone())),
+        };
+        let Some((kind, label)) = found else {
+            parts.push("?".to_string());
+            break;
+        };
+        let leaf = i == node.path.len();
+        parts.push(if leaf {
+            gate_description(&kind, label.as_deref())
+        } else {
+            label.filter(|l| !l.trim().is_empty()).unwrap_or_else(|| kind.display_name().to_string())
+        });
+        if let GateKind::SubCircuit { definition } = kind {
+            scope = Some(definition);
+        }
+    }
+    parts.join(" / ")
+}
+
+/// The editor message for a combinational loop through the named gates.
+pub fn loop_message(names: &[String]) -> String {
+    let count = names.len();
+    let mut list = names.iter().take(LOOP_NAMES_SHOWN).cloned().collect::<Vec<_>>().join(", ");
+    if count > LOOP_NAMES_SHOWN {
+        list.push_str(&format!(" and {} more", count - LOOP_NAMES_SHOWN));
+    }
+    let gates = if count == 1 { "gate" } else { "gates" };
+    format!(
+        "Combinational loop through {count} {gates}: {list}. A feedback loop needs a state \
+         element: put a Delay (or a Register, DLatch, SrLatch or Ram) on the loop."
+    )
+}
+
 /// Collect load results into [`SimDiagnostics`].
 pub fn collect_engine_events_system(
     mut bridge: ResMut<SimBridge>,
     mut diagnostics: ResMut<SimDiagnostics>,
+    library: Res<CircuitLibrary>,
+    root_gates: Query<(&GateLabel, &GateType), Allow<Disabled>>,
 ) {
     bridge.poll_events();
     for event in bridge.take_events() {
@@ -1109,30 +1235,45 @@ pub fn collect_engine_events_system(
             }
             EngineEvent::CompileFailed { revision, errors } => {
                 let mut loop_gates = Vec::new();
+                let mut loops = Vec::new();
+                let mut messages = Vec::new();
                 for error in &errors {
-                    if let CompileError::CombinationalLoop { nodes } = error {
-                        for path in nodes {
-                            let root_node = path.instances.first().copied().unwrap_or(path.node);
-                            if let Some(e) = bridge.entity_of(root_node)
-                                && !loop_gates.contains(&e)
-                            {
-                                loop_gates.push(e);
-                            }
+                    let nodes = match error {
+                        CompileError::CombinationalLoop { nodes } => nodes,
+                        CompileError::Invalid(v) => {
+                            messages.push(format!("Invalid circuit: {v:?}"));
+                            continue;
+                        }
+                    };
+                    for path in nodes {
+                        let root_node = path.instances.first().copied().unwrap_or(path.node);
+                        if let Some(e) = bridge.entity_of(root_node)
+                            && !loop_gates.contains(&e)
+                        {
+                            loop_gates.push(e);
                         }
                     }
+                    let mut resolved: Vec<LoopNode> = Vec::new();
+                    for node in nodes.iter().filter_map(|p| bridge.resolve_node_path(p)) {
+                        if !resolved.contains(&node) {
+                            resolved.push(node);
+                        }
+                    }
+                    let mut names: Vec<String> = resolved
+                        .iter()
+                        .map(|n| loop_node_name(n, &bridge, &library, &root_gates))
+                        .collect();
+                    if names.is_empty() {
+                        // The design changed before the error arrived.
+                        names = vec![format!("{} node(s)", nodes.len())];
+                    }
+                    names.sort();
+                    messages.push(loop_message(&names));
+                    loops.push(resolved);
                 }
-                let messages = errors
-                    .iter()
-                    .map(|e| match e {
-                        CompileError::CombinationalLoop { nodes } => format!(
-                            "Combinational loop through {} gate(s). Break it with a Delay or Register.",
-                            nodes.len()
-                        ),
-                        CompileError::Invalid(v) => format!("Invalid circuit: {v:?}"),
-                    })
-                    .collect();
                 warn!("Revision {revision} did not compile: {errors:?}");
-                diagnostics.compile_error = Some(CompileFailure { revision, messages, loop_gates });
+                diagnostics.compile_error =
+                    Some(CompileFailure { revision, messages, loop_gates, loops });
             }
         }
     }
@@ -1149,6 +1290,7 @@ pub fn project_probes_system(
     mut last: Local<Option<(u64, u64, u64)>>,
     mut gates: Query<(&GateProbes, &mut GateValues)>,
     mut wires: Query<&mut WireState>,
+    work: Option<Res<EntityWorkCounter>>,
 ) {
     let generation = bridge.binding_generation();
     bridge.with_frame(|frame| {
@@ -1157,6 +1299,7 @@ pub fn project_probes_system(
             return;
         }
         *last = Some(key);
+        EntityWorkCounter::add(&work, gates.iter().len() + wires.iter().len());
         let read = |p: &Option<u32>| p.and_then(|i| frame.values.get(i as usize).copied()).unwrap_or(0);
         for (probes, mut values) in &mut gates {
             let inputs = probes.inputs.iter().map(read);

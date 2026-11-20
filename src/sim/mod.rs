@@ -11,7 +11,8 @@
 //!   sends revisions to the v2 engine and reads probes back.
 //! - [`view`] – instance views: opening a subcircuit shows its definition
 //!   with live values probed from the running root simulation.
-//! - [`systems`] – Bevy systems for rendering and user interaction.
+//! - [`visuals`] – change-driven gate and wire visuals, loop highlight.
+//! - [`systems`] – Bevy systems for picking, dragging and egui panels.
 //! - [`plugin`] – plugins that wire everything into Bevy.
 //! - [`spatial_grid`] – spatial acceleration for entity picking.
 
@@ -28,9 +29,10 @@ pub mod kind;
 pub mod spatial_grid;
 pub mod systems;
 pub mod view;
+pub mod visuals;
 
 pub use authoring::*;
-pub use bridge::{CompileFailure, SimBridge, SimDiagnostics, SimRuntime};
+pub use bridge::{CompileFailure, LoopNode, SimBridge, SimDiagnostics, SimRuntime};
 pub use document::{
     CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, PinAddr,
     WorkspaceDocument,
@@ -38,6 +40,7 @@ pub use document::{
 pub use kind::GateKind;
 pub use view::{CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame};
 pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin};
+pub use visuals::{EntityWorkCounter, LoopHighlight, SimulationVisualsPlugin};
 
 use bevy::prelude::*;
 use bevy::reflect::Reflect;

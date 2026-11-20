@@ -136,7 +136,7 @@ pub enum DisplayRadix {
 }
 
 /// Presentation of a display gate's value.
-#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 #[reflect(Component)]
 pub struct DisplayConfig {
     pub radix: DisplayRadix,

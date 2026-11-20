@@ -7,7 +7,6 @@
 use bevy::ecs::system::SystemParam;
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
@@ -18,10 +17,9 @@ use crate::{
 use super::{
     AuthoringFeedback, CircuitLibrary, CircuitReader, DeleteGate, DeleteWire, DisplayConfig,
     DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind, GateLabel, GateLabelChanged,
-    GateType, GateValues, InputDrive, LogicDisplay, SaveWorkspaceEvent, Selected, SelectedGate,
+    GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected, SelectedGate,
     SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter,
-    WireEndpoints, WireState, WorkspaceRevision, calculate_connection_geometry, format_value,
-    get_gate_sprite, spatial_grid::SpatialGrid,
+    WireEndpoints, WireState, WorkspaceRevision, spatial_grid::SpatialGrid,
     view::{CircuitView, InstanceViewItem, OpenInstanceView},
 };
 
@@ -29,48 +27,8 @@ use super::{
 pub struct SimBackground;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Visual attachment (reacting to authoring changes)
+// Background and camera
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Give new or re-kinded gates their sprite and value text.
-pub fn attach_gate_visuals_system(
-    mut commands: Commands,
-    gates: Query<(Entity, &GateType, Option<&Children>), Changed<GateType>>,
-    texts: Query<(), With<LogicDisplay>>,
-) {
-    for (entity, ty, children) in &gates {
-        for child in children.into_iter().flat_map(|c| c.iter()) {
-            if texts.contains(child) {
-                commands.entity(child).despawn();
-            }
-        }
-        commands.entity(entity).try_insert(get_gate_sprite(&ty.kind));
-        if matches!(ty.kind, GateKind::Output { .. } | GateKind::Display { .. }) {
-            commands.spawn((
-                Text2d::new(""),
-                TextFont::from_font_size(22.0),
-                TextColor(Color::srgb(0.3, 1.0, 0.5)),
-                Transform::from_xyz(0.0, 0.0, 1.0),
-                LogicDisplay,
-                ChildOf(entity),
-            ));
-        }
-    }
-}
-
-/// Give new wires a line sprite; [`update_connections_system`] places it.
-pub fn attach_wire_visuals_system(
-    mut commands: Commands,
-    wires: Query<Entity, Added<WireEndpoints>>,
-) {
-    for entity in &wires {
-        commands.entity(entity).try_insert((
-            Sprite { color: Color::WHITE, custom_size: Some(Vec2::new(1.0, 2.0)), ..default() },
-            Transform::from_xyz(0.0, 0.0, crate::temp::CONNECTION_Z_LEVEL),
-            Visibility::Visible,
-        ));
-    }
-}
 
 /// Draw a background behind all simulation entities.
 pub fn draw_sim_background_system(mut commands: Commands, query: Query<Entity, With<SimBackground>>) {
@@ -126,78 +84,8 @@ pub fn fit_camera_to_circuit_system(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-frame visual updates
+// Spatial grid (gate visuals live in `super::visuals`)
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Show output and display values as text.
-pub fn update_logic_displays_system(
-    mut displays: Query<(&mut Text2d, &ChildOf), With<LogicDisplay>>,
-    gates: Query<(&GateType, &GateValues, Option<&DisplayConfig>)>,
-) {
-    for (mut text, child_of) in &mut displays {
-        let Ok((ty, values, config)) = gates.get(child_of.parent()) else { continue };
-        let value = values.inputs.first().copied().unwrap_or(0);
-        let formatted = format_value(value, ty.kind.width().unwrap_or(1), &config.copied().unwrap_or_default());
-        if text.0 != formatted {
-            text.0 = formatted;
-        }
-    }
-}
-
-/// Recolour input and output gates from their values.
-pub fn update_input_colours_system(mut query: Query<(&mut Sprite, &GateType, &GateValues)>) {
-    for (mut sprite, ty, values) in &mut query {
-        let color = match ty.kind {
-            GateKind::Input { .. } => {
-                if values.outputs.first().copied().unwrap_or(0) != 0 {
-                    Color::srgb(0.0, 1.0, 0.0)
-                } else {
-                    Color::srgb(0.8, 0.0, 0.0)
-                }
-            }
-            GateKind::Output { .. } => {
-                if values.inputs.first().copied().unwrap_or(0) != 0 {
-                    Color::srgb(1.0, 1.0, 1.0)
-                } else {
-                    Color::srgb(0.1, 0.1, 0.1)
-                }
-            }
-            _ => continue,
-        };
-        if sprite.color != color {
-            sprite.color = color;
-        }
-    }
-}
-
-/// Place wire sprites between their gates and colour them by value.
-pub fn update_connections_system(
-    gates: Query<(&GateIdentity, &Transform), Without<WireEndpoints>>,
-    mut lines: Query<(&mut Transform, &mut Sprite, &WireEndpoints, &WireState), Without<GateIdentity>>,
-) {
-    let positions: HashMap<Uuid, Vec3> =
-        gates.iter().map(|(id, t)| (id.uuid, t.translation)).collect();
-    for (mut transform, mut sprite, ep, state) in &mut lines {
-        let (Some(&from), Some(&to)) = (positions.get(&ep.source_gate), positions.get(&ep.sink_gate))
-        else {
-            continue;
-        };
-        let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
-        transform.translation = mid.with_z(crate::temp::CONNECTION_Z_LEVEL);
-        transform.rotation = rot;
-        let thickness = if state.width > 1 { 4.0 } else { 2.0 };
-        sprite.custom_size = Some(Vec2::new(dist, thickness));
-        sprite.color = if !state.connected {
-            Color::srgba(0.8, 0.6, 0.2, 1.0)
-        } else if state.value != 0 {
-            Color::srgb(0.0, 1.0, 0.0)
-        } else if state.width > 1 {
-            Color::srgb(0.25, 0.7, 1.0)
-        } else {
-            Color::WHITE
-        };
-    }
-}
 
 type MovedGate = (With<GateIdentity>, Changed<Transform>);
 
@@ -384,6 +272,12 @@ pub fn simulation_config_ui_system(
             );
             for message in &error.messages {
                 ui.colored_label(egui::Color32::from_rgb(255, 120, 90), message);
+            }
+            if error.loops.iter().any(|l| !l.is_empty()) {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 120, 90),
+                    "The gates and wires on the loop are outlined in red.",
+                );
             }
         }
         if let Some(message) = &feedback.message {

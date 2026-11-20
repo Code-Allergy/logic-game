@@ -26,13 +26,12 @@ use crate::sim::{
         sync_design_system, update_tickrate_system,
     },
     systems::{
-        attach_gate_visuals_system, attach_wire_visuals_system, drag_selected_system,
-        draw_sim_background_system, fit_camera_to_circuit_system, gate_selection_system,
-        save_on_exit_system, simulation_config_ui_system, ui_for_selected_gate,
-        update_connections_system, update_input_colours_system, update_inputs_on_left_click,
-        update_logic_displays_system, update_selected_gate, update_spatial_grid_system,
-        workspace_io_system,
+        drag_selected_system, draw_sim_background_system, fit_camera_to_circuit_system,
+        gate_selection_system, save_on_exit_system, simulation_config_ui_system,
+        ui_for_selected_gate, update_inputs_on_left_click, update_selected_gate,
+        update_spatial_grid_system, workspace_io_system,
     },
+    visuals::SimulationVisualsPlugin,
 };
 
 use super::fixtures;
@@ -51,7 +50,8 @@ pub struct SimulationRuntimePlugin {
     pub runtime: SimRuntime,
 }
 
-/// Presentation and interaction. Expects [`SimulationRuntimePlugin`].
+/// Presentation and interaction (includes [`SimulationVisualsPlugin`]).
+/// Expects [`SimulationRuntimePlugin`].
 pub struct SimulationViewPlugin {
     pub state: GameState,
 }
@@ -134,7 +134,8 @@ impl Plugin for SimulationViewPlugin {
     fn build(&self, app: &mut App) {
         let state = self.state.clone();
 
-        app.init_resource::<SelectedGate>()
+        app.add_plugins(SimulationVisualsPlugin)
+            .init_resource::<SelectedGate>()
             .insert_resource(SpatialGrid::new(100.0))
             .register_type::<crate::sim::LogicDisplay>()
             .register_type::<crate::sim::GateKind>()
@@ -175,15 +176,11 @@ impl Plugin for SimulationViewPlugin {
                     workspace_io_system,
                 ),
             )
-            .add_systems(PostUpdate, (attach_gate_visuals_system, attach_wire_visuals_system))
             .add_systems(
                 Update,
                 (
-                    update_input_colours_system,
-                    update_logic_displays_system,
                     gate_selection_system.before(drag_selected_system),
                     drag_selected_system,
-                    update_connections_system,
                     update_spatial_grid_system,
                     update_inputs_on_left_click,
                     update_selected_gate,
