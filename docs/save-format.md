@@ -232,7 +232,13 @@ rarely matters.
 | `at` | `[x, y]` | Position (required). |
 | `count`, `step` | integer, `[dx, dy]` | An array of `count` nodes (1 to 4096). Element `i` is named `name[i]` and placed at `at + i * step`. |
 
-Parameter conveniences: `w` defaults to `1` for every kind that has one;
+Parameter conveniences: in an array, `{i}` in a string parameter is
+replaced by the element's index, and a value that is then an integer is
+that number: `{"name": "bit", "type": "Split", "w": 8, "lo": "{i}", "len":
+1, "count": 8, …}` is the eight 1-bit slices of a byte, `{"type": "Const",
+"w": 3, "value": "{i}", "count": 8, …}` the constants 0 to 7. The elements
+of an array must still have the same pins (the same widths), and `{i}`
+outside an array is just text. `w` defaults to `1` for every kind that has one;
 `value` and the entries of `contents` may be strings in hex (`"0x1F"`),
 binary (`"0b101"`) or decimal, with `_` separators allowed. Parameters a
 kind does not have are refused, and so are invalid ones (for example a
@@ -298,10 +304,18 @@ mentioned stay unconnected (they read 0).
   len)`, shared by every sink that needs it) and a `Merge` node joins the
   pieces (neighbouring bits of the same source pin are joined first, so
   `["A:0..4", "Y:0..4"]` plus `["A:4..8", "Y:4..8"]` is one plain wire).
-  A split of output pin `p` of node `n` is node `~split/n/p/lo/len`, placed
-  70 to the right of `n` and 30 lower for each further adapter of `n`; the
-  merge into input pin `p` of node `n` is node `~merge/n/p`, placed 70 to
-  the left of `n`, stacked the same way. Their ids follow the rule above.
+  A split of output pin `p` of node `n` is node `~split/n/p/lo/len`; the
+  splits of `n` stand in a column to its right, the first level with `n`
+  and each further one 60 lower (a box and a gap), at a distance that
+  leaves 30 between the boxes, rounded up to the 20-unit grid (80 for an
+  ordinary 50-wide node). The merge into input pin `p` of node `n` is node
+  `~merge/n/p`, in a column to the left of `n` placed the same way. So
+  adapters never overlap each other or their node; to place them exactly,
+  write the `Split` and `Merge` nodes yourself (an array with `"lo":
+  "{i}"`, below, cuts a word into its bits). Their ids follow the rule
+  above. (Before the gallery, adapters were placed 70 beside their node
+  and stacked 30 apart, so they overlapped; files are read the same way,
+  only the generated positions changed.)
 - Nodes and wires of each expanded circuit are sorted by id (the order the
   editor writes).
 
@@ -390,3 +404,62 @@ load, the embedded copies are used and a warning is logged. To add a demo,
 write its file, add it to the manifest and to the `embed!` list, and run
 `cargo run --example demo_fmt`; the tests check that the folder, the
 embedded list and the manifest agree.
+
+## Gallery
+
+`assets/gallery/` holds the gallery: 27 more circuits beside the
+curriculum, from a majority vote to a CPU running Fibonacci. Its
+`manifest.json` has the shape of the demo manifest with categories in
+place of levels:
+
+```json
+{
+  "format": "gatequest-gallery",
+  "version": 1,
+  "categories": [ { "id": "combinational", "title": "Combinational logic" }, … ],
+  "items": [
+    {
+      "id": "magnitude",
+      "category": "combinational",
+      "title": "4-bit magnitude comparator",
+      "description": "Four one-bit comparators …",
+      "uses": ["comparator/cmp1"]
+    },
+    …
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `categories` | Group ids and titles (headings in the editor's Gallery list). |
+| `items` | In order, simple to complex; the items of a category are listed together, categories in their order. |
+| `id` | The item's id: its file is `<id>.json`, its circuits are referenced as `"<id>/<circuit>"`. Ids share that namespace with the demos, so an item id is never a demo id. |
+| `uses` | Exactly the references in the file, each to a curriculum demo or to a gallery item listed earlier. |
+
+Item ids derive from the key `gallery/<id>` (UUID v5, as for demos). The
+gallery is loaded after the demos into the same catalog
+(`src/sim/demos.rs`, `DemoCatalog::gallery`), so workspace files can use
+its circuits too, and it is embedded the same way (`GALLERY_EMBEDDED`).
+The editor shows it as a second group, **Gallery**, under the demos; items
+open read-only and can be copied like demos. `demo_fmt` formats and checks
+both folders.
+
+| Category | Items (circuits beyond the root) |
+|---|---|
+| Combinational | majority vote; one-bit comparator (`cmp1`); 4-bit magnitude comparator (`mag4`, beside `Eq`/`LtU`); 8-bit parity XOR tree (beside `ReduceXor`); Gray code both ways; 8-to-3 priority encoder; 7-segment decoder driving seven lights; BCD to binary; 8-bit barrel shifter; 4-bit carry-lookahead adder (`lookahead`, `cla4`, beside `ripple4`); 4x4 array multiplier |
+| Sequential | edge detector (`rising`); 4-bit shift register; Johnson counter; 8-bit LFSR (`lfsr8`); clock divider; 8-bit up/down counter; BCD counter (`mod_counter`); debouncer; PWM generator; sequence detector (1011, ROM state table); traffic light; stopwatch (59.9 s) |
+| Systems | 8-entry stack on a RAM; UART transmitter; reaction timer game (`countdown`, `timer2`); CPU with ADDI/SUBI/ANDI printing the Fibonacci numbers |
+
+### Previews
+
+`cargo run --example render_svg -- <id | file.json>... [--out DIR]
+[--circuit NAME] [--ortho]` writes an SVG of every circuit of a demo,
+gallery item or file (default folder `target/previews`): the expanded
+circuit with the editor's box sizes and colours, labels, generated adapters
+dashed, and wires straight from centre to centre as the editor draws them
+(`--ortho`: horizontal and vertical segments instead). It prints each
+circuit's node count and two layout checks: overlapping boxes and wires
+that pass through a box. The gallery was laid out by hand with it, and
+its tests check that no boxes overlap and every node is on the 20-unit
+grid.

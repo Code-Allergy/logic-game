@@ -839,3 +839,41 @@ ambiguous. Each is small and can be revisited.
     The editor's "Import RTL…" field is native only (no file system on
     wasm). `save_workspace_in` now uses the new `workspace_to_json`, which
     the `rtl_import` example also uses for `--v5`.
+46. **Gallery.** 27 circuits beside the curriculum live in
+    `assets/gallery/` with their own manifest (`"gatequest-gallery"`:
+    categories and items instead of levels and demos), loaded after the
+    demos into the same `DemoCatalog` (`gallery`, `categories`; `get` and
+    `by_root` search both; a gallery item has level 0 and a category).
+    Chosen over a `gallery` section in the demo manifest so that the
+    curriculum's level rules stay as they are; the pyramid rule carries
+    over: an item uses curriculum demos and items listed before it, and 10
+    of them build on earlier items (the edge detector, the BCD digit
+    counter, the LFSR, the comparators, the ripple adder). The editor
+    lists it as a second group under the demos. No new primitive or I/O
+    part was added: lights are `Output` nodes (the 7-segment digit and the
+    traffic lights are arrangements of them), readouts are `Display`
+    nodes, buttons are `Input` switches pressed and released (an edge
+    detector turns a press into a one-tick pulse), and there is no speaker.
+47. **Array parameters (`{i}`).** Version 6 gains one authoring feature: in
+    an array, `{i}` in a string parameter is the element's index (`"lo":
+    "{i}"` cuts a word into bits, `"value": "{i}"` numbers constants);
+    elements must keep the same pins. Files without it read as before.
+    It exists because hand placement of bit slices was otherwise only
+    possible one node at a time.
+48. **Adapter placement.** Generated `Split`/`Merge` adapters used to stand
+    70 beside their node, stacked 30 apart, so a word cut into bits gave a
+    pile of overlapping 50-unit boxes. They now stand in a column at a
+    distance that leaves 30 between boxes (80 for an ordinary node,
+    rounded up to the grid for wider ones such as a `Display`), 60 apart,
+    splits right and merges left with separate stacks. Only generated
+    positions change: ids, wiring and behaviour are the same, so existing
+    files load the same circuits. Some curriculum demos still have
+    overlapping boxes (two word inputs whose split columns meet in
+    `ripple_adder/adder8` and `mux/mux2x8`, and the AND/OR arrays spaced 40
+    apart in `alu/alu8`); the no-overlap test covers the gallery only.
+49. **Preview renderer.** `examples/render_svg.rs` writes SVG previews of
+    circuits (see `docs/save-format.md`, "Previews") and reports
+    overlapping boxes and wires drawn through boxes. It is a development
+    tool only; the app does not use it. `layout.rs` is unchanged: the
+    gallery is placed by hand, not by `layout_circuit`.
+
