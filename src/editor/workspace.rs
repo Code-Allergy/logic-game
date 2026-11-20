@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use crate::editor::EditorState;
 use crate::sim::fixtures::fixture_workspace_catalog;
-use crate::sim::{CircuitDocument, WorkspaceDocument};
+use crate::sim::{CircuitDocument, CircuitLibrary, WorkspaceDocument};
 use crate::{DEFAULT_WORKSPACE_EXT, WORKSPACE_DIR};
 
 pub const WORKSPACE_MANIFEST_FILE: &str = "manifest.json";
@@ -195,6 +195,13 @@ pub fn read_workspace_in(dir: &Path, name: &str) -> Result<WorkspaceDocument, Wo
         root,
         definitions: circuits.into_iter().map(|(id, c)| (id, Arc::new(c))).collect(),
     };
+    let library = CircuitLibrary { definitions: workspace.definitions.clone() };
+    if let Some(id) = library.find_cycle() {
+        let name = library.get(id).map_or_else(String::new, |d| d.name.clone());
+        return Err(WorkspaceError::Invalid(format!(
+            "subcircuit \"{name}\" ({id}) contains itself"
+        )));
+    }
     validate_required_io_labels(&workspace)?;
     Ok(workspace)
 }

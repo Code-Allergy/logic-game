@@ -256,6 +256,65 @@ impl CircuitLibrary {
         (inputs, named(kind.output_pin_names(), &outs))
     }
 
+    /// Whether definition `outer` instances `inner`, directly or through
+    /// other definitions. A definition does not contain itself unless the
+    /// library has a cycle.
+    pub fn contains(&self, outer: Uuid, inner: Uuid) -> bool {
+        let mut seen = HashSet::new();
+        let mut stack: Vec<Uuid> = match self.get(outer) {
+            Some(def) => def.instanced_definitions().collect(),
+            None => return false,
+        };
+        while let Some(id) = stack.pop() {
+            if id == inner {
+                return true;
+            }
+            if seen.insert(id)
+                && let Some(def) = self.get(id)
+            {
+                stack.extend(def.instanced_definitions());
+            }
+        }
+        false
+    }
+
+    /// Why placing an instance of `placing` into the circuit `into` would
+    /// make a circuit contain itself, or `None` when it is allowed.
+    /// `into` is the id of the circuit being edited (the root circuit or a
+    /// definition).
+    /// `fallback_name` names `into` when it is not in the library (the
+    /// root circuit).
+    pub fn recursion_error(&self, placing: Uuid, into: Uuid, fallback_name: &str) -> Option<String> {
+        let name = |id: Uuid| {
+            self.get(id)
+                .map_or_else(|| format!("\"{fallback_name}\""), |d| format!("\"{}\"", d.name))
+        };
+        if placing == into {
+            return Some(format!(
+                "Cannot place {} inside itself: a circuit cannot contain an instance of itself.",
+                name(placing)
+            ));
+        }
+        if self.contains(placing, into) {
+            return Some(format!(
+                "Cannot place {} inside {}: {} already contains {}, so the circuit would contain \
+                 itself.",
+                name(placing),
+                name(into),
+                name(placing),
+                name(into)
+            ));
+        }
+        None
+    }
+
+    /// A definition that contains itself, if the library has a cycle.
+    pub fn find_cycle(&self) -> Option<Uuid> {
+        let mut ids: Vec<Uuid> = self.definitions.keys().copied().collect();
+        ids.sort();
+        ids.into_iter().find(|&id| self.contains(id, id))
+    }
+
     /// Definitions reachable from `root` (excluding the root itself).
     pub fn reachable_from(&self, root: &CircuitDocument) -> HashMap<Uuid, Arc<CircuitDocument>> {
         let mut out = HashMap::new();
