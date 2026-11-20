@@ -11,6 +11,8 @@
 //!   (names, arrays, bus wiring), and its expansion into documents.
 //! - [`demos`] – the built-in demos, loaded from `assets/demos/`.
 //! - [`rtl`] – RTL import: a Yosys JSON netlist becomes a workspace.
+//! - [`netlist`] – a workspace as a `logi_sim` design, for simulating it
+//!   without the app (tests, benchmarks).
 //! - [`layout`] – automatic layered layout of a circuit.
 //! - [`bridge`] – `SimBridge`: maps the ECS onto a `logi_sim` v2 `Design`,
 //!   sends revisions to the engine and reads probes back.
@@ -32,6 +34,7 @@ pub mod demos;
 pub mod document;
 pub mod kind;
 pub mod layout;
+pub mod netlist;
 pub mod rtl;
 pub mod source;
 pub mod spatial_grid;
