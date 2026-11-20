@@ -262,6 +262,21 @@ pub fn save_workspace_in(
     }
     fs::create_dir_all(&folder)?;
 
+    let json = workspace_to_json(name, workspace)?;
+    let manifest = folder.join(WORKSPACE_MANIFEST_FILE);
+    let tmp = folder.join("manifest.json.tmp");
+    fs::write(&tmp, json)?;
+    fs::rename(tmp, manifest)?;
+    Ok(())
+}
+
+/// The version 5 `manifest.json` text of `workspace` (pretty-printed; the
+/// root first, then the definitions sorted by id).
+pub fn workspace_to_json(
+    name: &str,
+    workspace: &WorkspaceDocument,
+) -> Result<String, WorkspaceError> {
+    validate_required_io_labels(workspace)?;
     let mut definitions: Vec<&Arc<CircuitDocument>> = workspace.definitions.values().collect();
     definitions.sort_by_key(|d| d.id);
     let file = WorkspaceFile {
@@ -273,12 +288,7 @@ pub fn save_workspace_in(
             .chain(definitions.into_iter().map(|d| (**d).clone()))
             .collect(),
     };
-    let json = serde_json::to_vec_pretty(&file)?;
-    let manifest = folder.join(WORKSPACE_MANIFEST_FILE);
-    let tmp = folder.join("manifest.json.tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(tmp, manifest)?;
-    Ok(())
+    Ok(serde_json::to_string_pretty(&file)?)
 }
 
 /// Input, Output and Display nodes must be labelled (labels name ports).
