@@ -194,10 +194,12 @@ pub fn layout(nodes: &[LayoutNode], edges: &[(usize, usize)]) -> Layout {
     // Sources (constants) sit just left of their first consumer. Done in
     // reverse topological order so a chain of sources moves together.
     for &v in topo.iter().rev() {
-        if nodes[v].role != Role::Input && nodes[v].role != Role::Output && preds[v].is_empty() {
-            if let Some(m) = dag[v].iter().map(|&w| rank[w]).min() {
-                rank[v] = m.saturating_sub(1).max(1);
-            }
+        if nodes[v].role != Role::Input
+            && nodes[v].role != Role::Output
+            && preds[v].is_empty()
+            && let Some(m) = dag[v].iter().map(|&w| rank[w]).min()
+        {
+            rank[v] = m.saturating_sub(1).max(1);
         }
     }
     // Drop empty ranks (outputs may leave a gap, e.g. a circuit of ports).
@@ -338,13 +340,13 @@ fn count_crossings(columns: &[Vec<usize>], edges: &[(usize, usize)], rank: &[usi
             let mut le = 0;
             while i > 0 {
                 le += tree[i];
-                i -= i & i.wrapping_neg();
+                i -= i.isolate_lowest_one();
             }
             total += seen - le;
             let mut i = b + 1;
             while i <= size {
                 tree[i] += 1;
-                i += i & i.wrapping_neg();
+                i += i.isolate_lowest_one();
             }
         }
     }

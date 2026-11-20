@@ -500,7 +500,7 @@ fn flip_flops_hold_state() {
 
 #[test]
 fn constants_slices_and_concatenations_become_adapters() {
-    // y = {a[1:0], 2'b10, a[3]}, z = a[3:2], w = 1'bx.
+    // y = {a[1:0], 2'b10, a[3]} (a = 1001: 01, 10, 1), z = a[3:2], w = 1'bx.
     let text = netlist(
         &[
             ("a", "input", bits(2, 4)),
@@ -524,7 +524,7 @@ fn constants_slices_and_concatenations_become_adapters() {
     assert_readable_layout(&imported.workspace);
     let mut app = open_import(&imported);
     let got = eval(&mut app, &[("a", 0b1001)], &["y", "z", "w"]);
-    assert_eq!(got, [0b01_10_1 /* a[1:0]=01, 10, a[3]=1 */, 0b10, 0]);
+    assert_eq!(got, [0b0_1101, 0b10, 0]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
