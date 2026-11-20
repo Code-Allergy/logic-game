@@ -4,6 +4,7 @@ pub mod engine;
 pub mod fixtures;
 pub mod graphviz;
 pub mod netlist;
+pub mod reference;
 pub mod runner;
 
 pub mod prelude {
