@@ -30,12 +30,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bevy::prelude::ResMut;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::editor::EditorState;
-use crate::sim::fixtures::fixture_workspace_catalog;
 use crate::sim::source::{self, Externals};
 use crate::sim::{CircuitDocument, CircuitLibrary, WorkspaceDocument, demos};
 use crate::{DEFAULT_WORKSPACE_EXT, WORKSPACE_DIR};
@@ -106,12 +103,6 @@ struct WorkspaceFile {
     name: String,
     root: Uuid,
     circuits: Vec<CircuitDocument>,
-}
-
-pub fn catalog_init_system(mut editor_state: ResMut<EditorState>) {
-    if editor_state.workspace_catalog.is_empty() {
-        editor_state.workspace_catalog = fixture_workspace_catalog();
-    }
 }
 
 pub fn load_saved_workspace_names() -> io::Result<Vec<String>> {

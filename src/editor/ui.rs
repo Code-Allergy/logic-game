@@ -16,12 +16,12 @@ use crate::{
     sim::{
         ActiveCircuit, CircuitLibrary, CircuitView, CloseView, CreateGate, CreateWire,
         GateIdentity, GateKind, GateLabel, GateType, InstanceViewItem, OpenDefinitionView,
-        RegisterDefinitions, WorkspaceDocument,
+        RegisterDefinitions, WorkspaceDocument, demos,
     },
 };
 
 use super::{EditorState, LoadWorkspaceEvent, SaveWorkspaceEvent};
-use crate::editor::workspace::{load_saved_workspace_names, read_workspace};
+use crate::editor::workspace::{load_saved_workspace_names, read_workspace, save_workspace};
 
 fn gate_name(label: &GateLabel, ty: &GateType) -> String {
     if label.value.trim().is_empty() {
@@ -168,8 +168,12 @@ pub fn editor_ui_system(
     }
 
     let mut select_kind: Option<(GateKind, Option<String>)> = None;
+    let catalog = demos::catalog();
+    let open_demo = catalog.ok().and_then(|c| c.by_root(active.uuid));
     let mut place_catalog: Option<usize> = None;
     let mut open_catalog: Option<usize> = None;
+    let mut copy_demo = false;
+    let mut new_workspace = false;
     let mut load_saved: Option<String> = None;
     let mut place_saved: Option<String> = None;
     let mut close_requested: Option<bool> = None;
@@ -183,6 +187,19 @@ pub fn editor_ui_system(
 
             if let Some(active_workspace) = &editor_state.current_workspace {
                 ui.label(format!("Active workspace: {active_workspace}"));
+            }
+            if active.read_only {
+                if let Some(demo) = open_demo {
+                    ui.label(format!("Demo, level {}: {}", demo.level, demo.title));
+                    ui.label(&demo.description);
+                }
+                ui.colored_label(
+                    egui::Color32::from_rgb(140, 200, 255),
+                    "Read-only demo: toggle inputs and open subcircuits freely; copy it to edit.",
+                );
+                if ui.button("Copy to my workspace").clicked() {
+                    copy_demo = true;
+                }
             }
             ui.label(format!("View: {}", views.view.breadcrumb(&active.name)));
             if let Some(frame) = views.view.frames().last() {
@@ -216,11 +233,18 @@ pub fn editor_ui_system(
                 ui.label("Workspace name");
                 ui.text_edit_singleline(&mut editor_state.workspace_file_name);
             });
-            if ui.button("Save Workspace").clicked() && !editor_state.workspace_file_name.trim().is_empty() {
-                let name = editor_state.workspace_file_name.trim().to_string();
-                editor_state.current_workspace = Some(name.clone());
-                save_workspace_events.write(SaveWorkspaceEvent { name });
-            }
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!active.read_only, egui::Button::new("Save Workspace")).clicked()
+                    && !editor_state.workspace_file_name.trim().is_empty()
+                {
+                    let name = editor_state.workspace_file_name.trim().to_string();
+                    editor_state.current_workspace = Some(name.clone());
+                    save_workspace_events.write(SaveWorkspaceEvent { name });
+                }
+                if ui.button("New empty workspace").clicked() {
+                    new_workspace = true;
+                }
+            });
             if let Some(status) = &editor_state.status {
                 ui.colored_label(egui::Color32::from_rgb(255, 200, 90), status);
             }
@@ -253,11 +277,15 @@ pub fn editor_ui_system(
 
             ui.separator();
             ui.heading("Subcircuits");
-            ui.label("Place as cell:");
-            for (i, (name, _)) in editor_state.workspace_catalog.iter().enumerate() {
-                if ui.button(format!("Place: {name}")).clicked() {
-                    place_catalog = Some(i);
-                }
+            ui.label("Place a demo as a cell:");
+            if let Ok(catalog) = catalog {
+                ui.horizontal_wrapped(|ui| {
+                    for (i, demo) in catalog.demos.iter().enumerate() {
+                        if ui.small_button(&demo.title).on_hover_text(&demo.description).clicked() {
+                            place_catalog = Some(i);
+                        }
+                    }
+                });
             }
 
             ui.separator();
@@ -277,10 +305,25 @@ pub fn editor_ui_system(
             }
 
             ui.separator();
-            ui.heading("Open Workspace");
-            for (i, (name, _)) in editor_state.workspace_catalog.iter().enumerate() {
-                if ui.button(format!("Open {name}")).clicked() {
-                    open_catalog = Some(i);
+            ui.heading("Demos");
+            match catalog {
+                Ok(catalog) => {
+                    ui.label("From gates to a CPU: each level is built from the ones before it. Demos open read-only.");
+                    let mut level = None;
+                    for (i, demo) in catalog.demos.iter().enumerate() {
+                        if level != Some(demo.level) {
+                            level = Some(demo.level);
+                            ui.strong(format!("Level {}: {}", demo.level, catalog.level_title(demo.level)));
+                        }
+                        let open = open_demo.is_some_and(|d| d.id == demo.id);
+                        if ui.selectable_label(open, &demo.title).on_hover_text(&demo.description).clicked() {
+                            open_catalog = Some(i);
+                        }
+                        ui.small(&demo.description);
+                    }
+                }
+                Err(e) => {
+                    ui.colored_label(egui::Color32::from_rgb(255, 120, 90), format!("Cannot load the demos: {e}"));
                 }
             }
 
@@ -371,9 +414,9 @@ pub fn editor_ui_system(
         editor_state.connection_mode = false;
         editor_state.clear_connection();
     };
-    if let Some(i) = place_catalog {
-        let (name, ws) = editor_state.workspace_catalog[i].clone();
-        place(&mut editor_state, name, &ws);
+    if let (Some(i), Ok(catalog)) = (place_catalog, catalog) {
+        let demo = &catalog.demos[i];
+        place(&mut editor_state, demo.title.clone(), &demo.workspace);
     }
     if let Some(name) = place_saved {
         match read_workspace(&name) {
@@ -388,7 +431,10 @@ pub fn editor_ui_system(
         }
     }
 
-    let mut open = |editor_state: &mut EditorState, name: String, ws: Arc<WorkspaceDocument>| {
+    let mut open = |editor_state: &mut EditorState,
+                    name: String,
+                    ws: Arc<WorkspaceDocument>,
+                    read_only: bool| {
         editor_state.current_workspace = Some(name.clone());
         editor_state.workspace_file_name = name.clone();
         editor_state.selected_gate_type = None;
@@ -396,13 +442,43 @@ pub fn editor_ui_system(
         load_workspace_events.write(LoadWorkspaceEvent {
             name,
             workspace: ws,
+            read_only,
         });
     };
 
-    if let Some(i) = open_catalog {
-        let (name, ws) = editor_state.workspace_catalog[i].clone();
+    if let (Some(i), Ok(catalog)) = (open_catalog, catalog) {
+        let demo = &catalog.demos[i];
         editor_state.status = None;
-        open(&mut editor_state, name, ws);
+        open(
+            &mut editor_state,
+            demo.title.clone(),
+            Arc::clone(&demo.workspace),
+            true,
+        );
+    }
+
+    if new_workspace {
+        editor_state.status = None;
+        let root = crate::sim::CircuitDocument::new("workspace");
+        open(
+            &mut editor_state,
+            "workspace".into(),
+            Arc::new(WorkspaceDocument::new(root)),
+            false,
+        );
+    }
+
+    // An editable copy under fresh ids, saved right away so it is listed
+    // with the saved workspaces.
+    if copy_demo && let Some(demo) = open_demo {
+        let name = format!("{} (copy)", demo.title);
+        let copy = demos::editable_copy(&demo.workspace, &name);
+        editor_state.status = Some(match save_workspace(&name, &copy) {
+            Ok(()) => format!("Copied \"{}\" to your workspace \"{name}\".", demo.title),
+            Err(err) => format!("Copied \"{}\" (not saved to disk: {err}).", demo.title),
+        });
+        editor_state.saved_workspaces = None;
+        open(&mut editor_state, name, Arc::new(copy), false);
     }
 
     if let Some(name) = load_saved {
@@ -410,7 +486,7 @@ pub fn editor_ui_system(
         match read_workspace(&name) {
             Ok(ws) => {
                 editor_state.status = None;
-                open(&mut editor_state, name, Arc::new(ws));
+                open(&mut editor_state, name, Arc::new(ws), false);
             }
             Err(err) => {
                 warn!("Cannot load workspace {name}: {err}");

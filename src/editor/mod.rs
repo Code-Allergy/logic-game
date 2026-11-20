@@ -3,7 +3,7 @@
 //! Split into small modules:
 //! - `ui`: UI layout and workspace/sub-circuit selection logic.
 //! - `systems`: wire-building selection.
-//! - `workspace`: catalog initialization and on-disk workspace helpers.
+//! - `workspace`: on-disk workspace helpers.
 //!
 //! The editor never mutates the circuit directly: it sends the authoring
 //! messages of [`crate::sim::authoring`].
@@ -13,17 +13,14 @@ mod ui;
 
 pub mod workspace;
 
-use std::sync::Arc;
-
 use bevy::prelude::*;
 use bevy_egui::EguiPrimaryContextPass;
 
-use crate::sim::{GateKind, WorkspaceDocument};
+use crate::sim::GateKind;
 
 pub use crate::sim::{CloseView, LoadWorkspaceEvent, OpenInstanceView, SaveWorkspaceEvent};
 pub use systems::handle_connection_creation;
 pub use ui::editor_ui_system;
-pub use workspace::catalog_init_system;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Editor resource
@@ -39,7 +36,6 @@ pub struct EditorState {
     pub connection_mode: bool,
     pub current_workspace: Option<String>,
     pub workspace_file_name: String,
-    pub workspace_catalog: Vec<(String, Arc<WorkspaceDocument>)>,
     /// Saved workspace names, read from disk once and refreshed after a save
     /// or on request (never per frame).
     pub saved_workspaces: Option<Vec<String>>,
@@ -65,7 +61,6 @@ impl Default for EditorState {
             connection_mode: false,
             current_workspace: None,
             workspace_file_name: "workspace".to_string(),
-            workspace_catalog: Vec::new(),
             saved_workspaces: None,
             status: None,
             connection_source: None,
@@ -95,11 +90,7 @@ impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>().add_systems(
             EguiPrimaryContextPass,
-            (
-                catalog_init_system,
-                editor_ui_system,
-                handle_connection_creation,
-            ),
+            (editor_ui_system, handle_connection_creation),
         );
     }
 }

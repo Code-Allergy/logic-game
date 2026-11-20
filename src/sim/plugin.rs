@@ -34,7 +34,7 @@ use crate::sim::{
     visuals::SimulationVisualsPlugin,
 };
 
-use super::fixtures;
+use super::demos;
 use super::spatial_grid::SpatialGrid;
 
 /// Everything: runtime plus view, entering `state` loads the default example.
@@ -209,7 +209,11 @@ impl Plugin for SimulationViewPlugin {
     }
 }
 
-/// Load the default example the first time the simulation state is entered.
+/// Demo opened the first time the simulation state is entered.
+pub const DEFAULT_DEMO: &str = "counter";
+
+/// Open the default demo (read-only) the first time the simulation state is
+/// entered.
 fn load_default_circuit_system(
     mut loaded: Local<bool>,
     gates: Query<(), With<GateIdentity>>,
@@ -219,11 +223,18 @@ fn load_default_circuit_system(
         return;
     }
     *loaded = true;
-    let workspace = fixtures::build_64bit_counter_subcircuits();
-    load.write(LoadWorkspaceEvent {
-        name: workspace.root.name.clone(),
-        workspace: Arc::new(workspace),
-    });
+    match demos::catalog() {
+        Ok(catalog) => {
+            if let Some(demo) = catalog.get(DEFAULT_DEMO) {
+                load.write(LoadWorkspaceEvent {
+                    name: demo.title.clone(),
+                    workspace: Arc::clone(&demo.workspace),
+                    read_only: true,
+                });
+            }
+        }
+        Err(e) => error!("Cannot load the built-in demos: {e}"),
+    }
 }
 
 fn resume_bridge_system(mut bridge: ResMut<SimBridge>) {

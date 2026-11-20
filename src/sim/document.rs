@@ -199,7 +199,7 @@ impl WorkspaceDocument {
         id
     }
 
-    /// Register every definition of `other` (used to nest fixtures).
+    /// Register every definition of `other`.
     pub fn absorb(&mut self, other: &WorkspaceDocument) {
         for (id, def) in &other.definitions {
             self.definitions.insert(*id, Arc::clone(def));

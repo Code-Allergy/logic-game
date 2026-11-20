@@ -188,15 +188,16 @@ fn assert_idle_does_no_work(app: &mut App, what: &str) {
 #[test]
 fn paused_idle_circuit_does_no_per_entity_work() {
     let mut app = visual_app();
-    load(&mut app, fixtures::build_64bit_counter_subcircuits());
+    load(&mut app, demo("counter"));
     assert!(
         !app.world().resource::<SimBridge>().is_running(),
         "the bridge starts paused"
     );
+    set_input(&mut app, "Enable", 1);
     run(&mut app, 12);
-    assert!(display_value(&mut app) > 0, "the counter ran");
+    assert!(value_at(&mut app, "Count") > 0, "the counter ran");
     // The visuals exist, so the idle check below is meaningful.
-    let display = gate_of_kind(&mut app, |k| matches!(k, GateKind::Display { .. }));
+    let display = gate(&mut app, "Count");
     assert_ne!(text_of_display(&mut app, display).1, "");
     assert!(
         wires(&mut app)
@@ -220,7 +221,7 @@ fn paused_idle_circuit_does_no_per_entity_work() {
 fn paused_idle_instance_view_and_threaded_engine_do_no_per_entity_work() {
     for runtime in [SimRuntime::Threadless, SimRuntime::Threaded] {
         let mut app = visual_app_with(runtime);
-        load(&mut app, fixtures::build_8bit_counter_subcircuit());
+        load(&mut app, demo("counter"));
         app.world_mut()
             .resource_mut::<SimBridge>()
             .wait_until_current(Duration::from_secs(5));

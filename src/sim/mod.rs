@@ -5,7 +5,7 @@
 //! - [`kind`] – [`GateKind`], the single editor node-kind enum.
 //! - [`authoring`] – ECS authoring components (the source of truth) and the
 //!   commands that edit them.
-//! - [`document`] – portable circuit documents (examples, save format,
+//! - [`document`] – portable circuit documents (demos, save format,
 //!   subcircuit definitions) and the [`CircuitLibrary`].
 //! - [`source`] – save format version 6, the hand-editable authoring form
 //!   (names, arrays, bus wiring), and its expansion into documents.
@@ -28,7 +28,6 @@ pub mod authoring;
 pub mod bridge;
 pub mod demos;
 pub mod document;
-pub mod fixtures;
 pub mod kind;
 pub mod source;
 pub mod spatial_grid;

@@ -6,7 +6,8 @@ demand. (This replaces the earlier `GameCircuit` snapshot and `SimCache`
 model; see `docs/sim-v2-design.md` sections 10 and 13.)
 
 ```text
-workspace file / built-in example (CircuitDocument + definitions)
+workspace file / built-in demo (CircuitDocument + definitions;
+                                 demos and version 6 files expanded first)
     -> LoadWorkspaceEvent: spawn ECS authoring entities (authoritative)
     -> sync_design_system: edit SimBridge's persistent logi_sim Design
     -> v2 engine: compile revision, swap program, carry state
@@ -49,6 +50,13 @@ messages handled in `Update` (`src/sim/authoring.rs`, `src/sim/view.rs`):
 `RegisterDefinitions`, `GateLabelChanged`, `DisplayConfigChanged`,
 `GateMoved`, `EntityLayerChanged`, `LoadWorkspaceEvent`,
 `SaveWorkspaceEvent`.
+
+`LoadWorkspaceEvent::read_only` opens a built-in demo read-only
+(`ActiveCircuit::read_only`): the handlers refuse every edit (create,
+delete, kind, label, move, layer) and saves with `READ_ONLY_MESSAGE` in
+`AuthoringFeedback`, while inputs, display settings and instance views
+keep working. The editor's "Copy to my workspace" loads an editable copy
+with fresh definition ids (`sim::demos::editable_copy`).
 
 ## Bridge
 
