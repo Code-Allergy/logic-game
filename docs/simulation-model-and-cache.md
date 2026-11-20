@@ -26,6 +26,7 @@ workspace file / built-in example (CircuitDocument + definitions)
 | `DisplayConfig` | Radix / leading zeroes of a `Display`. |
 | `GateValues` | Simulated pin values (one word per pin), from probes. |
 | `GateProbes` | Probe indices feeding `GateValues`. |
+| `LoopHighlight` | On a combinational loop of the last failed compile (visual only). |
 
 ## Wire entities
 
@@ -89,7 +90,24 @@ that would contain itself is refused with a message in
 
 The open view decides the probes: at the root, one probe per output net
 of every root gate; in a subcircuit view, one per output net of the
-definition at the instance path. Each frame `project_probes_system`
-reads the latest probe frame and writes `GateValues` and
-`WireState::value` where they changed. Visual systems read
-only those components.
+definition at the instance path. When a new probe frame arrives
+(new tick, revision or probe layout), `project_probes_system` writes
+`GateValues` and `WireState::value` where they changed; otherwise it does
+nothing.
+
+## Visuals
+
+`SimulationVisualsPlugin` (`src/sim/visuals.rs`) draws gates and wires
+from those components, driven by change detection, so an idle circuit
+costs no per-entity work:
+
+- gate colours follow `GateValues`/`GateType` changes; display text is
+  re-formatted only when its value, width or format changes;
+- wire geometry is recomputed only for wires whose endpoints changed or
+  whose endpoint gate moved; dragging a gate touches only its wires and
+  never the `Design`;
+- multi-bit wires are thicker and blue, with a hex value label;
+- a combinational-loop compile error (`SimDiagnostics::compile_error`,
+  with `loops` as gate ids and instance paths) marks the gates and wires
+  on the loop in the open view with `LoopHighlight` (red), until a later
+  revision compiles. The previous program keeps running meanwhile.
