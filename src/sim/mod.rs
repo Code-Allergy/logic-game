@@ -9,6 +9,7 @@
 //!   subcircuit definitions) and the [`CircuitLibrary`].
 //! - [`source`] – save format version 6, the hand-editable authoring form
 //!   (names, arrays, bus wiring), and its expansion into documents.
+//! - [`demos`] – the built-in demos, loaded from `assets/demos/`.
 //! - [`bridge`] – `SimBridge`: maps the ECS onto a `logi_sim` v2 `Design`,
 //!   sends revisions to the engine and reads probes back.
 //! - [`view`] – instance views: opening a subcircuit shows its definition
@@ -25,6 +26,7 @@ mod tests;
 
 pub mod authoring;
 pub mod bridge;
+pub mod demos;
 pub mod document;
 pub mod fixtures;
 pub mod kind;
@@ -36,6 +38,7 @@ pub mod visuals;
 
 pub use authoring::*;
 pub use bridge::{CompileFailure, LoopNode, SimBridge, SimDiagnostics, SimRuntime};
+pub use demos::{Demo, DemoCatalog};
 pub use document::{
     CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, PinAddr,
     WorkspaceDocument,
