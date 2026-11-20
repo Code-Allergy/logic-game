@@ -167,6 +167,34 @@
       "title": "Stopwatch",
       "description": "Three digit counters in a chain count tenths, seconds and tens of seconds (up to 59.9); a digit's carry steps the next one. Run starts and stops counting, Reset clears the time. One clock period is a tenth.",
       "uses": ["bcd_counter/mod_counter", "edge_detector/rising"]
+    },
+    {
+      "id": "stack",
+      "category": "systems",
+      "title": "Stack",
+      "description": "A last-in, first-out store of up to eight bytes in a RAM. Push writes Data at the current depth and adds one; Pop takes one off, so Top shows the byte pushed most recently. Pushing when Full and popping when Empty are ignored.",
+      "uses": ["edge_detector/rising"]
+    },
+    {
+      "id": "uart_tx",
+      "category": "systems",
+      "title": "UART transmitter",
+      "description": "Sends a byte one bit at a time, the way a serial port does: the line idles at 1, then a 0 start bit, the eight data bits from bit 0 up, and a 1 stop bit, one bit per clock period. A 10-bit shift register holds the frame and a counter counts the bits still to send.",
+      "uses": ["edge_detector/rising"]
+    },
+    {
+      "id": "reaction_timer",
+      "category": "systems",
+      "title": "Reaction timer",
+      "description": "A small game. Press Start: after a random wait of 8 to 15 clock periods (from the LFSR), GO! lights and the time starts counting. Press Stop as fast as you can; the display shows how many periods you took. Pressing Stop before GO! lights Too soon!",
+      "uses": ["bcd_counter/mod_counter", "edge_detector/rising", "lfsr/lfsr8"]
+    },
+    {
+      "id": "cpu_fibonacci",
+      "category": "systems",
+      "title": "CPU: Fibonacci",
+      "description": "The curriculum's CPU with three more instructions, ADDI, SUBI and ANDI (ops 12 to 14: rd = rs op imm, the ALU's B input switched to the immediate). Its program prints the Fibonacci numbers 0, 1, 1, 2, 3, 5, ... 144 on Out, using OR r, r as a move and SUBI to count the loop down, then halts.",
+      "uses": ["alu/alu8", "mux/mux2x8", "register/register8", "register_file/regfile4x8", "ripple_adder/adder8"]
     }
   ]
 }
