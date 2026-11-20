@@ -306,3 +306,46 @@ Considered and deliberately left out of v2; each is additive later.
 - Partitioned multithreading.
 - Native JIT (not available on wasm).
 - Multi-driver buses with conflict detection; X/Z values.
+
+## 13. Deviations
+
+Choices made while implementing M1 where this document was silent or
+ambiguous. Each is small and can be revisited.
+
+1. **Clock timing.** Section 3.2 lists `tick_count += 1` after the settle, but
+   `Clock` is a function of `tick_count`. The implementation fixes it as: the
+   settle of a tick sees the *new* count, so whenever `tick_count() == t` the
+   clock reads `((t + phase) % period) < duty`. The tick-0 settle uses `t = 0`.
+2. **`Not` has one input** (`a → y`). The table groups it with the 2-input gates.
+3. **Memory contents live in the node kind.** `Rom { addr_bits, w, contents }`
+   and `Ram { addr_bits, w, init }` hold an `Arc<[u64]>`. Missing words are 0,
+   stored words are masked to `w`, and `addr_bits` is limited to 1..=20.
+   Address pins must be exactly `addr_bits` wide.
+4. **`SrLatch` with both inputs high resets** (`r ? 0 : s ? 1 : state`, as in
+   the table). Reset values of all state elements are 0, or `init` for RAM.
+5. **The mutation API is on `Design`, not `Definition`.** Adding or removing a
+   port node has to update every instance of that definition, and those
+   instances live in other definitions. Removing a port drops that pin from
+   every instance. The other pins keep their connections, so they stay on the
+   same ports, and later pins shift down by one. Adding a port appends an
+   unconnected pin. The struct fields stay `pub` for reading. Code that writes
+   them directly should call `Design::validate`.
+6. **Names.** Each definition has a `names: SecondaryMap<NodeId, String>` side
+   table. Port names are the names of the port nodes.
+7. **The reference interpreter also checks loops structurally.** Settling by
+   value cannot see every combinational loop. For example, cross-coupled NORs
+   reach a fixed point under in-order evaluation. So `Reference::new` runs a
+   per-definition cycle check over the combinational edges in 3.3. Each
+   instance contributes its definition's input→output paths. A cycle is
+   `CombinationalLoop { def, nodes }`, naming the nodes on the cycle in the
+   definition where it closes. A full `NodePath` is left to the M2 compiler.
+   The bounded settle is kept and reports `DidNotSettle`, which the structural
+   check should make unreachable.
+8. **Reference net reads take `(instance path, NetId)`.** `NetId`s are
+   per-definition slotmap keys, so the caller must pass a `NetId` that
+   belongs to the definition at that path. A key from another definition can
+   resolve to an unrelated net.
+9. **Test support lives in `logi_sim::testkit`** (`rng`, `random`, `fixtures`).
+   It is a public module so that M3 benchmarks can use it. The legacy gate-loop
+   latch fixtures are `LoopFixture`s that record the nodes expected on the
+   loop.
