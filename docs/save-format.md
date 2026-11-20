@@ -334,6 +334,14 @@ files).
   and cross-file references become definitions stored in the file.
   Nothing is lost semantically; the compact spelling is.
 
+### Imported netlists
+
+`cargo run --example rtl_import` and the editor's **Import RTL…** turn a
+Yosys JSON netlist into a version 6 file (positions from the auto-layout,
+only whole-pin wires: slices, constants and concatenations are explicit
+`Split`, `Const` and `Merge` nodes) and its version 5 expansion. See
+`docs/rtl-import.md`.
+
 ---
 
 ## Demos
