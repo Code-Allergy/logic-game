@@ -35,6 +35,7 @@ fn fixtures_match_the_reference() {
         ripple_adder(8),
         adder(64),
         ripple_adder(64),
+        nested_adder16(),
         mux_tree(3, 8),
         mux_tree_bitblasted(3, 8),
         counter(8),
@@ -64,6 +65,99 @@ fn cpu_halts_with_the_expected_result() {
     }
     assert_eq!(s.get("acc"), fixtures::MULTIPLY_RESULT);
     assert_eq!(s.tick_count(), ticks);
+}
+
+/// Port of the legacy per-runner truth tables (`primitive_gates.rs`,
+/// `runner/{gates,complex}.rs`): every 1-bit primitive and the builder's
+/// demux, exhaustively, on the compiled `Sim` rather than the reference.
+#[test]
+fn primitive_truth_tables_on_the_compiled_sim() {
+    type Table = (NodeKind, fn(&[u64]) -> u64);
+    let tables: [Table; 9] = [
+        (NodeKind::Not { w: 1 }, |x| x[0] ^ 1),
+        (NodeKind::And { w: 1 }, |x| x[0] & x[1]),
+        (NodeKind::Or { w: 1 }, |x| x[0] | x[1]),
+        (NodeKind::Xor { w: 1 }, |x| x[0] ^ x[1]),
+        (NodeKind::Nand { w: 1 }, |x| (x[0] & x[1]) ^ 1),
+        (NodeKind::Nor { w: 1 }, |x| (x[0] | x[1]) ^ 1),
+        (NodeKind::Xnor { w: 1 }, |x| (x[0] ^ x[1]) ^ 1),
+        // sel, a, b: `sel ? b : a`.
+        (
+            NodeKind::Mux { w: 1 },
+            |x| if x[0] == 1 { x[2] } else { x[1] },
+        ),
+        // en, d: the legacy tri-state buffer, with 0 for "Z".
+        (NodeKind::Switch { w: 1 }, |x| x[0] & x[1]),
+    ];
+    for opts in [Options::default(), Options::unoptimized()] {
+        for (kind, f) in &tables {
+            let mut d = Design::new("top");
+            let r = d.root;
+            let mut b = d.builder(r);
+            let n = kind.pins().unwrap().0.len();
+            let ins: Vec<_> = (0..n).map(|i| Some(b.input(format!("i{i}"), 1))).collect();
+            let id = b.node(kind.clone(), &ins);
+            let y = b.out(id, 0);
+            b.output("y", y);
+            let mut s = Sim::new(Arc::new(compile(&d, &opts).unwrap()));
+            for row in 0..1u64 << n {
+                let x: Vec<u64> = (0..n).map(|i| row >> (n - 1 - i) & 1).collect();
+                for (i, &v) in x.iter().enumerate() {
+                    s.set_input(i, v);
+                }
+                s.tick();
+                assert_eq!(s.output(0), f(&x), "{kind:?} {x:?}");
+            }
+        }
+
+        // Demux: output `i` is `d` when `sel == i`, else 0.
+        for sel_bits in [1u8, 2] {
+            let mut d = Design::new("top");
+            let r = d.root;
+            let mut b = d.builder(r);
+            let sel = b.input("sel", sel_bits);
+            let x = b.input("d", 1);
+            let outs = b.demux(sel, x);
+            for (i, &o) in outs.iter().enumerate() {
+                b.output(format!("y{i}"), o);
+            }
+            let mut s = Sim::new(Arc::new(compile(&d, &opts).unwrap()));
+            for sel in 0..1u64 << sel_bits {
+                for v in 0..2 {
+                    s.set("sel", sel);
+                    s.set("d", v);
+                    s.tick();
+                    for i in 0..1u64 << sel_bits {
+                        let want = if i == sel { v } else { 0 };
+                        assert_eq!(s.get(&format!("y{i}")), want, "sel {sel} d {v} y{i}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Port of the legacy `test_recursive_16bit_adder_all_runners` and the
+/// compiler's dead-code test: four levels of instances flatten into one
+/// program that adds, and the simplify passes remove the floating gates
+/// inside every half adder.
+#[test]
+fn nested_adder_flattens_and_drops_dead_gates() {
+    let d = fixtures::nested_adder16();
+    let mut s = sim_of(&d);
+    for (a, b, c) in [(1, 1, 0), (0xFFFF, 1, 0), (0xBEEF, 0x1111, 1)] {
+        s.set("a", a);
+        s.set("b", b);
+        s.set("cin", c);
+        s.tick();
+        let t = a + b + c;
+        assert_eq!((s.get("sum"), s.get("cout")), (t & 0xFFFF, t >> 16));
+    }
+    // 16 full adders, each two half adders.
+    let dead = 16 * 2 * 2 * fixtures::NESTED_ADDER_DEAD_PAIRS;
+    let opt = compile(&d, &Options::default()).unwrap().instrs.len();
+    let raw = compile(&d, &Options::unoptimized()).unwrap().instrs.len();
+    assert!(raw >= opt + dead, "unoptimized {raw}, optimized {opt}");
 }
 
 // ── Basic API ────────────────────────────────────────────────────────────

@@ -1,8 +1,7 @@
-//! Benchmark report and acceptance gates for simulation v2 (design doc
-//! section 9; issue #25). Run with:
+//! Benchmark report for the simulator (design doc section 9). Run with:
 //!
 //! ```text
-//! cargo run -p logi-sim --release --bin sim_v2_report [-- --quick]
+//! cargo run -p logi-sim --release --bin sim_report [-- --quick]
 //! ```
 //!
 //! Every throughput case changes the root inputs every tick (the cost of
@@ -20,12 +19,10 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use logi_sim::circuit::BitPackedCircuit;
 use logi_sim::compile::{Options, PackMode, Program, SlotOrder, compile};
 use logi_sim::netlist::{Design, mask};
-use logi_sim::prelude::{Runner, SimdRunner};
 use logi_sim::sim::{Sim, SimOptions};
-use logi_sim::testkit::{GenConfig, bitblast::bitblast, fixtures, generate, legacy::to_legacy};
+use logi_sim::testkit::{GenConfig, bitblast::bitblast, fixtures, generate};
 
 struct XorShift(u64);
 impl XorShift {
@@ -55,8 +52,7 @@ fn measure(budget: Duration, mut step: impl FnMut(u64)) -> f64 {
 }
 
 /// Throughput cases compile with the simplify passes off, so every
-/// instruction counted is work done and the legacy baseline runs identical
-/// logic; the memory layout passes (slot order, packing) are at their
+/// instruction counted is work done; the memory layout passes (slot order, packing) are at their
 /// defaults. The simplify section reports what the passes remove.
 fn bench_options() -> Options {
     Options {
@@ -125,7 +121,6 @@ fn main() {
         .skip_while(|a| a != "--runs")
         .nth(1)
         .map_or(if quick { 3 } else { 5 }, |n| n.parse().expect("--runs N"));
-    let mut gate_ratio = None;
     let mut gate_compile = None;
 
     perf_steps(quick, runs, budget);
@@ -142,31 +137,16 @@ fn main() {
         );
     }
 
-    println!("\n== 1-bit gate DAGs: Sim vs legacy SIMD runner (same logic) ==");
+    println!("\n== 1-bit gate DAGs, inputs change every tick ==");
     for &n in sizes {
         let d = generate(&GenConfig::gates(2, n, 1)).design;
         let (p, _) = compile_timed(&d);
-        let sim_t = time_sim(&p, budget);
-        row(&format!("sim gates1 {n}"), p.work(), "gate", sim_t);
-
-        let legacy = to_legacy(&d);
-        let mut simd = SimdRunner::new(BitPackedCircuit::compile(&legacy.circuit));
-        let mut rng = XorShift(0x1234_5678_9ABC_DEF1);
-        let simd_t = measure(budget, |k| {
-            for _ in 0..k {
-                for &node in &legacy.inputs {
-                    simd.set_input(node, 0, rng.next() & 1 == 1);
-                }
-                simd.tick();
-            }
-            black_box(simd.output(legacy.outputs[0], 0));
-        });
-        row(&format!("legacy SIMD gates1 {n}"), p.work(), "gate", simd_t);
-        let ratio = simd_t / sim_t;
-        println!("{:<34} {ratio:.2}x", "  speedup");
-        if n == 1_000_000 {
-            gate_ratio = Some(ratio);
-        }
+        row(
+            &format!("sim gates1 {n}"),
+            p.work(),
+            "gate",
+            time_sim(&p, budget),
+        );
     }
 
     println!("\n== CPU fixture (looping program), word-level vs bit-blasted ==");
@@ -307,14 +287,9 @@ fn main() {
         }
     }
 
+    // Gate 2 (3x the legacy SIMD runner) was last measured before the legacy
+    // runners were deleted; see logi-sim/ARCHITECTURE.md, "Benchmarks".
     println!("\n== Gates (section 9) ==");
-    match gate_ratio {
-        Some(r) => println!(
-            "1M gate DAG throughput >= 3x legacy SIMD: {r:.2}x  {}",
-            if r >= 3.0 { "PASS" } else { "FAIL" }
-        ),
-        None => println!("1M gate DAG throughput: skipped (--quick)"),
-    }
     match gate_compile {
         Some(s) => println!(
             "compile 1M nodes < 2 s: {s:.2} s  {}",

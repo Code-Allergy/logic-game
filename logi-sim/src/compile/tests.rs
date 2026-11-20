@@ -737,6 +737,51 @@ fn cse_merges_identical_and_commuted_instructions() {
     differential(&d, 1, 20);
 }
 
+/// Port of the legacy `common_cells_are_merged_without_losing_wire_observability`
+/// and `common_cell_pass_recurses_into_subcircuits`: CSE merges commuted
+/// instructions inside an instance and across two instances, and every
+/// merged net stays readable at its own instance path.
+#[test]
+fn cse_inside_and_across_instances_keeps_merged_nets_readable() {
+    let mut d = Design::new("top");
+    let c = d.add_definition("c");
+    let mut b = Builder::new(&mut d, c);
+    let x = b.input("x", 8);
+    let y = b.input("y", 8);
+    let p = b.and(x, y);
+    let q = b.and(y, x);
+    b.output("p", p);
+    b.output("q", q);
+    let r = d.root;
+    let mut b = d.builder(r);
+    let rx = b.input("x", 8);
+    let ry = b.input("y", 8);
+    let o1 = b.instance(c, &[Some(rx), Some(ry)]);
+    let o2 = b.instance(c, &[Some(ry), Some(rx)]);
+    for (i, &o) in o1.iter().chain(&o2).enumerate() {
+        b.output(format!("o{i}"), o);
+    }
+    let i1 = d.root_def().nets[o1[0]].driver.0;
+    let i2 = d.root_def().nets[o2[0]].driver.0;
+    assert_eq!(count(&d, &Options::unoptimized()), 4);
+    assert_eq!(
+        count(&d, &Options::default()),
+        1,
+        "four ands merge into one"
+    );
+    differential(&d, 2, 20);
+
+    let mut s = sim(compile_ok(&d));
+    s.set("x", 0b1100_1010);
+    s.set("y", 0b1010_0110);
+    s.tick();
+    for inst in [i1, i2] {
+        for net in [p, q] {
+            assert_eq!(s.read_net(&[inst], net), Some(0b1000_0010));
+        }
+    }
+}
+
 #[test]
 fn dce_keeps_outputs_state_and_probes() {
     let mut d = Design::new("top");

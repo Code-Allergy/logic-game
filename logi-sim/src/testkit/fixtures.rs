@@ -1,4 +1,4 @@
-//! Hand-built v2 fixtures, ported from the legacy `crate::fixtures` and
+//! Hand-built v2 fixtures, ported from the deleted legacy fixtures and
 //! extended. Word-level fixtures come with bit-blasted variants (same
 //! function and port names, built from 1-bit gates) for benchmarks and
 //! cross-checks. Ports are named; use `Reference::set`/`get`.
@@ -57,6 +57,85 @@ pub fn ripple_adder(w: u8) -> Design {
         let o = b.instance(fa, &[Some(ab[i]), Some(bb[i]), Some(carry)]);
         sums.push(o[0]);
         carry = o[1];
+    }
+    let sum = b.bus_collect(&sums);
+    b.output("sum", sum);
+    b.output("cout", carry);
+    d
+}
+
+/// Number of floating `And -> Or` pairs in each half adder of
+/// [`nested_adder16`].
+pub const NESTED_ADDER_DEAD_PAIRS: usize = 10;
+
+/// 16-bit adder in four levels of shared definitions, ported from the legacy
+/// `recursive_16bit_adder`: a half adder (XOR/AND, plus
+/// [`NESTED_ADDER_DEAD_PAIRS`] floating gate pairs that nothing reads), a
+/// full adder from two half adders and an OR, a 4-bit adder from four full
+/// adders, and a root of four 4-bit adders. Same ports as [`adder`]`(16)`.
+pub fn nested_adder16() -> Design {
+    let mut d = Design::new("nested_adder16");
+
+    let ha = d.add_definition("half_adder");
+    let mut b = Builder::new(&mut d, ha);
+    let a = b.input("a", 1);
+    let x = b.input("b", 1);
+    let sum = b.xor(a, x);
+    let carry = b.and(a, x);
+    b.output("sum", sum);
+    b.output("carry", carry);
+    for _ in 0..NESTED_ADDER_DEAD_PAIRS {
+        let g = b.node(NodeKind::And { w: 1 }, &[None, None]);
+        let y = b.out(g, 0);
+        b.node(NodeKind::Or { w: 1 }, &[Some(y), None]);
+    }
+
+    let fa = d.add_definition("full_adder");
+    let mut b = Builder::new(&mut d, fa);
+    let a = b.input("a", 1);
+    let x = b.input("b", 1);
+    let cin = b.input("cin", 1);
+    let h1 = b.instance(ha, &[Some(a), Some(x)]);
+    let h2 = b.instance(ha, &[Some(h1[0]), Some(cin)]);
+    let cout = b.or(h1[1], h2[1]);
+    b.output("sum", h2[0]);
+    b.output("cout", cout);
+
+    let add4 = d.add_definition("adder4");
+    let mut b = Builder::new(&mut d, add4);
+    let a: Vec<NetId> = (0..4).map(|i| b.input(format!("a{i}"), 1)).collect();
+    let x: Vec<NetId> = (0..4).map(|i| b.input(format!("b{i}"), 1)).collect();
+    let mut carry = b.input("cin", 1);
+    let mut sums = Vec::with_capacity(4);
+    for i in 0..4 {
+        let o = b.instance(fa, &[Some(a[i]), Some(x[i]), Some(carry)]);
+        sums.push(o[0]);
+        carry = o[1];
+    }
+    for (i, &s) in sums.iter().enumerate() {
+        b.output(format!("s{i}"), s);
+    }
+    b.output("cout", carry);
+
+    let r = d.root;
+    let mut b = d.builder(r);
+    let a = b.input("a", 16);
+    let x = b.input("b", 16);
+    let mut carry = b.input("cin", 1);
+    let ab = b.bus_expand(a);
+    let bb = b.bus_expand(x);
+    let mut sums = Vec::with_capacity(16);
+    for block in 0..4 {
+        let lane = block * 4..block * 4 + 4;
+        let ins: Vec<Option<NetId>> = ab[lane.clone()]
+            .iter()
+            .chain(&bb[lane])
+            .map(|&n| Some(n))
+            .chain([Some(carry)])
+            .collect();
+        let o = b.instance(add4, &ins);
+        sums.extend_from_slice(&o[..4]);
+        carry = o[4];
     }
     let sum = b.bus_collect(&sums);
     b.output("sum", sum);

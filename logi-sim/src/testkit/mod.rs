@@ -4,7 +4,6 @@
 pub mod bitblast;
 pub mod diff;
 pub mod fixtures;
-pub mod legacy;
 pub mod random;
 pub mod rng;
 

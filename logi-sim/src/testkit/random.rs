@@ -50,8 +50,8 @@ pub enum OpMix {
     /// Every combinational primitive.
     #[default]
     All,
-    /// Only the 2-input bitwise gates and `Not` (the legacy gate set, for
-    /// baselines against the legacy runners when `max_width` is 1).
+    /// Only the 2-input bitwise gates and `Not` (the gate set of the deleted
+    /// legacy runners, which benchmark gate 2 was measured on).
     Gates,
 }
 
@@ -97,8 +97,8 @@ impl GenConfig {
     }
 
     /// A flat, combinational, gates-only DAG (`Not` and 2-input bitwise
-    /// gates) of exactly `nodes` gates at width `w`. With `w == 1` it maps
-    /// one-to-one onto the legacy circuit model.
+    /// gates) of exactly `nodes` gates at width `w`. With `w == 1` it is the
+    /// classic gate-level circuit.
     pub fn gates(seed: u64, nodes: usize, w: u8) -> Self {
         Self {
             ops: OpMix::Gates,
