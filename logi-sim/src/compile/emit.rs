@@ -8,19 +8,21 @@ use slotmap::SecondaryMap;
 
 use super::elaborate::Elab;
 use super::program::*;
+use super::simplify::simplify;
+use super::Options;
 use crate::netlist::{NetId, NodeKind, mask};
 
 const UNASSIGNED: u32 = u32::MAX;
 
-struct Emitter {
-    widths: Vec<u8>,
-    ops: Vec<Op>,
-    instrs: Vec<Instr>,
-    imms: Vec<u64>,
-    consts: Vec<(u32, u64)>,
-    commits: Vec<Commit>,
-    mems: Vec<MemDesc>,
-    state_keys: Vec<StateKey>,
+pub(super) struct Emitter {
+    pub widths: Vec<u8>,
+    pub ops: Vec<Op>,
+    pub instrs: Vec<Instr>,
+    pub imms: Vec<u64>,
+    pub consts: Vec<(u32, u64)>,
+    pub commits: Vec<Commit>,
+    pub mems: Vec<MemDesc>,
+    pub state_keys: Vec<StateKey>,
 }
 
 impl Emitter {
@@ -42,7 +44,7 @@ impl Emitter {
     }
 }
 
-pub(super) fn emit(mut e: Elab<'_>) -> Program {
+pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
     let design = e.design;
     let n = e.n_nets as usize;
 
@@ -144,6 +146,17 @@ pub(super) fn emit(mut e: Elab<'_>) -> Program {
             let key = |loc, width| StateKey { path: NodePath { instances: e.path(inst), node: id }, loc, width };
             lower(&mut em, &node.kind, &i, &o, key);
         }
+    }
+
+    // ── Simplify ───────────────────────────────────────────────────────────
+    if opts.const_fold || opts.alias || opts.cse || (opts.dce && !opts.debug) {
+        let probe_slots: Vec<u32> = opts
+            .probes
+            .iter()
+            .filter_map(|(path, net)| debug.slot(path, *net))
+            .collect();
+        let (_, order) = levelize(&em.ops, &em.instrs, em.widths.len());
+        simplify(&mut em, &order, &mut ports, &mut debug, &probe_slots, opts);
     }
 
     // ── Levelize and group into blocks ─────────────────────────────────────

@@ -19,7 +19,7 @@ use logi_sim::sim::Sim;
 use logi_sim::testkit::{GenConfig, bitblast::bitblast, fixtures, generate, legacy::to_legacy};
 
 fn program(d: &Design) -> Arc<Program> {
-    Arc::new(compile(d, &Options::default()).unwrap())
+    Arc::new(compile(d, &Options::unoptimized()).unwrap())
 }
 
 /// One tick with every input randomized.
