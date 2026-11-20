@@ -1,0 +1,51 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "divider",
+  "circuits": [
+    {
+      "name": "divider",
+      "title": "Clock divider",
+      "nodes": [
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Clock",
+          "at": [0, 0]
+        },
+        {"name": "on", "type": "Const", "value": 1, "at": [0, -120]},
+        {"name": "off", "type": "Const", "value": 0, "at": [0, -200]},
+        {"name": "cnt", "use": "counter/counter8", "label": "counter", "at": [200, 0]},
+        {
+          "name": "s",
+          "type": "Split",
+          "w": 8,
+          "lo": "{i}",
+          "len": 1,
+          "at": [380, 120],
+          "count": 4,
+          "step": [0, -80]
+        },
+        {"name": "raw", "type": "Output", "label": "Clock in", "at": [520, 220]},
+        {"name": "d2", "type": "Output", "label": "Clock / 2", "at": [520, 120]},
+        {"name": "d4", "type": "Output", "label": "Clock / 4", "at": [520, 40]},
+        {"name": "d8", "type": "Output", "label": "Clock / 8", "at": [520, -40]},
+        {"name": "d16", "type": "Output", "label": "Clock / 16", "at": [520, -120]},
+        {"name": "show", "type": "Display", "w": 8, "label": "Count", "at": [400, -300]}
+      ],
+      "wires": [
+        ["clock", "cnt.Clk", "raw"],
+        ["on", "cnt.Enable"],
+        ["off", "cnt.Reset"],
+        ["cnt", "s", "show"],
+        ["s[0]", "d2"],
+        ["s[1]", "d4"],
+        ["s[2]", "d8"],
+        ["s[3]", "d16"]
+      ]
+    }
+  ]
+}

@@ -85,6 +85,18 @@ pub const GALLERY_EMBEDDED: &[(&str, &str)] = embed!(
     "barrel_shifter.json",
     "cla_adder.json",
     "multiplier.json",
+    "edge_detector.json",
+    "shift_register.json",
+    "johnson_counter.json",
+    "lfsr.json",
+    "clock_divider.json",
+    "updown_counter.json",
+    "bcd_counter.json",
+    "debouncer.json",
+    "pwm.json",
+    "sequence_detector.json",
+    "traffic_light.json",
+    "stopwatch.json",
 );
 
 #[derive(Debug, Deserialize)]

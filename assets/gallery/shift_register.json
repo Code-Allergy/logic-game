@@ -1,0 +1,45 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "shift4",
+  "circuits": [
+    {
+      "name": "shift4",
+      "title": "Shift register",
+      "nodes": [
+        {"name": "Data", "type": "Input", "at": [0, 0]},
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 8,
+          "duty": 4,
+          "phase": 4,
+          "label": "Clock",
+          "at": [0, 160]
+        },
+        {
+          "name": "ff",
+          "use": "flip_flop/dff",
+          "label": "flip-flop {i}",
+          "at": [160, 0],
+          "count": 4,
+          "step": [160, 0]
+        },
+        {
+          "name": "q",
+          "type": "Output",
+          "label": "Q{i}",
+          "at": [160, -140],
+          "count": 4,
+          "step": [160, 0]
+        }
+      ],
+      "wires": [
+        ["Data", "ff[0].D"],
+        ["ff[0..3].Q", "ff[1..4].D"],
+        ["clock", "ff.Clk"],
+        ["ff.Q", "q"]
+      ]
+    }
+  ]
+}

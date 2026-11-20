@@ -83,6 +83,90 @@
       "title": "4x4 array multiplier",
       "description": "Multiplies like long multiplication in binary: each bit of B either keeps a copy of A or zeroes it, giving four partial products. Three rows of 4-bit ripple adders add them, each row shifted one place; one bit of the product falls out of every row.",
       "uses": ["cla_adder/ripple4"]
+    },
+    {
+      "id": "edge_detector",
+      "category": "sequential",
+      "title": "Edge detector",
+      "description": "A Delay remembers the input from the last tick, so 'now 1 and was 0' is a rising edge and 'now 0 and was 1' a falling edge. Each output flashes for exactly one tick; later circuits use the rising-edge detector to act once per clock period.",
+      "uses": []
+    },
+    {
+      "id": "shift_register",
+      "category": "sequential",
+      "title": "Shift register",
+      "description": "Four flip-flops in a row, each one's output feeding the next one's input. On every rising clock edge the bits move one place to the right and Data enters on the left. Set Data and watch the pattern travel along the lights.",
+      "uses": ["flip_flop/dff"]
+    },
+    {
+      "id": "johnson_counter",
+      "category": "sequential",
+      "title": "Johnson counter",
+      "description": "A shift register whose last output is fed back, inverted, to its first input. It fills up with 1s, then with 0s, and repeats: four flip-flops give eight states, and neighbouring states differ in one bit.",
+      "uses": ["flip_flop/dff"]
+    },
+    {
+      "id": "lfsr",
+      "category": "sequential",
+      "title": "Pseudo-random numbers (LFSR)",
+      "description": "A linear-feedback shift register: each clock it shifts left and feeds in the XNOR of bits 7, 5, 4 and 3. The numbers look random but repeat after 255 steps, every 8-bit value except 255 appearing once.",
+      "uses": ["register/register8"]
+    },
+    {
+      "id": "clock_divider",
+      "category": "sequential",
+      "title": "Clock divider",
+      "description": "Each bit of a binary counter changes half as often as the bit below it, so bit 0 is the clock divided by 2, bit 1 by 4, and so on. Built on the 8-bit counter from the curriculum.",
+      "uses": ["counter/counter8"]
+    },
+    {
+      "id": "updown_counter",
+      "category": "sequential",
+      "title": "Up/down counter",
+      "description": "On every rising clock edge while Enable is 1, the register loads Q + 1 when Up is 1 and Q - 1 when Up is 0. Subtracting 1 is adding 255: the carry out of the top bit is simply dropped.",
+      "uses": ["mux/mux2x8", "register/register8", "ripple_adder/adder8"]
+    },
+    {
+      "id": "bcd_counter",
+      "category": "sequential",
+      "title": "BCD counter",
+      "description": "Two decimal digits counting 00 to 99. Each digit is a counter that goes back to 0 after Last (here 9) and then gives a one-tick Carry, which steps the next digit. Reset clears both.",
+      "uses": ["edge_detector/rising"]
+    },
+    {
+      "id": "debouncer",
+      "category": "sequential",
+      "title": "Debouncer",
+      "description": "A real button bounces between 0 and 1 for a moment when pressed. The debouncer keeps the last four samples and only changes its output when all four agree: all 1 sets the latch, all 0 resets it.",
+      "uses": []
+    },
+    {
+      "id": "pwm",
+      "category": "sequential",
+      "title": "PWM generator",
+      "description": "Pulse-width modulation: a 4-bit counter runs from 0 to 15 over and over, and the output is 1 while the count is below Duty. So the output is on for Duty out of every 16 ticks, which is how a digital pin dims a light.",
+      "uses": ["magnitude/mag4"]
+    },
+    {
+      "id": "sequence_detector",
+      "category": "sequential",
+      "title": "Sequence detector",
+      "description": "A finite-state machine that lights Found after the bits 1, 0, 1, 1 arrive in a row (overlaps count). Set Bit, then press Step: the state register moves to the state the table gives for the old state and the new bit. State 4 means the pattern was just seen.",
+      "uses": ["edge_detector/rising"]
+    },
+    {
+      "id": "traffic_light",
+      "category": "sequential",
+      "title": "Traffic light",
+      "description": "A counter steps through ten phases, one per clock period, and a ROM turns each phase into lights: north-south green for four phases, yellow for one, then the same for east-west while north-south is red. The counter is the BCD counter's digit with Last = 9.",
+      "uses": ["bcd_counter/mod_counter", "edge_detector/rising"]
+    },
+    {
+      "id": "stopwatch",
+      "category": "sequential",
+      "title": "Stopwatch",
+      "description": "Three digit counters in a chain count tenths, seconds and tens of seconds (up to 59.9); a digit's carry steps the next one. Run starts and stops counting, Reset clears the time. One clock period is a tenth.",
+      "uses": ["bcd_counter/mod_counter", "edge_detector/rising"]
     }
   ]
 }
