@@ -438,3 +438,27 @@ ambiguous. Each is small and can be revisited.
       second instead of bursting after a stall.
     - **Probe frames.** They are published by swapping an `Arc` under one
       mutex per batch, and their buffers are reused once readers drop them.
+19. **App mapping (M5, #28).** The bridge keeps one persistent `Design`
+    and edits it through the mutation API as ECS components change
+    (spawn, despawn, `GateType` or `WireEndpoints` change), so `NodeId`s
+    are stable and the engine carries state across edits. A gate maps to
+    one root node; changing its kind or width replaces that node, which
+    resets its own state only. A wire maps to one connected input pin.
+    Opening another workspace despawns every gate and wire and spawns new
+    ones; the new nodes get fresh slotmap keys, so no state is carried
+    between workspaces.
+20. **`Display` is an `Output` port in the root** (it needs a sink node),
+    and is left out of subcircuit definitions, where it would otherwise add
+    an output pin to every instance. Subcircuit port order is the port
+    nodes sorted by label, then id.
+21. **Probes.** The app probes every output net of every root gate (the
+    nets of the open view); probe indices are stored on the entities
+    (`GateProbes`, `WireState::probe`). After a probe-list change the
+    threaded bridge calls `Engine::sync` once, so a frame is never read
+    with a stale probe layout. Restricting probes to the on-screen
+    viewport is left to #30.
+22. **Built-in examples** keep their gate-level master-slave T flip-flops.
+    Each latch's `q` reaches its own `qn` gate and the other latch
+    through one `Delay`, which breaks every combinational loop (master,
+    slave, and the T feedback through both). With all state starting at
+    0 the counters power up at 0, so the old power-on reset pulse is gone.
