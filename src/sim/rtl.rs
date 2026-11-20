@@ -5,7 +5,10 @@
 //! circuits; word-level and gate-level cells become primitives, keeping
 //! their widths. Where a cell pin takes bits that are not one whole output
 //! pin (a slice, a concatenation, constants), `Split`, `Merge` and `Const`
-//! nodes are added. Every circuit is then laid out with
+//! nodes are added. Cells with no primitive of their own (multipliers,
+//! shifts, comparisons, flip-flops with resets, memories) are built from
+//! several in the submodules: `build` (helpers that fold constants),
+//! `arith` and `state`. Every circuit is then laid out with
 //! [`super::layout::layout`].
 //!
 //! The result is a save format version 6 file ([`SourceFile`], with a

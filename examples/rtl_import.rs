@@ -4,6 +4,8 @@
 //! yosys -p 'read_verilog top.v; synth -run :fine; opt -full; write_json top.json'
 //! cargo run --example rtl_import -- examples/rtl/top.json out.json
 //! cargo run --example rtl_import -- in.json out.json --v5 --top top --name "My CPU"
+//! yosys -p 'read_verilog mac.v; proc; opt; memory -nomap; opt; write_json mac.json'
+//! cargo run --example rtl_import -- examples/rtl/arith.json out.json --top mul_s
 //! ```
 //!
 //! Writes save format version 6 (the hand-editable form, canonical text)

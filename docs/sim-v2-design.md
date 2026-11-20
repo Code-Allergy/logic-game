@@ -876,4 +876,43 @@ ambiguous. Each is small and can be revisited.
     overlapping boxes and wires drawn through boxes. It is a development
     tool only; the app does not use it. `layout.rs` is unchanged: the
     gallery is placed by hand, not by `layout_circuit`.
-
+60. **More RTL cells, by composition.** The importer (`src/sim/rtl.rs`
+    and `src/sim/rtl/`) maps arithmetic (`$mul`, `$div`, `$mod`, `$neg`,
+    `$alu`), every shift, the ordered comparisons, `$pmux`/`$bmux`/
+    `$demux`, `$lut`, flip-flops with synchronous and asynchronous
+    resets, sets, clears and loads (word and gate level), latches and
+    memories (`docs/rtl-import.md` has the table). No primitive was added
+    to `logi_sim`: a multiplier is shift and add (`Switch`, `Add`), a
+    divider restoring division (`Add`, `Or`, `Mux`), a variable shift a
+    barrel of `Mux` stages, `$lt` an `LtU` with the sign bits inverted
+    when signed. A `Mul` or `Shift` primitive would need the IR, the
+    reference interpreter, the compiler's lowering and simplification,
+    the runtime, the editor's `GateKind`, the palette and the save format
+    to agree, for cells that composition already computes exactly; the
+    cost is node count (a 32-bit multiplier is 63 primitives plus
+    adapters). Asynchronous controls cannot act between ticks (D2): the
+    output shows the reset value at once through a `Mux` (or `Or`/`And`
+    for set and clear) after the state element, and the state element
+    stores it at the next tick, with a warning; a design whose
+    asynchronous reset depends on its own outputs within a tick becomes
+    a combinational loop. Undefined results (`$pmux` with several selects,
+    division by 0, `$shiftx` out of range) take a fixed value. `inout`
+    ports stay refused rather than read as outputs. Generated adapters
+    gain `Extend` for a repeated bit (sign extension), and helper nodes
+    nobody reads are dropped.
+61. **RTL memories.** `$mem_v2` and `$mem` (one write port at most)
+    become a `Rom` per read port when nothing writes them, a `Ram` when
+    every read port reads at the write address, and otherwise a
+    `Register` per word (up to 64 words) with a `Mux` tree per read port,
+    because the `Ram` primitive has a single address. The editor's `Ram`
+    has no initial contents (`GateKind::Ram` drops the netlist's `init`),
+    so initial contents are kept without changing the save format: the
+    state element holds `word ^ init[addr]`, with the initial word from a
+    `Rom` at the same address (or a constant per register), which is exact
+    and powers up reading `init`. A clocked read port is a `Delay` or
+    `Register` after the read, reading the old word or, when transparent,
+    the word being written. Building this exposed a compiler bug, fixed in
+    `logi_sim::compile::simplify`: constant identities looked up
+    immediates (a concatenation's shift) as slots, which panicked when a
+    shift was past the slot count (a small design with a constant in the
+    high bits of a `Merge`).
