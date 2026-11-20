@@ -403,15 +403,53 @@ fn perf_variants() -> Vec<(String, Options, SimOptions)> {
             ..base.clone()
         };
         push("defaults", base.clone(), SimOptions::default());
+        for threads in [2, 3, 4] {
+            push(
+                &format!("threads{threads}"),
+                off.clone(),
+                SimOptions {
+                    threads,
+                    par_min: 1,
+                    ..SimOptions::baseline()
+                },
+            );
+        }
+        push(
+            "partitions3/threads3",
+            off.clone().for_threads(3),
+            SimOptions {
+                threads: 3,
+                par_min: 1,
+                ..SimOptions::baseline()
+            },
+        );
+        push(
+            "partitions3/threads1",
+            off.clone().for_threads(3),
+            SimOptions::baseline(),
+        );
         push("all", all.clone(), SimOptions::default());
         push(
-            "all/pack-all-1",
+            "all/threads4",
+            all.clone().for_threads(4),
+            SimOptions {
+                threads: 4,
+                par_min: 1,
+                ..SimOptions::default()
+            },
+        );
+        push(
+            "all/pack-all-1/threads3",
             Options {
                 pack: PackMode::All,
                 pack_min: 1,
                 ..all.clone()
             },
-            SimOptions::default(),
+            SimOptions {
+                threads: 3,
+                par_min: 1,
+                ..SimOptions::default()
+            },
         );
     }
     out
@@ -486,4 +524,74 @@ fn auto_packing_on_a_large_gate_design() {
     assert!(lane_nets > 500_000, "{lane_nets}");
     crate::compile::tests::check_program_invariants(&p);
     diff::check_design(&d, 5, 3, &opts).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Threads start only when some rank is large enough, and a threaded `Sim`
+/// keeps working across ticks, state import and drop.
+#[test]
+fn thread_pool_lifecycle() {
+    use crate::testkit::{GenConfig, generate};
+    let small = Arc::new(compile(&fixtures::counter(8), &Options::default()).unwrap());
+    let s = Sim::with_options(Arc::clone(&small), SimOptions::threaded(4));
+    assert_eq!(s.threads(), 1, "small circuits stay single-threaded");
+
+    let d = generate(&GenConfig::gates(3, 40_000, 1)).design;
+    let p = Arc::new(compile(&d, &Options::debug()).unwrap());
+    let mut one = Sim::new(Arc::clone(&p));
+    let mut four = Sim::with_options(
+        Arc::clone(&p),
+        SimOptions {
+            threads: 4,
+            par_min: 64,
+            ..SimOptions::default()
+        },
+    );
+    assert_eq!(four.threads(), 4);
+    let (par, total) = four.phases();
+    assert!(par > 0 && total >= par, "{par}/{total}");
+    for t in 0..50u64 {
+        for port in 0..p.ports.inputs.len() {
+            let v = t.wrapping_mul(0x9E37_79B9) >> port & 1;
+            one.set_input(port, v);
+            four.set_input(port, v);
+        }
+        one.tick();
+        four.tick();
+        if t == 20 {
+            // Idle long enough for the workers to fall asleep.
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        for port in 0..p.ports.outputs.len() {
+            assert_eq!(one.output(port), four.output(port), "tick {t}");
+        }
+    }
+    let snap = one.export_state();
+    four.import_state(&snap);
+    drop(four);
+}
+
+/// A program whose ranks read their own results (all blocks relabelled to
+/// rank 0) is valid for the sequential runtime but not provably race-free,
+/// so it must run single-threaded, with the same results.
+#[test]
+fn racy_programs_run_single_threaded() {
+    let d = fixtures::cpu(&fixtures::MULTIPLY_PROGRAM);
+    let mut p = compile(&d, &Options::unoptimized()).unwrap();
+    for b in &mut p.blocks {
+        b.rank = 0;
+    }
+    let p = Arc::new(p);
+    let mut one = Sim::new(Arc::clone(&p));
+    let mut many = Sim::with_options(
+        Arc::clone(&p),
+        SimOptions {
+            threads: 4,
+            par_min: 1,
+            ..SimOptions::default()
+        },
+    );
+    assert_eq!(many.threads(), 1);
+    one.run(100);
+    many.run(100);
+    assert_eq!(one.get("acc"), many.get("acc"));
 }

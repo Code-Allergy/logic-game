@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use crate::compile::{CompileError, Options, Program, compile};
 use crate::netlist::{Design, NetId, NodeId};
-use crate::sim::Sim;
+use crate::sim::{Sim, SimOptions};
 
 /// Tick pacing.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,6 +90,9 @@ const MAX_DEBT_SECS: f64 = 0.25;
 
 pub struct EngineCore {
     options: Options,
+    /// Runtime options for every `Sim` this core creates (single-threaded
+    /// by default).
+    sim_options: SimOptions,
     sim: Option<Sim>,
     revision: u64,
     /// Root input values by port node; reapplied after every program swap.
@@ -113,6 +116,7 @@ impl EngineCore {
     pub fn new(options: Options) -> Self {
         Self {
             options,
+            sim_options: SimOptions::default(),
             sim: None,
             revision: 0,
             inputs: HashMap::new(),
@@ -128,6 +132,16 @@ impl EngineCore {
 
     pub fn options(&self) -> &Options {
         &self.options
+    }
+
+    /// Runtime options (threads, issue #41) for programs installed from
+    /// now on.
+    pub fn set_sim_options(&mut self, sim_options: SimOptions) {
+        self.sim_options = sim_options;
+    }
+
+    pub fn sim_options(&self) -> &SimOptions {
+        &self.sim_options
     }
 
     pub fn sim(&self) -> Option<&Sim> {
@@ -194,7 +208,7 @@ impl EngineCore {
     /// probes over from the running one.
     pub fn install(&mut self, program: Arc<Program>, revision: u64) -> EngineEvent {
         let snapshot = self.sim.as_ref().map(Sim::export_state);
-        let mut sim = Sim::new(program);
+        let mut sim = Sim::with_options(program, self.sim_options.clone());
         for (&node, &v) in &self.inputs {
             if let Some(port) = sim.program().ports.input_by_node(node) {
                 sim.set_input(port, v);

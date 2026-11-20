@@ -20,10 +20,13 @@
 use crate::compile::{Gather, Instr, Op, Pack, PackOperand, Program};
 use crate::netlist::mask;
 
-/// One block of [`Code`]: `len` instructions sharing `op`.
+/// One block of [`Code`]: `len` instructions sharing `op` and `rank`.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct XBlock {
     pub op: Op,
+    pub rank: u32,
+    /// The program block's `start` (into `instrs` or `packs`).
+    pub src: u32,
     pub len: u32,
     pub form: Form,
 }
@@ -84,6 +87,8 @@ impl Code {
             if b.packed {
                 code.blocks.push(XBlock {
                     op: b.op,
+                    rank: b.rank,
+                    src: b.start,
                     len: b.len,
                     form: Form::Packed { start: b.start },
                 });
@@ -123,6 +128,8 @@ impl Code {
             };
             code.blocks.push(XBlock {
                 op: b.op,
+                rank: b.rank,
+                src: b.start,
                 len: b.len,
                 form,
             });
@@ -139,6 +146,8 @@ impl Code {
                 .iter()
                 .map(|b| XBlock {
                     op: b.op,
+                    rank: b.rank,
+                    src: b.start,
                     len: b.len,
                     form: if b.packed {
                         Form::Packed { start: b.start }

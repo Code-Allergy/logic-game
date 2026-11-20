@@ -383,6 +383,10 @@ pub struct Program {
     /// Real slots of the packed words that hold lane slots: lane slot
     /// `slot_count + 64 * k + l` is bit `l` of `lane_words[k]`.
     pub lane_words: Vec<u32>,
+    /// With `Options::partitions` > 1: the partition of each block
+    /// (parallel to `blocks`). Empty otherwise. A runtime with that many
+    /// threads gives thread `t` the blocks of partition `t`.
+    pub block_parts: Vec<u8>,
 }
 
 impl Program {

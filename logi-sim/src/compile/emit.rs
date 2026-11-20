@@ -193,11 +193,15 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
     let (ranks, order) = levelize(&ops, &instrs, widths.len());
     let mut sorted: Vec<u32> = order;
     sorted.sort_by_key(|&i| (ranks[i as usize], ops[i as usize], i));
+    let parts = opts.partitions.max(1) as usize;
+    let part = partition(parts, &ops, &instrs, &ranks, &sorted, widths.len());
+    sorted.sort_by_key(|&i| (ranks[i as usize], ops[i as usize], part[i as usize], i));
     let numbering = locality_order(
         opts.slot_order,
         &ops,
         &instrs,
         &ranks,
+        &part,
         &mut sorted,
         &commits,
         &ports,
@@ -233,14 +237,18 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         }
     }
     // Per `(rank, op)` run: the packed words, then the scalar instructions.
-    let mut units: Vec<(Op, u32, std::ops::Range<usize>, Vec<u32>)> = Vec::new();
+    // (op, rank, partition, packed words, scalar instructions)
+    type Unit = (Op, u32, u8, std::ops::Range<usize>, Vec<u32>);
+    let mut units: Vec<Unit> = Vec::new();
     let mut lo = 0;
     while lo < sorted.len() {
-        let (op, rank) = (ops[sorted[lo] as usize], ranks[sorted[lo] as usize]);
+        let k0 = sorted[lo] as usize;
+        let (op, rank, pt) = (ops[k0], ranks[k0], part[k0]);
         let mut hi = lo + 1;
         while hi < sorted.len()
             && ops[sorted[hi] as usize] == op
             && ranks[sorted[hi] as usize] == rank
+            && part[sorted[hi] as usize] == pt
         {
             hi += 1;
         }
@@ -269,7 +277,7 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
             .copied()
             .filter(|&k| plan.lane_of[instrs[k as usize].dst as usize] == pack::NONE)
             .collect();
-        units.push((op, rank, w0..plan.words.len(), scalar));
+        units.push((op, rank, pt, w0..plan.words.len(), scalar));
         lo = hi;
     }
     let (packs, gathers, scatters) = if plan.words.is_empty() {
@@ -277,7 +285,7 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
     } else {
         // Packed nets read as plain slots need a scalar copy.
         let mut scalar_read = vec![false; widths.len()];
-        for (_, _, _, scalar) in &units {
+        for (_, _, _, _, scalar) in &units {
             for &k in scalar {
                 for s in operand_slots(ops[k as usize], &instrs[k as usize]) {
                     scalar_read[s as usize] = true;
@@ -294,30 +302,48 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
     let mut out = Vec::with_capacity(instrs.len());
     let mut out_imms = Vec::with_capacity(instrs.len());
     let mut out_ops = Vec::with_capacity(instrs.len());
-    for (op, rank, words, scalar) in &units {
-        if !words.is_empty() {
-            blocks.push(Block {
-                op: *op,
-                rank: *rank,
-                start: words.start as u32,
-                len: words.len() as u32,
-                packed: true,
-            });
+    let mut block_parts = Vec::new();
+    // Within a `(rank, op)` run: packed blocks, then scalar ones, each in
+    // partition order.
+    let mut lo = 0;
+    while lo < units.len() {
+        let mut hi = lo;
+        while hi < units.len() && (units[hi].0, units[hi].1) == (units[lo].0, units[lo].1) {
+            hi += 1;
         }
-        if !scalar.is_empty() {
-            blocks.push(Block {
-                op: *op,
-                rank: *rank,
-                start: out.len() as u32,
-                len: scalar.len() as u32,
-                packed: false,
-            });
+        for (op, rank, pt, words, _) in &units[lo..hi] {
+            if !words.is_empty() {
+                blocks.push(Block {
+                    op: *op,
+                    rank: *rank,
+                    start: words.start as u32,
+                    len: words.len() as u32,
+                    packed: true,
+                });
+                block_parts.push(*pt);
+            }
         }
-        for &i in scalar {
-            out.push(instrs[i as usize]);
-            out_imms.push(imms[i as usize]);
-            out_ops.push(*op);
+        for (op, rank, pt, _, scalar) in &units[lo..hi] {
+            if !scalar.is_empty() {
+                blocks.push(Block {
+                    op: *op,
+                    rank: *rank,
+                    start: out.len() as u32,
+                    len: scalar.len() as u32,
+                    packed: false,
+                });
+                block_parts.push(*pt);
+            }
+            for &i in scalar {
+                out.push(instrs[i as usize]);
+                out_imms.push(imms[i as usize]);
+                out_ops.push(*op);
+            }
         }
+        lo = hi;
+    }
+    if parts == 1 {
+        block_parts.clear();
     }
     // Numbering order of destination slots (old numbering).
     let dsts: Vec<u32> = match numbering {
@@ -342,12 +368,80 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         debug,
         state_keys,
         lane_words: packs.iter().map(|p| p.dst).collect(),
+        block_parts,
         packs,
         gathers,
         scatters,
     };
     renumber(&mut p, &out_ops, &dsts, &plan.lane_of);
     p
+}
+
+/// Estimated relative cost of one instruction of `op` (for balancing
+/// partitions): streaming ops by operand count, ops with literal fields
+/// (which run from the full instruction) and memory reads more.
+fn op_cost(op: Op) -> u32 {
+    match op {
+        Op::Shr | Op::Concat | Op::Sext | Op::Clock => 5,
+        Op::MemRead => 6,
+        _ => {
+            let (a, b, c) = op.slot_operands();
+            1 + a as u32 + b as u32 + c as u32
+        }
+    }
+}
+
+/// Partition every instruction for `parts` threads (`Options::partitions`):
+/// rank by rank, an instruction joins the partition that produced most of
+/// its operands, unless that partition already has its share of the rank's
+/// estimated cost; then the least loaded one. Values then mostly stay in
+/// the cache of the core that computed them.
+fn partition(
+    parts: usize,
+    ops: &[Op],
+    instrs: &[Instr],
+    ranks: &[u32],
+    sorted: &[u32],
+    slots: usize,
+) -> Vec<u8> {
+    let mut part = vec![0u8; instrs.len()];
+    if parts <= 1 {
+        return part;
+    }
+    let mut producer = vec![u32::MAX; slots];
+    for (k, ins) in instrs.iter().enumerate() {
+        producer[ins.dst as usize] = k as u32;
+    }
+    let mut lo = 0;
+    while lo < sorted.len() {
+        let rank = ranks[sorted[lo] as usize];
+        let mut hi = lo;
+        while hi < sorted.len() && ranks[sorted[hi] as usize] == rank {
+            hi += 1;
+        }
+        let span = &sorted[lo..hi];
+        let total: u32 = span.iter().map(|&k| op_cost(ops[k as usize])).sum();
+        let cap = total.div_ceil(parts as u32) + 6;
+        let mut load = vec![0u32; parts];
+        for &k in span {
+            let c = op_cost(ops[k as usize]);
+            let mut votes = vec![0u32; parts];
+            for s in operand_slots(ops[k as usize], &instrs[k as usize]) {
+                let p = producer[s as usize];
+                if p != u32::MAX {
+                    votes[part[p as usize] as usize] += 1;
+                }
+            }
+            let best = (0..parts)
+                .filter(|&q| load[q] + c <= cap)
+                .max_by_key(|&q| (votes[q], std::cmp::Reverse(load[q]), std::cmp::Reverse(q)))
+                .unwrap_or_else(|| (0..parts).min_by_key(|&q| load[q]).unwrap());
+            part[k as usize] = best as u8;
+            load[best] += c;
+        }
+        lo = hi;
+    }
+    part
 }
 
 /// Slots read by commits.
@@ -448,6 +542,7 @@ fn locality_order(
     ops: &[Op],
     instrs: &[Instr],
     ranks: &[u32],
+    part: &[u8],
     sorted: &mut [u32],
     commits: &[Commit],
     ports: &PortMap,
@@ -485,7 +580,8 @@ fn locality_order(
                         .min()
                         .unwrap_or(u32::MAX);
                 }
-                sorted[span.clone()].sort_by_key(|&k| (ops[k as usize], key[k as usize], k));
+                sorted[span.clone()]
+                    .sort_by_key(|&k| (ops[k as usize], part[k as usize], key[k as usize], k));
                 for (j, &k) in sorted[span.clone()].iter().enumerate() {
                     pos[k as usize] = (span.start + j) as u32;
                 }
@@ -538,7 +634,8 @@ fn locality_order(
                 }
             }
             for span in rank_spans(sorted) {
-                sorted[span].sort_by_key(|&k| (ops[k as usize], post[k as usize]));
+                sorted[span]
+                    .sort_by_key(|&k| (ops[k as usize], part[k as usize], post[k as usize]));
             }
             let mut numbering: Vec<u32> = sorted.to_vec();
             numbering.sort_by_key(|&k| post[k as usize]);

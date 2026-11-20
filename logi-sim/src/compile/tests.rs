@@ -43,15 +43,19 @@ fn sim(p: Program) -> Sim {
     Sim::new(Arc::new(p))
 }
 
-/// Blocks are sorted by (rank, op), cover the instruction list (and the
+/// Blocks are sorted by (rank, op, packed first, partition), cover the
+/// instruction list (and the
 /// packed words) exactly, every slot is written once, and nothing reads a
 /// slot written in its own or a later rank.
 pub(crate) fn check_program_invariants(p: &Program) {
     let mut written_rank = vec![u32::MAX; p.slot_count as usize];
     let (mut next, mut next_pack) = (0, 0);
-    for w in p.blocks.windows(2) {
+    let part = |i: usize| p.block_parts.get(i).copied().unwrap_or(0);
+    assert!(p.block_parts.is_empty() || p.block_parts.len() == p.blocks.len());
+    for (i, w) in p.blocks.windows(2).enumerate() {
         assert!(
-            (w[0].rank, w[0].op, !w[0].packed) < (w[1].rank, w[1].op, !w[1].packed),
+            (w[0].rank, w[0].op, !w[0].packed, part(i))
+                < (w[1].rank, w[1].op, !w[1].packed, part(i + 1)),
             "blocks out of order"
         );
     }

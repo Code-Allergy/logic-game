@@ -11,6 +11,7 @@
 //! [`Sim::new`], so the inner loops can skip bounds checks.
 
 mod code;
+mod pool;
 #[cfg(test)]
 mod tests;
 
@@ -37,26 +38,62 @@ pub struct StateSnapshot {
     pub mems: HashMap<NodePath, (u8, u8, Vec<u64>)>,
 }
 
-/// Runtime options (issue #41). [`SimOptions::default`] gives the fastest
-/// single-threaded setup; every field only changes speed, never results.
+/// Runtime options (issue #41). Every field only changes speed, never
+/// results. [`SimOptions::default`] is single-threaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimOptions {
     /// Re-encode blocks whose destinations are consecutive so they stream
     /// only their operands (see `sim/code.rs`). Off runs every block from
     /// the program's own instructions.
     pub stream: bool,
+    /// Threads per settle, counting the caller (1 = single-threaded). The
+    /// [`Sim`] starts `threads - 1` workers and keeps them for its
+    /// lifetime; it starts none if no rank reaches `par_min`, and none on
+    /// wasm.
+    pub threads: usize,
+    /// Work (about one unit per instruction) a rank needs to be split
+    /// between threads; smaller ranks run on the calling thread.
+    pub par_min: u64,
 }
+
+/// Default [`SimOptions::par_min`] (see the design doc, section 13).
+pub const DEFAULT_PAR_MIN: u64 = 2048;
 
 impl Default for SimOptions {
     fn default() -> Self {
-        Self { stream: true }
+        Self {
+            stream: true,
+            threads: 1,
+            par_min: DEFAULT_PAR_MIN,
+        }
     }
 }
 
 impl SimOptions {
     /// Everything off: the M3 runtime.
     pub fn baseline() -> Self {
-        Self { stream: false }
+        Self {
+            stream: false,
+            ..Self::default()
+        }
+    }
+
+    /// The defaults with `threads` threads.
+    pub fn threaded(threads: usize) -> Self {
+        Self {
+            threads,
+            ..Self::default()
+        }
+    }
+
+    /// The defaults with one thread per available core (1 on wasm).
+    pub fn all_cores() -> Self {
+        let n = if cfg!(target_arch = "wasm32") {
+            1
+        } else {
+            std::thread::available_parallelism().map_or(1, |n| n.get())
+        };
+        Self::threaded(n)
     }
 }
 
@@ -64,6 +101,9 @@ pub struct Sim {
     program: Arc<Program>,
     code: Arc<code::Code>,
     options: SimOptions,
+    /// Worker threads, when `options.threads > 1` and some rank is large
+    /// enough.
+    pool: Option<pool::Pool>,
     slots: Vec<u64>,
     mems: Vec<Vec<u64>>,
     tick: u64,
@@ -109,9 +149,22 @@ impl Sim {
                 v
             })
             .collect();
+        let code = Arc::new(code);
+        let pool = if options.threads > 1 {
+            let sched = pool::Schedule::new(&program, &code, options.threads, options.par_min);
+            pool::Pool::new(
+                Arc::clone(&program),
+                Arc::clone(&code),
+                sched,
+                options.threads,
+            )
+        } else {
+            None
+        };
         let mut sim = Sim {
-            code: Arc::new(code),
+            code,
             options,
+            pool,
             slots: vec![0; program.slot_count as usize],
             mems,
             tick: 0,
@@ -131,6 +184,19 @@ impl Sim {
 
     pub fn options(&self) -> &SimOptions {
         &self.options
+    }
+
+    /// Threads each settle uses (1 when no worker threads were started).
+    pub fn threads(&self) -> usize {
+        self.pool.as_ref().map_or(1, pool::Pool::threads)
+    }
+
+    /// `(parallel, total)` settle phases (diagnostics; `(0, 0)` when
+    /// single-threaded).
+    pub fn phases(&self) -> (usize, usize) {
+        self.pool.as_ref().map_or((0, 0), |p| {
+            (p.schedule().parallel_phases(), p.schedule().phases.len())
+        })
     }
 
     /// Set a root input. It is visible to logic at the next settle (the next
@@ -234,6 +300,11 @@ impl Sim {
         let p = &*self.program;
         for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
             self.slots[port.slot as usize] = v;
+        }
+        if let Some(pool) = &self.pool {
+            pool.settle(&mut self.slots, &self.mems, self.tick);
+            debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+            return;
         }
         let s = self.slots.as_mut_ptr();
         let env = code::Env {
@@ -349,6 +420,9 @@ fn check(p: &Program) -> Result<(), BadProgram> {
         if !slot_ok(x.slot) || x.slot == ZERO_SLOT || x.lane >= 64 {
             return bad(format!("bad scatter {x:?}"));
         }
+    }
+    if !p.block_parts.is_empty() && p.block_parts.len() != p.blocks.len() {
+        return bad("block_parts and blocks differ in length".into());
     }
     for &w in &p.lane_words {
         if !slot_ok(w) {

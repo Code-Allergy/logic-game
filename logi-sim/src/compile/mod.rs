@@ -57,6 +57,12 @@ pub struct Options {
     /// With `pack`, the fewest lanes a packed word may hold; smaller groups
     /// stay scalar.
     pub pack_min: u8,
+    /// Lay the program out for this many threads (issue #41): each rank's
+    /// instructions are split into partitions of about equal estimated cost,
+    /// an instruction preferring the partition that produced its operands,
+    /// and each `(rank, op)` run becomes one block per partition. Use the
+    /// same number as `SimOptions::threads`. 1 (the default) does nothing.
+    pub partitions: u8,
 }
 
 /// Which 1-bit instructions [`Options::pack`] packs into lanes.
@@ -116,6 +122,7 @@ impl Default for Options {
             slot_order: SlotOrder::default(),
             pack: PackMode::Auto,
             pack_min: DEFAULT_PACK_MIN,
+            partitions: 1,
         }
     }
 }
@@ -134,6 +141,16 @@ impl Options {
             slot_order: SlotOrder::Production,
             pack: PackMode::Off,
             pack_min: DEFAULT_PACK_MIN,
+            partitions: 1,
+        }
+    }
+
+    /// These options laid out for `threads` threads
+    /// ([`Options::partitions`]).
+    pub fn for_threads(self, threads: usize) -> Self {
+        Self {
+            partitions: threads.clamp(1, u8::MAX as usize) as u8,
+            ..self
         }
     }
 
