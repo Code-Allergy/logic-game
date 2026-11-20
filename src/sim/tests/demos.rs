@@ -404,15 +404,6 @@ fn open(id: &str) -> App {
     app
 }
 
-/// Set inputs, run one tick, and read outputs.
-fn eval(app: &mut App, inputs: &[(&str, u64)], outputs: &[&str]) -> Vec<u64> {
-    for &(label, value) in inputs {
-        set_input(app, label, value);
-    }
-    run(app, 1);
-    outputs.iter().map(|label| value_at(app, label)).collect()
-}
-
 #[test]
 fn gates_demo_truth_tables() {
     let mut app = open("gates");

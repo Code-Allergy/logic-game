@@ -4,6 +4,7 @@
 mod demos;
 pub mod geometry_tests;
 mod instance_views;
+mod rtl;
 mod visuals;
 
 use std::path::PathBuf;
@@ -93,6 +94,15 @@ fn run(app: &mut App, ticks: u64) {
         assert!(Instant::now() < deadline, "ticks did not run");
     }
     app.update();
+}
+
+/// Set inputs, run one tick, and read outputs.
+fn eval(app: &mut App, inputs: &[(&str, u64)], outputs: &[&str]) -> Vec<u64> {
+    for &(label, value) in inputs {
+        set_input(app, label, value);
+    }
+    run(app, 1);
+    outputs.iter().map(|label| value_at(app, label)).collect()
 }
 
 fn gate(app: &mut App, label: &str) -> Entity {
