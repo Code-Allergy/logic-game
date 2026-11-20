@@ -349,3 +349,31 @@ ambiguous. Each is small and can be revisited.
    It is a public module so that M3 benchmarks can use it. The legacy gate-loop
    latch fixtures are `LoopFixture`s that record the nodes expected on the
    loop.
+10. **Program execution model (M2).** `logi_sim::compile::program` documents
+    it in full. Points the doc leaves open:
+    - **Fixed slots.** Slot 0 is always zero. Unconnected pins and undriven
+      nets read it. Constants live in `Program::consts`, are loaded once and
+      are never written.
+    - **Next state is computed during the settle.** Each state element gets
+      a `next` slot that only commits read. A RAM gets snapshot slots for
+      `we`, `addr` and `wdata`, also read only by commits. This keeps the
+      rule in 3.2: an input change reaches state at the commit after the
+      next settle. Root-input writes are staged and applied after the
+      commit, at the start of the settle.
+    - **Instruction encoding.** `Instr { dst, a, b, c, imm }`; each op
+      documents which fields are slots and which are literals.
+    - **Lowering.** `Add` becomes `AddSum` plus `AddCarry`. `Merge` becomes
+      a chain of `Concat`s through temporary slots. `DLatch` gets a hidden
+      state slot, and its output is a `Mux`.
+    - **Blocks** also record their rank.
+11. **Loop check runs before unification.** It runs on the per-instance net
+    graph, where port crossings keep their direction. There is one
+    `CombinationalLoop` error per strongly connected component, so a loop
+    inside a definition instanced *k* times is reported *k* times, each with
+    full `NodePath`s. The nodes listed are the primitives in the component
+    (the component can contain more than one simple cycle). A loop made only
+    of wires through instance ports reports the instance nodes it crosses.
+12. **`compile` returns every validation error** (wrapped as
+    `CompileError::Invalid`) or every loop. `Options::debug` exists but has
+    no effect until the simplify passes (#26) land; until then every
+    authored net is observable.

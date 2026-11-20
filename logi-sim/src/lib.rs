@@ -1,4 +1,5 @@
 pub mod circuit;
+pub mod compile;
 pub mod compiler;
 pub mod engine;
 pub mod fixtures;
