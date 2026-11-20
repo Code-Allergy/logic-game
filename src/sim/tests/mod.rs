@@ -382,3 +382,38 @@ fn bevy_bridge_flush_exposes_all_nested_outputs_in_game_uuid_space() {
         thread::sleep(Duration::from_millis(1));
     }
 }
+
+/// Regression for issue #19: flushing the bridge every frame must not mark
+/// `SimulationConfig` changed (which resent `SetTickRate` every frame).
+#[test]
+fn bridge_flush_does_not_mark_simulation_config_changed_every_frame() {
+    #[derive(Resource, Default)]
+    struct ConfigChanges(u32);
+
+    fn count_changes(config: Res<SimulationConfig>, mut changes: ResMut<ConfigChanges>) {
+        if config.is_changed() {
+            changes.0 += 1;
+        }
+    }
+
+    let fixture = nested_fanout_fixture();
+    let bridge = SimBridge::from_circuit(&fixture.circuit);
+
+    let mut app = App::new();
+    app.insert_resource(fixture.circuit)
+        .insert_resource(bridge)
+        .init_resource::<SimCache>()
+        .init_resource::<SimulationConfig>()
+        .init_resource::<ConfigChanges>()
+        .add_systems(Update, (bridge_flush_system, count_changes).chain());
+
+    for _ in 0..20 {
+        app.update();
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    // One change on the first frame (resource added), plus at most one for the
+    // worker's initial `RunnerSet` event if it reports a different runner.
+    let changes = app.world().resource::<ConfigChanges>().0;
+    assert!(changes <= 2, "config marked changed on {changes} of 20 frames");
+}

@@ -257,3 +257,33 @@ fn test_flat_runner_equivalence() {
     assert_eq!(naive.output(out, 0), flat.output(out, 0));
     assert_eq!(flat.output(out, 0), true);
 }
+
+/// Regression for issue #19: resending an unchanged tick rate (the app used to
+/// do this every frame) must not reset pacing and force a tick per command.
+#[test]
+fn test_redundant_set_tick_rate_does_not_reset_pacing() {
+    let mut c = Circuit::new();
+    let input = c.input();
+    let out = c.output();
+    c.connect((input, 0), (out, 0));
+
+    let mut engine = SimulationEngine::new(c);
+    engine.start_worker();
+    engine.set_tick_rate(Some(20.0));
+    sleep(Duration::from_millis(20));
+    let start = engine.tick_count();
+
+    // ~300 redundant commands over ~300ms. At 20 Hz that is ~6 ticks; the old
+    // behaviour ticked once per command.
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        engine.set_tick_rate(Some(20.0));
+        sleep(Duration::from_millis(1));
+    }
+    let ticks = engine.tick_count() - start;
+    engine.stop_worker();
+    assert!(
+        ticks <= 20,
+        "redundant SetTickRate reset pacing: {ticks} ticks in 300ms at 20 Hz"
+    );
+}

@@ -12,6 +12,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::{JoinHandle, spawn};
 
+/// Worker tick rate (Hz) used until a `SetTickRate` command arrives.
+pub const DEFAULT_TICK_RATE: f64 = 1000.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerType {
     Naive,
@@ -695,8 +698,9 @@ impl SimulationEngine {
                 let mut ticks_since_snapshot = 0_u32;
                 let mut pending_cmd = None;
 
-                let mut tick_rate = Some(10.0);
-                let mut tick_duration = std::time::Duration::from_secs_f64(1.0 / 10.0);
+                let mut tick_rate = Some(DEFAULT_TICK_RATE);
+                let mut tick_duration =
+                    std::time::Duration::from_secs_f64(1.0 / DEFAULT_TICK_RATE);
                 let mut next_tick_time = std::time::Instant::now();
                 let mut last_snapshot_time = std::time::Instant::now();
                 let mut last_slow_warning = None;
@@ -747,6 +751,12 @@ impl SimulationEngine {
                                 let _ = tx_evt.send(SimEvent::RunnerSet(current_runner_type));
                             }
                             SimCommand::SetTickRate(rate) => {
+                                // A redundant SetTickRate must not reset pacing,
+                                // otherwise resending it every frame forces a
+                                // tick per frame regardless of the rate.
+                                if rate == tick_rate {
+                                    continue;
+                                }
                                 tick_rate = rate;
                                 if let Some(r) = rate {
                                     tick_duration = std::time::Duration::from_secs_f64(
