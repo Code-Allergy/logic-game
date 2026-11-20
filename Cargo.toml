@@ -57,7 +57,7 @@ lto = true
 codegen-units = 1
 strip = true
 
-# The simulator is the hot path; "s" measured ~1.65x slower on the Flat runner.
+# The simulator is the hot path; "s" measured ~1.65x slower (on the old Flat runner).
 [profile.release.package.logi-sim]
 opt-level = 3
 

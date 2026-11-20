@@ -1,8 +1,11 @@
 # Simulation v2: synchronous, word-level, compiled
 
-Status: proposed design. Supersedes the timing model described in
-`logi-sim/ARCHITECTURE.md` and the bridge/cache model in
-`docs/simulation-model-and-cache.md` once milestone M6 lands.
+Status: implemented; all milestones (M0 to M6) are done. M6 (#31) deleted
+the legacy circuit, compiler, runners and engine. `logi-sim/ARCHITECTURE.md`
+describes the crate as built and records the final benchmark comparison
+with the legacy runners; `docs/app-simulation-bridge.md` describes how the
+app maps onto the simulator. Sections 1 to 12 are the design as proposed;
+section 13 lists where the implementation deviates from it.
 
 ## 1. Why
 
@@ -270,6 +273,11 @@ Gates before the legacy runners are deleted (M6):
    1e9 simple ops per second per core.)
 3. Compiling 1M nodes takes under 2 seconds.
 
+All three held when M6 deleted the legacy runners. The final measurement
+(gate 2 at 10.55x, gate 3 at 1.08 s) is recorded with the date and machine
+in `logi-sim/ARCHITECTURE.md`, "Benchmarks"; the legacy baseline can no
+longer be re-run.
+
 ## 10. App integration (root crate)
 
 - The ECS authoring components become the single source of truth and map
@@ -297,6 +305,11 @@ Gates before the legacy runners are deleted (M6):
 
 v2 is built beside the existing modules so the app keeps running until M5.
 Bugs in the legacy runners are not fixed, since M6 deletes them.
+
+All milestones are complete. M6 (#31) deleted the legacy `circuit`,
+`compiler`, `runner`, `engine`, `fixtures` and `graphviz` modules with
+their tests, benches and the `profile_tick` binary, and ported the legacy
+tests whose behaviour had no v2 test (item 36).
 
 ## 12. Deferred
 
@@ -401,7 +414,8 @@ ambiguous. Each is small and can be revisited.
     bitwise gates (`GenConfig::gates`), converted one-to-one into the legacy
     `Circuit`. Word-level mixed-op DAGs are reported alongside, with no
     legacy baseline. `cargo run -p logi-sim --release --bin sim_v2_report`
-    prints every case and the two gates.
+    printed every case and the two gates. Since M6 the binary is
+    `sim_report` and has no legacy column (item 36).
 16. **Program layout for throughput (M3).**
     - **`imm` moved out of `Instr`.** `Instr` is four `u32`s (16 bytes);
       `imm` lives in the parallel `Program::imms`, read only by ops that use
@@ -674,3 +688,26 @@ ambiguous. Each is small and can be revisited.
     benchmark VM. With 4 threads it helped the word-level DAG (up to 2.1x
     over 1 thread) but slowed single-thread runs (more and smaller blocks,
     interleaved slots) and the gate DAGs, so it is off by default.
+36. **M6 (#31).**
+    - **Rename.** `engine_v2` took the name `logi_sim::engine` once the
+      legacy engine was deleted (item 18). The app imports it from there.
+    - **Report and benches.** `sim_v2_report` became `sim_report` and
+      `benches/sim_v2.rs` became `benches/sim.rs` (Criterion groups
+      `sim/*`). Both lost the legacy SIMD baseline along with
+      `testkit::legacy`, so gate 2 is no longer re-measured; its final value
+      is in `logi-sim/ARCHITECTURE.md`.
+    - **Prelude.** The crate prelude only re-exported legacy types and had
+      no users, so it was removed rather than replaced.
+    - **Ported tests.** Legacy tests whose behaviour no v2 test covered
+      became v2 tests: exhaustive 1-bit primitive and demux truth tables on
+      the compiled `Sim`, a four-level nested adder fixture
+      (`testkit::fixtures::nested_adder16`, from the legacy
+      `recursive_16bit_adder`, with floating gates that DCE removes), and
+      CSE inside and across instances with every merged net still readable.
+      Tests of legacy-only machinery (the fixture-shaped adder and counter
+      lowering, SIMD record layouts, runner equivalence) were dropped.
+    - **Dependencies.** `wide` and `log` and the `simd-profile` feature
+      were removed. `slotmap` and `smallvec` remain (used by `netlist`).
+    - **Docs.** `docs/simulation-model-and-cache.md`, which M5 had already
+      rewritten for the ECS bridge, was renamed
+      `docs/app-simulation-bridge.md`.

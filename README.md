@@ -32,5 +32,7 @@ For example `cargo run -p gate_quest --features dev`, or
 ## Documentation
 
 - `docs/sim-v2-design.md`: simulator design and implementation notes.
-- `docs/simulation-model-and-cache.md`: how the app maps onto the simulator.
+- `docs/app-simulation-bridge.md`: how the app maps onto the simulator.
+- `logi-sim/ARCHITECTURE.md`: the simulator crate as built, with benchmarks.
+- `logi-sim/PROFILING.md`: benchmarking and profiling the simulator.
 - `docs/save-format.md`: workspace file format.
