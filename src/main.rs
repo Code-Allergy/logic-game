@@ -3,7 +3,7 @@ use std::env;
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "inspector")]
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
 use gate_quest::configure_camera_scaling;
@@ -40,7 +40,7 @@ fn main() {
         app = app.add_plugins(EguiPlugin::default());
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "inspector")]
     if !disable_egui {
         app = app.add_plugins(WorldInspectorPlugin::new());
     }

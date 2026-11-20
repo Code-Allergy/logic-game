@@ -9,16 +9,23 @@ exclude = ["build", "assets"]
 [lib]
 name = "gate_quest"
 
+[features]
+default = []
+# Native development: Bevy as a dynamic library (faster incremental links)
+# plus the world inspector. Not for release or wasm builds.
+dev = ["bevy/dynamic_linking", "inspector"]
+# The egui world inspector window.
+inspector = ["dep:bevy-inspector-egui"]
+
 [dependencies]
 logi-sim = { path = "logi-sim" }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 smallvec = "1"
 
 # egui
-bevy = { version = "0.19.0", features = ["dynamic_linking", "wayland"] }
+bevy = { version = "0.19.0", features = ["wayland"] }
 bevy_egui = "0.40"
-bevy_mod_debugdump = "0.16"
-bevy-inspector-egui = "0.37"
+bevy-inspector-egui = { version = "0.37", optional = true }
 
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
