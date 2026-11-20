@@ -1,0 +1,56 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "regfile4x8",
+  "circuits": [
+    {
+      "name": "regfile4x8",
+      "title": "Register file (4 x 8 bits)",
+      "nodes": [
+        {"name": "WE", "type": "Input", "at": [-500, 300]},
+        {"name": "WAddr", "type": "Input", "w": 2, "at": [-500, 200]},
+        {"name": "WData", "type": "Input", "w": 8, "at": [-500, 100]},
+        {"name": "Clk", "type": "Input", "at": [-500, 0]},
+        {"name": "RA", "type": "Input", "w": 2, "at": [-500, -150]},
+        {"name": "RB", "type": "Input", "w": 2, "at": [-500, -250]},
+        {"name": "dec", "use": "decoder/decoder2", "label": "write address", "at": [-350, 250]},
+        {
+          "name": "we",
+          "use": "gates/and",
+          "label": "write r{i}",
+          "at": [-200, 330],
+          "count": 4,
+          "step": [0, -80]
+        },
+        {
+          "name": "r",
+          "use": "register/register8",
+          "label": "r{i}",
+          "at": [0, 300],
+          "count": 4,
+          "step": [0, -120]
+        },
+        {"name": "read_a", "use": "mux_tree/mux4x8", "label": "read port A", "at": [250, 100]},
+        {"name": "read_b", "use": "mux_tree/mux4x8", "label": "read port B", "at": [250, -150]},
+        {"name": "QA", "type": "Output", "w": 8, "at": [450, 100]},
+        {"name": "QB", "type": "Output", "w": 8, "at": [450, -150]}
+      ],
+      "wires": [
+        ["WAddr", "dec"],
+        ["dec", "we.A"],
+        ["WE", "we.B"],
+        ["we", "r.Load"],
+        ["WData", "r.D"],
+        ["Clk", "r.Clk"],
+        ["RA", "read_a.Sel"],
+        ["RB", "read_b.Sel"],
+        ["r[0]", "read_a.D0", "read_b.D0"],
+        ["r[1]", "read_a.D1", "read_b.D1"],
+        ["r[2]", "read_a.D2", "read_b.D2"],
+        ["r[3]", "read_a.D3", "read_b.D3"],
+        ["read_a", "QA"],
+        ["read_b", "QB"]
+      ]
+    }
+  ]
+}
