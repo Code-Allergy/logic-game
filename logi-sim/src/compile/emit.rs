@@ -8,6 +8,7 @@ use slotmap::SecondaryMap;
 
 use super::Options;
 use super::elaborate::Elab;
+use super::pack;
 use super::program::*;
 use super::simplify::simplify;
 use crate::netlist::{NetId, NodeKind, mask};
@@ -202,25 +203,132 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         &ports,
         widths.len(),
     );
+
+    // ── Lane packing and blocks ────────────────────────────────────────────
+    let mut widths = widths;
+    let mut plan = pack::Plan::new(widths.len());
+    let pack_mode = match opts.pack {
+        super::PackMode::Auto => {
+            let packable = (0..instrs.len())
+                .filter(|&k| pack::packable(ops[k], &instrs[k], &widths))
+                .count();
+            if widths.len() * 8 > super::AUTO_PACK_BYTES && 2 * packable >= instrs.len() {
+                super::PackMode::All
+            } else {
+                super::PackMode::Off
+            }
+        }
+        mode => mode,
+    };
+    if pack_mode != super::PackMode::Off {
+        for (k, ins) in instrs.iter().enumerate() {
+            if !pack::packable(ops[k], ins, &widths) {
+                for s in operand_slots(ops[k], ins) {
+                    plan.sink_read[s as usize] = true;
+                }
+            }
+        }
+        for s in commit_reads(&commits).chain(ports.outputs.iter().map(|p| p.slot)) {
+            plan.sink_read[s as usize] = true;
+        }
+    }
+    // Per `(rank, op)` run: the packed words, then the scalar instructions.
+    let mut units: Vec<(Op, u32, std::ops::Range<usize>, Vec<u32>)> = Vec::new();
+    let mut lo = 0;
+    while lo < sorted.len() {
+        let (op, rank) = (ops[sorted[lo] as usize], ranks[sorted[lo] as usize]);
+        let mut hi = lo + 1;
+        while hi < sorted.len()
+            && ops[sorted[hi] as usize] == op
+            && ranks[sorted[hi] as usize] == rank
+        {
+            hi += 1;
+        }
+        let run = &sorted[lo..hi];
+        let w0 = plan.words.len();
+        if pack_mode != super::PackMode::Off {
+            let packable: Vec<u32> = run
+                .iter()
+                .copied()
+                .filter(|&k| pack::packable(op, &instrs[k as usize], &widths))
+                .collect();
+            plan.pack_run(
+                op,
+                &packable,
+                &instrs,
+                pack_mode,
+                opts.pack_min as usize,
+                || {
+                    widths.push(64);
+                    (widths.len() - 1) as u32
+                },
+            );
+        }
+        let scalar: Vec<u32> = run
+            .iter()
+            .copied()
+            .filter(|&k| plan.lane_of[instrs[k as usize].dst as usize] == pack::NONE)
+            .collect();
+        units.push((op, rank, w0..plan.words.len(), scalar));
+        lo = hi;
+    }
+    let (packs, gathers, scatters) = if plan.words.is_empty() {
+        Default::default()
+    } else {
+        // Packed nets read as plain slots need a scalar copy.
+        let mut scalar_read = vec![false; widths.len()];
+        for (_, _, _, scalar) in &units {
+            for &k in scalar {
+                for s in operand_slots(ops[k as usize], &instrs[k as usize]) {
+                    scalar_read[s as usize] = true;
+                }
+            }
+        }
+        for s in commit_reads(&commits).chain(ports.outputs.iter().map(|p| p.slot)) {
+            scalar_read[s as usize] = true;
+        }
+        plan.build(&instrs, &scalar_read)
+    };
+
     let mut blocks: Vec<Block> = Vec::new();
     let mut out = Vec::with_capacity(instrs.len());
     let mut out_imms = Vec::with_capacity(instrs.len());
     let mut out_ops = Vec::with_capacity(instrs.len());
-    for &i in &sorted {
-        let (op, rank) = (ops[i as usize], ranks[i as usize]);
-        match blocks.last_mut() {
-            Some(b) if b.op == op && b.rank == rank => b.len += 1,
-            _ => blocks.push(Block {
-                op,
-                rank,
-                start: out.len() as u32,
-                len: 1,
-            }),
+    for (op, rank, words, scalar) in &units {
+        if !words.is_empty() {
+            blocks.push(Block {
+                op: *op,
+                rank: *rank,
+                start: words.start as u32,
+                len: words.len() as u32,
+                packed: true,
+            });
         }
-        out.push(instrs[i as usize]);
-        out_imms.push(imms[i as usize]);
-        out_ops.push(op);
+        if !scalar.is_empty() {
+            blocks.push(Block {
+                op: *op,
+                rank: *rank,
+                start: out.len() as u32,
+                len: scalar.len() as u32,
+                packed: false,
+            });
+        }
+        for &i in scalar {
+            out.push(instrs[i as usize]);
+            out_imms.push(imms[i as usize]);
+            out_ops.push(*op);
+        }
     }
+    // Numbering order of destination slots (old numbering).
+    let dsts: Vec<u32> = match numbering {
+        Some(order) => order
+            .iter()
+            .map(|&k| instrs[k as usize].dst)
+            .filter(|&d| plan.lane_of[d as usize] == pack::NONE)
+            .chain(exec_dsts(&blocks, &[], &packs, &scatters))
+            .collect(),
+        None => exec_dsts(&blocks, &out, &packs, &scatters),
+    };
 
     let mut p = Program {
         slot_count: widths.len() as u32,
@@ -233,9 +341,43 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         ports,
         debug,
         state_keys,
+        lane_words: packs.iter().map(|p| p.dst).collect(),
+        packs,
+        gathers,
+        scatters,
     };
-    renumber(&mut p, &out_ops, numbering.as_deref());
+    renumber(&mut p, &out_ops, &dsts, &plan.lane_of);
     p
+}
+
+/// Slots read by commits.
+fn commit_reads(commits: &[Commit]) -> impl Iterator<Item = u32> + '_ {
+    commits.iter().flat_map(|c| match *c {
+        Commit::Copy { next, .. } => [next, ZERO_SLOT, ZERO_SLOT],
+        Commit::RamWrite { we, addr, data, .. } => [we, addr, data],
+    })
+}
+
+/// Destination slots in execution order: scalar instructions (from
+/// `instrs`; none if it is empty), packed words and their scatters.
+fn exec_dsts(blocks: &[Block], instrs: &[Instr], packs: &[Pack], scatters: &[Scatter]) -> Vec<u32> {
+    let mut out = Vec::new();
+    for b in blocks {
+        let range = b.start as usize..(b.start + b.len) as usize;
+        if b.packed {
+            for p in &packs[range] {
+                out.push(p.dst);
+                out.extend(
+                    scatters[p.scatter_start as usize..][..p.scatter_len as usize]
+                        .iter()
+                        .map(|s| s.slot),
+                );
+            }
+        } else if !instrs.is_empty() {
+            out.extend(instrs[range].iter().map(|i| i.dst));
+        }
+    }
+    out
 }
 
 /// Producer of every slot (`u32::MAX` if no instruction writes it) and each
@@ -299,7 +441,7 @@ fn operand_slots(op: Op, ins: &Instr) -> impl Iterator<Item = u32> {
 
 /// Reorder instructions inside each `(rank, op)` run of `sorted` for memory
 /// locality (issue #41). Returns the order in which destination slots are
-/// numbered, as positions in `sorted`, when it differs from execution order.
+/// numbered (instruction indices), when it differs from execution order.
 #[allow(clippy::too_many_arguments)]
 fn locality_order(
     order: super::SlotOrder,
@@ -398,17 +540,19 @@ fn locality_order(
             for span in rank_spans(sorted) {
                 sorted[span].sort_by_key(|&k| (ops[k as usize], post[k as usize]));
             }
-            let mut numbering: Vec<u32> = (0..n as u32).collect();
-            numbering.sort_by_key(|&j| post[sorted[j as usize] as usize]);
+            let mut numbering: Vec<u32> = sorted.to_vec();
+            numbering.sort_by_key(|&k| post[k as usize]);
             Some(numbering)
         }
     }
 }
 
 /// Renumber slots densely: zero, root inputs, constants, state, then
-/// instruction destinations in execution order (or in `numbering`, a
-/// permutation of instruction positions). Unreferenced slots disappear.
-fn renumber(p: &mut Program, ops: &[Op], numbering: Option<&[u32]>) {
+/// `dsts` (instruction, packed word and scatter destinations, in the order
+/// they should be numbered). Unreferenced slots disappear. A net held only
+/// in a lane (`lane_of`, indexed by old slot) gets a lane slot in the debug
+/// map.
+fn renumber(p: &mut Program, ops: &[Op], dsts: &[u32], lane_of: &[u32]) {
     let mut map = vec![UNASSIGNED; p.slot_count as usize];
     let mut next = 0u32;
     let mut assign = |s: u32, map: &mut Vec<u32>| {
@@ -429,17 +573,8 @@ fn renumber(p: &mut Program, ops: &[Op], numbering: Option<&[u32]>) {
             assign(state, &mut map);
         }
     }
-    match numbering {
-        Some(order) => {
-            for &k in order {
-                assign(p.instrs[k as usize].dst, &mut map);
-            }
-        }
-        None => {
-            for ins in &p.instrs {
-                assign(ins.dst, &mut map);
-            }
-        }
+    for &d in dsts {
+        assign(d, &mut map);
     }
     // Anything still unassigned is read but never written: it can only be
     // the zero slot's class, which is already slot 0.
@@ -489,9 +624,31 @@ fn renumber(p: &mut Program, ops: &[Op], numbering: Option<&[u32]>) {
     for port in p.ports.inputs.iter_mut().chain(p.ports.outputs.iter_mut()) {
         port.slot = m(port.slot);
     }
+    for pk in &mut p.packs {
+        pk.dst = m(pk.dst);
+        for o in [&mut pk.a, &mut pk.b, &mut pk.c] {
+            o.base = m(o.base);
+            o.splat = m(o.splat);
+        }
+    }
+    for g in &mut p.gathers {
+        g.slot = m(g.slot);
+    }
+    for sc in &mut p.scatters {
+        sc.slot = m(sc.slot);
+    }
+    for w in &mut p.lane_words {
+        *w = m(*w);
+    }
     for slots in &mut p.debug.net_slots {
         for (_, s) in slots.iter_mut() {
-            *s = m(*s);
+            *s = match (map[*s as usize], lane_of.get(*s as usize)) {
+                (UNASSIGNED, Some(&x)) if x != pack::NONE => {
+                    // Lane slot: `slot_count + 64 * word + lane`.
+                    next + 64 * (x >> 6) + (x & 63)
+                }
+                _ => m(*s),
+            };
         }
     }
     for key in &mut p.state_keys {

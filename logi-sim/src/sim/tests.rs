@@ -354,7 +354,7 @@ fn snapshot_round_trip_matches_continuous_run() {
 /// Every layout and runtime switch alone, then all together, each under the
 /// optimizing and the unoptimized compile.
 fn perf_variants() -> Vec<(String, Options, SimOptions)> {
-    use crate::compile::SlotOrder;
+    use crate::compile::{PackMode, SlotOrder};
     let mut out = Vec::new();
     for (base_name, base) in [
         ("default", Options::default()),
@@ -362,6 +362,7 @@ fn perf_variants() -> Vec<(String, Options, SimOptions)> {
     ] {
         let off = Options {
             slot_order: SlotOrder::Production,
+            pack: PackMode::Off,
             ..base.clone()
         };
         let mut push = |name: &str, o: Options, so: SimOptions| {
@@ -381,7 +382,37 @@ fn perf_variants() -> Vec<(String, Options, SimOptions)> {
         let mut stream = SimOptions::baseline();
         stream.stream = true;
         push("stream", off.clone(), stream);
-        push("all", base.clone(), SimOptions::default());
+        for (mode, min) in [
+            (PackMode::All, 1),
+            (PackMode::All, 8),
+            (PackMode::Aligned, 1),
+        ] {
+            push(
+                &format!("pack {mode:?}/{min}"),
+                Options {
+                    pack: mode,
+                    pack_min: min,
+                    ..off.clone()
+                },
+                SimOptions::baseline(),
+            );
+        }
+        let all = Options {
+            slot_order: SlotOrder::FirstUse,
+            pack: PackMode::Aligned,
+            ..base.clone()
+        };
+        push("defaults", base.clone(), SimOptions::default());
+        push("all", all.clone(), SimOptions::default());
+        push(
+            "all/pack-all-1",
+            Options {
+                pack: PackMode::All,
+                pack_min: 1,
+                ..all.clone()
+            },
+            SimOptions::default(),
+        );
     }
     out
 }
@@ -417,6 +448,7 @@ fn perf_switches_match_the_reference() {
         let n = diff::sweep_with(&diff::standard_configs(), 20, 15, &opts, &so);
         assert_eq!(n, 120, "{name}");
         for (i, d) in designs.iter().enumerate() {
+            crate::compile::tests::check_program_invariants(&compile(d, &opts).unwrap());
             diff::check_design_with(d, i as u64, 40, &opts, &so)
                 .unwrap_or_else(|e| panic!("{name}, design {i}: {e}"));
         }
@@ -432,4 +464,26 @@ fn perf_switches_10k() {
         let n = diff::sweep_with(&diff::standard_configs(), 1700, 30, &opts, &so);
         assert!(n >= 10_000, "{name}");
     }
+}
+
+/// `PackMode::Auto` packs a large 1-bit design (past `AUTO_PACK_BYTES`),
+/// lane slots read back through the debug map, and it matches the
+/// reference.
+#[test]
+fn auto_packing_on_a_large_gate_design() {
+    use crate::testkit::{GenConfig, generate};
+    let d = generate(&GenConfig::gates(11, 600_000, 1)).design;
+    let opts = Options::debug();
+    let p = compile(&d, &opts).unwrap();
+    assert!(p.packed_lanes() > 500_000, "{}", p.packed_lanes());
+    let lane_nets = p
+        .debug
+        .net_slots
+        .iter()
+        .flat_map(|m| m.values())
+        .filter(|&&s| s >= p.slot_count)
+        .count();
+    assert!(lane_nets > 500_000, "{lane_nets}");
+    crate::compile::tests::check_program_invariants(&p);
+    diff::check_design(&d, 5, 3, &opts).unwrap_or_else(|e| panic!("{e}"));
 }

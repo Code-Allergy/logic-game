@@ -14,7 +14,9 @@
 //! 2. **Advance** the tick count, then apply staged root-input writes to
 //!    their port slots.
 //! 3. **Settle.** Run the blocks in order. Instructions in a block share one
-//!    [`Op`] and one rank, and never read each other's results.
+//!    [`Op`] and one rank, and never read each other's results. A packed
+//!    block runs [`Pack`]s instead: each evaluates up to 64 1-bit
+//!    instructions of its op in the lanes of one `u64` (see below).
 //!
 //! Slots are numbered densely: the zero slot, root inputs, constants, state,
 //! then instruction destinations. With [`super::SlotOrder::Production`] and
@@ -25,6 +27,22 @@
 //!
 //! Construction is: zero all slots, load constants, apply inputs (all zero),
 //! settle at tick 0.
+//!
+//! # Lane packing
+//!
+//! With [`super::Options::pack`], 1-bit instructions of a packable op that
+//! share a rank are packed into the lanes of a 64-bit word slot. Each
+//! [`Pack`] builds its operand words from in-place lanes of other words
+//! (`base`), one bit shared by many lanes (`splat`) and single gathered
+//! bits ([`Gather`]), stores the result word, and copies out ([`Scatter`])
+//! the lanes something reads as a plain slot: a scalar instruction, a
+//! commit or a root output. So commits, ports and state keys always name
+//! real slots, and commits still read only slots no commit writes.
+//!
+//! A packed net nothing reads as a plain slot has no slot of its own. The
+//! debug map holds a **lane slot** for it, numbered from `slot_count` up:
+//! lane slot `slot_count + 64 * k + l` is bit `l` of real slot
+//! `lane_words[k]` ([`Program::locate`]); `Sim::read` resolves both kinds.
 //!
 //! The settle also computes each state element's next value (and snapshots
 //! RAM write ports) into slots that only commits read, so a root input
@@ -122,13 +140,77 @@ pub struct Instr {
     pub c: u32,
 }
 
-/// A run of instructions with the same op and rank: `instrs[start..start+len]`.
+/// A run of instructions with the same op and rank: `instrs[start..start+len]`,
+/// or, when `packed`, `packs[start..start+len]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Block {
     pub op: Op,
     pub rank: u32,
     pub start: u32,
     pub len: u32,
+    /// The block runs [`Pack`]s instead of [`Instr`]s.
+    pub packed: bool,
+}
+
+/// Up to 64 independent 1-bit instructions of one op and rank, evaluated
+/// as one `u64` operation (issue #41, `Options::pack`). Lane `l` of each
+/// operand word holds lane `l`'s operand; the result word goes to `dst`,
+/// and the lanes that something reads as a plain 1-bit slot are copied
+/// out by `scatters`.
+///
+/// Ops and their lane semantics: `Copy` `a`, `Not` `!a`, `And`, `Or`,
+/// `Xor` as usual, `Nand`, `Nor`, `Xnor` negated, `Mux` `a ? c : b`
+/// (`(a & c) | (!a & b)`), `Switch` `a & b`. Lanes no instruction uses hold
+/// unspecified bits and are never read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pack {
+    pub dst: u32,
+    /// Lanes holding an instruction.
+    pub lanes: u64,
+    pub a: PackOperand,
+    pub b: PackOperand,
+    pub c: PackOperand,
+    /// `scatters[scatter_start..scatter_start + scatter_len]`.
+    pub scatter_start: u32,
+    pub scatter_len: u32,
+}
+
+/// How a [`Pack`] assembles one operand word:
+///
+/// ```text
+/// (slots[base] & keep)
+///   | (if (slots[splat] >> splat_bit) & 1 == 1 { splat_mask } else { 0 })
+///   | for g in gathers[gather_start..][..gather_len]:
+///         ((slots[g.slot] >> g.bit) & 1) << g.lane
+/// ```
+///
+/// `base` covers lanes already in place in another packed word, `splat`
+/// one bit read by many lanes (a register enable), and gathers the rest.
+/// Unused parts are `ZERO_SLOT` with a zero mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PackOperand {
+    pub base: u32,
+    pub keep: u64,
+    pub splat: u32,
+    pub splat_bit: u8,
+    pub splat_mask: u64,
+    pub gather_start: u32,
+    pub gather_len: u32,
+}
+
+/// One gathered lane: bit `bit` of `slot` into lane `lane`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gather {
+    pub slot: u32,
+    pub bit: u8,
+    pub lane: u8,
+}
+
+/// One scattered lane: `slots[slot] = (word >> lane) & 1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scatter {
+    pub slot: u32,
+    pub lane: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,7 +291,9 @@ pub struct InstanceInfo {
     pub parent: Option<(u32, NodeId)>,
 }
 
-/// `(instance path, NetId) <-> slot` for every authored net.
+/// `(instance path, NetId) <-> slot` for every authored net. A slot may be
+/// a lane slot (at or above [`Program::slot_count`]; see
+/// [`Program::locate`]).
 #[derive(Debug, Clone, Default)]
 pub struct DebugMap {
     pub instances: Vec<InstanceInfo>,
@@ -292,11 +376,43 @@ pub struct Program {
     pub ports: PortMap,
     pub debug: DebugMap,
     pub state_keys: Vec<StateKey>,
+    /// Packed words run by packed blocks (empty unless `Options::pack`).
+    pub packs: Vec<Pack>,
+    pub gathers: Vec<Gather>,
+    pub scatters: Vec<Scatter>,
+    /// Real slots of the packed words that hold lane slots: lane slot
+    /// `slot_count + 64 * k + l` is bit `l` of `lane_words[k]`.
+    pub lane_words: Vec<u32>,
 }
 
 impl Program {
     /// Number of ranks (the settle's critical path length).
     pub fn depth(&self) -> u32 {
         self.blocks.last().map_or(0, |b| b.rank + 1)
+    }
+
+    /// Number of 1-bit instructions folded into packed words.
+    pub fn packed_lanes(&self) -> usize {
+        self.packs
+            .iter()
+            .map(|p| p.lanes.count_ones() as usize)
+            .sum()
+    }
+
+    /// Total work items: scalar instructions plus packed lanes.
+    pub fn work(&self) -> usize {
+        self.instrs.len() + self.packed_lanes()
+    }
+
+    /// Real slot and bit holding `slot`: a lane slot (at or above
+    /// `slot_count`) resolves to its packed word, any other slot to itself
+    /// with bit 0 meaning the whole word. `None` if out of range.
+    pub fn locate(&self, slot: u32) -> Option<(u32, Option<u8>)> {
+        if slot < self.slot_count {
+            return Some((slot, None));
+        }
+        let lane = (slot - self.slot_count) as usize;
+        let word = *self.lane_words.get(lane / 64)?;
+        Some((word, Some((lane % 64) as u8)))
     }
 }

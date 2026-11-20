@@ -166,9 +166,15 @@ impl Sim {
         self.output(port)
     }
 
-    /// Raw slot value (see [`crate::compile::DebugMap`]).
+    /// Raw slot value (see [`crate::compile::DebugMap`]). A lane slot (at or
+    /// above `slot_count`, see [`Program::locate`]) reads its bit of the
+    /// packed word. Panics if `slot` is neither.
     pub fn read(&self, slot: u32) -> u64 {
-        self.slots[slot as usize]
+        match self.program.locate(slot) {
+            Some((s, None)) => self.slots[s as usize],
+            Some((s, Some(lane))) => (self.slots[s as usize] >> lane) & 1,
+            None => panic!("slot {slot} out of range"),
+        }
     }
 
     /// Value of an authored net, by instance path and `NetId`.
@@ -316,8 +322,50 @@ fn check(p: &Program) -> Result<(), BadProgram> {
     if p.imms.len() != p.instrs.len() {
         return bad("imms and instrs differ in length".into());
     }
+    for pk in &p.packs {
+        if !slot_ok(pk.dst) || pk.dst == ZERO_SLOT {
+            return bad(format!("bad packed dst in {pk:?}"));
+        }
+        for o in [&pk.a, &pk.b, &pk.c] {
+            let end = o.gather_start as u64 + o.gather_len as u64;
+            if !slot_ok(o.base) || !slot_ok(o.splat) || o.splat_bit >= 64 {
+                return bad(format!("bad packed operand in {pk:?}"));
+            }
+            if end > p.gathers.len() as u64 {
+                return bad(format!("gathers out of range in {pk:?}"));
+            }
+        }
+        let end = pk.scatter_start as u64 + pk.scatter_len as u64;
+        if end > p.scatters.len() as u64 {
+            return bad(format!("scatters out of range in {pk:?}"));
+        }
+    }
+    for g in &p.gathers {
+        if !slot_ok(g.slot) || g.bit >= 64 || g.lane >= 64 {
+            return bad(format!("bad gather {g:?}"));
+        }
+    }
+    for x in &p.scatters {
+        if !slot_ok(x.slot) || x.slot == ZERO_SLOT || x.lane >= 64 {
+            return bad(format!("bad scatter {x:?}"));
+        }
+    }
+    for &w in &p.lane_words {
+        if !slot_ok(w) {
+            return bad(format!("bad lane word {w}"));
+        }
+    }
+    if p.slot_count as u64 + 64 * p.lane_words.len() as u64 > u32::MAX as u64 + 1 {
+        return bad("too many lane slots".into());
+    }
     for b in &p.blocks {
         let end = b.start as u64 + b.len as u64;
+        if b.packed {
+            if end > p.packs.len() as u64 || !code::packable_op(b.op) {
+                return bad(format!("packed block {b:?} out of range"));
+            }
+            continue;
+        }
         if end > p.instrs.len() as u64 {
             return bad(format!("block {b:?} out of range"));
         }

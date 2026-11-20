@@ -17,7 +17,7 @@
 //! Every kernel takes an instruction sub-range `lo..hi` of its block, so a
 //! block can be split between threads (`super::pool`).
 
-use crate::compile::{Instr, Op, Program};
+use crate::compile::{Gather, Instr, Op, Pack, PackOperand, Program};
 use crate::netlist::mask;
 
 /// One block of [`Code`]: `len` instructions sharing `op`.
@@ -35,6 +35,8 @@ pub(super) enum Form {
     Seq { dst0: u32, opnd: u32, imm: Imm },
     /// Instructions `instrs[start..start + len]` and their `imms`.
     Plain { start: u32 },
+    /// Packed words `packs[start..start + len]`.
+    Packed { start: u32 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +81,14 @@ impl Code {
     pub fn new(p: &Program) -> Self {
         let mut code = Code::default();
         for b in &p.blocks {
+            if b.packed {
+                code.blocks.push(XBlock {
+                    op: b.op,
+                    len: b.len,
+                    form: Form::Packed { start: b.start },
+                });
+                continue;
+            }
             let range = b.start as usize..(b.start + b.len) as usize;
             let ins = &p.instrs[range.clone()];
             let imms = &p.imms[range];
@@ -130,7 +140,11 @@ impl Code {
                 .map(|b| XBlock {
                     op: b.op,
                     len: b.len,
-                    form: Form::Plain { start: b.start },
+                    form: if b.packed {
+                        Form::Packed { start: b.start }
+                    } else {
+                        Form::Plain { start: b.start }
+                    },
                 })
                 .collect(),
             ..Code::default()
@@ -183,7 +197,88 @@ pub(super) unsafe fn exec(env: &Env<'_>, b: &XBlock, lo: u32, hi: u32, s: *mut u
                 plain(env, b.op, s, ins, imms)
             }
         }
+        Form::Packed { start } => {
+            let range = start as usize + lo..start as usize + hi;
+            // SAFETY: `check` validated the block range, every slot, bit,
+            // lane and gather/scatter range of these packs.
+            unsafe {
+                let packs = env.program.packs.get_unchecked(range);
+                packed(env.program, b.op, s, packs)
+            }
+        }
     }
+}
+
+/// Assemble one packed operand word (see [`PackOperand`]).
+#[inline(always)]
+unsafe fn operand(s: *const u64, o: &PackOperand, g: *const Gather) -> u64 {
+    unsafe {
+        let mut v = *s.add(o.base as usize) & o.keep;
+        let splat = (*s.add(o.splat as usize) >> o.splat_bit) & 1;
+        v |= splat.wrapping_neg() & o.splat_mask;
+        let g = g.add(o.gather_start as usize);
+        for k in 0..o.gather_len as usize {
+            let g = &*g.add(k);
+            v |= ((*s.add(g.slot as usize) >> g.bit) & 1) << g.lane;
+        }
+        v
+    }
+}
+
+/// Packed kernels: assemble operands, apply the op to all lanes, store the
+/// word and scatter the lanes read as plain slots.
+#[inline(always)]
+unsafe fn packed(p: &Program, op: Op, s: *mut u64, packs: &[Pack]) {
+    #[inline(always)]
+    unsafe fn each(
+        p: &Program,
+        s: *mut u64,
+        packs: &[Pack],
+        n: u8,
+        f: impl Fn(u64, u64, u64) -> u64,
+    ) {
+        let g = p.gathers.as_ptr();
+        let sc = p.scatters.as_ptr();
+        for pk in packs {
+            unsafe {
+                let a = operand(s, &pk.a, g);
+                let b = if n >= 2 { operand(s, &pk.b, g) } else { 0 };
+                let c = if n >= 3 { operand(s, &pk.c, g) } else { 0 };
+                let r = f(a, b, c);
+                *s.add(pk.dst as usize) = r;
+                let sc = sc.add(pk.scatter_start as usize);
+                for k in 0..pk.scatter_len as usize {
+                    let x = &*sc.add(k);
+                    *s.add(x.slot as usize) = (r >> x.lane) & 1;
+                }
+            }
+        }
+    }
+    // SAFETY: forwarded from `exec`.
+    unsafe {
+        match op {
+            Op::Copy => each(p, s, packs, 1, |a, _, _| a),
+            Op::Not => each(p, s, packs, 1, |a, _, _| !a),
+            Op::And => each(p, s, packs, 2, |a, b, _| a & b),
+            Op::Or => each(p, s, packs, 2, |a, b, _| a | b),
+            Op::Xor => each(p, s, packs, 2, |a, b, _| a ^ b),
+            Op::Nand => each(p, s, packs, 2, |a, b, _| !(a & b)),
+            Op::Nor => each(p, s, packs, 2, |a, b, _| !(a | b)),
+            Op::Xnor => each(p, s, packs, 2, |a, b, _| !(a ^ b)),
+            Op::Switch => each(p, s, packs, 2, |a, b, _| a & b),
+            Op::Mux => each(p, s, packs, 3, |a, b, c| (a & c) | (!a & b)),
+            _ => unreachable!("checked: not a packable op"),
+        }
+    }
+}
+
+/// Ops a packed block may have.
+pub(super) fn packable_op(op: Op) -> bool {
+    use Op::*;
+    matches!(
+        op,
+        Copy | Not | And | Or | Xor | Nand | Nor | Xnor | Mux | Switch
+    )
 }
 
 /// Streaming kernels: `n` operands per instruction, destination `d + k`.
