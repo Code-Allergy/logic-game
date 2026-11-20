@@ -2,6 +2,7 @@
 //! headless `App` with [`SimulationRuntimePlugin`].
 
 pub mod geometry_tests;
+mod instance_views;
 
 use std::path::PathBuf;
 use std::sync::Arc;

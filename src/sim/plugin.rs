@@ -11,6 +11,10 @@ use crate::sim::{
     GateMoved, LoadWorkspaceEvent, RegisterDefinitions, SaveWorkspaceEvent, SelectedGate,
     SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimRuntime, SimulationConfig,
     TickRateMeter, WireIdentity, WorkspaceRevision,
+    view::{
+        CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView,
+        view_navigation_system, write_back_view_system,
+    },
     authoring::{
         apply_authoring_messages_system, apply_create_gate_system, apply_create_wire_system,
         apply_delete_system, apply_register_definitions_system, apply_set_input_system,
@@ -76,6 +80,7 @@ impl Plugin for SimulationRuntimePlugin {
         app.insert_resource(SimBridge::new(self.runtime))
             .init_resource::<SimDiagnostics>()
             .init_resource::<CircuitLibrary>()
+            .init_resource::<CircuitView>()
             .init_resource::<ActiveCircuit>()
             .init_resource::<WorkspaceRevision>()
             .init_resource::<AuthoringFeedback>()
@@ -94,6 +99,9 @@ impl Plugin for SimulationRuntimePlugin {
             .add_message::<EntityLayerChanged>()
             .add_message::<LoadWorkspaceEvent>()
             .add_message::<SaveWorkspaceEvent>()
+            .add_message::<OpenInstanceView>()
+            .add_message::<OpenDefinitionView>()
+            .add_message::<CloseView>()
             .add_systems(
                 PreUpdate,
                 (drive_local_engine_system, collect_engine_events_system, project_probes_system)
@@ -103,6 +111,7 @@ impl Plugin for SimulationRuntimePlugin {
                 Update,
                 (
                     load_workspace_system,
+                    view_navigation_system,
                     apply_register_definitions_system,
                     apply_create_gate_system,
                     apply_create_wire_system,
@@ -112,6 +121,7 @@ impl Plugin for SimulationRuntimePlugin {
                     apply_authoring_messages_system,
                     sync_gate_names_system,
                     track_authoring_component_changes_system,
+                    write_back_view_system,
                     update_tickrate_system,
                 )
                     .chain(),
@@ -125,7 +135,6 @@ impl Plugin for SimulationViewPlugin {
         let state = self.state.clone();
 
         app.init_resource::<SelectedGate>()
-            .add_message::<crate::editor::OpenSubcircuitEvent>()
             .insert_resource(SpatialGrid::new(100.0))
             .register_type::<crate::sim::LogicDisplay>()
             .register_type::<crate::sim::GateKind>()
@@ -145,6 +154,7 @@ impl Plugin for SimulationViewPlugin {
             .register_type::<crate::sim::WireIdentity>()
             .register_type::<crate::sim::WireEndpoints>()
             .register_type::<crate::sim::WireState>()
+            .register_type::<InstanceViewItem>()
             .add_systems(Startup, pause_bridge_system)
             .add_systems(
                 OnEnter(state.clone()),
@@ -159,7 +169,9 @@ impl Plugin for SimulationViewPlugin {
             .add_systems(
                 Update,
                 (
-                    fit_camera_to_circuit_system.after(load_workspace_system),
+                    fit_camera_to_circuit_system
+                        .after(load_workspace_system)
+                        .after(view_navigation_system),
                     workspace_io_system,
                 ),
             )

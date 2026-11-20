@@ -2,7 +2,7 @@
 //!
 //! Split into small modules:
 //! - `ui`: UI layout and workspace/sub-circuit selection logic.
-//! - `systems`: wire-building selection and subcircuit navigation.
+//! - `systems`: wire-building selection.
 //! - `workspace`: catalog initialization and on-disk workspace helpers.
 //!
 //! The editor never mutates the circuit directly: it sends the authoring
@@ -17,25 +17,13 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use bevy_egui::EguiPrimaryContextPass;
-use uuid::Uuid;
 
 use crate::sim::{GateKind, WorkspaceDocument};
 
-pub use crate::sim::{LoadWorkspaceEvent, SaveWorkspaceEvent};
-pub use systems::{handle_connection_creation, subcircuit_navigation_system};
+pub use crate::sim::{CloseView, LoadWorkspaceEvent, OpenInstanceView, SaveWorkspaceEvent};
+pub use systems::handle_connection_creation;
 pub use ui::editor_ui_system;
 pub use workspace::catalog_init_system;
-
-#[derive(Clone)]
-pub(crate) struct SubcircuitNavigationFrame {
-    /// Definition being edited in the child view.
-    pub definition: Uuid,
-    /// The parent circuit as it was when the child view opened.
-    pub parent: Arc<WorkspaceDocument>,
-    pub parent_workspace: Option<String>,
-    pub parent_workspace_file_name: String,
-    pub parent_breadcrumb: String,
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Editor resource
@@ -52,8 +40,6 @@ pub struct EditorState {
     pub current_workspace: Option<String>,
     pub workspace_file_name: String,
     pub workspace_catalog: Vec<(String, Arc<WorkspaceDocument>)>,
-    pub workspace_breadcrumb: String,
-    pub(crate) subcircuit_navigation_stack: Vec<SubcircuitNavigationFrame>,
     /// Saved workspace names, read from disk once and refreshed after a save
     /// or on request (never per frame).
     pub saved_workspaces: Option<Vec<String>>,
@@ -80,8 +66,6 @@ impl Default for EditorState {
             current_workspace: None,
             workspace_file_name: "workspace".to_string(),
             workspace_catalog: Vec::new(),
-            workspace_breadcrumb: "workspace".to_string(),
-            subcircuit_navigation_stack: Vec::new(),
             saved_workspaces: None,
             status: None,
             connection_source: None,
@@ -102,18 +86,6 @@ impl EditorState {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Messages
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Message)]
-pub struct OpenSubcircuitEvent {
-    pub entity: Entity,
-}
-
-#[derive(Message)]
-pub struct CloseSubcircuitViewEvent;
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Plugin
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -122,9 +94,6 @@ pub struct EditorPlugin;
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>()
-            .add_message::<OpenSubcircuitEvent>()
-            .add_message::<CloseSubcircuitViewEvent>()
-            .add_systems(Update, subcircuit_navigation_system)
             .add_systems(
                 EguiPrimaryContextPass,
                 (catalog_init_system, editor_ui_system, handle_connection_creation),

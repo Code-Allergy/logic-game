@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
-    MainCamera, UiPointerState, editor::OpenSubcircuitEvent,
-    editor::workspace::save_workspace, temp::GateComponentSelectionEvent,
+    MainCamera, UiPointerState, editor::workspace::save_workspace,
+    temp::GateComponentSelectionEvent,
 };
 
 use super::{
@@ -22,6 +22,7 @@ use super::{
     SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter,
     WireEndpoints, WireState, WorkspaceRevision, calculate_connection_geometry, format_value,
     get_gate_sprite, spatial_grid::SpatialGrid,
+    view::{CircuitView, InstanceViewItem, OpenInstanceView},
 };
 
 #[derive(Component)]
@@ -91,11 +92,12 @@ pub fn draw_sim_background_system(mut commands: Commands, query: Query<Entity, W
 /// Fit the camera to the circuit after a workspace load.
 pub fn fit_camera_to_circuit_system(
     active: Res<crate::sim::ActiveCircuit>,
+    view: Res<CircuitView>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<(&mut Projection, &mut Transform), With<MainCamera>>,
     gates: Query<&Transform, (With<GateIdentity>, Without<MainCamera>)>,
 ) {
-    if !active.is_changed() {
+    if !active.is_changed() && !view.is_changed() {
         return;
     }
     let (Ok((mut projection, mut transform)), Ok(window)) = (cameras.single_mut(), windows.single())
@@ -408,7 +410,7 @@ pub struct GateEditWriters<'w> {
     displays: MessageWriter<'w, DisplayConfigChanged>,
     delete_gate: MessageWriter<'w, DeleteGate>,
     delete_wire: MessageWriter<'w, DeleteWire>,
-    open: MessageWriter<'w, OpenSubcircuitEvent>,
+    open: MessageWriter<'w, OpenInstanceView>,
 }
 
 type SelectedGateQuery = (
@@ -418,6 +420,7 @@ type SelectedGateQuery = (
     &'static GateValues,
     Option<&'static InputDrive>,
     Option<&'static DisplayConfig>,
+    Has<InstanceViewItem>,
 );
 
 fn width_drag(ui: &mut egui::Ui, label: &str, value: &mut u8, range: std::ops::RangeInclusive<u8>) {
@@ -503,6 +506,7 @@ pub fn ui_for_selected_gate(
     mut contexts: EguiContexts,
     mut sel: ResMut<SelectedGate>,
     library: Res<CircuitLibrary>,
+    view: Res<CircuitView>,
     keys: Res<ButtonInput<KeyCode>>,
     gates: Query<SelectedGateQuery>,
     names: Query<(&GateIdentity, &GateLabel, &GateType)>,
@@ -514,7 +518,7 @@ pub fn ui_for_selected_gate(
         return Ok(());
     }
     let Some(entity) = sel.0 else { return Ok(()) };
-    let Ok((identity, ty, label, values, drive, display)) = gates.get(entity) else {
+    let Ok((identity, ty, label, values, drive, display, in_view)) = gates.get(entity) else {
         sel.0 = None;
         return Ok(());
     };
@@ -547,7 +551,14 @@ pub fn ui_for_selected_gate(
             writers.labels.write(GateLabelChanged { gate_uuid: identity.uuid, label: label_text });
         }
 
-        if let (Some(drive), GateKind::Input { w }) = (drive, &ty.kind) {
+        if in_view && ty.kind.is_input() {
+            ui.separator();
+            ui.label(if view.is_live() {
+                "Driven by the parent circuit (live value below); change it there."
+            } else {
+                "Driven by the parent circuit."
+            });
+        } else if let (Some(drive), GateKind::Input { w }) = (drive, &ty.kind) {
             ui.separator();
             let mut value = drive.value;
             if *w == 1 {
@@ -617,8 +628,9 @@ pub fn ui_for_selected_gate(
             ui.separator();
             let name = library.get(definition).map_or("(missing definition)", |d| d.name.as_str());
             ui.label(format!("Subcircuit: {name}"));
-            if ui.button("Open in new view").clicked() {
-                writers.open.write(OpenSubcircuitEvent { entity });
+            ui.label(format!("Definition id: {definition}"));
+            if ui.button("Open instance (live values)").clicked() {
+                writers.open.write(OpenInstanceView { entity });
             }
         }
 

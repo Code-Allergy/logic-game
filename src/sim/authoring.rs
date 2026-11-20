@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bevy::ecs::entity_disabling::Disabled;
+use bevy::ecs::query::QueryFilter;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use uuid::Uuid;
@@ -18,6 +20,7 @@ use super::document::{
     WorkspaceDocument,
 };
 use super::GateKind;
+use super::view::{CircuitView, InstanceViewItem};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Resources
@@ -62,7 +65,7 @@ pub struct AuthoringFeedback {
 }
 
 impl AuthoringFeedback {
-    fn refuse(&mut self, message: String) {
+    pub(crate) fn refuse(&mut self, message: String) {
         warn!("{message}");
         self.message = Some(message);
     }
@@ -273,18 +276,18 @@ type GateDocQuery = (
 );
 type WireDocQuery = (&'static WireIdentity, &'static WireEndpoints, &'static CircuitLayer);
 
-/// Reads the open circuit's authoring components as a document. Used for
-/// save and subcircuit navigation; never per frame.
+/// Gate and wire entities read as a document. With the default filter
+/// (`F = ()`) these are the entities of the open view: the root circuit's
+/// while it is open, the view items while a subcircuit view is open (the
+/// root's are parked with [`Disabled`]).
 #[derive(SystemParam)]
-pub struct CircuitReader<'w, 's> {
-    pub active: Res<'w, ActiveCircuit>,
-    pub library: Res<'w, CircuitLibrary>,
-    gates: Query<'w, 's, GateDocQuery>,
-    wires: Query<'w, 's, WireDocQuery>,
+pub struct DocumentQueries<'w, 's, F: QueryFilter + 'static = ()> {
+    gates: Query<'w, 's, GateDocQuery, F>,
+    wires: Query<'w, 's, WireDocQuery, F>,
 }
 
-impl CircuitReader<'_, '_> {
-    pub fn document(&self) -> CircuitDocument {
+impl<F: QueryFilter + 'static> DocumentQueries<'_, '_, F> {
+    pub fn document(&self, id: Uuid, name: String) -> CircuitDocument {
         let mut nodes: Vec<DocNode> = self
             .gates
             .iter()
@@ -312,16 +315,46 @@ impl CircuitReader<'_, '_> {
             })
             .collect();
         wires.sort_by_key(|w| w.id);
-        CircuitDocument { id: self.active.uuid, name: self.active.name.clone(), nodes, wires }
+        CircuitDocument { id, name, nodes, wires }
+    }
+}
+
+/// The root circuit's entities, whether or not they are parked.
+pub type RootItems = (Without<InstanceViewItem>, Allow<Disabled>);
+
+/// Reads circuits as documents. Used for save, view switches and tests;
+/// never per frame.
+#[derive(SystemParam)]
+pub struct CircuitReader<'w, 's> {
+    pub active: Res<'w, ActiveCircuit>,
+    pub library: Res<'w, CircuitLibrary>,
+    pub view: Res<'w, CircuitView>,
+    open: DocumentQueries<'w, 's>,
+    root: DocumentQueries<'w, 's, RootItems>,
+}
+
+impl CircuitReader<'_, '_> {
+    /// The open circuit: the root, or the definition of the open view.
+    pub fn document(&self) -> CircuitDocument {
+        match self.view.frames().last() {
+            Some(frame) => self.open.document(frame.definition, frame.name.clone()),
+            None => self.root_document(),
+        }
     }
 
-    /// The open circuit plus every definition it instances.
+    /// The root circuit, also while a subcircuit view is open.
+    pub fn root_document(&self) -> CircuitDocument {
+        self.root.document(self.active.uuid, self.active.name.clone())
+    }
+
+    /// The root circuit plus every definition it instances. Edits made in an
+    /// open view are already in the library.
     pub fn workspace(&self) -> WorkspaceDocument {
-        let mut root = self.document();
+        let mut root = self.root_document();
         let definitions = self.library.reachable_from(&root);
         if definitions.contains_key(&root.id) {
-            // The circuit instances a definition that shares its id (it was
-            // opened from the catalog and placed into itself): keep ids unique.
+            // Cannot happen through the editor (recursion is refused), but
+            // keep ids unique if it does.
             root.id = Uuid::new_v4();
         }
         WorkspaceDocument { root, definitions }
@@ -438,10 +471,12 @@ fn title_case(name: &str) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply_create_gate_system(
     mut commands: Commands,
     mut events: MessageReader<CreateGate>,
     active: Res<ActiveCircuit>,
+    view: Res<CircuitView>,
     mut revision: ResMut<WorkspaceRevision>,
     mut feedback: ResMut<AuthoringFeedback>,
     library: Res<CircuitLibrary>,
@@ -453,11 +488,19 @@ pub fn apply_create_gate_system(
             feedback.refuse(format!("Cannot place {}: {reason}", event.kind.display_name()));
             continue;
         }
-        if let GateKind::SubCircuit { definition } = event.kind
-            && library.get(definition).is_none()
-        {
-            feedback.refuse(format!("Cannot place subcircuit: unknown definition {definition}"));
-            continue;
+        if let GateKind::SubCircuit { definition } = event.kind {
+            if library.get(definition).is_none() {
+                feedback.refuse(format!("Cannot place subcircuit: unknown definition {definition}"));
+                continue;
+            }
+            // The open circuit and every circuit around it in the view.
+            let refused = view.circuit_chain(active.uuid).into_iter().rev().find_map(|into| {
+                library.recursion_error(definition, into, &active.name)
+            });
+            if let Some(message) = refused {
+                feedback.refuse(message);
+                continue;
+            }
         }
         let mut node = DocNode::new(event.kind.clone(), event.position);
         node.label = event.label.clone().filter(|l| !l.trim().is_empty());
@@ -470,7 +513,12 @@ pub fn apply_create_gate_system(
             taken.push(label.clone());
             node.label = Some(label);
         }
-        spawn_gate(&mut commands, &node, active.uuid);
+        let circuit = view.definition().unwrap_or(active.uuid);
+        let entity = spawn_gate(&mut commands, &node, circuit);
+        if !view.is_root() {
+            commands.entity(entity).insert(InstanceViewItem);
+        }
+        feedback.message = None;
         revision.mark_dirty();
     }
 }
@@ -480,6 +528,7 @@ pub fn apply_create_wire_system(
     mut commands: Commands,
     mut events: MessageReader<CreateWire>,
     active: Res<ActiveCircuit>,
+    view: Res<CircuitView>,
     library: Res<CircuitLibrary>,
     mut revision: ResMut<WorkspaceRevision>,
     mut feedback: ResMut<AuthoringFeedback>,
@@ -524,7 +573,11 @@ pub fn apply_create_wire_system(
             }
         }
         let wire = DocWire::new(event.source_gate, event.source_pin, event.sink_gate, event.sink_pin);
-        spawn_wire(&mut commands, &wire, active.uuid);
+        let circuit = view.definition().unwrap_or(active.uuid);
+        let entity = spawn_wire(&mut commands, &wire, circuit);
+        if !view.is_root() {
+            commands.entity(entity).insert(InstanceViewItem);
+        }
         feedback.message = None;
         revision.mark_dirty();
     }
@@ -559,10 +612,18 @@ pub fn apply_delete_system(
 
 pub fn apply_set_input_system(
     mut events: MessageReader<SetInputValue>,
-    mut inputs: Query<(&GateType, &mut InputDrive)>,
+    mut inputs: Query<(&GateType, &mut InputDrive, Has<InstanceViewItem>)>,
+    mut feedback: ResMut<AuthoringFeedback>,
 ) {
     for event in events.read() {
-        let Ok((ty, mut drive)) = inputs.get_mut(event.entity) else { continue };
+        let Ok((ty, mut drive, in_view)) = inputs.get_mut(event.entity) else { continue };
+        if in_view {
+            feedback.refuse(
+                "Inputs inside a subcircuit are driven by the parent circuit; change them there."
+                    .into(),
+            );
+            continue;
+        }
         let w = ty.kind.width().unwrap_or(64);
         drive.set_if_neq(InputDrive { value: event.value & logi_sim::netlist::mask(w) });
     }
@@ -595,19 +656,36 @@ pub fn apply_set_kind_system(
     }
 }
 
-/// Register definitions sent by the editor.
+/// Register definitions sent by the editor (placing from the catalog or a
+/// saved workspace). Definitions are identified by id: one already in the
+/// library is kept as it is (it may have been edited), only new ids are
+/// added. Registrations that would make a definition contain itself are
+/// refused.
 pub fn apply_register_definitions_system(
     mut events: MessageReader<RegisterDefinitions>,
     mut library: ResMut<CircuitLibrary>,
+    mut feedback: ResMut<AuthoringFeedback>,
 ) {
     for event in events.read() {
-        // Only touch the resource (and trigger a rebuild) on a real change.
-        let changed = event.definitions.iter().any(|(id, def)| {
-            library.definitions.get(id).is_none_or(|have| **have != **def)
-        });
-        if changed {
-            library.merge(&event.definitions);
+        let new: HashMap<Uuid, Arc<CircuitDocument>> = event
+            .definitions
+            .iter()
+            .filter(|(id, _)| !library.definitions.contains_key(id))
+            .map(|(id, d)| (*id, Arc::clone(d)))
+            .collect();
+        if new.is_empty() {
+            continue;
         }
+        let mut merged = CircuitLibrary { definitions: library.definitions.clone() };
+        merged.merge(&new);
+        if let Some(cycle) = merged.find_cycle() {
+            let name = merged.get(cycle).map_or_else(String::new, |d| d.name.clone());
+            feedback.refuse(format!(
+                "Cannot add subcircuit definitions: \"{name}\" would contain itself."
+            ));
+            continue;
+        }
+        library.merge(&new);
     }
 }
 
@@ -710,10 +788,15 @@ pub fn load_workspace_system(
     mut active: ResMut<ActiveCircuit>,
     mut library: ResMut<CircuitLibrary>,
     mut revision: ResMut<WorkspaceRevision>,
-    gates: Query<Entity, With<GateIdentity>>,
-    wires: Query<Entity, With<WireIdentity>>,
+    mut view: ResMut<CircuitView>,
+    gates: Query<Entity, (With<GateIdentity>, Allow<Disabled>)>,
+    wires: Query<Entity, (With<WireIdentity>, Allow<Disabled>)>,
 ) {
     let Some(event) = events.read().last() else { return };
+    // Close any subcircuit view; parked root entities go too.
+    if !view.is_root() {
+        view.reset();
+    }
     for entity in gates.iter().chain(wires.iter()) {
         commands.entity(entity).despawn();
     }

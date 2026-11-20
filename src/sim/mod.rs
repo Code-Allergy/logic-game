@@ -9,6 +9,8 @@
 //!   subcircuit definitions) and the [`CircuitLibrary`].
 //! - [`bridge`] – `SimBridge`: maps the ECS onto a `logi_sim` v2 `Design`,
 //!   sends revisions to the v2 engine and reads probes back.
+//! - [`view`] – instance views: opening a subcircuit shows its definition
+//!   with live values probed from the running root simulation.
 //! - [`systems`] – Bevy systems for rendering and user interaction.
 //! - [`plugin`] – plugins that wire everything into Bevy.
 //! - [`spatial_grid`] – spatial acceleration for entity picking.
@@ -25,6 +27,7 @@ pub mod fixtures;
 pub mod kind;
 pub mod spatial_grid;
 pub mod systems;
+pub mod view;
 
 pub use authoring::*;
 pub use bridge::{CompileFailure, SimBridge, SimDiagnostics, SimRuntime};
@@ -33,6 +36,7 @@ pub use document::{
     WorkspaceDocument,
 };
 pub use kind::GateKind;
+pub use view::{CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame};
 pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin};
 
 use bevy::prelude::*;

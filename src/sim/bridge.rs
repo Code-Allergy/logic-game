@@ -19,10 +19,26 @@
 //! keeps register/RAM state. On a compile error the old program keeps
 //! running and the error is published in [`SimDiagnostics`].
 //!
+//! ## Definitions
+//!
+//! Each [`CircuitLibrary`] entry that is instanced is built once into a
+//! design definition, keyed by its stable id. When a library entry changes
+//! (an edit in an instance view), the bridge updates that definition in
+//! place: nodes are matched by their document id, so unchanged nodes keep
+//! their `NodeId`, and the engine carries state across wherever the node
+//! path is unchanged. Port nodes are stateless; if the port list changes
+//! they are all rebuilt, which renumbers the instance pins, and every
+//! wire into or out of an instance of that definition is reconnected.
+//! Definitions no longer reachable from the root are dropped.
+//!
 //! ## Readback
 //!
-//! The bridge registers one probe per output net of every gate in the open
-//! circuit. Probe indices are written to [`GateProbes`] and
+//! The open view decides the probes. At the root: one probe per output net
+//! of every root gate. In a subcircuit view (see [`super::view`]): one
+//! probe per output net of the definition, at the instance path of the
+//! open instance, so the values are those of that instance in the running
+//! simulation. Changing the view changes the probe list only; it never
+//! recompiles. Probe indices are written to [`GateProbes`] and
 //! [`WireState::probe`]; [`project_probes_system`] copies the latest probe
 //! frame into [`GateValues`] and [`WireState::value`].
 
@@ -30,16 +46,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use std::sync::Arc;
+
+use bevy::ecs::entity_disabling::Disabled;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use logi_sim::compile::{CompileError, Options};
 #[cfg(not(target_arch = "wasm32"))]
 use logi_sim::engine_v2::Engine;
 use logi_sim::engine_v2::{EngineEvent, LocalEngine, Probe, ProbeFrame, Rate};
-use logi_sim::netlist::{DefId, Design, NodeId, PinRef};
+use logi_sim::netlist::{DefId, Design, NodeId, NodeKind, PinRef};
 use uuid::Uuid;
 
-use super::document::CircuitLibrary;
+use super::document::{CircuitDocument, CircuitLibrary, DocNode};
+use super::view::{CircuitView, InstanceViewItem};
 use super::{
     GateIdentity, GateKind, GateProbes, GateType, GateValues, InputDrive, SimulationConfig,
     WireEndpoints, WireState,
@@ -80,6 +100,38 @@ struct WireEntry {
     sink: PinRef,
 }
 
+/// Nodes (ports with their labels) and wires: what the design is built
+/// from. Positions and layers are not part of it.
+type StructureKey = (Vec<(Uuid, GateKind, Option<String>)>, Vec<(Uuid, u8, Uuid, u8)>);
+
+fn structure_key(doc: &CircuitDocument) -> StructureKey {
+    let mut nodes: Vec<_> = doc
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, GateKind::Display { .. }))
+        .map(|n| {
+            let port = matches!(n.kind, GateKind::Input { .. } | GateKind::Output { .. });
+            (n.id, n.kind.clone(), if port { n.label.clone() } else { None })
+        })
+        .collect();
+    nodes.sort_by_key(|n| n.0);
+    let mut wires: Vec<_> =
+        doc.wires.iter().map(|w| (w.from.node, w.from.pin, w.to.node, w.to.pin)).collect();
+    wires.sort();
+    (nodes, wires)
+}
+
+/// A library definition built into the design.
+struct BuiltDef {
+    def: DefId,
+    key: StructureKey,
+    doc: Arc<CircuitDocument>,
+    /// Document node id -> design node, with the kind it was built as.
+    nodes: HashMap<Uuid, (NodeId, GateKind)>,
+    /// Port nodes as built, in port order.
+    ports: Vec<(Uuid, GateKind)>,
+}
+
 /// Compile and load status, for the editor to show.
 #[derive(Resource, Debug, Default)]
 pub struct SimDiagnostics {
@@ -114,8 +166,18 @@ pub struct SimBridge {
     node_by_uuid: HashMap<Uuid, NodeId>,
     wires: HashMap<Entity, WireEntry>,
     /// Definitions built from the library, by document id.
-    defs: HashMap<Uuid, DefId>,
+    built: HashMap<Uuid, BuiltDef>,
+    def_ids: HashMap<DefId, Uuid>,
+    /// Probe index by `(node, output pin)` of the probed definition (the
+    /// root, or the definition of the open view).
     probe_index: HashMap<(NodeId, u8), u32>,
+    /// A subcircuit view is open.
+    view_open: bool,
+    /// Gate ids from the root to the open instance (live views only).
+    view_path: Option<Vec<Uuid>>,
+    /// The open instance as resolved at the last probe rebuild: node path
+    /// and definition id.
+    view_resolved: Option<(Vec<NodeId>, Uuid)>,
     /// Bumped whenever probe bindings may have changed.
     binding_generation: u64,
     running: bool,
@@ -150,8 +212,12 @@ impl SimBridge {
             node_entity: HashMap::new(),
             node_by_uuid: HashMap::new(),
             wires: HashMap::new(),
-            defs: HashMap::new(),
+            built: HashMap::new(),
+            def_ids: HashMap::new(),
             probe_index: HashMap::new(),
+            view_open: false,
+            view_path: None,
+            view_resolved: None,
             binding_generation: 0,
             running: false,
             tick_rate: Some(SimulationConfig::default().tick_rate),
@@ -222,6 +288,13 @@ impl SimBridge {
         }
     }
 
+    /// Forget a gate's recorded kind so the next upsert builds it again.
+    pub fn forget_gate(&mut self, entity: Entity) {
+        if let Some(entry) = self.gates.get_mut(&entity) {
+            entry.kind = None;
+        }
+    }
+
     /// Create or replace the node for a gate. Returns `true` when a new node
     /// was created (its wires must be reconnected).
     pub fn upsert_gate(
@@ -241,8 +314,7 @@ impl SimBridge {
         let root = self.root();
         let node = match kind {
             GateKind::SubCircuit { definition } => {
-                let mut visiting = HashSet::new();
-                self.ensure_definition(*definition, library, &mut visiting)
+                self.sync_def(*definition, library, &mut Vec::new(), &mut HashSet::new(), &mut HashSet::new())
                     .and_then(|def| match self.design.add_instance(root, def) {
                         Ok(n) => Some(n),
                         Err(e) => {
@@ -291,24 +363,253 @@ impl SimBridge {
         Ok(self.design.root_def().nets[net].width)
     }
 
-    /// Drop every definition built from the library; returns the gates whose
-    /// instance nodes were removed (they must be re-added).
-    pub fn invalidate_definitions(&mut self) -> Vec<Entity> {
-        let subcircuits: Vec<Entity> = self
-            .gates
-            .iter()
-            .filter(|(_, g)| matches!(g.kind, Some(GateKind::SubCircuit { .. })))
-            .map(|(e, _)| *e)
-            .collect();
-        for &e in &subcircuits {
-            if let Some(entry) = self.gates.get(&e) {
-                let uuid = entry.uuid;
-                self.remove_gate(e);
-                self.gates.insert(e, GateEntry { uuid, kind: None, node: None });
+    /// Bring every built definition up to date with the library. Returns
+    /// the ids of definitions whose interface (ports) changed; wires to
+    /// their instances in the root must be reconnected
+    /// (see [`Self::reset_instance_wires`]).
+    pub fn sync_library(&mut self, library: &CircuitLibrary) -> HashSet<Uuid> {
+        let mut ids: Vec<Uuid> = self.built.keys().copied().collect();
+        ids.sort();
+        let mut done = HashSet::new();
+        let mut iface_changed = HashSet::new();
+        for id in ids {
+            self.sync_def(id, library, &mut Vec::new(), &mut done, &mut iface_changed);
+        }
+        if !iface_changed.is_empty() {
+            let mut parents: Vec<Uuid> = self
+                .built
+                .iter()
+                .filter(|(_, b)| b.doc.instanced_definitions().any(|d| iface_changed.contains(&d)))
+                .map(|(id, _)| *id)
+                .collect();
+            parents.sort();
+            for id in parents {
+                if let Some(b) = self.built.remove(&id) {
+                    self.rewire(&b);
+                    self.built.insert(id, b);
+                }
             }
         }
-        // Remove definitions; parents first, so retry until none is in use.
-        let mut remaining: Vec<DefId> = self.defs.drain().map(|(_, d)| d).collect();
+        iface_changed
+    }
+
+    /// Build definition `id` from the library, or update the built one in
+    /// place. `stack` holds the definitions being built (recursion guard),
+    /// `done` those already synced in this pass.
+    fn sync_def(
+        &mut self,
+        id: Uuid,
+        library: &CircuitLibrary,
+        stack: &mut Vec<Uuid>,
+        done: &mut HashSet<Uuid>,
+        iface_changed: &mut HashSet<Uuid>,
+    ) -> Option<DefId> {
+        if done.contains(&id) {
+            return self.built.get(&id).map(|b| b.def);
+        }
+        if stack.contains(&id) {
+            warn!("Subcircuit definition {id} contains itself; it is not simulated");
+            return None;
+        }
+        let Some(doc) = library.get(id).cloned() else {
+            warn!("Subcircuit definition {id} is missing from the library");
+            return self.built.get(&id).map(|b| b.def);
+        };
+        let key = structure_key(&doc);
+        if let Some(b) = self.built.get_mut(&id)
+            && (Arc::ptr_eq(&b.doc, &doc) || b.key == key)
+        {
+            b.doc = doc;
+            done.insert(id);
+            return Some(b.def);
+        }
+
+        // Children first.
+        stack.push(id);
+        let mut children: HashMap<Uuid, DefId> = HashMap::new();
+        let child_ids: HashSet<Uuid> = doc.instanced_definitions().collect();
+        for child in child_ids {
+            if let Some(def) = self.sync_def(child, library, stack, done, iface_changed) {
+                children.insert(child, def);
+            }
+        }
+        stack.pop();
+
+        let mut b = match self.built.remove(&id) {
+            Some(b) => b,
+            None => {
+                let def = self.design.add_definition(doc.name.clone());
+                self.def_ids.insert(def, id);
+                BuiltDef {
+                    def,
+                    key: Default::default(),
+                    doc: Arc::clone(&doc),
+                    nodes: HashMap::new(),
+                    ports: Vec::new(),
+                }
+            }
+        };
+        let def = b.def;
+        let old_signature = self.design.def(def).map(|d| d.signature()).ok();
+
+        let wanted: HashMap<Uuid, &DocNode> = doc
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, GateKind::Display { .. }))
+            .map(|n| (n.id, n))
+            .collect();
+        let (inputs, outputs) = doc.interface();
+        let ports: Vec<(Uuid, GateKind)> =
+            inputs.iter().chain(outputs.iter()).map(|n| (n.id, n.kind.clone())).collect();
+        let ports_changed = b.ports != ports;
+
+        // Remove nodes that are gone or changed kind; all ports if the port
+        // list changed (ports hold no state).
+        let mut stale: HashSet<Uuid> = b
+            .nodes
+            .iter()
+            .filter(|(uuid, (_, kind))| wanted.get(*uuid).is_none_or(|n| &n.kind != kind))
+            .map(|(uuid, _)| *uuid)
+            .collect();
+        if ports_changed {
+            stale.extend(b.ports.iter().map(|(uuid, _)| *uuid));
+            b.ports.clear();
+        }
+        let mut stale: Vec<Uuid> = stale.into_iter().collect();
+        stale.sort();
+        for uuid in stale {
+            if let Some((node, _)) = b.nodes.remove(&uuid) {
+                let _ = self.design.remove_node(def, node);
+            }
+        }
+
+        if ports_changed {
+            for n in inputs.iter().chain(outputs.iter()) {
+                match n.kind.to_netlist().map(|k| self.design.add_node(def, k)) {
+                    Some(Ok(node)) => {
+                        b.nodes.insert(n.id, (node, n.kind.clone()));
+                        b.ports.push((n.id, n.kind.clone()));
+                    }
+                    _ => warn!("Subcircuit {}: cannot build port {}", doc.name, n.id),
+                }
+            }
+        }
+        for n in inputs.iter().chain(outputs.iter()) {
+            if let Some((node, _)) = b.nodes.get(&n.id) {
+                let _ = self.design.set_name(def, *node, n.label.clone());
+            }
+        }
+        for n in &doc.nodes {
+            if b.nodes.contains_key(&n.id) || n.kind.is_port() {
+                continue;
+            }
+            let node = match &n.kind {
+                GateKind::SubCircuit { definition } => children.get(definition).and_then(|child| {
+                    self.design
+                        .add_instance(def, *child)
+                        .map_err(|e| warn!("Subcircuit {}: cannot instance {definition}: {e}", doc.name))
+                        .ok()
+                }),
+                k => k.to_netlist().and_then(|nk| self.design.add_node(def, nk).ok()),
+            };
+            match node {
+                Some(node) => {
+                    b.nodes.insert(n.id, (node, n.kind.clone()));
+                }
+                None => warn!("Subcircuit {}: cannot build node {}", doc.name, n.id),
+            }
+        }
+
+        b.doc = doc;
+        b.key = key;
+        self.rewire(&b);
+        let new_signature = self.design.def(def).map(|d| d.signature()).ok();
+        if ports_changed || old_signature != new_signature {
+            iface_changed.insert(id);
+        }
+        self.built.insert(id, b);
+        done.insert(id);
+        self.dirty = true;
+        self.probes_dirty = true;
+        Some(def)
+    }
+
+    /// Disconnect every input pin of a built definition and connect its
+    /// document's wires again.
+    fn rewire(&mut self, b: &BuiltDef) {
+        let Ok(d) = self.design.def(b.def) else { return };
+        let pins: Vec<PinRef> = d
+            .nodes
+            .iter()
+            .flat_map(|(node, n)| {
+                n.inputs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, net)| net.is_some())
+                    .map(move |(pin, _)| (node, pin as u8))
+            })
+            .collect();
+        for pin in pins {
+            let _ = self.design.disconnect(b.def, pin);
+        }
+        for w in &b.doc.wires {
+            let (Some((src, _)), Some((dst, _))) = (b.nodes.get(&w.from.node), b.nodes.get(&w.to.node))
+            else {
+                continue;
+            };
+            if let Err(e) = self.design.connect_pins(b.def, (*src, w.from.pin), (*dst, w.to.pin)) {
+                warn!("Subcircuit {}: cannot connect wire {}: {e}", b.doc.name, w.id);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// The pins of a root instance were renumbered: forget and disconnect
+    /// every wire into or out of it. The caller reconnects them.
+    pub fn reset_instance_wires(&mut self, entity: Entity) {
+        let Some(node) = self.node_of(entity) else { return };
+        self.wires.retain(|_, w| w.source.0 != node && w.sink.0 != node);
+        let root = self.root();
+        let Some(n) = self.design.root_def().nodes.get(node) else { return };
+        let mut sinks: Vec<PinRef> = (0..n.inputs.len()).map(|pin| (node, pin as u8)).collect();
+        for &net in &n.outputs {
+            sinks.extend(self.design.root_def().sinks(net));
+        }
+        for sink in sinks {
+            let _ = self.design.disconnect(root, sink);
+        }
+        self.dirty = true;
+    }
+
+    /// Remove built definitions that the root no longer reaches.
+    fn collect_unused_definitions(&mut self) {
+        let mut reachable = HashSet::new();
+        let mut stack = vec![self.design.root];
+        while let Some(def) = stack.pop() {
+            if !reachable.insert(def) {
+                continue;
+            }
+            if let Ok(d) = self.design.def(def) {
+                for n in d.nodes.values() {
+                    if let NodeKind::Instance(child) = n.kind {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+        let unused: Vec<Uuid> =
+            self.built.iter().filter(|(_, b)| !reachable.contains(&b.def)).map(|(id, _)| *id).collect();
+        if unused.is_empty() {
+            return;
+        }
+        let mut remaining: Vec<DefId> = Vec::new();
+        for id in unused {
+            if let Some(b) = self.built.remove(&id) {
+                self.def_ids.remove(&b.def);
+                remaining.push(b.def);
+            }
+        }
+        // Parents first: retry until none is in use.
         while !remaining.is_empty() {
             let before = remaining.len();
             remaining.retain(|&d| self.design.remove_definition(d).is_err());
@@ -316,105 +617,140 @@ impl SimBridge {
                 break;
             }
         }
-        self.dirty = true;
-        subcircuits
     }
 
-    fn ensure_definition(
-        &mut self,
-        id: Uuid,
-        library: &CircuitLibrary,
-        visiting: &mut HashSet<Uuid>,
-    ) -> Option<DefId> {
-        if let Some(&def) = self.defs.get(&id) {
-            return Some(def);
+    // ── Views ────────────────────────────────────────────────────────────
+
+    /// Follow the open view. A change rebuilds the probe list (no
+    /// recompile).
+    pub fn set_view(&mut self, view: &CircuitView) {
+        let open = !view.is_root();
+        let path = view.instance_path();
+        if self.view_open != open || self.view_path != path {
+            self.view_open = open;
+            self.view_path = path;
+            self.probes_dirty = true;
         }
-        let Some(doc) = library.get(id).cloned() else {
-            warn!("Subcircuit definition {id} is missing from the library");
-            return None;
+    }
+
+    /// The definition an instance node instances, by library id.
+    fn instance_target(&self, def: DefId, node: NodeId) -> Option<Uuid> {
+        match self.design.def(def).ok()?.nodes.get(node)?.kind {
+            NodeKind::Instance(child) => self.def_ids.get(&child).copied(),
+            _ => None,
+        }
+    }
+
+    /// Resolve gate ids from the root to the node path of an instance and
+    /// the id of its definition.
+    pub fn resolve_instance_path(&self, path: &[Uuid]) -> Option<(Vec<NodeId>, Uuid)> {
+        let (first, rest) = path.split_first()?;
+        let mut node = *self.node_by_uuid.get(first)?;
+        let mut nodes = vec![node];
+        let mut def = self.instance_target(self.design.root, node)?;
+        for gate in rest {
+            let b = self.built.get(&def)?;
+            node = b.nodes.get(gate)?.0;
+            nodes.push(node);
+            def = self.instance_target(b.def, node)?;
+        }
+        Some((nodes, def))
+    }
+
+    /// The node path of the open instance view, as probed.
+    pub fn view_node_path(&self) -> Option<&[NodeId]> {
+        self.view_resolved.as_ref().map(|(path, _)| path.as_slice())
+    }
+
+    /// The design node of a gate of the open view.
+    fn view_node(&self, gate: Uuid) -> Option<NodeId> {
+        let (_, def) = self.view_resolved.as_ref()?;
+        self.built.get(def)?.nodes.get(&gate).map(|(node, _)| *node)
+    }
+
+    /// Probe index of output pin `pin` of a gate of the open view.
+    pub fn view_probe(&self, gate: Uuid, pin: u8) -> Option<u32> {
+        let node = self.view_node(gate)?;
+        self.probe_index.get(&(node, pin)).copied()
+    }
+
+    /// Whether a wire of the open view is connected in the running
+    /// definition, and the width of its net. `None` when the view is not of
+    /// a live instance.
+    fn view_wire(&self, ep: &WireEndpoints) -> Option<(bool, u8)> {
+        let (_, def) = self.view_resolved.as_ref()?;
+        let b = self.built.get(def)?;
+        let d = self.design.def(b.def).ok()?;
+        let Some(src) = self.view_node(ep.source_gate) else { return Some((false, 0)) };
+        let Some(net) = d.output_net(src, ep.source_pin) else { return Some((false, 0)) };
+        let width = d.nets[net].width;
+        let connected = match self.view_node(ep.sink_gate) {
+            Some(sink) => d.input_net(sink, ep.sink_pin) == Some(net),
+            // A Display: not part of the definition, shown from its source.
+            None => b.doc.node(ep.sink_gate).is_some_and(|n| matches!(n.kind, GateKind::Display { .. })),
         };
-        if !visiting.insert(id) {
-            warn!("Subcircuit definition {} ({id}) contains itself", doc.name);
-            return None;
-        }
-        let def = self.design.add_definition(doc.name.clone());
-        let mut nodes: HashMap<Uuid, NodeId> = HashMap::new();
-        let (inputs, outputs) = doc.interface();
-        let ports: Vec<_> = inputs.iter().chain(outputs.iter()).map(|n| n.id).collect();
-        for n in inputs.iter().chain(outputs.iter()) {
-            if let Some(k) = n.kind.to_netlist()
-                && let Ok(node) = self.design.add_node(def, k)
-            {
-                let _ = self.design.set_name(def, node, n.label.clone());
-                nodes.insert(n.id, node);
-            }
-        }
-        for n in &doc.nodes {
-            if ports.contains(&n.id) || matches!(n.kind, GateKind::Display { .. }) {
-                continue;
-            }
-            let node = match &n.kind {
-                GateKind::SubCircuit { definition } => self
-                    .ensure_definition(*definition, library, visiting)
-                    .and_then(|child| self.design.add_instance(def, child).ok()),
-                k => k.to_netlist().and_then(|nk| self.design.add_node(def, nk).ok()),
-            };
-            match node {
-                Some(node) => {
-                    nodes.insert(n.id, node);
-                }
-                None => warn!("Subcircuit {}: cannot build node {}", doc.name, n.id),
-            }
-        }
-        for w in &doc.wires {
-            let (Some(&src), Some(&dst)) = (nodes.get(&w.from.node), nodes.get(&w.to.node)) else {
-                continue;
-            };
-            if let Err(e) = self.design.connect_pins(def, (src, w.from.pin), (dst, w.to.pin)) {
-                warn!("Subcircuit {}: cannot connect wire {}: {e}", doc.name, w.id);
-            }
-        }
-        visiting.remove(&id);
-        self.defs.insert(id, def);
-        Some(def)
+        Some((connected, width))
     }
 
     // ── Sending revisions ────────────────────────────────────────────────
 
     /// Send the design to the engine if it changed. Returns whether it did.
+    /// Send the design to the engine if it changed, and rebuild the probe
+    /// list if the design or the view changed. Returns whether probe
+    /// bindings may have changed.
     pub fn flush(&mut self) -> bool {
-        if !self.dirty {
+        if !self.dirty && !self.probes_dirty {
             return false;
         }
-        self.dirty = false;
-        if self.probes_dirty {
-            self.probes_dirty = false;
-            self.rebuild_probes();
+        let send = self.dirty;
+        if send {
+            self.collect_unused_definitions();
+            self.dirty = false;
         }
-        self.revision += 1;
+        self.probes_dirty = false;
+        self.rebuild_probes();
         self.binding_generation += 1;
-        let revision = self.revision;
-        let design = &self.design;
-        self.with_runtime(|rt| match rt {
-            #[cfg(not(target_arch = "wasm32"))]
-            Runtime::Threaded(engine) => engine.load(std::sync::Arc::new(design.clone()), revision),
-            Runtime::Local { engine, .. } => engine.load(design, revision),
-        });
+        if send {
+            self.revision += 1;
+            let revision = self.revision;
+            let design = &self.design;
+            self.with_runtime(|rt| match rt {
+                #[cfg(not(target_arch = "wasm32"))]
+                Runtime::Threaded(engine) => engine.load(Arc::new(design.clone()), revision),
+                Runtime::Local { engine, .. } => engine.load(design, revision),
+            });
+        }
         true
     }
 
     fn rebuild_probes(&mut self) {
         self.probe_index.clear();
+        self.view_resolved = None;
         let mut probes = Vec::new();
-        let root = self.design.root_def();
-        let mut nodes: Vec<NodeId> = self.node_entity.keys().copied().collect();
-        nodes.sort();
-        for node in nodes {
-            let Some(n) = root.nodes.get(node) else { continue };
-            for (pin, &net) in n.outputs.iter().enumerate() {
-                self.probe_index.insert((node, pin as u8), probes.len() as u32);
-                probes.push(Probe { path: Vec::new(), net });
+        if !self.view_open {
+            let root = self.design.root_def();
+            let mut nodes: Vec<NodeId> = self.node_entity.keys().copied().collect();
+            nodes.sort();
+            for node in nodes {
+                let Some(n) = root.nodes.get(node) else { continue };
+                for (pin, &net) in n.outputs.iter().enumerate() {
+                    self.probe_index.insert((node, pin as u8), probes.len() as u32);
+                    probes.push(Probe { path: Vec::new(), net });
+                }
             }
+        } else if let Some(resolved) =
+            self.view_path.as_deref().and_then(|p| self.resolve_instance_path(p))
+            && let Some(d) = self.built.get(&resolved.1).and_then(|b| self.design.def(b.def).ok())
+        {
+            let mut nodes: Vec<NodeId> = d.nodes.keys().collect();
+            nodes.sort();
+            for node in nodes {
+                for (pin, &net) in d.nodes[node].outputs.iter().enumerate() {
+                    self.probe_index.insert((node, pin as u8), probes.len() as u32);
+                    probes.push(Probe { path: resolved.0.clone(), net });
+                }
+            }
+            self.view_resolved = Some(resolved);
         }
         self.with_runtime(|rt| match rt {
             #[cfg(not(target_arch = "wasm32"))]
@@ -590,24 +926,83 @@ impl SimBridge {
 // Systems
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Root circuit entities, also while parked behind a subcircuit view.
+type RootOnly = (Without<InstanceViewItem>, Allow<Disabled>);
+
+type ChangedRootGate =
+    (Or<(Changed<GateType>, Changed<InputDrive>)>, Without<InstanceViewItem>, Allow<Disabled>);
+type ChangedViewItem =
+    (With<InstanceViewItem>, Or<(Changed<GateType>, Changed<WireEndpoints>)>);
+
+/// Probe bindings of the open subcircuit view's entities.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ViewBindings<'w, 's> {
+    changed: Query<'w, 's, (), ChangedViewItem>,
+    gates: Query<'w, 's, (&'static GateIdentity, &'static GateType, &'static mut GateProbes), With<InstanceViewItem>>,
+    wires: Query<'w, 's, (&'static WireEndpoints, &'static mut WireState), With<InstanceViewItem>>,
+}
+
+impl ViewBindings<'_, '_> {
+    /// Point the view's gates and wires at the bridge's probes. Gate input
+    /// values come from the wire into each pin.
+    fn bind(&mut self, bridge: &SimBridge, library: &CircuitLibrary) {
+        let sources: HashMap<(Uuid, u8), (Uuid, u8)> = self
+            .wires
+            .iter()
+            .map(|(ep, _)| ((ep.sink_gate, ep.sink_pin), (ep.source_gate, ep.source_pin)))
+            .collect();
+        let mut kinds: HashMap<Uuid, GateKind> = HashMap::new();
+        for (id, ty, mut probes) in &mut self.gates {
+            kinds.insert(id.uuid, ty.kind.clone());
+            let (ins, outs) = library.pins(&ty.kind).unwrap_or_default();
+            let bound = GateProbes {
+                inputs: (0..ins.len() as u8)
+                    .map(|pin| sources.get(&(id.uuid, pin)).and_then(|&(g, p)| bridge.view_probe(g, p)))
+                    .collect(),
+                outputs: (0..outs.len() as u8).map(|pin| bridge.view_probe(id.uuid, pin)).collect(),
+            };
+            probes.set_if_neq(bound);
+        }
+        for (ep, mut state) in &mut self.wires {
+            let (connected, width) = bridge.view_wire(ep).unwrap_or_else(|| {
+                // Not a live instance: show the authored widths.
+                let out = kinds.get(&ep.source_gate).and_then(|k| library.pins(k)).and_then(|(_, o)| {
+                    o.get(usize::from(ep.source_pin)).copied()
+                });
+                let inp = kinds.get(&ep.sink_gate).and_then(|k| library.pins(k)).and_then(|(i, _)| {
+                    i.get(usize::from(ep.sink_pin)).copied()
+                });
+                (out.is_some() && out == inp, out.unwrap_or(0))
+            });
+            let new = WireState { connected, width, probe: bridge.view_probe(ep.source_gate, ep.source_pin), ..*state };
+            state.set_if_neq(new);
+        }
+    }
+}
+
 /// Apply ECS authoring changes to the bridge's design and send a new
 /// revision when anything changed. Runs every frame in `PostUpdate`, after
 /// the authoring commands of the frame have been applied.
+///
+/// Root gates and wires map to the root definition. Entities of an open
+/// subcircuit view do not touch the design directly: their edits reach the
+/// library through [`super::view::write_back_view_system`], and the library
+/// change updates the definition here.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn sync_design_system(
     mut bridge: ResMut<SimBridge>,
     library: Res<CircuitLibrary>,
+    view: Res<CircuitView>,
     mut removed_gates: RemovedComponents<GateType>,
     mut removed_wires: RemovedComponents<WireEndpoints>,
-    changed_gates: Query<
-        (Entity, &GateIdentity, Ref<GateType>, Option<Ref<InputDrive>>),
-        Or<(Changed<GateType>, Changed<InputDrive>)>,
-    >,
-    all_gates: Query<(Entity, &GateIdentity, &GateType, Option<&InputDrive>)>,
-    changed_wires: Query<(), Changed<WireEndpoints>>,
-    mut wires: Query<(Entity, Ref<WireEndpoints>, &mut WireState)>,
-    mut gate_probes: Query<(Entity, &mut GateProbes)>,
+    changed_gates: Query<(Entity, &GateIdentity, Ref<GateType>, Option<Ref<InputDrive>>), ChangedRootGate>,
+    all_gates: Query<(Entity, &GateIdentity, &GateType, Option<&InputDrive>), RootOnly>,
+    changed_wires: Query<(), (Changed<WireEndpoints>, Without<InstanceViewItem>)>,
+    mut wires: Query<(Entity, Ref<WireEndpoints>, &mut WireState), RootOnly>,
+    mut gate_probes: Query<(Entity, &mut GateProbes), RootOnly>,
+    mut view_bindings: ViewBindings,
 ) {
+    bridge.set_view(&view);
     for entity in removed_wires.read() {
         bridge.remove_wire(entity);
     }
@@ -630,10 +1025,17 @@ pub fn sync_design_system(
     };
 
     if library.is_changed() && !library.is_added() {
-        for entity in bridge.invalidate_definitions() {
-            if let Ok((e, id, ty, drive)) = all_gates.get(entity)
-                && add(&mut bridge, e, id, ty, drive)
-            {
+        let iface_changed = bridge.sync_library(&library);
+        for (entity, id, ty, drive) in &all_gates {
+            let GateKind::SubCircuit { definition } = ty.kind else { continue };
+            if bridge.node_of(entity).is_none() {
+                // Its definition may be buildable now.
+                bridge.forget_gate(entity);
+                if add(&mut bridge, entity, id, ty, drive) {
+                    recreated.insert(id.uuid);
+                }
+            } else if iface_changed.contains(&definition) {
+                bridge.reset_instance_wires(entity);
                 recreated.insert(id.uuid);
             }
         }
@@ -673,7 +1075,12 @@ pub fn sync_design_system(
         }
     }
 
-    if bridge.flush() {
+    let rebound = bridge.flush();
+    if bridge.view_open {
+        if rebound || !view_bindings.changed.is_empty() {
+            view_bindings.bind(&bridge, &library);
+        }
+    } else if rebound {
         for (entity, mut probes) in &mut gate_probes {
             probes.set_if_neq(bridge.gate_probes(entity));
         }
