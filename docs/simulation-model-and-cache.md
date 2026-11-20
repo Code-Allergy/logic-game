@@ -42,7 +42,8 @@ pin, so creating a wire into a connected pin replaces the old wire.
 ## Commands
 
 Editor UI never mutates components directly for topology. It sends
-messages handled in `Update` (`src/sim/authoring.rs`): `CreateGate`,
+messages handled in `Update` (`src/sim/authoring.rs`, `src/sim/view.rs`):
+`OpenInstanceView`, `OpenDefinitionView`, `CloseView`, `CreateGate`,
 `CreateWire`, `DeleteGate`, `DeleteWire`, `SetInputValue`, `SetGateKind`,
 `RegisterDefinitions`, `GateLabelChanged`, `DisplayConfigChanged`,
 `GateMoved`, `EntityLayerChanged`, `LoadWorkspaceEvent`,
@@ -60,12 +61,35 @@ off the tick loop and carries register/RAM state across the swap. A
 compile error (e.g. a combinational loop) keeps the old program running
 and is published in `SimDiagnostics`.
 
-Subcircuit definitions live once in the `CircuitLibrary` resource; the
-bridge builds one `Design` definition per library entry and instances it.
+Subcircuit definitions live once in the `CircuitLibrary` resource (the
+definition table), keyed by stable `Uuid`; the bridge builds one `Design`
+definition per instanced library entry and instances it. When a library
+entry changes, the bridge updates that definition in place, matching nodes
+by document id, so unchanged nodes keep their `NodeId` and their state.
+
+## Subcircuit views
+
+`CircuitView` (`src/sim/view.rs`) is the stack of opened instances, as gate
+ids from the root. Opening one (`OpenInstanceView`, or `OpenDefinitionView`
+from the definition table; `CloseView` goes back) parks the root's
+entities with Bevy's `Disabled` marker and spawns the definition's gates
+and wires marked `InstanceViewItem`. The bridge resolves the gate ids to
+the instance's node path and probes the definition's nets there, so the
+view shows the live values of that instance in the running root
+simulation; no second simulation runs and nothing is recompiled.
+
+Edits in a view edit the shared definition: `write_back_view_system`
+writes the view's document into the library (renumbering wires to its
+instances if ports moved), and the bridge updates the design. Inputs in a
+view are driven by the parent and cannot be toggled. Placing a definition
+that would contain itself is refused with a message in
+`AuthoringFeedback`.
 
 ## Readback
 
-The bridge registers one probe per output net of every root gate. Each
-frame `project_probes_system` reads the latest probe frame and writes
-`GateValues` and `WireState::value` where they changed. Visual systems read
+The open view decides the probes: at the root, one probe per output net
+of every root gate; in a subcircuit view, one per output net of the
+definition at the instance path. Each frame `project_probes_system`
+reads the latest probe frame and writes `GateValues` and
+`WireState::value` where they changed. Visual systems read
 only those components.

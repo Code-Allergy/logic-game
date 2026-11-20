@@ -1,6 +1,7 @@
 # Workspace save format (version 5)
 
-Status: implemented in #28 (`src/editor/workspace.rs`). It is the
+Status: implemented in #28 (`src/editor/workspace.rs`); #29 added the
+definition-cycle check on load (files written by #28 still load). It is the
 foundation for the hand-editable format planned in #40 (definition dedup,
 compact repetition such as instance arrays and bus/bit-range wiring); those
 extensions are not implemented yet.
@@ -46,6 +47,14 @@ A workspace named `<name>` is a folder `workspaces/<name>/` (characters
 A subcircuit definition is a circuit like any other. Its ports are its
 `Input` and `Output` nodes, ordered by `label` (then `id`); that order gives
 the instance's pin numbers. `Display` nodes are not ports.
+
+`circuits` is the definition table. A definition is identified only by its
+`id`, which is stable: every instance refers to it by id, it is stored
+once however many instances there are, and saving and loading keep it.
+Placing a saved workspace as a cell uses that workspace's root `id` as the
+definition id. When the editor changes a definition's ports, the pin
+numbers in wires to its instances are renumbered before the file is
+written, so a saved wire always names the port it was connected to.
 
 ## Node
 
@@ -118,6 +127,8 @@ Loading fails with a message shown in the editor when:
   `workspaces/<name>.json` exists (format version 1).
 - The root circuit is missing, two circuits share an id, a `SubCircuit`
   refers to a definition that is not in the file, or a port is unlabelled.
+- A definition contains itself, directly or through other definitions
+  (`subcircuit "A" (…) contains itself`).
 
 Kinds with invalid parameters (for example a `Split` past its input width)
 load, but the gate is not simulated and its wires show as not connected.

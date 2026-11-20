@@ -462,3 +462,45 @@ ambiguous. Each is small and can be revisited.
     through one `Delay`, which breaks every combinational loop (master,
     slave, and the T feedback through both). With all state starting at
     0 the counters power up at 0, so the old power-on reset pulse is gone.
+23. **Instance views (M5, #29).** Opening a subcircuit does not start a
+    second simulation. The view stack (`CircuitView`) holds the opened
+    instance gates by their stable ids; the bridge resolves them to the
+    instance's `NodeId` path and probes every output net of the definition
+    at that path. Changing the view only replaces the probe list; the
+    design is not recompiled. The root's gate and wire entities are parked
+    with Bevy's `Disabled` marker (children included) while a view is open,
+    so the editor's default queries skip them and the bridge keeps their
+    nodes; closing the view unparks them, with no respawn and no state
+    loss. The definition's entities are spawned from the library and
+    marked `InstanceViewItem`. Inputs in a view are driven by the parent
+    and refuse `SetInputValue` with a message. A `Display` inside a
+    definition has no node; it shows the value of the net wired into it.
+    Opening a definition from the definition table opens the first
+    instance found from the root (depth first, gates in id order); if
+    nothing instances it, the bare definition opens with no live values.
+24. **Editing a definition (M5, #29).** Edits made in a view are written
+    back to the definition in the `CircuitLibrary` (same id), so they apply
+    to every instance. The bridge updates the built definition in place,
+    matching nodes by document id: unchanged nodes keep their `NodeId`
+    (and so their state through the engine's carry-over), a node whose
+    kind changed is replaced and resets. Position-only edits do not touch
+    the design. Port nodes hold no state, so when the port list changes
+    (added, removed, relabelled, re-kinded) all ports of that definition
+    are rebuilt; that renumbers instance pins, so every wire to an instance
+    of it, in the root and in other definitions, is renumbered to stay on
+    the same port (by port node id). Wires to a removed port are deleted.
+25. **Definition identity and registration (M5, #29).** A definition is its
+    `Uuid`; there is no structural matching. Placing from the catalog or a
+    saved workspace registers the workspace root under the root's id, plus
+    its definitions. A registration never replaces a definition already in
+    the library (it may have been edited); only new ids are added. Loading
+    a workspace replaces the library entries it contains with the file's.
+    Built definitions that the root no longer reaches are removed from the
+    design, so a stale one cannot fail validation.
+26. **Recursion (M5, #29).** Placing definition `X` is refused, with a
+    message, when `X` is the open circuit or any circuit around it in the
+    view stack, or contains one of them. Registering definitions that would
+    form a cycle is refused, and loading a file whose definitions form a
+    cycle is refused with `WorkspaceError::Invalid`. The bridge still
+    guards against cycles when building, and `Design::add_instance`
+    rejects them.
