@@ -192,6 +192,16 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
     let (ranks, order) = levelize(&ops, &instrs, widths.len());
     let mut sorted: Vec<u32> = order;
     sorted.sort_by_key(|&i| (ranks[i as usize], ops[i as usize], i));
+    let numbering = locality_order(
+        opts.slot_order,
+        &ops,
+        &instrs,
+        &ranks,
+        &mut sorted,
+        &commits,
+        &ports,
+        widths.len(),
+    );
     let mut blocks: Vec<Block> = Vec::new();
     let mut out = Vec::with_capacity(instrs.len());
     let mut out_imms = Vec::with_capacity(instrs.len());
@@ -224,15 +234,181 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         debug,
         state_keys,
     };
-    renumber(&mut p, &out_ops);
+    renumber(&mut p, &out_ops, numbering.as_deref());
     p
 }
 
-/// Renumber slots densely in the order they are first produced: zero, root
-/// inputs, constants, state, then instruction destinations in execution
-/// order. Writes in a block become sequential, values produced close in time
-/// sit close in memory, and unreferenced slots disappear.
-fn renumber(p: &mut Program, ops: &[Op]) {
+/// Producer of every slot (`u32::MAX` if no instruction writes it) and each
+/// instruction's readers in CSR form (`start`, `readers`).
+struct Readers {
+    producer: Vec<u32>,
+    start: Vec<u32>,
+    readers: Vec<u32>,
+}
+
+impl Readers {
+    fn new(ops: &[Op], instrs: &[Instr], slots: usize) -> Self {
+        let n = instrs.len();
+        let mut producer = vec![u32::MAX; slots];
+        for (k, ins) in instrs.iter().enumerate() {
+            producer[ins.dst as usize] = k as u32;
+        }
+        let mut start = vec![0u32; n + 1];
+        for (k, ins) in instrs.iter().enumerate() {
+            for s in operand_slots(ops[k], ins) {
+                let p = producer[s as usize];
+                if p != u32::MAX {
+                    start[p as usize + 1] += 1;
+                }
+            }
+        }
+        for k in 0..n {
+            start[k + 1] += start[k];
+        }
+        let mut fill = start.clone();
+        let mut readers = vec![0u32; start[n] as usize];
+        for (k, ins) in instrs.iter().enumerate() {
+            for s in operand_slots(ops[k], ins) {
+                let p = producer[s as usize];
+                if p != u32::MAX {
+                    readers[fill[p as usize] as usize] = k as u32;
+                    fill[p as usize] += 1;
+                }
+            }
+        }
+        Self {
+            producer,
+            start,
+            readers,
+        }
+    }
+
+    fn of(&self, k: u32) -> &[u32] {
+        &self.readers[self.start[k as usize] as usize..self.start[k as usize + 1] as usize]
+    }
+}
+
+/// Slot operands of `ins` (up to three).
+fn operand_slots(op: Op, ins: &Instr) -> impl Iterator<Item = u32> {
+    let (sa, sb, sc) = op.slot_operands();
+    [(sa, ins.a), (sb, ins.b), (sc, ins.c)]
+        .into_iter()
+        .filter(|&(is, _)| is)
+        .map(|(_, s)| s)
+}
+
+/// Reorder instructions inside each `(rank, op)` run of `sorted` for memory
+/// locality (issue #41). Returns the order in which destination slots are
+/// numbered, as positions in `sorted`, when it differs from execution order.
+#[allow(clippy::too_many_arguments)]
+fn locality_order(
+    order: super::SlotOrder,
+    ops: &[Op],
+    instrs: &[Instr],
+    ranks: &[u32],
+    sorted: &mut [u32],
+    commits: &[Commit],
+    ports: &PortMap,
+    slots: usize,
+) -> Option<Vec<u32>> {
+    use super::SlotOrder;
+    let n = sorted.len();
+    let readers = || Readers::new(ops, instrs, slots);
+    // Spans of `sorted` with one rank.
+    let rank_spans = |sorted: &[u32]| {
+        let mut spans = Vec::new();
+        let mut lo = 0;
+        for k in 1..=n {
+            if k == n || ranks[sorted[k] as usize] != ranks[sorted[lo] as usize] {
+                spans.push(lo..k);
+                lo = k;
+            }
+        }
+        spans
+    };
+    match order {
+        SlotOrder::Production => None,
+        SlotOrder::FirstUse => {
+            let r = readers();
+            // Final position of each instruction; ranks are placed last to
+            // first, so every reader is placed before its producer.
+            let mut pos = vec![u32::MAX; n];
+            let mut key = vec![u32::MAX; n];
+            for span in rank_spans(sorted).into_iter().rev() {
+                for &k in &sorted[span.clone()] {
+                    key[k as usize] = r
+                        .of(k)
+                        .iter()
+                        .map(|&c| pos[c as usize])
+                        .min()
+                        .unwrap_or(u32::MAX);
+                }
+                sorted[span.clone()].sort_by_key(|&k| (ops[k as usize], key[k as usize], k));
+                for (j, &k) in sorted[span.clone()].iter().enumerate() {
+                    pos[k as usize] = (span.start + j) as u32;
+                }
+            }
+            None
+        }
+        SlotOrder::Dfs => {
+            let r = readers();
+            // Post-order over operands, from the sinks: root outputs, slots
+            // read by commits, then anything not reached (observable only).
+            let mut post = vec![u32::MAX; n];
+            let mut next = 0u32;
+            let mut stack: Vec<(u32, u8)> = Vec::new();
+            let roots = ports
+                .outputs
+                .iter()
+                .map(|p| p.slot)
+                .chain(commits.iter().flat_map(|c| match *c {
+                    Commit::Copy { next, .. } => vec![next],
+                    Commit::RamWrite { we, addr, data, .. } => vec![we, addr, data],
+                }))
+                .filter_map(|s| {
+                    let p = r.producer[s as usize];
+                    (p != u32::MAX).then_some(p)
+                })
+                .chain(0..n as u32)
+                .collect::<Vec<_>>();
+            let mut visited = vec![false; n];
+            for root in roots {
+                if visited[root as usize] {
+                    continue;
+                }
+                visited[root as usize] = true;
+                stack.push((root, 0));
+                while let Some(&mut (k, ref mut i)) = stack.last_mut() {
+                    let operand =
+                        operand_slots(ops[k as usize], &instrs[k as usize]).nth(*i as usize);
+                    if let Some(s) = operand {
+                        let p = r.producer[s as usize];
+                        *i += 1;
+                        if p != u32::MAX && !visited[p as usize] {
+                            visited[p as usize] = true;
+                            stack.push((p, 0));
+                        }
+                    } else {
+                        post[k as usize] = next;
+                        next += 1;
+                        stack.pop();
+                    }
+                }
+            }
+            for span in rank_spans(sorted) {
+                sorted[span].sort_by_key(|&k| (ops[k as usize], post[k as usize]));
+            }
+            let mut numbering: Vec<u32> = (0..n as u32).collect();
+            numbering.sort_by_key(|&j| post[sorted[j as usize] as usize]);
+            Some(numbering)
+        }
+    }
+}
+
+/// Renumber slots densely: zero, root inputs, constants, state, then
+/// instruction destinations in execution order (or in `numbering`, a
+/// permutation of instruction positions). Unreferenced slots disappear.
+fn renumber(p: &mut Program, ops: &[Op], numbering: Option<&[u32]>) {
     let mut map = vec![UNASSIGNED; p.slot_count as usize];
     let mut next = 0u32;
     let mut assign = |s: u32, map: &mut Vec<u32>| {
@@ -253,8 +429,17 @@ fn renumber(p: &mut Program, ops: &[Op]) {
             assign(state, &mut map);
         }
     }
-    for ins in &p.instrs {
-        assign(ins.dst, &mut map);
+    match numbering {
+        Some(order) => {
+            for &k in order {
+                assign(p.instrs[k as usize].dst, &mut map);
+            }
+        }
+        None => {
+            for ins in &p.instrs {
+                assign(ins.dst, &mut map);
+            }
+        }
     }
     // Anything still unassigned is read but never written: it can only be
     // the zero slot's class, which is already slot 0.

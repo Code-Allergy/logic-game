@@ -10,13 +10,14 @@
 //! the same on native and wasm. Every index in the program is checked once in
 //! [`Sim::new`], so the inner loops can skip bounds checks.
 
+mod code;
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::compile::{Commit, Instr, NodePath, Op, Program, StateLoc, ZERO_SLOT};
+use crate::compile::{Commit, NodePath, Op, Program, StateLoc, ZERO_SLOT};
 use crate::netlist::{NetId, NodeId, mask};
 
 /// Index of a root port, in port order.
@@ -36,8 +37,33 @@ pub struct StateSnapshot {
     pub mems: HashMap<NodePath, (u8, u8, Vec<u64>)>,
 }
 
+/// Runtime options (issue #41). [`SimOptions::default`] gives the fastest
+/// single-threaded setup; every field only changes speed, never results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimOptions {
+    /// Re-encode blocks whose destinations are consecutive so they stream
+    /// only their operands (see `sim/code.rs`). Off runs every block from
+    /// the program's own instructions.
+    pub stream: bool,
+}
+
+impl Default for SimOptions {
+    fn default() -> Self {
+        Self { stream: true }
+    }
+}
+
+impl SimOptions {
+    /// Everything off: the M3 runtime.
+    pub fn baseline() -> Self {
+        Self { stream: false }
+    }
+}
+
 pub struct Sim {
     program: Arc<Program>,
+    code: Arc<code::Code>,
+    options: SimOptions,
     slots: Vec<u64>,
     mems: Vec<Vec<u64>>,
     tick: u64,
@@ -54,7 +80,26 @@ impl Sim {
     }
 
     pub fn try_new(program: Arc<Program>) -> Result<Self, BadProgram> {
+        Self::try_with_options(program, SimOptions::default())
+    }
+
+    /// [`Sim::new`] with runtime options.
+    #[track_caller]
+    pub fn with_options(program: Arc<Program>, options: SimOptions) -> Self {
+        Self::try_with_options(program, options).unwrap_or_else(|e| panic!("bad program: {}", e.0))
+    }
+
+    /// [`Sim::try_new`] with runtime options.
+    pub fn try_with_options(
+        program: Arc<Program>,
+        options: SimOptions,
+    ) -> Result<Self, BadProgram> {
         check(&program)?;
+        let code = if options.stream {
+            code::Code::new(&program)
+        } else {
+            code::Code::plain(&program)
+        };
         let mems = program
             .mems
             .iter()
@@ -65,6 +110,8 @@ impl Sim {
             })
             .collect();
         let mut sim = Sim {
+            code: Arc::new(code),
+            options,
             slots: vec![0; program.slot_count as usize],
             mems,
             tick: 0,
@@ -80,6 +127,10 @@ impl Sim {
 
     pub fn program(&self) -> &Arc<Program> {
         &self.program
+    }
+
+    pub fn options(&self) -> &SimOptions {
+        &self.options
     }
 
     /// Set a root input. It is visible to logic at the next settle (the next
@@ -179,71 +230,17 @@ impl Sim {
             self.slots[port.slot as usize] = v;
         }
         let s = self.slots.as_mut_ptr();
-        let tick = self.tick;
-        for b in &p.blocks {
-            let range = b.start as usize..(b.start + b.len) as usize;
-            let ins = &p.instrs[range.clone()];
-            let imms = &p.imms[range];
-            // SAFETY: every slot index in `ins` was checked against
-            // `slot_count` in `check`, and `slots` has that length. Reads and
-            // writes go through the raw pointer so `dst` may equal no operand
-            // (it never does in a compiled program, but it would be sound).
-            unsafe {
-                match b.op {
-                    Op::Copy => run1(s, ins, imms, |a, _, _| a),
-                    Op::Not => run1(s, ins, imms, |a, _, m| !a & m),
-                    Op::And => run2(s, ins, imms, |a, b, _, _| a & b),
-                    Op::Or => run2(s, ins, imms, |a, b, _, _| a | b),
-                    Op::Xor => run2(s, ins, imms, |a, b, _, _| a ^ b),
-                    Op::Nand => run2(s, ins, imms, |a, b, _, m| !(a & b) & m),
-                    Op::Nor => run2(s, ins, imms, |a, b, _, m| !(a | b) & m),
-                    Op::Xnor => run2(s, ins, imms, |a, b, _, m| !(a ^ b) & m),
-                    Op::Mux => run3(s, ins, imms, |a, b, c, _| if a != 0 { c } else { b }),
-                    Op::Switch => run2(s, ins, imms, |a, b, _, _| if a != 0 { b } else { 0 }),
-                    Op::AddSum => run3(s, ins, imms, |a, b, c, m| {
-                        a.wrapping_add(b).wrapping_add(c) & m
-                    }),
-                    Op::AddCarry => run3(s, ins, imms, |a, b, c, w| {
-                        ((a as u128 + b as u128 + c as u128) >> w) as u64 & 1
-                    }),
-                    Op::Eq => run2(s, ins, imms, |a, b, _, _| (a == b) as u64),
-                    Op::LtU => run2(s, ins, imms, |a, b, _, _| (a < b) as u64),
-                    Op::ReduceOr => run1(s, ins, imms, |a, _, _| (a != 0) as u64),
-                    Op::ReduceAnd => run1(s, ins, imms, |a, _, m| (a == m) as u64),
-                    Op::ReduceXor => run1(s, ins, imms, |a, _, _| (a.count_ones() & 1) as u64),
-                    Op::Shr => run1(s, ins, imms, |a, i, m| (a >> i.b) & m),
-                    Op::Concat => run2(s, ins, imms, |a, b, i, _| a | (b << i.c)),
-                    Op::Sext => run1(s, ins, imms, |a, i, m| {
-                        if (a >> (i.b - 1)) & 1 == 1 {
-                            (a | !mask(i.b as u8)) & m
-                        } else {
-                            a
-                        }
-                    }),
-                    Op::Clock => {
-                        for i in ins {
-                            let v = ((tick + i.c as u64) % i.a as u64) < i.b as u64;
-                            *s.add(i.dst as usize) = v as u64;
-                        }
-                    }
-                    Op::MemRead => {
-                        for i in ins {
-                            let m = self.mems.get_unchecked(i.b as usize);
-                            let a = *s.add(i.a as usize) as usize & (m.len() - 1);
-                            *s.add(i.dst as usize) = *m.get_unchecked(a);
-                        }
-                    }
-                    Op::SrNext => run3(s, ins, imms, |a, b, c, _| {
-                        if b != 0 {
-                            0
-                        } else if a != 0 {
-                            1
-                        } else {
-                            c
-                        }
-                    }),
-                }
-            }
+        let env = code::Env {
+            program: p,
+            code: &self.code,
+            mems: &self.mems,
+            tick: self.tick,
+        };
+        for b in &self.code.blocks {
+            // SAFETY: the program passed `check`, `code` was built from it,
+            // and `slots` has `slot_count` entries. Nothing else touches the
+            // slots meanwhile.
+            unsafe { code::exec(&env, b, 0, b.len, s) };
         }
         debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
     }
@@ -305,41 +302,6 @@ impl Sim {
         }
         self.tick = snap.tick;
         self.settle();
-    }
-}
-
-#[inline(always)]
-unsafe fn run1(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, &Instr, u64) -> u64) {
-    for (k, i) in ins.iter().enumerate() {
-        unsafe { *s.add(i.dst as usize) = f(*s.add(i.a as usize), i, *imms.get_unchecked(k)) };
-    }
-}
-
-#[inline(always)]
-unsafe fn run2(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, u64, &Instr, u64) -> u64) {
-    for (k, i) in ins.iter().enumerate() {
-        unsafe {
-            *s.add(i.dst as usize) = f(
-                *s.add(i.a as usize),
-                *s.add(i.b as usize),
-                i,
-                *imms.get_unchecked(k),
-            )
-        };
-    }
-}
-
-#[inline(always)]
-unsafe fn run3(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, u64, u64, u64) -> u64) {
-    for (k, i) in ins.iter().enumerate() {
-        unsafe {
-            *s.add(i.dst as usize) = f(
-                *s.add(i.a as usize),
-                *s.add(i.b as usize),
-                *s.add(i.c as usize),
-                *imms.get_unchecked(k),
-            )
-        };
     }
 }
 

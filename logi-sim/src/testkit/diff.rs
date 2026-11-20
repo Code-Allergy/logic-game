@@ -14,7 +14,7 @@ use super::rng::Rng;
 use crate::compile::{Options, compile};
 use crate::netlist::{Design, mask};
 use crate::reference::Reference;
-use crate::sim::Sim;
+use crate::sim::{Sim, SimOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mismatch {
@@ -61,9 +61,20 @@ pub fn check_design(
     ticks: u64,
     options: &Options,
 ) -> Result<(), DiffError> {
+    check_design_with(design, input_seed, ticks, options, &SimOptions::default())
+}
+
+/// [`check_design`] with runtime options for the compiled [`Sim`].
+pub fn check_design_with(
+    design: &Design,
+    input_seed: u64,
+    ticks: u64,
+    options: &Options,
+    sim_options: &SimOptions,
+) -> Result<(), DiffError> {
     let program = compile(design, options).map_err(|e| DiffError::Compile(format!("{e:?}")))?;
     let program = Arc::new(program);
-    let mut sim = Sim::new(Arc::clone(&program));
+    let mut sim = Sim::with_options(Arc::clone(&program), sim_options.clone());
     let mut reference =
         Reference::new(design).map_err(|e| DiffError::Reference(format!("{e:?}")))?;
     let widths: Vec<u8> = program.ports.inputs.iter().map(|p| p.width).collect();
@@ -115,8 +126,18 @@ pub fn check_design(
 
 /// Generate the design for `cfg` and check it, using `cfg.seed` for inputs.
 pub fn check_generated(cfg: &GenConfig, ticks: u64, options: &Options) -> Result<(), DiffError> {
+    check_generated_with(cfg, ticks, options, &SimOptions::default())
+}
+
+/// [`check_generated`] with runtime options.
+pub fn check_generated_with(
+    cfg: &GenConfig,
+    ticks: u64,
+    options: &Options,
+    sim_options: &SimOptions,
+) -> Result<(), DiffError> {
     let g = generate(cfg);
-    check_design(&g.design, cfg.seed, ticks, options)
+    check_design_with(&g.design, cfg.seed, ticks, options, sim_options)
 }
 
 /// Check `count` designs per config (seeds `0..count`, mixed with the config
@@ -124,6 +145,18 @@ pub fn check_generated(cfg: &GenConfig, ticks: u64, options: &Options) -> Result
 /// Returns the number of designs checked.
 #[track_caller]
 pub fn sweep(configs: &[GenConfig], count: u64, ticks: u64, options: &Options) -> u64 {
+    sweep_with(configs, count, ticks, options, &SimOptions::default())
+}
+
+/// [`sweep`] with runtime options.
+#[track_caller]
+pub fn sweep_with(
+    configs: &[GenConfig],
+    count: u64,
+    ticks: u64,
+    options: &Options,
+    sim_options: &SimOptions,
+) -> u64 {
     let mut n = 0;
     for (ci, base) in configs.iter().enumerate() {
         for k in 0..count {
@@ -131,10 +164,11 @@ pub fn sweep(configs: &[GenConfig], count: u64, ticks: u64, options: &Options) -
                 seed: k.wrapping_mul(0x9E37_79B9) ^ (ci as u64) << 48,
                 ..base.clone()
             };
-            if let Err(e) = check_generated(&cfg, ticks, options) {
+            if let Err(e) = check_generated_with(&cfg, ticks, options, sim_options) {
                 panic!(
                     "differential failure: {e}\n  reproduce with: \
-                     testkit::diff::check_generated(&{cfg:?}, {ticks}, &{options:?})"
+                     testkit::diff::check_generated_with(&{cfg:?}, {ticks}, &{options:?}, \
+                     &{sim_options:?})"
                 );
             }
             n += 1;

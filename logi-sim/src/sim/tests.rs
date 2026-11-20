@@ -348,3 +348,88 @@ fn snapshot_round_trip_matches_continuous_run() {
         (b.get("acc"), b.get("pc"), b.tick_count())
     );
 }
+
+// ── Performance switches (#41) ───────────────────────────────────────────
+
+/// Every layout and runtime switch alone, then all together, each under the
+/// optimizing and the unoptimized compile.
+fn perf_variants() -> Vec<(String, Options, SimOptions)> {
+    use crate::compile::SlotOrder;
+    let mut out = Vec::new();
+    for (base_name, base) in [
+        ("default", Options::default()),
+        ("unoptimized", Options::unoptimized()),
+    ] {
+        let off = Options {
+            slot_order: SlotOrder::Production,
+            ..base.clone()
+        };
+        let mut push = |name: &str, o: Options, so: SimOptions| {
+            out.push((format!("{base_name}/{name}"), o, so));
+        };
+        push("none", off.clone(), SimOptions::baseline());
+        for order in [SlotOrder::FirstUse, SlotOrder::Dfs] {
+            push(
+                &format!("{order:?}"),
+                Options {
+                    slot_order: order,
+                    ..off.clone()
+                },
+                SimOptions::baseline(),
+            );
+        }
+        let mut stream = SimOptions::baseline();
+        stream.stream = true;
+        push("stream", off.clone(), stream);
+        push("all", base.clone(), SimOptions::default());
+    }
+    out
+}
+
+fn perf_designs() -> Vec<Design> {
+    use crate::testkit::{GenConfig, bitblast::bitblast, generate};
+    vec![
+        bitblast(&fixtures::cpu(&fixtures::MULTIPLY_PROGRAM)),
+        bitblast(&fixtures::counter(16)),
+        fixtures::ripple_adder(16),
+        fixtures::register_file(2, 8),
+        fixtures::cpu(&fixtures::MULTIPLY_PROGRAM),
+        generate(&GenConfig::gates(7, 3_000, 1)).design,
+        bitblast(
+            &generate(&GenConfig {
+                seed: 9,
+                nodes: 300,
+                child_defs: 0,
+                max_depth: 1,
+                max_width: 16,
+                state_percent: 20,
+                ..Default::default()
+            })
+            .design,
+        ),
+    ]
+}
+
+#[test]
+fn perf_switches_match_the_reference() {
+    let designs = perf_designs();
+    for (name, opts, so) in perf_variants() {
+        let n = diff::sweep_with(&diff::standard_configs(), 20, 15, &opts, &so);
+        assert_eq!(n, 120, "{name}");
+        for (i, d) in designs.iter().enumerate() {
+            diff::check_design_with(d, i as u64, 40, &opts, &so)
+                .unwrap_or_else(|e| panic!("{name}, design {i}: {e}"));
+        }
+    }
+}
+
+/// Acceptance sweep for every switch (10,000+ designs each):
+/// `cargo test -p logi-sim --release --lib -- --ignored perf_switches_10k`.
+#[test]
+#[ignore]
+fn perf_switches_10k() {
+    for (name, opts, so) in perf_variants() {
+        let n = diff::sweep_with(&diff::standard_configs(), 1700, 30, &opts, &so);
+        assert!(n >= 10_000, "{name}");
+    }
+}

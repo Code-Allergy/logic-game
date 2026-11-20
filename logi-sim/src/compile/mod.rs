@@ -42,6 +42,29 @@ pub struct Options {
     /// Nets to keep observable under dead-code elimination:
     /// `(instance path, NetId)`.
     pub probes: Vec<(Vec<NodeId>, NetId)>,
+    /// How instructions are ordered within a block and how slots are
+    /// numbered (issue #41). Changes memory layout only, never results.
+    pub slot_order: SlotOrder,
+}
+
+/// Slot numbering and in-block instruction order (issue #41). Every order
+/// keeps blocks sorted by `(rank, op)`; they differ in where values sit in
+/// memory relative to their readers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum SlotOrder {
+    /// Instructions in a block keep their lowering order, and slots are
+    /// numbered in execution order (the M3 layout).
+    Production,
+    /// Ranks are laid out last to first: each block's instructions are
+    /// sorted by the position of their first reader, and slots are numbered
+    /// in execution order. Every block still writes a contiguous run of
+    /// slots, and values read close together sit close together.
+    #[default]
+    FirstUse,
+    /// Slots are numbered in depth-first post-order from the sinks (root
+    /// outputs, then commits), so a value sits next to the other operands
+    /// of its reader; each block executes in that order.
+    Dfs,
 }
 
 impl Default for Options {
@@ -53,12 +76,14 @@ impl Default for Options {
             cse: true,
             dce: true,
             probes: Vec::new(),
+            slot_order: SlotOrder::default(),
         }
     }
 }
 
 impl Options {
-    /// Every pass off: one instruction per primitive, every net observable.
+    /// Every pass off: one instruction per primitive, every net observable,
+    /// and the M3 memory layout ([`SlotOrder::Production`]).
     pub fn unoptimized() -> Self {
         Self {
             debug: true,
@@ -67,6 +92,7 @@ impl Options {
             cse: false,
             dce: false,
             probes: Vec::new(),
+            slot_order: SlotOrder::Production,
         }
     }
 

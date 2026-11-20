@@ -17,7 +17,11 @@
 //!    [`Op`] and one rank, and never read each other's results.
 //!
 //! Slots are numbered densely: the zero slot, root inputs, constants, state,
-//! then instruction destinations in execution order.
+//! then instruction destinations. With [`super::SlotOrder::Production`] and
+//! [`super::SlotOrder::FirstUse`] destinations are numbered in execution
+//! order, so every block writes a contiguous run of slots; the runtime relies
+//! on that only as a fast path. Within a block, instructions are ordered for
+//! locality as [`super::Options::slot_order`] says.
 //!
 //! Construction is: zero all slots, load constants, apply inputs (all zero),
 //! settle at tick 0.
