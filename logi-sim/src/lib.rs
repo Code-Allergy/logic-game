@@ -7,6 +7,7 @@ pub mod graphviz;
 pub mod netlist;
 pub mod reference;
 pub mod runner;
+pub mod sim;
 pub mod testkit;
 
 pub mod prelude {
