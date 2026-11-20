@@ -475,7 +475,8 @@ ambiguous. Each is small and can be revisited.
     threaded bridge calls `Engine::sync` once, so a frame is never read
     with a stale probe layout. Restricting probes to the on-screen
     viewport is left to #30.
-22. **Built-in examples** keep their gate-level master-slave T flip-flops.
+22. **Built-in examples** (superseded by the demos of #40, items 37 to
+    42) keep their gate-level master-slave T flip-flops.
     Each latch's `q` reaches its own `qn` gate and the other latch
     through one `Delay`, which breaks every combinational loop (master,
     slave, and the T feedback through both). With all state starting at
@@ -711,3 +712,95 @@ ambiguous. Each is small and can be revisited.
     - **Docs.** `docs/simulation-model-and-cache.md`, which M5 had already
       rewritten for the ECS bridge, was renamed
       `docs/app-simulation-bridge.md`.
+37. **Save format version 6 (#40).** Version 5 stays the expanded,
+    in-memory form (`WorkspaceDocument`) and the format the editor writes.
+    Version 6 is an authoring layer over it (`src/sim/source.rs`): names
+    instead of ids, `use` (also across files), node arrays (`count`,
+    `step`) and bus/bit-range wiring. It keeps the `gatequest-workspace`
+    tag and is expanded into version 5 on load. The reader accepts 5 and 6
+    (5 is the expanded subset, so existing workspaces keep loading);
+    versions 1 to 4, or none, are still refused with the old message
+    (which now says it reads 5 and 6), never migrated. Why not make the
+    editor write version 6: the ECS and the bridge work on expanded
+    circuits, so the editor has no arrays or buses to write back;
+    inferring them from an edited circuit is out of scope. The guarantees
+    are therefore: the version 6 text round-trips byte for byte when
+    canonical (`to_text`), expansion is deterministic, and version 5
+    load/save is lossless; an editor save of a version 6 circuit keeps
+    definitions deduplicated, positions and labels, but not the compact
+    spelling (`docs/save-format.md`, "Round trips"). The syntax tree keeps
+    a primitive's parameters as written (a JSON map), so defaults (`w` is 1)
+    and hex strings (`"0x1F"`) survive load and save. `serde_json` now
+    has `preserve_order`, so maps keep their field order.
+38. **Derived ids (#40).** Every id of an expanded version 6 file is a UUID
+    v5: circuit `c` of a file with key `K` is `v5(NS, "K/c")` (`K` is
+    `demos/<id>` or `workspaces/<folder>`), node `n` of a circuit `C` is
+    `v5(C, "node/n")` (array elements `n[i]`), and the wire into input pin
+    `p` of node `n` is `v5(C, "wire/n/p")`. Reloading a demo therefore
+    gives the same ids, two demos using one definition share one library
+    entry, and nothing collides with editor ids (UUID v4). The generated
+    adapters are named `~split/…` and `~merge/…` and follow the same rule.
+39. **Bus wiring (#40).** A wire entry is `[source, sink, …]`. The source
+    pins are concatenated (element 0 lowest) into `W` bits; a sink whose
+    pins each take `W` bits gets a copy (fan-out), otherwise its pins must
+    take `W` bits together and get them in order (a bus); anything else is
+    an error. Bits are collected per input pin and then emitted: one wire
+    when a pin gets one whole source pin, otherwise one shared `Split` per
+    distinct source field and a `Merge` per sink pin (neighbouring bits of
+    one source pin are joined first). Each bit is driven at most once, and
+    a partly driven pin is an error. Adapters are placed at fixed offsets
+    from their node (70 units beside it, stacked 30 apart), since there is
+    no auto-layout yet (#42).
+40. **Demos (#40).** The hard-coded examples (`src/sim/fixtures.rs`) are
+    gone. Sixteen demos in ten levels live in `assets/demos/` as version 6
+    files plus `manifest.json` (order, level, title, description, uses),
+    loaded by `src/sim/demos.rs`. The manifest's `uses` must equal the
+    file's cross-file references, and each must name a demo listed
+    earlier at the same or a lower level: a level's "then" step (decoder
+    and mux, then mux tree; D latch, then flip-flop; register, then
+    counter) builds on the step before it at the same level. The files
+    are embedded with `include_str!` for wasm; native builds read
+    `assets/demos/` from the working directory when it is there and fall
+    back to the embedded copies on error. A demo opens read-only
+    (`LoadWorkspaceEvent::read_only`, `ActiveCircuit::read_only`): gate,
+    wire, kind, label, move and layer edits and saves are refused with
+    `READ_ONLY_MESSAGE`, dragging is off, and it is not saved on exit;
+    inputs, display settings and instance views work. "Copy to my
+    workspace" saves and opens a version 5 copy whose root and definitions
+    get fresh UUID v4s, so editing it never touches a demo's shared
+    definitions. The app opens the counter demo at startup (it used to
+    open the 64-bit counter); "New empty workspace" opens a blank one.
+41. **Gate-level state in the demos (#40).** The SR latch is two NORs and a
+    `Delay` that holds the state: `qn = NOR(S, Q)`, `Q' = NOR(R, qn)`,
+    `Q = Delay(Q')`. Its output is the Delay, so a latch, and every
+    flip-flop and register built from it, has no combinational path from
+    its inputs to `Q`. That matters: a counter or a CPU feeds a register's
+    output back to its input through logic, and with a transparent path
+    through the master and slave latches that loop would be combinational
+    even though the latches are never open together. The cost is timing:
+    `Q` changes one tick after `S`, `R`, or (for the D latch) `D` while
+    enabled, and a flip-flop's `Q` one tick after the rising clock edge.
+    The `SrLatch` primitive has the same timing; `DLatch` is transparent
+    in the same tick; the demos say so. Everything powers up at 0 with no
+    reset pulse. The flip-flop is a master-slave pair of D latches, rising
+    edge; the register puts a 2-to-1 mux before each flip-flop to hold its
+    bit unless `Load` is set.
+42. **CPU demo (#40).** A register machine rather than the testkit's
+    accumulator CPU, so it uses the register file and the ALU of the levels
+    below: 16-bit instructions `op | rd | rs | imm8` (rt is `imm[1:0]`),
+    ops LDI, JMP, JZ, ADD, SUB, AND, OR, OUT, HLT. A 16-word microcode ROM
+    turns the opcode into control lines; `ReduceOr`, `Rom` and `Const` are
+    used as primitives where the gate version would add nothing new. One
+    instruction runs per clock period (4 ticks). The program multiplies 5
+    by 7; the test checks the result against an interpreter of the ISA run
+    on the ROM contents read from the file.
+43. **Tests replaced (#40).** Tests that loaded code-built examples now load
+    demos from the files: the register-carry-over test uses the counter
+    demo (both its gate-built and its word-level counters), the counter
+    test checks the counter demo against its word-level twin every tick,
+    the save/load round trip uses the register demo (nine definitions
+    stored once), the counter-block interface test checks `counter8`,
+    "every example compiles" became "every demo compiles", and the
+    instance-view and idle-visuals tests load the half adder and counter
+    demos. `src/sim/tests/demos.rs` adds the file, format, pyramid and
+    per-demo behaviour tests.
