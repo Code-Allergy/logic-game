@@ -916,8 +916,31 @@ fn resolve<'e>(
     Ok(elements.iter().map(|e| (e, pin, width, lo, len)).collect())
 }
 
+/// Generated adapters keep this much space from their node's box...
+const ADAPTER_GAP: f32 = 30.0;
+/// ...with their centre on this grid (the editor's grid)...
+const ADAPTER_GRID: f32 = 20.0;
+/// ...and stand this far apart (a 50-unit box plus a gap).
+const ADAPTER_STEP: f32 = 60.0;
+
 fn template(label: &str, i: u32) -> String {
     label.replace("{i}", &i.to_string())
+}
+
+/// The parameters of array element `i`: `{i}` in a string value is `i`,
+/// and a value that is then an integer (`"{i}"`) is that number.
+fn element_params(params: &Map<String, Value>, i: u32) -> Map<String, Value> {
+    params
+        .iter()
+        .map(|(k, v)| match v {
+            Value::String(s) if s.contains("{i}") => {
+                let text = template(s, i);
+                let value = parse_int_text(&text).map_or(Value::String(text), Value::from);
+                (k.clone(), value)
+            }
+            v => (k.clone(), v.clone()),
+        })
+        .collect()
 }
 
 fn expand_circuit(
@@ -940,6 +963,10 @@ fn expand_circuit(
     for node in &circuit.nodes {
         let place = format!("node \"{}\"", node.name);
         let kind = match &node.body {
+            NodeBody::Primitive { ty, params } if node.array.is_some() => {
+                // Element 0 (parameters may use `{i}`, see below).
+                primitive_kind(ty, &element_params(params, 0)).context(&place)?
+            }
             NodeBody::Primitive { ty, params } => primitive_kind(ty, params).context(&place)?,
             NodeBody::Use(r) => {
                 let definition = if r.contains('/') {
@@ -952,16 +979,43 @@ fn expand_circuit(
                 GateKind::SubCircuit { definition }
             }
         };
-        let ((in_w, out_w), (in_n, out_n)) = match library.pins(&kind) {
-            Some(pins) => (pins, library.pin_names(&kind)),
+        let pins = library.pins(&kind);
+        let ((in_w, out_w), (in_n, out_n)) = match &pins {
+            Some(pins) => (pins.clone(), library.pin_names(&kind)),
             None => return err(format!("{place}: its pins are unknown")),
         };
         let is_port = kind.is_port();
         let is_instance = matches!(kind, GateKind::SubCircuit { .. });
         let count = node.array.map_or(1, |a| a.count);
         let step = node.array.map_or([0.0, 0.0], |a| a.step);
+        // In an array, `{i}` in a string parameter is the element's index.
+        let templated = match &node.body {
+            NodeBody::Primitive { ty, params }
+                if node.array.is_some()
+                    && params
+                        .values()
+                        .any(|v| v.as_str().is_some_and(|s| s.contains("{i}"))) =>
+            {
+                Some((ty, params))
+            }
+            _ => None,
+        };
         let mut elements = Vec::new();
         for i in 0..count {
+            let kind = match templated {
+                Some((ty, params)) => {
+                    let element = primitive_kind(ty, &element_params(params, i))
+                        .context(format_args!("{place}, element {i}"))?;
+                    if library.pins(&element) != pins {
+                        return err(format!(
+                            "{place}: the elements of an array must have the same pins \
+                             (element {i} differs from element 0)"
+                        ));
+                    }
+                    element
+                }
+                None => kind.clone(),
+            };
             let name = if node.array.is_some() {
                 format!("{}[{i}]", node.name)
             } else {
@@ -980,7 +1034,7 @@ fn expand_circuit(
             let node_id = item_id(id, &format!("node/{name}"));
             doc.nodes.push(DocNode {
                 id: node_id,
-                kind: kind.clone(),
+                kind,
                 label,
                 x: pos[0],
                 y: pos[1],
@@ -1113,9 +1167,20 @@ fn expand_circuit(
         }
     }
 
-    // Emit wires, with Split/Merge adapters where bits are regrouped.
+    // Emit wires, with Split/Merge adapters where bits are regrouped. A
+    // node's splits stand in a column to its right and its merges in a
+    // column to its left, one box apart (see `ADAPTER_*`).
     let mut splits: HashMap<(Uuid, u8, u8, u8), Uuid> = HashMap::new();
-    let mut adapters_at: HashMap<Uuid, u32> = HashMap::new();
+    let mut adapters_at: HashMap<(Uuid, bool), u32> = HashMap::new();
+    let half_width: HashMap<Uuid, f32> = doc
+        .nodes
+        .iter()
+        .map(|n| (n.id, n.kind.size().x / 2.0))
+        .collect();
+    let beside = |node: Uuid| {
+        let gap = half_width.get(&node).copied().unwrap_or(25.0) + ADAPTER_GAP + 25.0;
+        (gap / ADAPTER_GRID).ceil() * ADAPTER_GRID
+    };
     for key in sinks {
         let (slot, bits) = assigned.remove(&key).expect("collected above");
         // Every bit driven exactly once.
@@ -1172,7 +1237,7 @@ fn expand_circuit(
                         "~split/{}/{}/{}/{}",
                         piece.name, piece.pin, piece.lo, piece.len
                     );
-                    let k = adapters_at.entry(piece.node).or_default();
+                    let k = adapters_at.entry((piece.node, true)).or_default();
                     let s = item_id(id, &format!("node/{what}"));
                     doc.nodes.push(DocNode {
                         id: s,
@@ -1182,8 +1247,8 @@ fn expand_circuit(
                             len: piece.len,
                         },
                         label: None,
-                        x: piece.pos[0] + 70.0,
-                        y: piece.pos[1] - 30.0 * *k as f32,
+                        x: piece.pos[0] + beside(piece.node),
+                        y: piece.pos[1] - ADAPTER_STEP * *k as f32,
                         layer: DEFAULT_LAYER_UUID,
                         layer_order: 0,
                         properties: HashMap::new(),
@@ -1204,7 +1269,7 @@ fn expand_circuit(
             continue;
         }
         let what = format!("~merge/{sink_what}");
-        let k = adapters_at.entry(slot.node).or_default();
+        let k = adapters_at.entry((slot.node, false)).or_default();
         let merge = item_id(id, &format!("node/{what}"));
         doc.nodes.push(DocNode {
             id: merge,
@@ -1212,8 +1277,8 @@ fn expand_circuit(
                 widths: pieces.iter().map(|p| p.len).collect(),
             },
             label: None,
-            x: slot.pos[0] - 70.0,
-            y: slot.pos[1] - 30.0 * *k as f32,
+            x: slot.pos[0] - beside(slot.node),
+            y: slot.pos[1] - ADAPTER_STEP * *k as f32,
             layer: DEFAULT_LAYER_UUID,
             layer_order: 0,
             properties: HashMap::new(),
@@ -1257,6 +1322,103 @@ mod tests {
         assert!(parse_ref("3x").is_err());
         assert!(parse_ref("a[2..1]").is_err());
         assert!(parse_ref("a.").is_err());
+    }
+
+    fn expand_text(circuit: &str) -> Result<Expansion, SourceError> {
+        let text = format!(
+            r#"{{"format": "gatequest-workspace", "version": 6, "root": "c", "circuits": [{circuit}]}}"#
+        );
+        expand(&parse(&text)?, "test", &Externals::default())
+    }
+
+    #[test]
+    fn array_parameters_may_use_the_index() {
+        let ws = expand_text(
+            r#"{"name": "c", "nodes": [
+                {"name": "w", "type": "Input", "w": 4, "at": [0, 0]},
+                {"name": "s", "type": "Split", "w": 4, "lo": "{i}", "len": 1, "at": [100, 0],
+                 "count": 4, "step": [0, -60]},
+                {"name": "k", "type": "Const", "w": 3, "value": "{i}", "at": [200, 0],
+                 "count": 3, "step": [0, -60]}],
+              "wires": [["w", "s"]]}"#,
+        )
+        .unwrap()
+        .workspace;
+        let mut los: Vec<u8> = ws
+            .root
+            .nodes
+            .iter()
+            .filter_map(|n| match n.kind {
+                GateKind::Split { lo, .. } => Some(lo),
+                _ => None,
+            })
+            .collect();
+        los.sort_unstable();
+        assert_eq!(los, [0, 1, 2, 3]);
+        let mut values: Vec<u64> = ws
+            .root
+            .nodes
+            .iter()
+            .filter_map(|n| match n.kind {
+                GateKind::Const { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, [0, 1, 2]);
+
+        // Elements must keep the same pins.
+        let e = expand_text(
+            r#"{"name": "c", "nodes": [{"name": "g", "type": "Not", "w": "1{i}", "at": [0, 0],
+                "count": 3, "step": [0, 60]}]}"#,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("the same pins"), "{e}");
+        // `{i}` outside an array is not an index.
+        let e = expand_text(
+            r#"{"name": "c", "nodes": [{"name": "k", "type": "Const", "value": "{i}", "at": [0, 0]}]}"#,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("not an integer"), "{e}");
+    }
+
+    /// The generated splits of a word stand in a column beside it, one box
+    /// apart, on the grid; merges likewise on the other side.
+    #[test]
+    fn generated_adapters_do_not_overlap() {
+        let ws = expand_text(
+            r#"{"name": "c", "nodes": [
+                {"name": "a", "type": "Input", "w": 8, "at": [0, 0]},
+                {"name": "n", "type": "Not", "at": [400, 0], "count": 8, "step": [0, -80]},
+                {"name": "y", "type": "Display", "w": 8, "at": [800, 0]}],
+              "wires": [["a", "n"], ["n", "y"]]}"#,
+        )
+        .unwrap()
+        .workspace;
+        let boxes: Vec<(bevy::math::Vec2, bevy::math::Vec2)> = ws
+            .root
+            .nodes
+            .iter()
+            .map(|n| (bevy::math::Vec2::new(n.x, n.y), n.kind.size()))
+            .collect();
+        assert_eq!(crate::sim::layout::overlaps(&boxes), None);
+        let splits: Vec<(f32, f32)> = ws
+            .root
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, GateKind::Split { .. }))
+            .map(|n| (n.x, n.y))
+            .collect();
+        assert_eq!(splits.len(), 8);
+        assert!(splits.iter().all(|&(x, y)| x == 80.0 && y % 60.0 == 0.0));
+        // The merge into the wide display keeps clear of its box.
+        let merge = ws
+            .root
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, GateKind::Merge { .. }))
+            .unwrap();
+        assert_eq!((merge.x, merge.y), (680.0, 0.0));
     }
 
     #[test]
