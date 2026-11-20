@@ -214,8 +214,10 @@ impl Sim {
 }
 ```
 
-`Sim` is single-threaded, allocation-free per tick, and has no locks or
-atomics. It is the same code on native and wasm.
+`Sim` is allocation-free per tick and the same code on native and wasm.
+By default it is single-threaded and has no locks or atomics;
+`SimOptions::threads` (#41, section 13 item 34) opts into a worker pool
+on native targets.
 
 ## 7. Engine (`logi_sim::engine`, rewritten)
 
@@ -301,9 +303,10 @@ Bugs in the legacy runners are not fixed, since M6 deletes them.
 Considered and deliberately left out of v2; each is additive later.
 
 - Per-definition compile memoization and incremental recompilation.
-- Packing many 1-bit gates of one op into the lanes of a single `u64`.
+- Packing many 1-bit gates of one op into the lanes of a single `u64`
+  (done in #41, section 13 item 33).
 - Activity gating (skipping regions whose inputs did not change).
-- Partitioned multithreading.
+- Partitioned multithreading (done in #41, section 13 items 34 and 35).
 - Native JIT (not available on wasm).
 - Multi-driver buses with conflict detection; X/Z values.
 
@@ -550,3 +553,123 @@ ambiguous. Each is small and can be revisited.
     (`inspector` alone enables the inspector); `cargo dev` is an alias for
     `cargo run -p gate_quest --features dev`. The unused
     `bevy_mod_debugdump` dependency was removed.
+31. **Slot order (#41).** `Options::slot_order` picks how instructions
+    are ordered inside a `(rank, op)` block and how slots are numbered.
+    - **`FirstUse`** (the default) lays the ranks out last to first and
+      sorts each block by the position of its instructions' first readers;
+      slots are still numbered in execution order. Every block keeps
+      writing one contiguous run of slots, and values read together sit
+      together.
+    - **`Dfs`** numbers slots in depth-first post-order from the sinks
+      (root outputs, then commit inputs). It measured slower everywhere
+      (the 1M-gate DAG lost 40%), because blocks then write scattered
+      slots. It is kept behind the switch only.
+    - **`Production`** is the M3 layout (item 16). `Options::unoptimized()`
+      keeps it, so older benchmarks stay comparable.
+    - **Effect** (alone, single thread): 1M-gate DAG +7 to 25%, 1M
+      word-level DAG +12%, bit-blasted datapath +14%, small designs
+      within noise.
+32. **Streaming runtime (#41).** `Sim::try_new` lowers the checked
+    `Program` into its own encoding (`sim/code.rs`). In a block whose
+    destinations are consecutive, which is every block under `FirstUse`
+    and `Production`, `dst` is implicit and only the slot operands are
+    streamed (4 bytes each, instead of a 16-byte `Instr` plus an 8-byte
+    immediate). A block whose immediates are all equal stores one.
+    Blocks with literal fields (`Shr`, `Concat`, `Sext`, `Clock`,
+    `MemRead`) or out-of-order destinations run from the program's
+    instructions as before. `SimOptions::stream` switches it off
+    (`SimOptions::baseline()` is the M3 runtime). Together with
+    `FirstUse` it took the 1M-gate DAG from about 265 to 460 M gates/s.
+33. **Lane packing (#41).** `Options::pack` (`PackMode`) and `pack_min`.
+    - **What packs.** 1-bit `Copy`, `Not`, `And`, `Or`, `Xor`, `Nand`,
+      `Nor`, `Xnor`, `Mux` and `Switch` whose operands are all 1 bit. Per
+      `(rank, op)` run they become `ceil(n / 64)` dense words (`Pack`),
+      each with a new 64-bit slot. Lanes that read one source word are
+      placed in the lanes they already occupy when at least four do.
+    - **Operands.** Each operand word is
+      `(slots[base] & keep) | splat | gathered bits`: lanes already in
+      place in one packed word, one bit shared by many lanes (a register
+      enable, a constant, a sign bit), then single bits (`Gather`). Reads
+      of the zero slot are dropped.
+    - **Boundaries.** A packed net that something reads as a plain slot
+      (a scalar instruction, a commit, a root output) keeps its slot, and
+      its word scatters that lane there (`Scatter`). So commits, ports and
+      state keys still name real slots, and the commit rule (commits read
+      only slots no commit writes) is unchanged.
+    - **Debug reads.** A packed net with no plain slot is named in the
+      `DebugMap` by a lane slot, `slot_count + 64 * k + lane`, meaning bit
+      `lane` of `Program::lane_words[k]` (`Program::locate`). `Sim::read`,
+      `read_net` and the `engine_v2` probes resolve both kinds, so every
+      net stays observable.
+    - **Validation.** `Sim::try_new` checks every pack, gather and scatter
+      slot, bit and lane, and every gather and scatter range.
+    - **Modes.** `Off`; `All` packs every packable word with at least
+      `pack_min` (default 8) lanes; `Aligned` packs a word only when a cost
+      model says it is cheaper than its scalar instructions with everything
+      in cache (about 0.9 ns per scalar 1-bit instruction or certain
+      scatter, 3 ns per word, 0.3 ns per base or splat term, 1 ns per
+      gathered lane); `Auto`, the default, is `All` when the slots would
+      exceed `AUTO_PACK_BYTES` (4 MiB) and at least half the instructions
+      are packable, and `Off` otherwise. `Options::unoptimized()` is `Off`.
+    - **Effect.** A gathered lane costs about as much as a scalar
+      instruction, so packing pays only when operands are in place or the
+      scalar slot array no longer fits a core's L2 cache (2 MiB on the
+      benchmark VM). The 1M-gate DAG gains 40 to 50% (8 MB of slots against
+      128 KB of words). Everything that fits in cache loses with `All`
+      (10k gates: -45%, bit-blasted CPU: -25%); `Aligned` measured neutral
+      on every benchmark, because the bit-blasted ones are dominated by
+      splats and by scatters to state commits. Hence the `Auto` rule.
+34. **Threads (#41).** `SimOptions::threads` (default 1) and `par_min`
+    (default 2048 work units, about 2 us).
+    - **Pool.** `Sim::with_options` starts `threads - 1` workers once and
+      keeps them for its lifetime. None start when no rank reaches
+      `par_min` or on wasm, so small circuits and the default stay
+      single-threaded with no behaviour change. Waiting threads spin
+      about 20 us before yielding, and idle workers about 90 us before
+      they sleep on a condition variable (`spin_loop` costs about 11 ns on
+      the benchmark VM).
+      `EngineCore::set_sim_options` passes runtime options to the engine;
+      the engine and the app keep the single-threaded default unless they
+      call it.
+    - **One thread and wasm.** With `threads == 1` no schedule is built
+      and no worker spawned; the settle checks one `Option` and takes the
+      plain single-threaded loop, with no atomics. On wasm the pool module
+      is replaced at compile time by an uninhabited stub, so no thread or
+      synchronization code is compiled in and a threaded `SimOptions`
+      runs on one thread.
+    - **Schedule.** Ranks with at least `par_min` work (one unit per
+      streamed instruction, three per instruction run from the full
+      `Instr`, four plus gathers and scatters per packed word) become
+      parallel phases, cut into equal-work pieces (blocks may be split).
+      Runs of smaller ranks become serial phases on the calling thread.
+    - **Synchronization.** There is no global barrier. Each thread
+      publishes a progress counter after each phase in which it wrote, and
+      before a phase waits only for the threads and phases whose writes it
+      reads (wait lists computed with the schedule). Workers skip serial
+      phases they do not depend on. A centralized barrier measured 0.5 to
+      1.3 us per phase on the benchmark VM; the counters 0.4 to 0.8 us.
+    - **Soundness.** The schedule is used only after checking over the
+      whole settle that each slot has one writer, that no parallel phase
+      reads its own writes, and that nothing reads a slot another thread
+      writes in the same or a later phase. Every compiled program passes;
+      any other program runs single-threaded. A cross-thread read is
+      ordered after its write by the release/acquire pair on the writer's
+      counter. The caller blocks until every worker's final counter, so
+      the slot and memory buffers it lends out stay valid, and commits and
+      input writes happen only between settles.
+    - **Effect** (4 threads against 1, same program): the 1M word-level
+      DAG 1.7 to 1.9x, the 1M-gate DAG about 1.3x, and the bit-blasted
+      datapath about 1.0x. Ranks in the random gate DAG are narrow (median
+      about 700 gates), so each synchronization guards little work; that
+      choice of `par_min` came from a sweep of 256 to 8192.
+35. **Partitions (#41).** `Options::partitions` (default 1;
+    `Options::for_threads(n)`) lays the program out for `n` threads. Rank
+    by rank, an instruction joins the partition that produced most of its
+    operands, unless that partition already has its share of the rank's
+    estimated cost. Each `(rank, op)` run becomes one block per partition
+    (`Program::block_parts`), packed blocks first, and a runtime with that
+    many threads gives thread `t` the blocks of partition `t` whole. It
+    cuts cross-core reads of just-written values, which are slow on the
+    benchmark VM. With 4 threads it helped the word-level DAG (up to 2.1x
+    over 1 thread) but slowed single-thread runs (more and smaller blocks,
+    interleaved slots) and the gate DAGs, so it is off by default.

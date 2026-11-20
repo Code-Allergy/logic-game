@@ -162,11 +162,13 @@ impl Schedule {
             threads,
             ..Schedule::default()
         };
-        // Stamp per slot: the last phase id that wrote it.
+        // Stamp per slot: the last rank (counted from 0) that wrote it.
         let mut stamp = vec![u32::MAX; p.slot_count as usize];
         let blocks = &code.blocks;
         let mut lo = 0usize;
+        let mut id = 0u32;
         while lo < blocks.len() {
+            id += 1;
             let rank = blocks[lo].rank;
             let mut hi = lo;
             while hi < blocks.len() && blocks[hi].rank == rank {
@@ -179,7 +181,6 @@ impl Schedule {
                         .sum::<u64>()
                 })
                 .sum();
-            let id = sched.phases.len() as u32;
             let parallel = threads > 1 && work >= par_min.max(1) && {
                 // Distinct writes, and no read of this phase's writes.
                 let mut ok = true;
@@ -360,23 +361,30 @@ impl Schedule {
     }
 }
 
-/// Spin until `c >= v`, then yield.
+/// Spin until `c >= v`, then yield. Returns false, without waiting
+/// further, once the pool is shutting down (so that workers waiting on a
+/// caller that panicked mid-settle let `Pool::drop` join them).
 #[inline]
-fn wait_for(c: &AtomicU64, v: u64) {
+fn wait_for(c: &AtomicU64, v: u64, shutdown: &AtomicBool) -> bool {
     let mut i = 0u32;
     while c.load(Ordering::Acquire) < v {
         if i < SPINS {
             spin_loop();
             i += 1;
+        } else if shutdown.load(Ordering::Relaxed) {
+            return false;
         } else {
             std::thread::yield_now();
         }
     }
+    true
 }
 
-const SPINS: u32 = 1 << 14;
-/// Spins (about 50-100 us) before an idle worker sleeps.
-const IDLE_SPINS: u32 = 1 << 16;
+/// Spins (about 20 us at the ~11 ns per `spin_loop` measured on the
+/// benchmark VM) before a waiting thread starts yielding.
+const SPINS: u32 = 1 << 11;
+/// Spins (about 90 us) before an idle worker sleeps.
+const IDLE_SPINS: u32 = 1 << 13;
 
 /// Run every phase as thread `t` in the settle whose progress values start
 /// above `base`, then publish `base + phases`.
@@ -393,7 +401,9 @@ unsafe fn run_phases(sh: &Shared, env: &Env<'_>, s: *mut u64, t: usize, base: u6
     for (pi, ph) in sched.phases.iter().enumerate() {
         let w = pi * n + t;
         for &(u, wp) in &sched.waits[sched.wait_off[w] as usize..sched.wait_off[w + 1] as usize] {
-            wait_for(&sh.progress[u as usize], base + wp as u64 + 1);
+            if !wait_for(&sh.progress[u as usize], base + wp as u64 + 1, &sh.shutdown) {
+                return;
+            }
         }
         let wrote = match ph {
             Phase::Serial(r) => {
@@ -468,7 +478,7 @@ impl Pool {
         schedule: Schedule,
         threads: usize,
     ) -> Option<Self> {
-        if cfg!(target_arch = "wasm32") || threads < 2 || schedule.parallel_phases() == 0 {
+        if threads < 2 || schedule.parallel_phases() == 0 {
             return None;
         }
         let shared = Arc::new(Shared {
@@ -545,7 +555,7 @@ impl Pool {
         unsafe { run_phases(sh, &env, s, 0, base) };
         let end = base + sh.schedule.phases.len() as u64;
         for c in &sh.progress[1..] {
-            wait_for(c, end);
+            wait_for(c, end, &sh.shutdown);
         }
     }
 }

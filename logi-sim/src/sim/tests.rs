@@ -498,10 +498,31 @@ fn perf_switches_match_the_reference() {
 #[test]
 #[ignore]
 fn perf_switches_10k() {
-    for (name, opts, so) in perf_variants() {
-        let n = diff::sweep_with(&diff::standard_configs(), 1700, 30, &opts, &so);
-        assert!(n >= 10_000, "{name}");
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Single-threaded variants run four at a time; threaded ones alone, so
+    // they do not oversubscribe the cores. Each checks 10,200 designs.
+    let (threaded, single): (Vec<_>, Vec<_>) = perf_variants()
+        .into_iter()
+        .partition(|(_, _, so)| so.threads > 1);
+    let total = AtomicUsize::new(0);
+    for (variants, workers) in [(single, 4), (threaded, 1)] {
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    while let Some((name, opts, so)) =
+                        variants.get(next.fetch_add(1, Ordering::Relaxed))
+                    {
+                        let n = diff::sweep_with(&diff::standard_configs(), 1700, 30, opts, so);
+                        assert!(n >= 10_000, "{name}");
+                        total.fetch_add(n as usize, Ordering::Relaxed);
+                        eprintln!("{name}: {n} designs match");
+                    }
+                });
+            }
+        });
     }
+    eprintln!("{} designs in all", total.load(Ordering::Relaxed));
 }
 
 /// `PackMode::Auto` packs a large 1-bit design (past `AUTO_PACK_BYTES`),
@@ -594,4 +615,56 @@ fn racy_programs_run_single_threaded() {
     one.run(100);
     many.run(100);
     assert_eq!(one.get("acc"), many.get("acc"));
+}
+
+/// With one thread (the default) no worker starts and no schedule is built,
+/// whatever `par_min` says; results match a 4-thread run of the same
+/// programs on every design shape.
+#[test]
+fn one_thread_spawns_nothing_and_matches_threads() {
+    use crate::testkit::{GenConfig, bitblast::bitblast, generate};
+    let designs = [
+        generate(&GenConfig::gates(3, 40_000, 1)).design,
+        generate(&GenConfig::dag(5, 20_000, 32)).design,
+        bitblast(&fixtures::cpu(&fixtures::MULTIPLY_PROGRAM)),
+    ];
+    for d in &designs {
+        let p = Arc::new(compile(d, &Options::debug()).unwrap());
+        let force = |threads| SimOptions {
+            threads,
+            par_min: 1,
+            ..SimOptions::default()
+        };
+        assert_eq!(SimOptions::default().threads, 1);
+        let mut one = Sim::new(Arc::clone(&p));
+        let one_forced = Sim::with_options(Arc::clone(&p), force(1));
+        for s in [&one, &one_forced] {
+            assert_eq!(s.threads(), 1);
+            assert_eq!(s.phases(), (0, 0), "no schedule with one thread");
+            assert!(s.pool.is_none());
+        }
+        let mut four = Sim::with_options(Arc::clone(&p), force(4));
+        if !cfg!(target_arch = "wasm32") {
+            assert_eq!(four.threads(), 4);
+        }
+        for t in 0..40u64 {
+            for (port, input) in p.ports.inputs.iter().enumerate() {
+                let v = t.wrapping_mul(0x2545_F491_4F6C_DD1D) >> (port % 60);
+                let v = v & crate::netlist::mask(input.width);
+                one.set_input(port, v);
+                four.set_input(port, v);
+            }
+            one.tick();
+            four.tick();
+            for (inst, map) in p.debug.net_slots.iter().enumerate() {
+                for (net, &slot) in map {
+                    assert_eq!(
+                        one.read(slot),
+                        four.read(slot),
+                        "tick {t} inst {inst} {net:?}"
+                    );
+                }
+            }
+        }
+    }
 }

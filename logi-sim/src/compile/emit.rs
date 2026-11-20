@@ -216,7 +216,10 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
             let packable = (0..instrs.len())
                 .filter(|&k| pack::packable(ops[k], &instrs[k], &widths))
                 .count();
-            if widths.len() * 8 > super::AUTO_PACK_BYTES && 2 * packable >= instrs.len() {
+            // Live slots: one per instruction, input, constant and state
+            // element (`widths` still counts slots simplify removed).
+            let live = instrs.len() + ports.inputs.len() + consts.len() + commits.len();
+            if live * 8 > super::AUTO_PACK_BYTES && 2 * packable >= instrs.len() {
                 super::PackMode::All
             } else {
                 super::PackMode::Off

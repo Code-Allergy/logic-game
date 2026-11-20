@@ -6,12 +6,46 @@
 //! block; each block's inner loop is a pass over a contiguous slice of
 //! instructions with one opcode.
 //!
-//! `tick()` allocates nothing and uses no locks or atomics, and the code is
-//! the same on native and wasm. Every index in the program is checked once in
-//! [`Sim::new`], so the inner loops can skip bounds checks.
+//! `tick()` allocates nothing, and the code is the same on native and wasm.
+//! Every index in the program is checked once in [`Sim::new`], so the inner
+//! loops can skip bounds checks. The program is first lowered into the
+//! runtime's own streaming encoding (`code.rs`).
+//!
+//! Single-threaded (the default), a `Sim` uses no locks or atomics. With
+//! [`SimOptions::threads`] > 1 it owns a pool of worker threads that share
+//! each settle (`pool.rs`, which documents why that is race-free); results
+//! are identical.
 
 mod code;
+#[cfg(not(target_arch = "wasm32"))]
 mod pool;
+/// No threads on wasm. `Pool` is uninhabited, so a `Sim`'s pool is always
+/// `None`, every settle takes the single-threaded path, and no thread or
+/// synchronization code is compiled in. A threaded `SimOptions` silently
+/// runs on one thread.
+#[cfg(target_arch = "wasm32")]
+mod pool {
+    pub(super) enum Pool {}
+    pub(super) struct Schedule {
+        pub phases: Vec<()>,
+    }
+    impl Schedule {
+        pub fn parallel_phases(&self) -> usize {
+            0
+        }
+    }
+    impl Pool {
+        pub fn threads(&self) -> usize {
+            match *self {}
+        }
+        pub fn schedule(&self) -> &Schedule {
+            match *self {}
+        }
+        pub fn settle(&self, _: &mut [u64], _: &[Vec<u64>], _: u64) {
+            match *self {}
+        }
+    }
+}
 #[cfg(test)]
 mod tests;
 
@@ -102,7 +136,9 @@ pub struct Sim {
     code: Arc<code::Code>,
     options: SimOptions,
     /// Worker threads, when `options.threads > 1` and some rank is large
-    /// enough.
+    /// enough. Declared before `slots` and `mems`, so it is dropped (and
+    /// its workers joined) before the buffers they may still be using are
+    /// freed, even when unwinding out of a settle.
     pool: Option<pool::Pool>,
     slots: Vec<u64>,
     mems: Vec<Vec<u64>>,
@@ -150,17 +186,7 @@ impl Sim {
             })
             .collect();
         let code = Arc::new(code);
-        let pool = if options.threads > 1 {
-            let sched = pool::Schedule::new(&program, &code, options.threads, options.par_min);
-            pool::Pool::new(
-                Arc::clone(&program),
-                Arc::clone(&code),
-                sched,
-                options.threads,
-            )
-        } else {
-            None
-        };
+        let pool = start_pool(&program, &code, &options);
         let mut sim = Sim {
             code,
             options,
@@ -380,6 +406,32 @@ impl Sim {
         self.tick = snap.tick;
         self.settle();
     }
+}
+
+/// Worker threads for `options`, or `None`: always with one thread (the
+/// default, so nothing is spawned and the settle never touches pool or
+/// synchronization code), when no rank is large enough, and on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_pool(
+    program: &Arc<Program>,
+    code: &Arc<code::Code>,
+    options: &SimOptions,
+) -> Option<pool::Pool> {
+    if options.threads <= 1 {
+        return None;
+    }
+    let sched = pool::Schedule::new(program, code, options.threads, options.par_min);
+    pool::Pool::new(
+        Arc::clone(program),
+        Arc::clone(code),
+        sched,
+        options.threads,
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_pool(_: &Arc<Program>, _: &Arc<code::Code>, _: &SimOptions) -> Option<pool::Pool> {
+    None
 }
 
 /// Check every index the unchecked loops rely on.

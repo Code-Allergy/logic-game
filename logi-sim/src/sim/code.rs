@@ -24,8 +24,11 @@ use crate::netlist::mask;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct XBlock {
     pub op: Op,
+    /// Used by the thread schedule only (not compiled on wasm).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub rank: u32,
     /// The program block's `start` (into `instrs` or `packs`).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub src: u32,
     pub len: u32,
     pub form: Form,
