@@ -30,8 +30,8 @@ use bevy_egui::EguiPlugin;
 
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
 use gate_quest::sim::{
-    CircuitDocument, DocNode, DocWire, GateKind, GateLabel, LoadWorkspaceEvent, SelectedGate,
-    SetInputValue, SimBridge, SimulationPlugin, WorkspaceDocument, demos,
+    ActiveCircuit, CircuitDocument, DocNode, DocWire, GateKind, GateLabel, LoadWorkspaceEvent,
+    SelectedGate, SetInputValue, SimBridge, SimulationPlugin, WorkspaceDocument, demos,
 };
 use gate_quest::temp::GateComponentSelectionEvent;
 use gate_quest::theme::{Theme, ThemeMode, ThemePlugin};
@@ -177,6 +177,7 @@ fn drive(
     mut load: MessageWriter<LoadWorkspaceEvent>,
     mut cameras: Query<&mut Projection, With<MainCamera>>,
     mut exit: MessageWriter<AppExit>,
+    mut active: ResMut<ActiveCircuit>,
 ) {
     shot.frame += 1;
     match shot.frame {
@@ -227,6 +228,9 @@ fn drive(
                 .observe(save_to_disk(shot.out.clone()));
         }
         100 => {
+            // An editable workspace is saved on exit: a screenshot must not
+            // write the player's workspaces.
+            active.read_only = true;
             exit.write(AppExit::Success);
         }
         _ => {}
