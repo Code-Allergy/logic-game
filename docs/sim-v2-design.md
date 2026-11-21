@@ -882,3 +882,19 @@ ambiguous. Each is small and can be revisited.
     tool only; the app does not use it. `layout.rs` is unchanged: the
     gallery is placed by hand, not by `layout_circuit`.
 
+50. **A 16-bit CPU of gates and its word twin.** The gallery gains
+    `cpu16`, a multi-cycle 16-bit CPU whose state is all curriculum
+    flip-flops (about 14 700 primitives after flattening, the largest
+    hand-made design so far), and `cpu16_rtl`, the same instruction set of
+    word primitives; both run the same prime-number program (see
+    `docs/save-format.md`, "The 16-bit CPUs"). To simulate a workspace
+    without the app, `gate_quest::sim::netlist::design_of` builds the
+    `Design` the bridge would build (ports in interface order, root
+    `Display`s as outputs named by their labels); the CPU tests and
+    `examples/cpu_bench.rs` use it with `logi_sim::sim::Sim` directly,
+    which is far faster than stepping the app. The gallery stays within
+    its 20 to 30 items (29). The CPU files were laid out with the help of
+    a script that checked every candidate position against the two
+    `render_svg` checks; a test now also checks that no wire of either CPU
+    passes through a box (the other items are only checked for
+    overlapping boxes, as before).
