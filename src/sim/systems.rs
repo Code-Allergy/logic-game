@@ -174,7 +174,17 @@ fn hit(transform: &Transform, kind: &GateKind, world: Vec2) -> bool {
     local.x.abs() <= half.x && local.y.abs() <= half.y
 }
 
-/// Left-click selects a gate.
+/// A left click on the canvas: on a gate, that gate (to select); on empty
+/// canvas, nothing, and the selection is cleared.
+pub fn canvas_click(hit: Option<Entity>, selected: &mut SelectedGate) -> Option<Entity> {
+    if hit.is_none() && selected.0.is_some() {
+        selected.0 = None;
+    }
+    hit
+}
+
+/// Left-click selects a gate; a left click on empty canvas (not over the
+/// HUD) clears the selection.
 pub fn update_inputs_on_left_click(
     q_window: Query<&Window, With<PrimaryWindow>>,
     ui_pointer: Res<UiPointerState>,
@@ -182,6 +192,7 @@ pub fn update_inputs_on_left_click(
     q_camera: Query<(&Camera, &GlobalTransform)>,
     query: Query<(Entity, &Transform, &GateType)>,
     mut select_writer: MessageWriter<GateComponentSelectionEvent>,
+    mut selected: ResMut<SelectedGate>,
 ) {
     if ui_pointer.over_egui || !mouse_button_input.just_pressed(MouseButton::Left) {
         return;
@@ -193,9 +204,15 @@ pub fn update_inputs_on_left_click(
     let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
         return;
     };
-    if let Some((entity, ..)) = query.iter().find(|(_, t, ty)| hit(t, &ty.kind, world)) {
+    let target = query
+        .iter()
+        .find(|(_, t, ty)| hit(t, &ty.kind, world))
+        .map(|(entity, ..)| entity);
+    let mut next = *selected;
+    if let Some(entity) = canvas_click(target, &mut next) {
         select_writer.write(GateComponentSelectionEvent { entity });
     }
+    selected.set_if_neq(next);
 }
 
 /// Update [`SelectedGate`] when a selection event fires.
@@ -1101,6 +1118,23 @@ pub fn workspace_io_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_on_empty_canvas_clears_the_selection() {
+        let mut world = World::new();
+        let (a, b) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let mut selected = SelectedGate(Some(a));
+        assert_eq!(canvas_click(Some(b), &mut selected), Some(b));
+        assert_eq!(
+            selected.0,
+            Some(a),
+            "a click on a gate selects via the event"
+        );
+        assert_eq!(canvas_click(None, &mut selected), None);
+        assert_eq!(selected.0, None, "empty canvas deselects");
+        assert_eq!(canvas_click(None, &mut selected), None);
+        assert_eq!(selected.0, None);
+    }
 
     #[test]
     fn ticks_group_by_thousands() {

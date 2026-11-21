@@ -1216,7 +1216,30 @@ pub fn toast_system(
     Ok(())
 }
 
-/// `Esc` drops the armed part, the wire tool and the Library drawer; `W`
+/// `Esc`, in order: if a part is armed or being dragged from the parts
+/// bar, the wire tool is on, or the Library drawer is open, drop all of
+/// those; otherwise clear the selection (close the inspector). So one `Esc`
+/// cancels the tool in hand and a second deselects.
+pub fn escape(state: &mut EditorState, selected: &mut SelectedGate) {
+    let armed = state.selected_gate_type.is_some()
+        || state.dragging_part.is_some()
+        || state.connection_mode
+        || state.connection_source.is_some()
+        || state.library_open;
+    if armed {
+        state.selected_gate_type = None;
+        state.selected_gate_label = None;
+        state.dragging_part = None;
+        state.connection_mode = false;
+        state.clear_connection();
+        state.library_open = false;
+    } else {
+        selected.0 = None;
+    }
+}
+
+/// `Esc` drops the armed part, the wire tool and the Library drawer, or
+/// with none of those clears the selection (see [`escape`]); `W`
 /// toggles the wire tool; `F` fits the view. Ignored while a text field
 /// has the keyboard. (`1`–`9` are handled by the parts bar, `T` by the
 /// theme, `Delete` by the inspector.)
@@ -1226,6 +1249,7 @@ pub fn editor_keys_system(
     mut state: ResMut<EditorState>,
     mut fit: MessageWriter<FitView>,
     game_state: Res<State<GameState>>,
+    mut selected: Option<ResMut<SelectedGate>>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -1238,11 +1262,11 @@ pub fn editor_keys_system(
         return Ok(());
     }
     if keys.just_pressed(KeyCode::Escape) {
-        state.selected_gate_type = None;
-        state.dragging_part = None;
-        state.connection_mode = false;
-        state.clear_connection();
-        state.library_open = false;
+        let mut next = selected.as_deref().copied().unwrap_or_default();
+        escape(&mut state, &mut next);
+        if let Some(selected) = selected.as_mut() {
+            selected.set_if_neq(next);
+        }
     }
     if keys.just_pressed(KeyCode::KeyW) {
         state.connection_mode = !state.connection_mode;
@@ -1261,6 +1285,30 @@ mod tests {
 
     fn close(a: Vec2, b: Vec2) -> bool {
         (a - b).length() < 1e-3
+    }
+
+    #[test]
+    fn escape_cancels_the_armed_tool_first_then_deselects() {
+        let gate = World::new().spawn_empty().id();
+        let mut selected = SelectedGate(Some(gate));
+        let mut state = EditorState {
+            library_open: true,
+            ..Default::default()
+        };
+        state.arm(GateKind::Not { w: 1 }, None);
+        escape(&mut state, &mut selected);
+        assert!(state.selected_gate_type.is_none() && !state.library_open);
+        assert_eq!(selected.0, Some(gate), "the first Esc only drops the tool");
+        escape(&mut state, &mut selected);
+        assert_eq!(selected.0, None, "the second Esc deselects");
+
+        selected.0 = Some(gate);
+        state.connection_mode = true;
+        escape(&mut state, &mut selected);
+        assert!(!state.connection_mode);
+        assert_eq!(selected.0, Some(gate));
+        escape(&mut state, &mut selected);
+        assert_eq!(selected.0, None);
     }
 
     #[test]

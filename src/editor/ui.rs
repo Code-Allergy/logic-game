@@ -532,11 +532,13 @@ pub fn editor_ui_system(
                 .show(ui, |ui| {
             for tip in [
                 "1–9: pick a part from the open tab; click or drag it onto the canvas",
-                "Left-click: select a part (inspector: toggle inputs, edit, delete)",
+                "Left-click: select a part (inspector: toggle inputs, edit, delete); \
+                 empty canvas: deselect",
                 "Right-drag: move a part · Middle-drag: pan · Wheel: zoom",
                 "Delete: delete the selected part",
                 "W: wire tool (click source, then sink, choose pins)",
-                "F: fit the circuit · Esc: drop the armed part",
+                "F: fit the circuit · R: reset to tick 0",
+                "Esc: drop the armed part or wire tool, else deselect",
                 "T: day or night workshop",
             ] {
                 ui.label(egui::RichText::new(tip).size(12.0));
