@@ -12,6 +12,7 @@
 //! - [`demos`] – the built-in demos, loaded from `assets/demos/`.
 //! - [`rtl`] – RTL import: a Yosys JSON netlist becomes a workspace.
 //! - [`layout`] – automatic layered layout of a circuit.
+//! - [`routing`] – orthogonal wire routing on the grid.
 //! - [`bridge`] – `SimBridge`: maps the ECS onto a `logi_sim` v2 `Design`,
 //!   sends revisions to the engine and reads probes back.
 //! - [`view`] – instance views: opening a subcircuit shows its definition
@@ -36,6 +37,7 @@ pub mod demos;
 pub mod document;
 pub mod kind;
 pub mod layout;
+pub mod routing;
 pub mod rtl;
 pub mod shapes;
 pub mod source;
