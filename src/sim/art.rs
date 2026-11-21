@@ -165,10 +165,14 @@ pub enum Paint {
     Fault,
     Screen,
     Halo,
+    /// The bench, for the gap a wire cuts in the one it passes over.
+    Bench,
+    /// A wire the simulator did not accept.
+    FaultText,
 }
 
 impl Paint {
-    pub const ALL: [Paint; 19] = [
+    pub const ALL: [Paint; 21] = [
         Paint::Ink,
         Paint::Tile,
         Paint::StateTint,
@@ -188,6 +192,8 @@ impl Paint {
         Paint::Fault,
         Paint::Screen,
         Paint::Halo,
+        Paint::Bench,
+        Paint::FaultText,
     ];
 
     pub fn color(self, p: &Palette) -> Color {
@@ -211,6 +217,8 @@ impl Paint {
             Paint::Fault => p.fault,
             Paint::Screen => p.screen,
             Paint::Halo => p.halo,
+            Paint::Bench => p.bench,
+            Paint::FaultText => p.fault_text,
         }
     }
 
