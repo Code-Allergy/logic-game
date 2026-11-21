@@ -143,6 +143,82 @@ impl Shape {
     }
 }
 
+/// Radius of the rounded corner at vertex `i` of `points` (an interior
+/// vertex): `radius`, but at most half of either neighbouring segment;
+/// zero where the path runs straight on.
+pub fn corner_radius(points: &[Vec2], i: usize, radius: f32) -> f32 {
+    let (a, b, c) = (points[i - 1], points[i], points[i + 1]);
+    let (u, v) = (b - a, c - b);
+    if u.perp_dot(v).abs() <= 1e-3 * u.length() * v.length() {
+        return 0.0;
+    }
+    radius.min(u.length() * 0.5).min(v.length() * 0.5)
+}
+
+/// `points` with every corner replaced by a quadratic curve of up to
+/// `radius` (see [`corner_radius`]), as wires turn on the grid.
+pub fn round_corners(points: &[Vec2], radius: f32) -> Vec<Vec2> {
+    let n = points.len();
+    if n < 3 {
+        return points.to_vec();
+    }
+    let mut out = Vec::with_capacity(n * 4);
+    out.push(points[0]);
+    for i in 1..n - 1 {
+        let r = corner_radius(points, i, radius);
+        let b = points[i];
+        if r < 0.5 {
+            out.push(b);
+            continue;
+        }
+        let start = b + (points[i - 1] - b).normalize() * r;
+        let end = b + (points[i + 1] - b).normalize() * r;
+        out.extend(quad_bezier(start, b, end, quarter_segments(r)));
+    }
+    out.push(points[n - 1]);
+    out.dedup_by(|b, a| a.distance_squared(*b) < 1e-6);
+    out
+}
+
+impl Shape {
+    /// A stroke of `width` along a smooth open path (gentle turns, such as
+    /// [`round_corners`] makes): one strip with mitred joins, and round
+    /// caps at both ends.
+    pub fn path_stroke(points: &[Vec2], width: f32) -> Shape {
+        let mut pts = points.to_vec();
+        pts.dedup_by(|b, a| a.distance_squared(*b) < 1e-6);
+        let half = width * 0.5;
+        let mut shape = Shape::default();
+        match pts.len() {
+            0 => return shape,
+            1 => return Shape::dot(pts[0], half),
+            _ => {}
+        }
+        let n = pts.len();
+        let normal = |i: usize| (pts[i + 1] - pts[i]).normalize().perp();
+        for i in 0..n {
+            let offset = if i == 0 {
+                normal(0) * half
+            } else if i == n - 1 {
+                normal(n - 2) * half
+            } else {
+                let (a, b) = (normal(i - 1), normal(i));
+                let m = (a + b).normalize_or(a);
+                m * half / m.dot(a).max(0.25)
+            };
+            shape.positions.push(pts[i] + offset);
+            shape.positions.push(pts[i] - offset);
+        }
+        for i in 0..n as u32 - 1 {
+            let (l0, r0, l1, r1) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+            shape.indices.extend([l0, l1, r1, l0, r1, r0]);
+        }
+        shape.append(&Shape::dot(pts[0], half));
+        shape.append(&Shape::dot(pts[n - 1], half));
+        shape
+    }
+}
+
 /// Outline of a rounded rectangle, counter-clockwise from the right edge.
 pub fn rounded_rect_outline(size: Vec2, radius: f32) -> Vec<Vec2> {
     let half = size * 0.5;
@@ -281,6 +357,50 @@ mod tests {
         );
         assert!(corner.triangle_count() > straight.triangle_count());
         assert_eq!(Shape::stroke(&[], 3.0, false).triangle_count(), 0);
+    }
+
+    #[test]
+    fn rounded_corners_stay_inside_the_corner() {
+        let path = [Vec2::ZERO, Vec2::new(100.0, 0.0), Vec2::new(100.0, 100.0)];
+        let round = round_corners(&path, 20.0);
+        assert_eq!(round[0], path[0]);
+        assert_eq!(*round.last().unwrap(), path[2]);
+        assert!(round.contains(&Vec2::new(80.0, 0.0)) && round.contains(&Vec2::new(100.0, 20.0)));
+        assert!(!round.contains(&Vec2::new(100.0, 0.0)), "the corner is cut");
+        // Short legs limit the radius; straight runs keep their points.
+        assert_eq!(
+            corner_radius(
+                &[Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(10.0, 50.0)],
+                1,
+                20.0
+            ),
+            5.0
+        );
+        let straight = [Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(30.0, 0.0)];
+        assert_eq!(corner_radius(&straight, 1, 20.0), 0.0);
+        assert_eq!(round_corners(&straight, 20.0), straight.to_vec());
+    }
+
+    #[test]
+    fn path_stroke_has_constant_width() {
+        let path = round_corners(
+            &[Vec2::ZERO, Vec2::new(100.0, 0.0), Vec2::new(100.0, 100.0)],
+            20.0,
+        );
+        let s = Shape::path_stroke(&path, 6.0);
+        let (lo, hi) = s.bounds().unwrap();
+        assert!(close(lo.x, -3.0, 1e-3) && close(hi.x, 103.0, 1e-3));
+        assert!(close(lo.y, -3.0, 1e-3) && close(hi.y, 103.0, 1e-3));
+        // Strip area is about length times width (plus the two caps).
+        let length: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
+        // Two full discs at the ends (overlaps count twice).
+        let caps = 2.0 * PI * 9.0;
+        assert!(
+            close(s.area(), length * 6.0 + caps, length * 6.0 * 0.03),
+            "{}",
+            s.area()
+        );
+        assert_eq!(Shape::path_stroke(&[], 2.0).triangle_count(), 0);
     }
 
     #[test]
