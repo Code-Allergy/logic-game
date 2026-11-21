@@ -43,6 +43,8 @@ fn fixtures_match_the_reference() {
         counter(64),
         counter_bitblasted(64),
         register_file(3, 16),
+        register_file_ram2(4, 64, &[u64::MAX, 1]),
+        fifo(4, 12),
         sr_latch_nor_delayed(),
         cpu(&MULTIPLY_PROGRAM),
     ]
@@ -227,6 +229,26 @@ fn malformed_programs_are_rejected() {
     let mut p = good;
     p.slot_count -= 1;
     assert!(Sim::try_new(Arc::new(p)).is_err());
+
+    // A masked RAM write: a bad slot, a read-only memory.
+    let mut b = Design::new("top");
+    let r = b.root;
+    let mut bb = b.builder(r);
+    let a = bb.input("a", 2);
+    let m = bb.input("m", 4);
+    let q = bb.ram2(a, m, m, &[a], &[]);
+    bb.output("q", q[0]);
+    let good = compile(&b, &Options::default()).unwrap();
+    assert!(Sim::try_new(Arc::new(good.clone())).is_ok());
+    let mut p = good.clone();
+    let Commit::RamWriteMasked { mask, .. } = &mut p.commits[0] else {
+        panic!("{:?}", p.commits[0])
+    };
+    *mask = p.slot_count;
+    assert!(Sim::try_new(Arc::new(p)).is_err());
+    let mut p = good;
+    p.mems[0].writable = false;
+    assert!(Sim::try_new(Arc::new(p)).is_err());
 }
 
 // ── Regression tests for the audit bugs ──────────────────────────────────
@@ -405,6 +427,57 @@ fn unmatched_state_resets() {
         s2.mem(m).iter().all(|&w| w == 0),
         "geometry change resets RAM"
     );
+}
+
+/// A `Ram2` written at a counter address and read at `ra`, plus an extra
+/// gate on request.
+fn stateful_ram2(extra_gate: bool, addr_bits: u8) -> Design {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let one = b.one();
+    let ra = b.input("ra", addr_bits);
+    let (reg, q) = b.state_placeholder(NodeKind::Register { w: 8 });
+    let n = b.inc(q);
+    b.connect(one, (reg, 0));
+    b.connect(n, (reg, 1));
+    let waddr = b.split(q, 0, addr_bits);
+    let data = b.ram2(waddr, one, q, &[ra], &[0xEE; 4]);
+    b.output("q", q);
+    b.output("data", data[0]);
+    if extra_gate {
+        let x = b.input("x", 1);
+        let nx = b.not(x);
+        b.output("nx", nx);
+    }
+    d
+}
+
+#[test]
+fn ram2_contents_survive_an_edit_and_reset_on_a_new_geometry() {
+    let mut s1 = sim_of(&stateful_ram2(false, 5));
+    s1.run(10);
+    let snap = s1.export_state();
+    assert_eq!(snap.mems.len(), 1);
+
+    let mut s2 = sim_of(&stateful_ram2(true, 5));
+    s2.import_state(&snap);
+    for a in 0..10 {
+        s2.set("ra", a);
+        s2.tick();
+        // Tick 10 + a writes address 10 + a; 0..10 hold their count.
+        assert_eq!(s2.get("data"), a, "address {a}");
+    }
+    s2.set("ra", 31);
+    s2.tick();
+    assert_eq!(s2.get("data"), 0, "never written, past init");
+
+    // A different address width resets to the initial contents.
+    let mut s3 = sim_of(&stateful_ram2(true, 6));
+    s3.import_state(&snap);
+    let m = s3.program().mems.len() as u32 - 1;
+    assert_eq!(&s3.mem(m)[..5], &[0xEE, 0xEE, 0xEE, 0xEE, 0]);
+    assert_eq!(s3.get("q"), 10, "the register keeps its state");
 }
 
 #[test]
