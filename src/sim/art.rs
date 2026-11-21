@@ -73,7 +73,11 @@ pub fn pill_size(digits: usize) -> Vec2 {
 pub fn family(kind: &GateKind) -> Family {
     use GateKind as G;
     match kind {
-        G::Input { .. } | G::Output { .. } | G::Display { .. } | G::Clock { .. } => Family::Io,
+        G::Input { .. }
+        | G::Output { .. }
+        | G::Display { .. }
+        | G::Screen { .. }
+        | G::Clock { .. } => Family::Io,
         G::Delay { .. }
         | G::Register { .. }
         | G::DLatch { .. }

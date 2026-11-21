@@ -479,10 +479,96 @@ fn width_drag(ui: &mut egui::Ui, label: &str, value: &mut u8, range: std::ops::R
     });
 }
 
+/// The screen settings: mode, resolution, colours and pixel size.
+fn edit_screen_params(ui: &mut egui::Ui, palette: &crate::theme::Palette, kind: &mut GateKind) {
+    let GateKind::Screen {
+        mode,
+        width,
+        height,
+        palette: colours,
+        scale,
+    } = kind
+    else {
+        return;
+    };
+    let section = |ui: &mut egui::Ui, title: &str, body: &mut dyn FnMut(&mut egui::Ui)| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.label(caption(palette, title));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                body(ui);
+            });
+        });
+    };
+    section(ui, "Mode", &mut |ui| {
+        for m in super::ScreenMode::ALL {
+            if chip(ui, palette, m.name(), *mode == m).clicked() && *mode != m {
+                *mode = m;
+                *width = m.fit(*width);
+                *height = m.fit(*height);
+            }
+        }
+    });
+    let text = *mode == super::ScreenMode::Text;
+    let sides = mode.sides();
+    for (title, side) in [
+        (if text { "Columns" } else { "Width" }, &mut *width),
+        (if text { "Rows" } else { "Height" }, &mut *height),
+    ] {
+        section(ui, title, &mut |ui| {
+            for &s in sides {
+                if chip(ui, palette, s.to_string(), *side == s).clicked() {
+                    *side = s;
+                }
+            }
+        });
+    }
+    if text {
+        ui.label(
+            egui::RichText::new("8-bit character codes (ASCII); bit 7 inverts the cell.")
+                .size(12.0)
+                .color(egui_color(palette.text_secondary)),
+        );
+    } else {
+        section(ui, "Colours", &mut |ui| {
+            for p in super::ScreenPalette::ALL {
+                let label = format!("{} ({} bit)", p.name(), p.bits());
+                if chip(ui, palette, label, *colours == p).clicked() {
+                    *colours = p;
+                }
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label("Pixel size");
+        ui.add(egui::DragValue::new(scale).range(1..=super::MAX_SCREEN_SCALE));
+    });
+    let hint = match mode {
+        super::ScreenMode::Pixel => "Each tick that draw is on paints colour at (x, y).".into(),
+        super::ScreenMode::Scanline => {
+            "Each tick paints one pixel and moves right; hsync starts the next line, vsync the \
+             top."
+                .into()
+        }
+        _ => format!("Cell (x, y) is at address y × {width} + x."),
+    };
+    ui.label(
+        egui::RichText::new(hint)
+            .size(12.0)
+            .color(egui_color(palette.text_secondary)),
+    );
+}
+
 /// Edit the parameters of a kind. Returns the edited kind.
-fn edit_kind_params(ui: &mut egui::Ui, kind: &GateKind) -> GateKind {
+fn edit_kind_params(
+    ui: &mut egui::Ui,
+    palette: &crate::theme::Palette,
+    kind: &GateKind,
+) -> GateKind {
     let mut k = kind.clone();
     match &mut k {
+        GateKind::Screen { .. } => edit_screen_params(ui, palette, &mut k),
         GateKind::Clock {
             period,
             duty,
@@ -811,7 +897,7 @@ pub fn ui_for_selected_gate(
 
                         // The kind's other parameters (the width has its chips).
                         if !width_only(&ty.kind) {
-                            let edited = edit_kind_params(ui, &ty.kind);
+                            let edited = edit_kind_params(ui, &palette, &ty.kind);
                             if edited != ty.kind {
                                 writers.kinds.write(SetGateKind {
                                     entity,

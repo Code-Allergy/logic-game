@@ -115,7 +115,21 @@ from 0 in the order listed.
 | `DLatch` | `w` | en(1), d | q |
 | `SrLatch` | – | s(1), r(1) | q(1) |
 | `Ram` | `addr_bits`, `w` | addr, we(1), wdata | rdata(w) |
+| `Screen` | `mode`, `width`, `height`, `palette`, `scale` | per `mode`, see below | – |
 | `SubCircuit` | `definition` (circuit id) | the definition's inputs | the definition's outputs |
+
+`Screen` is the graphical display. `mode` is `"Pixel"` (inputs x, y,
+colour, draw(1), clear(1)), `"Framebuffer"` (addr, we(1), wdata),
+`"Scanline"` (colour, hsync(1), vsync(1)) or `"Text"` (addr, we(1),
+char(8)). `width` and `height` are in pixels, one of 8, 16, 32, 64, 128
+or 256 (in characters for text: 4, 8, 16, 32 or 64). Pixel `(x, y)` (a
+character cell for text) is at address `y * width + x`, so x is
+`log2(width)` bits and y `log2(height)`. `palette` sets the colour width:
+`"Mono"` 1 bit, `"Gray"` 2, `"Colors16"` 4 (IRGB), `"Rgb332"` 8; text
+always takes 8-bit character codes. `scale` (1 to 16) is the size of a
+pixel on the canvas. In version 6, `palette` defaults to `"Mono"` and
+`scale` to 4, and `Screen` has no `w`. It has no outputs and keeps its
+picture as state (like a `Ram`).
 
 Semantics are those of `docs/sim-v2-design.md` section 3.
 
@@ -413,8 +427,9 @@ embedded list and the manifest agree.
 
 ## Gallery
 
-`assets/gallery/` holds the gallery: 27 more circuits beside the
-curriculum, from a majority vote to a CPU running Fibonacci. Its
+`assets/gallery/` holds the gallery: 31 more circuits beside the
+curriculum, from a majority vote to a CPU running Fibonacci, and four
+screens (one per `Screen` mode) in the `displays` category. Its
 `manifest.json` has the shape of the demo manifest with categories in
 place of levels:
 

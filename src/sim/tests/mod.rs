@@ -6,6 +6,7 @@ mod gallery;
 pub mod geometry_tests;
 mod instance_views;
 mod rtl;
+mod screens;
 mod visuals;
 
 use std::path::PathBuf;

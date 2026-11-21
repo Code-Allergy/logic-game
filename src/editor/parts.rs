@@ -151,6 +151,7 @@ pub fn kind_title(kind: &GateKind) -> &'static str {
         "D-LATCH" => "D latch",
         "SR-LATCH" => "SR latch",
         "RAM" => "RAM",
+        "SCREEN" => "Screen",
         "SUBCIRCUIT" => "Chip",
         other => other,
     }
@@ -188,6 +189,7 @@ pub fn kind_blurb(kind: &GateKind) -> &'static str {
         "D-LATCH" => "Follows d while en is on, then holds",
         "SR-LATCH" => "Set turns it on, reset turns it off",
         "RAM" => "Memory you can write and read",
+        "SCREEN" => "Shows the pixels a circuit draws",
         "SUBCIRCUIT" => "A circuit used as a part",
         _ => "",
     }
@@ -200,6 +202,7 @@ pub fn slot_text(kind: &GateKind) -> &'static str {
         G::Input { .. } => "IN",
         G::Output { .. } => "OUT",
         G::Display { .. } => "SHOW",
+        G::Screen { .. } => "SCRN",
         G::Const { .. } => "K",
         G::Clock { .. } => "CLK",
         G::Register { .. } => "REG",

@@ -39,7 +39,14 @@ pub const ID_NAMESPACE: Uuid = Uuid::from_u128(0x6a7e_5f3c_1b2d_4e8f_9a0b_c1d2_e
 const LINE_WIDTH: usize = 100;
 
 /// Kinds whose parameters have no `w` (all others default `w` to 1).
-const NO_WIDTH_KINDS: &[&str] = &["Merge", "Extend", "Clock", "SrLatch", "SubCircuit"];
+const NO_WIDTH_KINDS: &[&str] = &[
+    "Merge",
+    "Extend",
+    "Clock",
+    "SrLatch",
+    "Screen",
+    "SubCircuit",
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Errors
