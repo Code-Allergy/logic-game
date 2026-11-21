@@ -565,8 +565,8 @@ ambiguous. Each is small and can be revisited.
     cycle (the compiler reports components, not single cycles). The marks
     follow `SimDiagnostics`, so they clear when a later revision loads.
     The message names up to 8 gates (`cell1 / NOT "inv"`), then "and N
-    more", and says the loop needs a Delay (or a Register, DLatch, SrLatch
-    or Ram); the editor adds that the previous circuit keeps running.
+    more", and says the loop needs a Delay (or a Register, D latch, SR
+    latch or RAM); the editor adds that the previous circuit keeps running.
 30. **Cargo features (#30).** The default build has neither
     `bevy/dynamic_linking` nor the world inspector. `dev` enables both
     (`inspector` alone enables the inspector); `cargo dev` is an alias for

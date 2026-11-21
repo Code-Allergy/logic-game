@@ -362,6 +362,23 @@ impl Sim {
         debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
     }
 
+    /// Return to power-on: every state element (registers, latches,
+    /// delays, RAM) back to its initial value, ROM and RAM `init`
+    /// contents restored, tick 0, then the tick-0 settle. Root inputs keep
+    /// their current values, so that settle sees them.
+    pub fn reset(&mut self) {
+        self.slots.fill(0);
+        for &(s, v) in &self.program.consts {
+            self.slots[s as usize] = v;
+        }
+        for (mem, d) in self.mems.iter_mut().zip(&self.program.mems) {
+            mem.fill(0);
+            mem[..d.init.len()].copy_from_slice(&d.init);
+        }
+        self.tick = 0;
+        self.settle();
+    }
+
     // ── State carry-over ──────────────────────────────────────────────────
 
     /// Snapshot every state element, keyed by node path.

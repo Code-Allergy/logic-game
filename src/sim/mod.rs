@@ -61,7 +61,7 @@ pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin
 pub use view::{
     CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame,
 };
-pub use visuals::{EntityWorkCounter, LoopHighlight, SimulationVisualsPlugin};
+pub use visuals::{EntityWorkCounter, LoopHighlight, ON_TOP_Z, OnTop, SimulationVisualsPlugin};
 
 use bevy::prelude::*;
 use bevy::reflect::Reflect;
@@ -75,7 +75,7 @@ pub const DEFAULT_TICK_RATE: f64 = 1000.0;
 pub struct LogicDisplay;
 
 /// Tracks which gate entity is currently selected in the editor.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectedGate(pub Option<Entity>);
 
 /// Simulation tick-rate configuration (ticks per second).
