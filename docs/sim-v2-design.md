@@ -936,4 +936,18 @@ ambiguous. Each is small and can be revisited.
     keeps the same `Arc`, so the app redraws a screen's texture only when
     `Arc::ptr_eq` says it changed. The worker's 1 ms batches therefore
     copy a large screen at most once per video frame.
+52. **The screen part (app).** `GateKind::Screen { mode, width, height,
+    palette, scale }` (`docs/save-format.md`) maps to one `Screen` node:
+    `Pixel` and `Scanline` to the same simulator modes, `Framebuffer` and
+    `Text` both to `Memory` (text is a framebuffer of 8-bit character
+    codes; the font is applied when drawing). The font is built in: printable
+    ASCII in 5x7 glyphs in 8x8 cells (`src/sim/screen.rs`), bit 7 inverts
+    a cell; a font ROM supplied by the circuit was left out to keep the
+    part one memory and the text mode one wire bundle. Value 0 is the dark
+    screen in every palette. The bridge registers a memory probe per
+    screen of the open view; each frame the app asks for copies and the
+    visuals redraw a screen's `Image` (nearest sampling, one texel per
+    pixel) only when its copy is a new `Arc`. The gallery gained a fourth
+    category, `displays`, with one item per mode, so its tests now expect
+    four categories and 20 to 35 items (was three and 20 to 30).
 
