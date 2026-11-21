@@ -168,6 +168,7 @@ impl Plugin for SimulationViewPlugin {
             .register_type::<crate::sim::WireEndpoints>()
             .register_type::<crate::sim::WireState>()
             .register_type::<InstanceViewItem>()
+            .init_resource::<RunOnReturn>()
             .add_systems(Startup, pause_bridge_system)
             .add_systems(
                 OnEnter(state.clone()),
@@ -180,7 +181,7 @@ impl Plugin for SimulationViewPlugin {
             )
             .add_systems(
                 OnExit(state.clone()),
-                (pause_bridge_system, hide_circuit_system),
+                (leave_bridge_system, hide_circuit_system),
             )
             .add_systems(
                 Update,
@@ -215,16 +216,22 @@ impl Plugin for SimulationViewPlugin {
 pub const DEFAULT_DEMO: &str = "counter";
 
 /// Open the default demo (read-only) the first time the simulation state is
-/// entered.
+/// entered, unless something else is being opened (a demo picked on the
+/// demo map).
 fn load_default_circuit_system(
     mut loaded: Local<bool>,
     gates: Query<(), With<GateIdentity>>,
+    mut pending: MessageReader<LoadWorkspaceEvent>,
     mut load: MessageWriter<LoadWorkspaceEvent>,
 ) {
     if *loaded || !gates.is_empty() {
         return;
     }
     *loaded = true;
+    if !pending.is_empty() {
+        pending.clear();
+        return;
+    }
     match demos::catalog() {
         Ok(catalog) => {
             if let Some(demo) = catalog.get(DEFAULT_DEMO) {
@@ -239,8 +246,27 @@ fn load_default_circuit_system(
     }
 }
 
-fn resume_bridge_system(mut bridge: ResMut<SimBridge>) {
-    bridge.resume();
+/// Whether the simulation was running when the simulation state was left
+/// (for the demo map, the title menu), so coming back keeps a paused
+/// circuit paused.
+#[derive(Resource)]
+struct RunOnReturn(bool);
+
+impl Default for RunOnReturn {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+fn resume_bridge_system(mut bridge: ResMut<SimBridge>, run: Res<RunOnReturn>) {
+    if run.0 {
+        bridge.resume();
+    }
+}
+
+fn leave_bridge_system(mut bridge: ResMut<SimBridge>, mut run: ResMut<RunOnReturn>) {
+    run.0 = bridge.is_running();
+    bridge.pause();
 }
 
 fn pause_bridge_system(mut bridge: ResMut<SimBridge>) {
