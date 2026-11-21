@@ -695,8 +695,12 @@ pub fn ui_for_selected_gate(
     if !ctx.egui_wants_keyboard_input()
         && (keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace))
     {
+        // A read-only demo refuses the delete (with a toast); the part
+        // stays, and so does the selection.
         writers.delete_gate.write(DeleteGate { entity });
-        sel.0 = None;
+        if !active.read_only {
+            sel.0 = None;
+        }
         return Ok(());
     }
 
@@ -782,7 +786,7 @@ pub fn ui_for_selected_gate(
                                 );
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                if ui.small_button("×").on_hover_text("Close").clicked() {
+                                if ui.small_button("×").on_hover_text("Close (Esc)").clicked() {
                                     close = true;
                                 }
                             });
@@ -814,7 +818,7 @@ pub fn ui_for_selected_gate(
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 4.0;
                                 ui.label(caption(&palette, "Width"));
-                                ui.scope(|ui| {
+                                ui.add_enabled_ui(editable, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
                                         let n = WIDTH_CHIPS.len() as f32;
@@ -843,7 +847,9 @@ pub fn ui_for_selected_gate(
 
                         // The kind's other parameters (the width has its chips).
                         if !width_only(&ty.kind) {
-                            let edited = edit_kind_params(ui, &ty.kind);
+                            let edited = ui
+                                .add_enabled_ui(editable, |ui| edit_kind_params(ui, &ty.kind))
+                                .inner;
                             if edited != ty.kind {
                                 writers.kinds.write(SetGateKind {
                                     entity,
