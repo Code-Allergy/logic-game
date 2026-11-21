@@ -367,7 +367,11 @@ The built-in demos live in `assets/demos/`: one version 6 file per demo,
 {
   "format": "gatequest-demos",
   "version": 1,
-  "levels": [ { "level": 1, "title": "Gates" }, … ],
+  "levels": [
+    { "level": 1, "title": "Gates", "description": "Six little tiles …" },
+    { "level": 4, "title": "Choosing: decoders and multiplexers", "short": "Choosing", "description": "…" },
+    …
+  ],
   "demos": [
     {
       "id": "full_adder",
@@ -383,7 +387,9 @@ The built-in demos live in `assets/demos/`: one version 6 file per demo,
 
 | Field | Meaning |
 |---|---|
-| `levels` | Level numbers and their titles (headings in the demo list). |
+| `levels` | Level numbers and their titles (headings in the demo list, stops on the demo map). |
+| `levels[].description` | Optional. One or two sentences about the level, shown in the demo map's level panel. Missing means empty, so older manifests still load. |
+| `levels[].short` | Optional. The stop's name on the demo map; when missing, the title up to a colon (`"Choosing: decoders and multiplexers"` reads `Choosing`). |
 | `demos` | The demos in pyramid order; the editor lists them in this order. |
 | `id` | The demo's id: its file is `<id>.json`, its circuits are referenced as `"<id>/<circuit>"`. |
 | `level` | Its level; levels never decrease down the list. |
