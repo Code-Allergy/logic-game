@@ -911,3 +911,50 @@ fn reset_restarts_the_fibonacci_cpu() {
         "it prints 0, 1, 1, 2, … again (repeats show once)"
     );
 }
+
+/// A gallery item placed as a chip (the Chips tab of the parts bar):
+/// its definitions are merged into the library, it builds, and it runs
+/// inside the chip as it does on its own.
+#[test]
+fn gallery_item_places_and_runs_as_a_chip() {
+    let mut app = app();
+    let item = demo("cpu_fibonacci");
+    let (registration, kind) = crate::sim::RegisterDefinitions::chip(&item);
+    send(&mut app, registration);
+    {
+        let library = app.world().resource::<crate::sim::CircuitLibrary>();
+        for id in item.definitions.keys().chain([&item.root.id]) {
+            assert!(library.get(*id).is_some(), "definition merged");
+        }
+    }
+    let chip = create_gate(&mut app, kind.clone(), "Fib");
+    let (_, outs) = app
+        .world()
+        .resource::<crate::sim::CircuitLibrary>()
+        .pin_names(&kind);
+    let pin = |name: &str| outs.iter().position(|n| n == name).unwrap() as u8;
+    let out = create_gate(&mut app, GateKind::Output { w: 8 }, "Out");
+    let halted = create_gate(&mut app, GateKind::Output { w: 1 }, "Done");
+    create_wire(&mut app, chip, pin("Out value"), out, 0);
+    create_wire(&mut app, chip, pin("Halted"), halted, 0);
+    settle(&mut app);
+    assert!(
+        app.world()
+            .resource::<SimDiagnostics>()
+            .compile_error
+            .is_none(),
+        "the chip builds"
+    );
+    let mut seen = vec![value_at(&mut app, "Out")];
+    let mut ticks = 0;
+    while value_at(&mut app, "Done") == 0 {
+        run(&mut app, 1);
+        ticks += 1;
+        assert!(ticks < 2000, "the chip's CPU did not halt");
+        let v = value_at(&mut app, "Out");
+        if seen.last() != Some(&v) {
+            seen.push(v);
+        }
+    }
+    assert_eq!(seen, [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]);
+}

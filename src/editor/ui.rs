@@ -563,17 +563,9 @@ pub fn editor_ui_system(
     // Place a workspace as a cell: its root becomes a definition, keyed by
     // the root's id (definitions already in the library are kept).
     let mut place = |editor_state: &mut EditorState, name: String, ws: &WorkspaceDocument| {
-        let mut definitions: HashMap<_, _> = ws.definitions.clone();
-        definitions.insert(ws.root.id, Arc::new(ws.root.clone()));
-        writers
-            .register_definitions
-            .write(RegisterDefinitions { definitions });
-        editor_state.arm(
-            GateKind::SubCircuit {
-                definition: ws.root.id,
-            },
-            Some(name),
-        );
+        let (registration, kind) = RegisterDefinitions::chip(ws);
+        writers.register_definitions.write(registration);
+        editor_state.arm(kind, Some(name));
     };
     if let Some(demo) = place_catalog {
         place(&mut editor_state, demo.title.clone(), &demo.workspace);

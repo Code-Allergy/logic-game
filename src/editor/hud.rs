@@ -14,9 +14,6 @@
 //!
 //! Every card is placed by [`HudLayout`].
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{
@@ -288,7 +285,7 @@ enum SlotItem {
     Kind(GateKind),
     /// A saved workspace, placed as a cell.
     Saved(String),
-    /// A demo, placed as a cell.
+    /// A demo or gallery item, placed as a cell.
     Demo(&'static Demo),
 }
 
@@ -315,7 +312,8 @@ impl SlotItem {
     }
 }
 
-/// The slots of a tab: its primitives, or saved workspaces then demos.
+/// The slots of a tab: its primitives, or saved workspaces, then demos,
+/// then gallery items.
 fn slot_items(tab: PartTab, state: &EditorState) -> Vec<SlotItem> {
     if tab != PartTab::Chips {
         return tab_kinds(tab, state.palette_width)
@@ -325,7 +323,7 @@ fn slot_items(tab: PartTab, state: &EditorState) -> Vec<SlotItem> {
     }
     let saved = state.saved_workspaces.iter().flatten().cloned();
     let demos = demos::catalog()
-        .map(|c| c.demos.iter())
+        .map(|c| c.demos.iter().chain(&c.gallery))
         .ok()
         .into_iter()
         .flatten();
@@ -513,12 +511,9 @@ fn cell_kind(
     register: &mut MessageWriter<RegisterDefinitions>,
     ws: &WorkspaceDocument,
 ) -> GateKind {
-    let mut definitions: HashMap<_, _> = ws.definitions.clone();
-    definitions.insert(ws.root.id, Arc::new(ws.root.clone()));
-    register.write(RegisterDefinitions { definitions });
-    GateKind::SubCircuit {
-        definition: ws.root.id,
-    }
+    let (registration, kind) = RegisterDefinitions::chip(ws);
+    register.write(registration);
+    kind
 }
 
 /// The kind and label a slot places (registering a chip's definition).
@@ -1285,6 +1280,33 @@ mod tests {
 
     fn close(a: Vec2, b: Vec2) -> bool {
         (a - b).length() < 1e-3
+    }
+
+    #[test]
+    fn chips_tab_lists_saved_workspaces_then_demos_then_the_gallery() {
+        let catalog = demos::catalog().unwrap();
+        let state = EditorState {
+            saved_workspaces: Some(vec!["mine".into()]),
+            ..Default::default()
+        };
+        let items = slot_items(PartTab::Chips, &state);
+        assert_eq!(items.len(), 1 + catalog.demos.len() + catalog.gallery.len());
+        assert!(matches!(&items[0], SlotItem::Saved(n) if n == "mine"));
+        let ids: Vec<&str> = items[1..]
+            .iter()
+            .map(|i| match i {
+                SlotItem::Demo(d) => d.id.as_str(),
+                _ => panic!("only demos and gallery items after the saved ones"),
+            })
+            .collect();
+        let want: Vec<&str> = catalog
+            .demos
+            .iter()
+            .chain(&catalog.gallery)
+            .map(|d| d.id.as_str())
+            .collect();
+        assert_eq!(ids, want);
+        assert!(ids.contains(&"cpu_fibonacci"));
     }
 
     #[test]
