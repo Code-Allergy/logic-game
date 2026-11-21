@@ -19,7 +19,7 @@ use crate::sim::{
     },
     bridge::{
         collect_engine_events_system, drive_local_engine_system, project_probes_system,
-        sync_design_system, update_tickrate_system,
+        request_screens_system, sync_design_system, update_tickrate_system,
     },
     systems::{
         drag_selected_system, draw_sim_background_system, fit_camera_to_circuit_system,
@@ -112,6 +112,7 @@ impl Plugin for SimulationRuntimePlugin {
             .add_systems(
                 PreUpdate,
                 (
+                    request_screens_system,
                     drive_local_engine_system,
                     collect_engine_events_system,
                     project_probes_system,

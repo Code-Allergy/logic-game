@@ -190,6 +190,8 @@ pub struct GateValues {
 pub struct GateProbes {
     pub inputs: Vec<Option<u32>>,
     pub outputs: Vec<Option<u32>>,
+    /// A screen's memory probe: its index in `ProbeFrame::mems`.
+    pub memory: Option<u32>,
 }
 
 #[derive(Component, Debug, Clone, Copy, Reflect)]

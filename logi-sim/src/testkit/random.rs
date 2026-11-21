@@ -5,8 +5,8 @@
 //! construction: combinational pins are only ever connected to nets that
 //! already exist, and the only pins wired afterwards (possibly to later nets,
 //! forming feedback) are non-combinational state inputs (`Delay` d,
-//! `Register` en/d, `SrLatch` s/r, `Ram` we/wdata, `Ram2` waddr/we/wdata).
-//! Optionally a loop is
+//! `Register` en/d, `SrLatch` s/r, `Ram` we/wdata, `Ram2` waddr/we/wdata,
+//! every `Screen` pin). Optionally a loop is
 //! injected for diagnostics tests.
 
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use super::rng::Rng;
-use crate::netlist::{DefId, Design, NetId, NodeId, NodeKind};
+use crate::netlist::{DefId, Design, NetId, NodeId, NodeKind, ScreenMode};
 
 #[derive(Debug, Clone)]
 pub struct GenConfig {
@@ -43,6 +43,9 @@ pub struct GenConfig {
     pub inject_loop: bool,
     /// Which combinational primitives to use.
     pub ops: OpMix,
+    /// Also draw `Screen` state elements (all three modes). Off by default
+    /// so the designs of existing seeds stay the same.
+    pub screens: bool,
 }
 
 /// Combinational primitive mix for the generator.
@@ -72,6 +75,7 @@ impl Default for GenConfig {
             unconnected_percent: 3,
             inject_loop: false,
             ops: OpMix::All,
+            screens: false,
         }
     }
 }
@@ -94,6 +98,7 @@ impl GenConfig {
             unconnected_percent: 0,
             inject_loop: false,
             ops: OpMix::All,
+            screens: false,
         }
     }
 
@@ -327,7 +332,9 @@ impl<'a> DefGen<'a> {
     fn state_node(&mut self) {
         let w = self.width();
         let addr_bits = self.rng.range(1, 6) as u8;
-        match self.rng.below(6) {
+        // Screens come last so that designs without them are unchanged.
+        let kinds = if self.cfg.screens { 7 } else { 6 };
+        match self.rng.below(kinds) {
             0 => self.deferred_node(NodeKind::Delay { w }),
             1 => self.deferred_node(NodeKind::Register { w }),
             2 => self.deferred_node(NodeKind::SrLatch),
@@ -351,7 +358,7 @@ impl<'a> DefGen<'a> {
                 self.deferred.push((id, 1, 1));
                 self.deferred.push((id, 2, w));
             }
-            _ => {
+            5 => {
                 let reads = self.rng.range(1, 3) as u8;
                 let mask = self.rng.coin();
                 let init: Vec<u64> = (0..self.rng.below(1 << addr_bits))
@@ -373,6 +380,22 @@ impl<'a> DefGen<'a> {
                 self.deferred.push((id, 0, addr_bits));
                 self.deferred.push((id, 1, if mask { w } else { 1 }));
                 self.deferred.push((id, 2, w));
+            }
+            // A screen has no outputs and no combinational inputs.
+            _ => {
+                let mode = match self.rng.below(3) {
+                    0 => ScreenMode::Pixel,
+                    1 => ScreenMode::Memory,
+                    _ => ScreenMode::Scan,
+                };
+                let x_bits = self.rng.range(1, 3) as u8;
+                let y_bits = self.rng.range(1, 3) as u8;
+                self.deferred_node(NodeKind::Screen {
+                    mode,
+                    x_bits,
+                    y_bits,
+                    w,
+                });
             }
         }
     }

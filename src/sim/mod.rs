@@ -22,6 +22,8 @@
 //! - [`visuals`] – change-driven gate and wire visuals, loop highlight.
 //! - [`art`] – the Workshop art kit: theme-driven materials, cached tile,
 //!   pin and glyph meshes, fonts, the dot-grid bench.
+//! - [`screen`] – drawing a screen part: palettes, the text font, the
+//!   rasterizer.
 //! - [`shapes`] – triangle-list shapes (rounded rectangles, strokes).
 //! - [`systems`] – Bevy systems for picking, dragging and egui panels.
 //! - [`plugin`] – plugins that wire everything into Bevy.
@@ -42,6 +44,7 @@ pub mod layout;
 pub mod netlist;
 pub mod routing;
 pub mod rtl;
+pub mod screen;
 pub mod shapes;
 pub mod source;
 pub mod spatial_grid;
@@ -56,7 +59,7 @@ pub use document::{
     CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, PinAddr,
     WorkspaceDocument,
 };
-pub use kind::GateKind;
+pub use kind::{GateKind, MAX_SCREEN_SCALE, SCREEN_BEZEL, ScreenMode, ScreenPalette, TEXT_CELL};
 pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin};
 pub use view::{
     CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame,

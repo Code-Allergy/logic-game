@@ -4,7 +4,8 @@
   "categories": [
     { "id": "combinational", "title": "Combinational logic" },
     { "id": "sequential", "title": "Sequential logic" },
-    { "id": "systems", "title": "Systems" }
+    { "id": "systems", "title": "Systems" },
+    { "id": "displays", "title": "Displays" }
   ],
   "items": [
     {
@@ -208,6 +209,34 @@
       "category": "systems",
       "title": "16-bit CPU of words",
       "description": "The 16-bit CPU of gates again, with the same instruction set and the same program, built from word primitives (Register, Add, Mux, Ram, Rom) instead of gates: it runs one instruction per tick, with the control signals from a 16-word control ROM. Its Out sequence is the same as the gate CPU's (the primes below 250), at a small fraction of the simulation cost.",
+      "uses": []
+    },
+    {
+      "id": "screen_plotter",
+      "category": "displays",
+      "title": "Screen: bouncing plotter",
+      "description": "A screen in pixel-port mode paints the pixel at (x, y) each tick that draw is on, and keeps it. A step counter moves the pen once every 16 ticks; x and y fold its low bits into a back-and-forth sweep (x xor 31 on the way back), so the pen bounces around the 32 by 16 screen, and the colour changes every lap. Clear blanks the screen.",
+      "uses": []
+    },
+    {
+      "id": "screen_xor",
+      "category": "displays",
+      "title": "Screen: XOR pattern",
+      "description": "A framebuffer screen shows its own video memory, written like a RAM: address y x 32 + x, one 4-bit colour per pixel. A counter sweeps all 1024 addresses, about once a second at the default speed, writing (x xor y) + frame; each sweep adds one to the frame, so the pattern's colours cycle.",
+      "uses": []
+    },
+    {
+      "id": "screen_bars",
+      "category": "displays",
+      "title": "Screen: scanline colour bars",
+      "description": "A scanline screen works like a TV: every tick the beam paints one colour and moves right; hsync starts the next line and vsync the next frame. A counter makes a 64-tick line (32 pixels, then 31 blanking ticks past the right edge, then hsync) and a 16-line frame ending in vsync. Eight bars, brighter in the lower half, shift by one each frame.",
+      "uses": []
+    },
+    {
+      "id": "screen_text",
+      "category": "displays",
+      "title": "Screen: text",
+      "description": "A text screen's memory holds one character code per cell, and a built-in 8 by 8 font draws it: write 72 and an H appears. A counter copies a message ROM into the 32 by 4 cells (bit 7 inverts the title row). Hold Write to put Char (an ASCII code) into Cell (row x 32 + column) by hand.",
       "uses": []
     }
   ]

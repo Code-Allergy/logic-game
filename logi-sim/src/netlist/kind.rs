@@ -16,6 +16,27 @@ pub const MAX_ADDR_BITS: u8 = 20;
 /// Most read ports a [`NodeKind::Ram2`] can have.
 pub const MAX_READ_PORTS: u8 = 8;
 
+/// Largest screen side, in address bits (256 pixels or cells).
+pub const MAX_SCREEN_BITS: u8 = 8;
+
+/// How a [`NodeKind::Screen`] is written (design doc section 3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScreenMode {
+    /// Pins: `x(x_bits), y(y_bits), colour(w), draw(1), clear(1) →`. At
+    /// commit, `clear` zeroes the memory, then `draw` writes `colour` at
+    /// `y << x_bits | x`.
+    Pixel,
+    /// Pins: `addr(x_bits + y_bits), we(1), wdata(w) →`. A write-only RAM:
+    /// at commit, `we` writes `wdata` at `addr`.
+    Memory,
+    /// Pins: `colour(w), hsync(1), vsync(1) →`. A beam `(x, y)` is state.
+    /// At commit: `vsync` moves it to `(0, 0)`; otherwise `hsync` to
+    /// `(0, y + 1)`; otherwise `colour` is written at the beam (if it is on
+    /// the screen) and the beam moves right. The beam stops one past the
+    /// right edge (and `y` one past the bottom), where nothing is written.
+    Scan,
+}
+
 /// Pin widths of one node: one entry per input pin and per output pin.
 pub type PinWidths = SmallVec<[u8; 4]>;
 
@@ -167,6 +188,16 @@ pub enum NodeKind {
         mask: bool,
         init: Arc<[u64]>,
     },
+    /// A screen: a write-only memory of `2^(x_bits + y_bits)` words of `w`
+    /// bits, pixel `(x, y)` at address `y << x_bits | x`, written as `mode`
+    /// says. No outputs; the memory is read back by the host (a memory
+    /// probe), once per frame. Starts all zero.
+    Screen {
+        mode: ScreenMode,
+        x_bits: u8,
+        y_bits: u8,
+        w: u8,
+    },
 }
 
 /// Which pins of a node form combinational (same-tick) dependencies.
@@ -196,15 +227,17 @@ impl NodeKind {
                 | NodeKind::SrLatch
                 | NodeKind::Ram { .. }
                 | NodeKind::Ram2 { .. }
+                | NodeKind::Screen { .. }
         )
     }
 
     /// Combinational input→output edges for loop detection and ranking.
     pub fn comb_deps(&self) -> CombDeps {
         match self {
-            NodeKind::Delay { .. } | NodeKind::Register { .. } | NodeKind::SrLatch => {
-                CombDeps::None
-            }
+            NodeKind::Delay { .. }
+            | NodeKind::Register { .. }
+            | NodeKind::SrLatch
+            | NodeKind::Screen { .. } => CombDeps::None,
             NodeKind::Ram { .. } => CombDeps::Pins(&[0]),
             NodeKind::Ram2 { .. } => CombDeps::Diagonal { first: 3 },
             NodeKind::Instance(def) => CombDeps::Instance(*def),
@@ -257,6 +290,16 @@ impl NodeKind {
                 ins.extend(std::iter::repeat_n(*addr_bits, *reads as usize));
                 Some((ins, std::iter::repeat_n(*w, *reads as usize).collect()))
             }
+            Screen {
+                mode,
+                x_bits,
+                y_bits,
+                w,
+            } => match mode {
+                ScreenMode::Pixel => p(&[*x_bits, *y_bits, *w, 1, 1], &[]),
+                ScreenMode::Memory => p(&[x_bits + y_bits, 1, *w], &[]),
+                ScreenMode::Scan => p(&[*w, 1, 1], &[]),
+            },
         }
     }
 
@@ -360,6 +403,16 @@ impl NodeKind {
                 need(
                     init.len() <= 1usize << addr_bits,
                     "RAM contents exceed address space",
+                )
+            }
+            Screen {
+                x_bits, y_bits, w, ..
+            } => {
+                need(w_ok(*w), "width must be 1..=64")?;
+                need(
+                    (1..=MAX_SCREEN_BITS).contains(x_bits)
+                        && (1..=MAX_SCREEN_BITS).contains(y_bits),
+                    "screen sides must be 1..=8 address bits",
                 )
             }
             SrLatch | Instance(_) => Ok(()),

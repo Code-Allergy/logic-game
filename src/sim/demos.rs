@@ -103,6 +103,10 @@ pub const GALLERY_EMBEDDED: &[(&str, &str)] = embed!(
     "cpu_fibonacci.json",
     "cpu16.json",
     "cpu16_rtl.json",
+    "screen_plotter.json",
+    "screen_xor.json",
+    "screen_bars.json",
+    "screen_text.json",
 );
 
 #[derive(Debug, Deserialize)]

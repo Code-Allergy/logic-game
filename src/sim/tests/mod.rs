@@ -8,6 +8,7 @@ mod instance_views;
 mod routing;
 mod rtl;
 mod rtl_cells;
+mod screens;
 mod visuals;
 
 use std::path::PathBuf;

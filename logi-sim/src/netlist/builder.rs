@@ -462,6 +462,27 @@ impl<'a> Builder<'a> {
         self.design.defs[self.def].nodes[id].outputs.to_vec()
     }
 
+    /// A screen; `inputs` are its pins in order (see
+    /// [`super::ScreenMode`]), `None` for unconnected. Returns the node.
+    pub fn screen(
+        &mut self,
+        mode: super::ScreenMode,
+        x_bits: u8,
+        y_bits: u8,
+        w: u8,
+        inputs: &[Option<NetId>],
+    ) -> NodeId {
+        self.node(
+            NodeKind::Screen {
+                mode,
+                x_bits,
+                y_bits,
+                w,
+            },
+            inputs,
+        )
+    }
+
     /// Add a state element with its inputs unconnected, for building
     /// feedback: use its output, then [`Self::connect`] its inputs later.
     /// Returns `(node, q)`.

@@ -34,6 +34,7 @@
 //! missing), so headless tests run the same systems.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bevy::prelude::*;
@@ -132,6 +133,19 @@ pub enum ValueArt {
 /// The value text of a word input (formatted like a display).
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct InputReadout;
+
+/// The picture of a screen (a child of its gate): a textured quad whose
+/// image is redrawn from the screen's memory copy when the copy changes
+/// ([`update_screen_pictures_system`]).
+#[derive(Component, Debug, Clone)]
+pub struct ScreenPicture {
+    /// The screen's kind (geometry and palette).
+    pub kind: GateKind,
+    /// The texture, once [`attach_screen_pictures_system`] made it.
+    pub image: Option<Handle<Image>>,
+    /// The memory copy last drawn (compared by pointer).
+    pub shown: Option<Arc<[u64]>>,
+}
 
 /// The name of a port, written under its tile.
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -469,6 +483,27 @@ fn build_tile(
             );
             commands.spawn((bulb, ValueArt::Lamp, TileArt, ChildOf(entity)));
         }
+        GateKind::Screen { .. } => {
+            let face = kind.screen_face().unwrap_or_default();
+            let inset = art.piece(
+                meshes,
+                MeshKey::rounded_rect(face + Vec2::splat(8.0), 5.0),
+                Paint::Screen,
+                Vec3::new(0.0, 0.0, 0.05),
+            );
+            child(commands, inset);
+            commands.spawn((
+                ScreenPicture {
+                    kind: kind.clone(),
+                    image: None,
+                    shown: None,
+                },
+                Transform::from_xyz(0.0, 0.0, 0.1),
+                Visibility::default(),
+                TileArt,
+                ChildOf(entity),
+            ));
+        }
         GateKind::Output { .. } | GateKind::Display { .. } | GateKind::Input { .. } => {
             let readout = !kind.is_input();
             if readout {
@@ -505,7 +540,7 @@ fn build_tile(
         _ => {}
     }
 
-    if kind.is_port() {
+    if kind.is_port() || matches!(kind, GateKind::Screen { .. }) {
         let text = label.map(|l| l.value.clone()).unwrap_or_default();
         commands.spawn((
             Text2d::new(text),
@@ -584,6 +619,89 @@ pub fn attach_gate_visuals_system(
             values,
         );
     }
+}
+
+/// Give new screen pictures their texture (nearest-neighbour, one texel
+/// per pixel), quad and material.
+pub fn attach_screen_pictures_system(
+    mut commands: Commands,
+    mut pictures: Query<(Entity, &mut ScreenPicture), Added<ScreenPicture>>,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::ImageSampler;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    for (entity, mut picture) in &mut pictures {
+        let Some((w, h)) = picture.kind.screen_pixels() else {
+            continue;
+        };
+        let mut image = Image::new_fill(
+            Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[0, 0, 0, 0],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        image.sampler = ImageSampler::nearest();
+        let image = images.add(image);
+        let face = picture.kind.screen_face().unwrap_or_default();
+        let material = materials.add(ColorMaterial {
+            texture: Some(image.clone()),
+            ..default()
+        });
+        commands.entity(entity).try_insert((
+            Mesh2d(meshes.add(Rectangle::from_size(face))),
+            MeshMaterial2d(material),
+        ));
+        picture.image = Some(image);
+        picture.shown = None;
+    }
+}
+
+/// Redraw a screen's texture when the engine published a new copy of its
+/// memory: at most once per frame, and not at all while it is unchanged.
+pub fn update_screen_pictures_system(
+    bridge: Res<super::SimBridge>,
+    mut pictures: Query<(&mut ScreenPicture, &ChildOf)>,
+    probes: Query<&super::GateProbes>,
+    mut images: ResMut<Assets<Image>>,
+    work: Option<Res<EntityWorkCounter>>,
+) {
+    if pictures.is_empty() {
+        return;
+    }
+    bridge.with_frame(|frame| {
+        for (mut picture, parent) in &mut pictures {
+            let Some(handle) = picture.image.clone() else {
+                continue;
+            };
+            let mem = probes
+                .get(parent.parent())
+                .ok()
+                .and_then(|p| p.memory)
+                .and_then(|i| frame.mems.get(i as usize).cloned().flatten());
+            let same = match (&mem, &picture.shown) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            if same {
+                continue;
+            }
+            EntityWorkCounter::add(&work, 1);
+            if let Some(mut image) = images.get_mut(&handle) {
+                let texels = image.data.get_or_insert_with(Vec::new);
+                super::screen::rasterize(&picture.kind, mem.as_deref().unwrap_or(&[]), texels);
+            }
+            picture.shown = mem;
+        }
+    });
 }
 
 /// Give new wires their pieces: an ink casing and a coloured core, each a
@@ -1627,6 +1745,9 @@ impl Plugin for SimulationVisualsPlugin {
         if !app.world().contains_resource::<Assets<ColorMaterial>>() {
             app.init_resource::<Assets<ColorMaterial>>();
         }
+        if !app.world().contains_resource::<Assets<Image>>() {
+            app.init_resource::<Assets<Image>>();
+        }
         app.init_resource::<Theme>()
             .init_resource::<CanvasArt>()
             .init_resource::<WireRouting>()
@@ -1635,6 +1756,7 @@ impl Plugin for SimulationVisualsPlugin {
                 PostUpdate,
                 (
                     (attach_gate_visuals_system, attach_wire_visuals_system),
+                    (attach_screen_pictures_system, update_screen_pictures_system).chain(),
                     apply_loop_highlight_system,
                     update_selection_halo_system,
                     bring_dragged_gate_to_front_system,

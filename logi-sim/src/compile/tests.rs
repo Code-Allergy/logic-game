@@ -720,7 +720,7 @@ fn each_pass_alone_and_together_matches_the_reference() {
     use crate::testkit::diff;
     for (name, opts) in pass_variants() {
         let n = diff::sweep(&diff::standard_configs(), 25, 15, &opts);
-        assert_eq!(n, 150, "{name}");
+        assert_eq!(n, 175, "{name}");
         // Bit-blasted designs are full of constants and duplicate logic.
         for d in [
             crate::testkit::bitblast::bitblast(&fixtures::cpu(&fixtures::MULTIPLY_PROGRAM)),
@@ -975,4 +975,23 @@ fn bitblasted_fixtures_shrink() {
         );
         assert!(after < before, "{}: {before} -> {after}", d.root_def().name);
     }
+}
+
+/// The constant-identity pass reads only slot operands: a literal (here
+/// the shift of a `Split` from bit 15) may be past the end of the slot
+/// table of a small design. This used to index out of bounds.
+#[test]
+fn literal_operands_past_the_slot_table_are_not_read_as_slots() {
+    use crate::netlist::Design;
+    let mut d = Design::new("small");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let a = b.input("a", 16);
+    let hi = b.split(a, 15, 1);
+    b.output("hi", hi);
+    let p = compile(&d, &Options::default()).unwrap();
+    let mut s = crate::sim::Sim::new(std::sync::Arc::new(p));
+    s.set("a", 0x8000);
+    s.tick();
+    assert_eq!(s.get("hi"), 1);
 }
