@@ -30,16 +30,22 @@ fn main() {
 
     let mut app = App::new();
 
-    let mut app = app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: GAME_TITLE.to_string(),
-            canvas: Some(GAME_WEB_TAG.to_owned()),
-            fit_canvas_to_parent: true,
-            prevent_default_event_handling: true,
-            ..default()
-        }),
-        ..default()
-    }));
+    // The game has no gamepad input. Without gilrs, an unplugged pad with
+    // rumble can't flood the log with force-feedback errors every 50 ms.
+    let mut app = app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: GAME_TITLE.to_string(),
+                    canvas: Some(GAME_WEB_TAG.to_owned()),
+                    fit_canvas_to_parent: true,
+                    prevent_default_event_handling: true,
+                    ..default()
+                }),
+                ..default()
+            })
+            .disable::<bevy::gilrs::GilrsPlugin>(),
+    );
 
     if !disable_egui {
         app = app.add_plugins((EguiPlugin::default(), WorkshopUiPlugin));
