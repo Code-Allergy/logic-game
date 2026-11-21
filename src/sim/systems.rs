@@ -551,43 +551,36 @@ fn edit_kind_params(ui: &mut egui::Ui, kind: &GateKind) -> GateKind {
             ));
         }
         GateKind::SrLatch | GateKind::SubCircuit { .. } => {}
-        _ => {
-            if let Some(mut w) = k.width() {
-                width_drag(ui, "Width", &mut w, 1..=64);
-                if Some(w) != k.width() {
-                    k = k.with_width(w);
-                }
+        // The width has its chips and exact value above.
+        _ => match &mut k {
+            GateKind::Const { w, value } => {
+                ui.horizontal(|ui| {
+                    ui.label("Value");
+                    ui.add(egui::DragValue::new(value).hexadecimal(1, false, true));
+                });
+                *value &= logi_sim::netlist::mask(*w);
             }
-            match &mut k {
-                GateKind::Const { w, value } => {
-                    ui.horizontal(|ui| {
-                        ui.label("Value");
-                        ui.add(egui::DragValue::new(value).hexadecimal(1, false, true));
-                    });
-                    *value &= logi_sim::netlist::mask(*w);
-                }
-                GateKind::Split { w, lo, len } => {
-                    let w = *w;
-                    width_drag(ui, "Low bit", lo, 0..=w - 1);
-                    let max_len = w - *lo;
-                    width_drag(ui, "Length", len, 1..=max_len);
-                }
-                GateKind::Extend { from, to, signed } => {
-                    let to = *to;
-                    width_drag(ui, "From width", from, 1..=to);
-                    ui.checkbox(signed, "Sign extend");
-                }
-                GateKind::Ram { addr_bits, .. } | GateKind::Rom { addr_bits, .. } => {
-                    width_drag(
-                        ui,
-                        "Address bits",
-                        addr_bits,
-                        1..=logi_sim::netlist::MAX_ADDR_BITS,
-                    );
-                }
-                _ => {}
+            GateKind::Split { w, lo, len } => {
+                let w = *w;
+                width_drag(ui, "Low bit", lo, 0..=w - 1);
+                let max_len = w - *lo;
+                width_drag(ui, "Length", len, 1..=max_len);
             }
-        }
+            GateKind::Extend { from, to, signed } => {
+                let to = *to;
+                width_drag(ui, "From width", from, 1..=to);
+                ui.checkbox(signed, "Sign extend");
+            }
+            GateKind::Ram { addr_bits, .. } | GateKind::Rom { addr_bits, .. } => {
+                width_drag(
+                    ui,
+                    "Address bits",
+                    addr_bits,
+                    1..=logi_sim::netlist::MAX_ADDR_BITS,
+                );
+            }
+            _ => {}
+        },
     }
     k
 }
@@ -809,7 +802,7 @@ pub fn ui_for_selected_gate(
                             }
                         });
 
-                        // Width chips.
+                        // Width chips, and the exact width beside the caption.
                         let width_kind = !matches!(
                             ty.kind,
                             GateKind::Merge { .. } | GateKind::SrLatch | GateKind::SubCircuit { .. }
@@ -817,7 +810,28 @@ pub fn ui_for_selected_gate(
                         if let (Some(w), true) = (ty.kind.width(), width_kind) {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 4.0;
-                                ui.label(caption(&palette, "Width"));
+                                ui.horizontal(|ui| {
+                                    ui.label(caption(&palette, "Width"));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let mut exact = w;
+                                            ui.add_enabled(
+                                                editable,
+                                                egui::DragValue::new(&mut exact)
+                                                    .range(1..=64)
+                                                    .suffix(" bit"),
+                                            )
+                                            .on_hover_text("Any width from 1 to 64");
+                                            if exact != w {
+                                                writers.kinds.write(SetGateKind {
+                                                    entity,
+                                                    kind: ty.kind.with_width(exact),
+                                                });
+                                            }
+                                        },
+                                    );
+                                });
                                 ui.add_enabled_ui(editable, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
