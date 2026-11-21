@@ -63,8 +63,9 @@ deletes the selected part, `T` day or night. Mouse: left-click selects
 the wheel zooms about the cursor.
 
 `cargo run --example screenshot -- <id> out.png [--night] [--size WxH]
-[--select LABEL] [--set LABEL=VALUE] [--tab NAME] [--library]` saves a
-screenshot of a demo or gallery item.
+[--select LABEL] [--set LABEL=VALUE] [--tab NAME] [--library] [--editable]`
+saves a screenshot of a demo or gallery item (or `empty`, a new
+workspace, or `loop`, a build error).
 
 ## Documentation
 
