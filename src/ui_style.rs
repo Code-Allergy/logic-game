@@ -197,6 +197,8 @@ pub enum HudIcon {
     Pause,
     Sun,
     Moon,
+    /// A folded map (the demo map).
+    Map,
 }
 
 /// A square chunky button with a painted icon.
@@ -241,6 +243,27 @@ pub fn paint_icon(
         HudIcon::Moon => {
             painter.circle_filled(c, 8.0, colour);
             painter.circle_filled(c + EVec2::new(4.0, -3.0), 7.0, egui_color(palette.raised));
+        }
+        HudIcon::Map => {
+            let p = |x: f32, y: f32| c + EVec2::new(x, y);
+            let outline = vec![
+                p(-9.0, -6.0),
+                p(-3.0, -9.0),
+                p(3.0, -6.0),
+                p(9.0, -9.0),
+                p(9.0, 6.0),
+                p(3.0, 9.0),
+                p(-3.0, 6.0),
+                p(-9.0, 9.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                vec![p(3.0, -6.0), p(9.0, -9.0), p(9.0, 6.0), p(3.0, 9.0)],
+                egui_color(palette.on),
+                Stroke::NONE,
+            ));
+            painter.add(egui::Shape::closed_line(outline, stroke(2.0, colour)));
+            painter.line_segment([p(-3.0, -9.0), p(-3.0, 6.0)], stroke(2.0, colour));
+            painter.line_segment([p(3.0, -6.0), p(3.0, 9.0)], stroke(2.0, colour));
         }
     }
 }

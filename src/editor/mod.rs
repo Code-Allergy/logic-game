@@ -19,10 +19,13 @@
 //! - `parts`: the parts bar's catalogue (tabs, number keys, names).
 //! - `systems`: wire-building selection.
 //! - `workspace`: on-disk workspace helpers.
+//! - `demo_map`: the full-screen demo map ([`crate::GameState::DemoMap`])
+//!   and the record of opened demos.
 //!
 //! The editor never mutates the circuit directly: it sends the authoring
 //! messages of [`crate::sim::authoring`].
 
+pub mod demo_map;
 pub mod hud;
 pub mod parts;
 mod systems;
@@ -141,18 +144,20 @@ pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<EditorState>().add_systems(
-            EguiPrimaryContextPass,
-            (
-                editor_ui_system,
-                handle_connection_creation,
-                hud::parts_bar_system,
-                hud::minimap_system,
-                hud::build_pill_system,
-                hud::signals_card_system,
-                hud::toast_system,
-                hud::editor_keys_system,
-            ),
-        );
+        app.init_resource::<EditorState>()
+            .add_plugins(demo_map::DemoMapPlugin)
+            .add_systems(
+                EguiPrimaryContextPass,
+                (
+                    editor_ui_system,
+                    handle_connection_creation,
+                    hud::parts_bar_system,
+                    hud::minimap_system,
+                    hud::build_pill_system,
+                    hud::signals_card_system,
+                    hud::toast_system,
+                    hud::editor_keys_system,
+                ),
+            );
     }
 }

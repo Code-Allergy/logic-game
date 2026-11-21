@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use crate::theme::Theme;
 use crate::ui_style::{
-    TOP_CARD_HEIGHT, caption, card, chunky_button, day_night_button, egui_color, heavy, stroke,
+    HudIcon, TOP_CARD_HEIGHT, caption, card, chunky_button, chunky_icon_button, day_night_button,
+    egui_color, heavy, stroke,
 };
 use crate::{
     GameState,
@@ -162,6 +163,7 @@ pub fn editor_ui_system(
     library: Res<CircuitLibrary>,
     gates: Query<(&GateIdentity, &GateType, &GateLabel)>,
     mut theme: ResMut<Theme>,
+    mut next_state: ResMut<NextState<GameState>>,
     mut seen_active: Local<Option<(Uuid, String)>>,
 ) -> Result<(), BevyError> {
     if game_state.get() != &GameState::Simulating {
@@ -221,6 +223,7 @@ pub fn editor_ui_system(
     let mut close_requested: Option<bool> = None;
     let mut open_definition: Option<Uuid> = None;
     let mut theme_wanted = None;
+    let mut open_map = false;
     let table = views.definition_table(&library);
     let breadcrumb = views.view.breadcrumb(&active.name);
     let view_note = views.view.frames().last().map(|frame| {
@@ -257,7 +260,7 @@ pub fn editor_ui_system(
     );
     // Room for the text: the card stops short of the transport card.
     let text_width =
-        ((layout.screen.x - 640.0) * 0.5 - layout.margin - layout.gap - 190.0).clamp(90.0, 300.0);
+        ((layout.screen.x - 640.0) * 0.5 - layout.margin - layout.gap - 238.0).clamp(90.0, 300.0);
     egui::Area::new(egui::Id::new("hud_file"))
         .anchor(Align2::LEFT_TOP, [layout.margin, layout.margin])
         .order(Order::Middle)
@@ -325,6 +328,12 @@ pub fn editor_ui_system(
                             {
                                 close_requested = Some(true);
                             }
+                        }
+                        if chunky_icon_button(ui, &palette, HudIcon::Map, false)
+                            .on_hover_text("Demo map: the road from one gate to a CPU")
+                            .clicked()
+                        {
+                            open_map = true;
                         }
                         let library_label = if layout.compact { "☰" } else { "☰ Library" };
                         if chunky_button(ui, &palette, library_label, editor_state.library_open)
@@ -443,6 +452,12 @@ pub fn editor_ui_system(
                         .default_open(true)
                         .show(ui, |ui| {
                     ui.label(egui::RichText::new("From gates to a CPU: each level is built from the ones before it. Demos open read-only.").size(12.0));
+                    if chunky_button(ui, &palette, "Open the demo map", false)
+                        .on_hover_text("The road from one gate to a CPU, with your progress")
+                        .clicked()
+                    {
+                        open_map = true;
+                    }
                     let mut level = None;
                     for demo in &catalog.demos {
                         if level != Some(demo.level) {
@@ -545,6 +560,12 @@ pub fn editor_ui_system(
                         });
                 });
             });
+    }
+
+    if open_map {
+        editor_state.library_open = false;
+        next_state.set(GameState::DemoMap);
+        return Ok(());
     }
 
     if let Some(to_root) = close_requested {
