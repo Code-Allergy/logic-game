@@ -622,7 +622,7 @@ fn loop_message_names_the_gates_and_the_state_elements() {
     assert_eq!(
         one,
         "Combinational loop through 1 gate: NOT \"n\". A feedback loop needs a state element: \
-         put a Delay (or a Register, DLatch, SrLatch or Ram) on the loop."
+         put a Delay (or a Register, D latch, SR latch or RAM) on the loop."
     );
     let many: Vec<String> = (0..10).map(|i| format!("And \"g{i}\"")).collect();
     let text = loop_message(&many);
@@ -657,7 +657,7 @@ fn loop_highlights_its_gates_and_wires_and_clears_when_fixed() {
     );
     assert!(message.contains("Delay"), "{message}");
     assert!(
-        message.contains("Register, DLatch, SrLatch or Ram"),
+        message.contains("Register, D latch, SR latch or RAM"),
         "{message}"
     );
 

@@ -1383,7 +1383,7 @@ pub fn loop_message(names: &[String]) -> String {
     let gates = if count == 1 { "gate" } else { "gates" };
     format!(
         "Combinational loop through {count} {gates}: {list}. A feedback loop needs a state \
-         element: put a Delay (or a Register, DLatch, SrLatch or Ram) on the loop."
+         element: put a Delay (or a Register, D latch, SR latch or RAM) on the loop."
     )
 }
 
