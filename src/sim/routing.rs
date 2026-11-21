@@ -1317,13 +1317,18 @@ pub fn pin_layout(kind: &GateKind, library: &CircuitLibrary) -> PinLayout {
     PinLayout::new(kind.size(), ins.len(), outs.len())
 }
 
+/// A driver or sink pin of a document: node index and pin.
+pub type DocPin = (usize, u8);
+/// The sinks of a document net: node index, pin and wire index.
+pub type DocSinks = Vec<(usize, u8, usize)>;
+
 /// A document as a routing problem.
 #[derive(Debug, Clone, Default)]
 pub struct DocumentNets {
     pub problem: RouteProblem,
     /// Per net: the driver `(node index, pin)` and per sink `(node index,
     /// pin, wire index)`, in the problem's order.
-    pub nets: Vec<((usize, u8), Vec<(usize, u8, usize)>)>,
+    pub nets: Vec<(DocPin, DocSinks)>,
     /// Pin width of each net's driver.
     pub widths: Vec<u8>,
 }
@@ -1346,7 +1351,8 @@ pub fn document_nets(doc: &CircuitDocument, library: &CircuitLibrary) -> Documen
         .map(|n| pin_layout(&n.kind, library))
         .collect();
     let centre = |i: usize| Vec2::new(doc.nodes[i].x, doc.nodes[i].y);
-    let mut grouped: BTreeMap<(uuid::Uuid, u8), Vec<(uuid::Uuid, u8, usize)>> = BTreeMap::new();
+    type Pin = (uuid::Uuid, u8);
+    let mut grouped: BTreeMap<Pin, Vec<(uuid::Uuid, u8, usize)>> = BTreeMap::new();
     for (w, wire) in doc.wires.iter().enumerate() {
         if index.contains_key(&wire.from.node) && index.contains_key(&wire.to.node) {
             grouped
@@ -1575,8 +1581,9 @@ fn check(
         return Ok(());
     }
     // Collinear overlaps between different nets.
-    let mut by_line: std::collections::HashMap<(bool, i64), Vec<(usize, f32, f32)>> =
-        std::collections::HashMap::new();
+    type Line = (bool, i64);
+    type Run = (usize, f32, f32);
+    let mut by_line: std::collections::HashMap<Line, Vec<Run>> = std::collections::HashMap::new();
     for &(net, a, b) in &segments {
         let vertical = (a.x - b.x).abs() < 1e-3;
         let (key, lo, hi) = if vertical {

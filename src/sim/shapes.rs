@@ -196,7 +196,7 @@ impl Shape {
         }
         let n = pts.len();
         let normal = |i: usize| (pts[i + 1] - pts[i]).normalize().perp();
-        for i in 0..n {
+        for (i, &p) in pts.iter().enumerate() {
             let offset = if i == 0 {
                 normal(0) * half
             } else if i == n - 1 {
@@ -206,8 +206,8 @@ impl Shape {
                 let m = (a + b).normalize_or(a);
                 m * half / m.dot(a).max(0.25)
             };
-            shape.positions.push(pts[i] + offset);
-            shape.positions.push(pts[i] - offset);
+            shape.positions.push(p + offset);
+            shape.positions.push(p - offset);
         }
         for i in 0..n as u32 - 1 {
             let (l0, r0, l1, r1) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);

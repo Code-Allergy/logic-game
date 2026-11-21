@@ -11,12 +11,15 @@
 //!   materials;
 //! - display text is re-formatted only when the shown value, width or
 //!   [`DisplayConfig`] change ([`DisplayedValue`]);
-//! - wire geometry is recomputed only for wires whose endpoints changed or
-//!   whose endpoint gate moved (a drag moves only that gate's wires); wires
-//!   run from pin to pin;
+//! - wires are routed on the grid ([`super::routing`]) by
+//!   [`route_wires_system`] only when gates or wires come or go, a pin
+//!   layout or the view changes, or a gate moves; a move keeps every sink
+//!   path whose pins stayed put, so a drag re-routes only that gate's wires;
 //! - a wire is cased: an ink casing under a coloured core (thicker for
-//!   buses), with a value pill on buses; colour, thickness and pill follow
-//!   [`WireState`] and the loop highlight;
+//!   buses), meshes along the routed path with rounded corners, a junction
+//!   dot where it branches off its net, a gap where another wire passes
+//!   over it, and a value pill on a bus; a value change only swaps the
+//!   core's shared material;
 //! - a combinational-loop compile error highlights the gates and wires on
 //!   the loop in the open view ([`LoopHighlight`]) until a later compile
 //!   succeeds;
@@ -204,8 +207,11 @@ const KNOB_TRAVEL: f32 = 6.0;
 pub const WIRE_CORNER: f32 = 20.0;
 /// Bench showing on each side of a wire where it passes over another.
 const GAP: f32 = 4.0;
-/// Ring of a junction dot beyond the casing.
-const JUNCTION_RING: f32 = 5.5;
+/// Outer radius of a junction dot (ink ring included): the design's r 9
+/// dot with a 2.5 ring, a little wider than the casing on a bus.
+fn junction_radius(core: f32) -> f32 {
+    (9.0 + OUTLINE * 0.5).max(casing_for(core) * 0.5 + 4.0)
+}
 /// Depth slots for nets, and the depth between two slots.
 const NET_SLOTS: u32 = 2048;
 const NET_STAGGER: f32 = 0.1;
@@ -1361,7 +1367,7 @@ pub fn update_wire_visuals_system(
                 }
             }
             if let Some(at) = path.junction {
-                let outer = casing_for(look.core) * 0.5 + JUNCTION_RING;
+                let outer = junction_radius(look.core);
                 for (core, radius, z, paint) in [
                     (false, outer, JUNCTION_INK_Z, Paint::Ink),
                     (true, outer - OUTLINE, JUNCTION_CORE_Z, look.paint),

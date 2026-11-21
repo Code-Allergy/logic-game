@@ -10,7 +10,7 @@ use super::*;
 use crate::sim::art::PinLayout;
 use crate::sim::bridge::loop_message;
 use crate::sim::visuals::{
-    DisplayedValue, LoopOutline, WireCore, WirePath, WireStyle, WireValueLabel,
+    DisplayedValue, LoopOutline, WireCore, WirePath, WireRouting, WireStyle, WireValueLabel,
 };
 use crate::sim::{
     CircuitLibrary, CloseView, EntityWorkCounter, GateMoved, GateProbes, InstanceViewItem,
@@ -387,6 +387,107 @@ fn dragging_a_gate_moves_only_its_wires_and_does_not_recompile() {
         },
     );
     assert_eq!(app.world().resource::<SimBridge>().revision(), revision);
+}
+
+#[test]
+fn dragging_in_a_large_circuit_routes_only_the_dragged_gates_wires() {
+    // 12 columns of 25 gates, each fed by two gates of the column before.
+    let (cols, rows) = (12, 25);
+    let mut doc = CircuitDocument::new("Big");
+    let mut ids = Vec::new();
+    for c in 0..cols {
+        for r in 0..rows {
+            let kind = if c == 0 {
+                GateKind::Input { w: 1 }
+            } else {
+                GateKind::And { w: 1 }
+            };
+            let at = Vec2::new(c as f32 * 160.0, -(r as f32) * 120.0);
+            ids.push(doc.add(DocNode::labeled(kind, at, format!("g{c}_{r}"))));
+        }
+    }
+    for c in 1..cols {
+        for r in 0..rows {
+            let to = ids[c * rows + r];
+            doc.connect(ids[(c - 1) * rows + r], 0, to, 0);
+            doc.connect(ids[(c - 1) * rows + (r + 1) % rows], 0, to, 1);
+        }
+    }
+    let mut app = visual_app();
+    load(&mut app, WorkspaceDocument::new(doc));
+    idle_frames(&mut app, 3);
+    let stats = app.world().resource::<WireRouting>().stats;
+    assert_eq!(stats.fallbacks, 0, "{stats:?}");
+    assert_eq!(
+        stats.searched,
+        (cols - 1) * rows * 2,
+        "every wire routed once"
+    );
+    assert!(
+        wires(&mut app)
+            .iter()
+            .all(|(e, ..)| app.world().get::<WirePath>(*e).unwrap().points.len() >= 2)
+    );
+
+    let dragged = gate(&mut app, "g6_12");
+    let id = uuid(&app, dragged);
+    let its_wires: HashSet<Entity> = wires(&mut app)
+        .into_iter()
+        .filter(|(_, ep, _)| ep.source_gate == id || ep.sink_gate == id)
+        .map(|(e, ..)| e)
+        .collect();
+    assert_eq!(its_wires.len(), 4);
+    // The nets the gate is on: its wires and their siblings (a sibling
+    // that branches off one of its wires follows it).
+    let nets: HashSet<(Uuid, u8)> = wires(&mut app)
+        .into_iter()
+        .filter(|(e, ..)| its_wires.contains(e))
+        .map(|(_, ep, _)| (ep.source_gate, ep.source_pin))
+        .collect();
+    let related: HashSet<Entity> = wires(&mut app)
+        .into_iter()
+        .filter(|(_, ep, _)| nets.contains(&(ep.source_gate, ep.source_pin)))
+        .map(|(e, ..)| e)
+        .collect();
+    assert!(related.len() < 10);
+    let revision = app.world().resource::<SimBridge>().revision();
+    clear_changes(&mut app);
+    let start = Instant::now();
+    for step in 1..=5 {
+        app.world_mut()
+            .get_mut::<Transform>(dragged)
+            .unwrap()
+            .translation
+            .y += 7.0 * step as f32;
+        app.update();
+        let stats = app.world().resource::<WireRouting>().stats;
+        assert!(
+            stats.searched <= related.len(),
+            "a drag frame searches only the wires of the dragged gate's nets: {stats:?}"
+        );
+    }
+    let took = start.elapsed();
+    eprintln!(
+        "5 drag frames over {} wires: {took:?}",
+        (cols - 1) * rows * 2
+    );
+    let rerouted: HashSet<Entity> = changes(&app).paths.iter().copied().collect();
+    assert!(
+        rerouted.is_superset(&its_wires),
+        "the dragged gate's wires follow it"
+    );
+    assert!(
+        rerouted.is_subset(&related),
+        "only the wires of its nets change"
+    );
+    assert_eq!(app.world().resource::<SimBridge>().revision(), revision);
+
+    // The first quiet frame checks the kept paths against the new place.
+    let passes = app.world().resource::<WireRouting>().passes;
+    app.update();
+    assert_eq!(app.world().resource::<WireRouting>().passes, passes + 1);
+    assert_eq!(app.world().resource::<WireRouting>().stats.fallbacks, 0);
+    assert_idle_does_no_work(&mut app, "after the drag");
 }
 
 #[test]
