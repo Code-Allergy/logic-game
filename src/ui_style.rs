@@ -1,6 +1,7 @@
 //! The Workshop look for egui: bundled fonts (Nunito, JetBrains Mono),
-//! a [`egui::Style`] built from the [`Theme`], chunky buttons with a solid
-//! bottom edge, floating HUD cards, and the Day/Night card.
+//! a [`egui::Style`] built from the [`Theme`], chunky buttons and chips
+//! with a solid bottom edge, floating HUD cards, and the [`HudLayout`]
+//! that places the cards over the canvas.
 
 use std::sync::Arc;
 
@@ -29,6 +30,17 @@ pub fn egui_color(color: Color) -> Color32 {
 /// which name this family once the Workshop style is applied.
 pub fn heavy(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(HEAVY.into()))
+}
+
+/// Whether the Workshop fonts are installed in `ctx` yet. egui takes new
+/// fonts at the start of the next pass, so for the first frame or two
+/// [`heavy`] text would panic; the HUD systems wait for this.
+pub fn workshop_fonts_ready(ctx: &egui::Context) -> bool {
+    ctx.fonts(|f| {
+        f.definitions()
+            .families
+            .contains_key(&FontFamily::Name(HEAVY.into()))
+    })
 }
 
 /// egui's default fonts with Nunito SemiBold first for proportional text,
@@ -131,6 +143,8 @@ pub fn workshop_style(theme: &Theme) -> egui::Style {
     style.spacing.window_margin = Margin::same(14);
     style.spacing.menu_margin = Margin::same(8);
     style.spacing.interact_size.y = 26.0;
+    // The fade is painted in the parent's colour, not the card's.
+    style.spacing.scroll.fade.strength = 0.0;
 
     let prop = |size| FontId::new(size, FontFamily::Proportional);
     style.text_styles = [
@@ -171,7 +185,76 @@ pub fn chunky_button(
         f32::INFINITY,
         TextStyle::Button,
     );
-    let body = EVec2::new((galley.size().x + 28.0).max(40.0), 34.0);
+    let width = (galley.size().x + 28.0).max(40.0);
+    chunky_button_with(ui, palette, width, primary, |painter, face, colour| {
+        painter.galley(face.center() - galley.size() * 0.5, galley, colour);
+    })
+}
+
+/// Icons the HUD paints itself (the bundled fonts lack these glyphs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HudIcon {
+    Pause,
+    Sun,
+    Moon,
+}
+
+/// A square chunky button with a painted icon.
+pub fn chunky_icon_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    icon: HudIcon,
+    primary: bool,
+) -> Response {
+    let fill = palette;
+    chunky_button_with(ui, palette, 40.0, primary, |painter, face, colour| {
+        paint_icon(painter, face.center(), icon, colour, fill);
+    })
+}
+
+/// Paint `icon` centred at `c` in `colour`.
+pub fn paint_icon(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    icon: HudIcon,
+    colour: Color32,
+    palette: &Palette,
+) {
+    match icon {
+        HudIcon::Pause => {
+            for dx in [-4.0, 4.0] {
+                painter.rect_filled(
+                    egui::Rect::from_center_size(c + EVec2::new(dx, 0.0), EVec2::new(4.5, 14.0)),
+                    CornerRadius::same(1),
+                    colour,
+                );
+            }
+        }
+        HudIcon::Sun => {
+            painter.circle(c, 4.5, egui_color(palette.on), stroke(2.0, colour));
+            for i in 0..8 {
+                let a = std::f32::consts::TAU * i as f32 / 8.0;
+                let d = EVec2::new(a.cos(), a.sin());
+                painter.line_segment([c + d * 7.5, c + d * 10.0], stroke(2.0, colour));
+            }
+        }
+        HudIcon::Moon => {
+            painter.circle_filled(c, 8.0, colour);
+            painter.circle_filled(c + EVec2::new(4.0, -3.0), 7.0, egui_color(palette.raised));
+        }
+    }
+}
+
+/// A chunky button `width` wide whose face content `paint` draws (given
+/// the face rectangle and the text colour).
+pub fn chunky_button_with(
+    ui: &mut Ui,
+    palette: &Palette,
+    width: f32,
+    primary: bool,
+    paint: impl FnOnce(&egui::Painter, egui::Rect, Color32),
+) -> Response {
+    let body = EVec2::new(width, 34.0);
     let (rect, response) =
         ui.allocate_exact_size(body + EVec2::new(0.0, BUTTON_EDGE), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -203,7 +286,7 @@ pub fn chunky_button(
         } else {
             palette.text
         });
-        painter.galley(face.center() - galley.size() * 0.5, galley, colour);
+        paint(painter, face, colour);
     }
     response
 }
@@ -244,52 +327,271 @@ pub fn apply_workshop_ui_system(
     Ok(())
 }
 
-/// The Day/Night card in the bottom-right corner.
-pub fn theme_toggle_card_system(
-    mut contexts: EguiContexts,
-    mut theme: ResMut<Theme>,
-    state: Option<Res<State<crate::GameState>>>,
-) -> Result {
-    if state.is_some_and(|s| s.get() != &crate::GameState::Simulating) {
-        return Ok(());
-    }
-    let ctx = contexts.ctx_mut()?;
-    let palette = theme.palette;
-    let mut wanted = None;
-    egui::Area::new(egui::Id::new("theme_toggle"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, [-18.0, -18.0])
-        .show(ctx, |ui| {
-            card(&palette).inner_margin(Margin::same(8)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if chunky_button(ui, &palette, "☀ Day", !theme.is_night()).clicked() {
-                        wanted = Some(ThemeMode::Day);
-                    }
-                    if chunky_button(ui, &palette, "🌙 Night", theme.is_night()).clicked() {
-                        wanted = Some(ThemeMode::Night);
-                    }
-                })
-                .response
-                .on_hover_text("Toggle with T");
-            });
-        });
-    if let Some(mode) = wanted
-        && mode != theme.mode
-    {
-        theme.set(mode);
-    }
-    Ok(())
+/// A compact Day/Night switch: one chunky button showing the other
+/// mode's icon. Returns the mode to switch to when clicked.
+pub fn day_night_button(ui: &mut Ui, theme: &Theme) -> Option<ThemeMode> {
+    let (icon, other, tip) = if theme.is_night() {
+        (HudIcon::Sun, ThemeMode::Day, "Day workshop (T)")
+    } else {
+        (HudIcon::Moon, ThemeMode::Night, "Night workshop (T)")
+    };
+    chunky_icon_button(ui, &theme.palette, icon, false)
+        .on_hover_text(tip)
+        .clicked()
+        .then_some(other)
 }
 
-/// The egui half of the theme: fonts, style and the Day/Night card.
+/// A small toggle chip (speed, width, tabs): ink-filled when `on`.
+pub fn chip(ui: &mut Ui, palette: &Palette, text: impl Into<String>, on: bool) -> Response {
+    chip_sized(ui, palette, text, on, None)
+}
+
+/// A chip at least `min_width` wide (equal-width chip rows).
+pub fn chip_sized(
+    ui: &mut Ui,
+    palette: &Palette,
+    text: impl Into<String>,
+    on: bool,
+    min_width: Option<f32>,
+) -> Response {
+    let text: String = text.into();
+    let galley = ui.painter().layout_no_wrap(
+        text,
+        heavy(13.0),
+        egui_color(if on { palette.tile } else { palette.text }),
+    );
+    let width = (galley.size().x + 22.0).max(min_width.unwrap_or(0.0));
+    let (rect, response) = ui.allocate_exact_size(EVec2::new(width, CHIP_HEIGHT), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if on {
+            palette.text
+        } else if response.hovered() {
+            palette.hover
+        } else {
+            palette.raised
+        };
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(9),
+            egui_color(fill),
+            stroke(2.0, egui_color(palette.ink)),
+            StrokeKind::Inside,
+        );
+        ui.painter().galley(
+            rect.center() - galley.size() * 0.5,
+            galley,
+            Color32::PLACEHOLDER,
+        );
+    }
+    response
+}
+
+/// Height of a [`chip`].
+pub const CHIP_HEIGHT: f32 = 28.0;
+
+/// A thin vertical rule between groups in a card row.
+pub fn rule(ui: &mut Ui, palette: &Palette, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(EVec2::new(2.0, height), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(1), egui_color(palette.divider));
+}
+
+/// A live value as the HUD shows it: `on`/`off` for one bit, otherwise
+/// hex and decimal (`0x2A · 42`).
+pub fn format_live_value(width: u8, value: u64) -> String {
+    if width <= 1 {
+        if value != 0 { "on" } else { "off" }.to_string()
+    } else {
+        let digits = usize::from(width).div_ceil(4);
+        format!("0x{value:0digits$X} · {value}")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HUD layout
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Height of the top row of cards (file, transport, build status).
+pub const TOP_CARD_HEIGHT: f32 = 60.0;
+/// The zoom row beside the minimap: `−`, the percentage, `+`.
+pub const ZOOM_ROW: Vec2 = Vec2::new(176.0, 43.0);
+/// Slots in the parts bar: nine numbered parts and the wire tool.
+pub const PART_SLOTS: usize = 10;
+/// Space between slots, and the extra space before the wire tool.
+pub const SLOT_GAP: f32 = 8.0;
+pub const TOOL_GAP: f32 = 14.0;
+
+/// Where the floating HUD cards sit for a window size (logical pixels,
+/// y down): the canvas fills the window and the cards float over it,
+/// anchored to its edges. Below 1600 x 900 the layout is compact
+/// (smaller margins, slots, minimap and signals card).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HudLayout {
+    pub screen: Vec2,
+    pub compact: bool,
+    /// Distance of the cards from the window edges.
+    pub margin: f32,
+    /// Space between neighbouring cards.
+    pub gap: f32,
+    pub inspector_width: f32,
+    pub library_width: f32,
+    pub minimap: Vec2,
+    /// The zoom row sits beside the minimap when there is room, else
+    /// above it.
+    pub zoom_beside_minimap: bool,
+    /// Side of a part slot.
+    pub slot: f32,
+    pub parts: Vec2,
+    pub signals: Vec2,
+}
+
+impl HudLayout {
+    pub fn new(screen: Vec2) -> Self {
+        let compact = screen.x < 1600.0 || screen.y < 900.0;
+        let (margin, gap, inspector_width, library_width, minimap, slot, signals_h) = if compact {
+            (
+                16.0,
+                12.0,
+                296.0,
+                330.0,
+                Vec2::new(200.0, 128.0),
+                52.0,
+                176.0,
+            )
+        } else {
+            (
+                24.0,
+                16.0,
+                320.0,
+                360.0,
+                Vec2::new(250.0, 168.0),
+                64.0,
+                250.0,
+            )
+        };
+        let slots = PART_SLOTS as f32;
+        // Card padding 14 a side; tab row 28, a 10 gap, the slot with its
+        // 3-unit edge, padding 10 above and 14 below.
+        let parts = Vec2::new(
+            slots * slot + (slots - 1.0) * SLOT_GAP + TOOL_GAP + 28.0,
+            slot + 3.0 + CHIP_HEIGHT + 10.0 + 24.0 + 6.0,
+        );
+        let room = (screen.x - margin) - (screen.x + parts.x) * 0.5 - gap;
+        let signals = Vec2::new(room.clamp(240.0, 560.0), signals_h);
+        let zoom_beside_minimap =
+            margin + minimap.x + gap + ZOOM_ROW.x + gap <= (screen.x - parts.x) * 0.5;
+        Self {
+            screen,
+            compact,
+            margin,
+            gap,
+            inspector_width,
+            library_width,
+            minimap,
+            zoom_beside_minimap,
+            slot,
+            parts,
+            signals,
+        }
+    }
+
+    /// Below the top row of cards.
+    pub fn top_band(&self) -> f32 {
+        self.margin + TOP_CARD_HEIGHT + self.gap
+    }
+
+    pub fn minimap_rect(&self) -> Rect {
+        let min = Vec2::new(self.margin, self.screen.y - self.margin - self.minimap.y);
+        Rect::from_corners(min, min + self.minimap)
+    }
+
+    pub fn zoom_rect(&self) -> Rect {
+        let map = self.minimap_rect();
+        let min = if self.zoom_beside_minimap {
+            Vec2::new(
+                map.max.x + self.gap,
+                self.screen.y - self.margin - ZOOM_ROW.y,
+            )
+        } else {
+            Vec2::new(self.margin, map.min.y - self.gap * 0.5 - ZOOM_ROW.y)
+        };
+        Rect::from_corners(min, min + ZOOM_ROW)
+    }
+
+    pub fn parts_rect(&self) -> Rect {
+        let min = Vec2::new(
+            (self.screen.x - self.parts.x) * 0.5,
+            self.screen.y - self.margin - self.parts.y,
+        );
+        Rect::from_corners(min, min + self.parts)
+    }
+
+    pub fn signals_rect(&self) -> Rect {
+        let min = self.screen - Vec2::splat(self.margin) - self.signals;
+        Rect::from_corners(min, min + self.signals)
+    }
+
+    /// The inspector column: right edge, from below the top row down to
+    /// just above the signals card (the card is as tall as its content,
+    /// up to this).
+    pub fn inspector_rect(&self) -> Rect {
+        let x = self.screen.x - self.margin - self.inspector_width;
+        Rect::new(
+            x,
+            self.top_band(),
+            x + self.inspector_width,
+            self.signals_rect().min.y - self.gap,
+        )
+    }
+
+    /// The library drawer: left edge, below the file card, down to just
+    /// above the minimap stack.
+    pub fn library_rect(&self) -> Rect {
+        let bottom = self.minimap_rect().min.y.min(self.zoom_rect().min.y) - self.gap;
+        Rect::new(
+            self.margin,
+            self.top_band(),
+            self.margin + self.library_width,
+            bottom,
+        )
+    }
+
+    /// Top of the bottom row of cards.
+    pub fn bottom_band(&self) -> f32 {
+        [
+            self.minimap_rect().min.y,
+            self.zoom_rect().min.y,
+            self.parts_rect().min.y,
+            self.signals_rect().min.y,
+        ]
+        .into_iter()
+        .fold(f32::INFINITY, f32::min)
+    }
+
+    /// The canvas area no card covers: between the top and bottom rows,
+    /// left of the inspector column. The camera fits circuits into it.
+    pub fn free_area(&self) -> Rect {
+        Rect::new(
+            self.margin,
+            self.top_band(),
+            self.inspector_rect().min.x - self.gap,
+            self.bottom_band() - self.gap,
+        )
+    }
+}
+
+/// A bevy rectangle as an egui one (both logical pixels, y down).
+pub fn egui_rect(r: Rect) -> egui::Rect {
+    egui::Rect::from_min_max(egui::pos2(r.min.x, r.min.y), egui::pos2(r.max.x, r.max.y))
+}
+
+/// The egui half of the theme: fonts and style.
 /// Expects bevy_egui's plugin and [`crate::theme::ThemePlugin`].
 pub struct WorkshopUiPlugin;
 
 impl Plugin for WorkshopUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            EguiPrimaryContextPass,
-            (apply_workshop_ui_system, theme_toggle_card_system).chain(),
-        );
+        app.add_systems(EguiPrimaryContextPass, apply_workshop_ui_system);
     }
 }
 
@@ -335,5 +637,70 @@ mod tests {
             egui_color(crate::theme::hex(0xFFB627)),
             Color32::from_rgb(0xFF, 0xB6, 0x27)
         );
+    }
+
+    #[test]
+    fn live_values_read_like_the_inspector() {
+        assert_eq!(format_live_value(1, 0), "off");
+        assert_eq!(format_live_value(1, 1), "on");
+        assert_eq!(format_live_value(8, 42), "0x2A · 42");
+        assert_eq!(format_live_value(12, 5), "0x005 · 5");
+    }
+
+    fn overlaps(a: Rect, b: Rect) -> bool {
+        !a.intersect(b).is_empty()
+    }
+
+    #[test]
+    fn hud_cards_fit_and_do_not_overlap_from_720p_to_1440p() {
+        for (w, h) in [
+            (1280.0, 720.0),
+            (1366.0, 768.0),
+            (1600.0, 900.0),
+            (1920.0, 1080.0),
+            (2560.0, 1440.0),
+        ] {
+            let screen = Vec2::new(w, h);
+            let l = HudLayout::new(screen);
+            let window = Rect::from_corners(Vec2::ZERO, screen);
+            let bottom = [
+                ("minimap", l.minimap_rect()),
+                ("zoom", l.zoom_rect()),
+                ("parts", l.parts_rect()),
+                ("signals", l.signals_rect()),
+            ];
+            for (name, r) in bottom {
+                assert!(
+                    window.contains(r.min) && window.contains(r.max),
+                    "{name} at {w}x{h}"
+                );
+            }
+            for (i, (a, ra)) in bottom.iter().enumerate() {
+                for (b, rb) in &bottom[i + 1..] {
+                    assert!(!overlaps(*ra, *rb), "{a} overlaps {b} at {w}x{h}");
+                }
+            }
+            let free = l.free_area();
+            assert!(
+                free.width() > 0.45 * w && free.height() > 0.5 * h,
+                "free area at {w}x{h}"
+            );
+            assert!(free.min.y >= l.top_band() && free.max.y < l.bottom_band());
+            for (name, r) in bottom.iter().chain([&("inspector", l.inspector_rect())]) {
+                assert!(!overlaps(free, *r), "free area overlaps {name} at {w}x{h}");
+            }
+            let inspector = l.inspector_rect();
+            assert!(inspector.height() > 300.0, "inspector at {w}x{h}");
+            assert!(!overlaps(inspector, l.signals_rect()));
+            let library = l.library_rect();
+            assert!(library.height() > 250.0 && !overlaps(library, l.minimap_rect()));
+            assert!(!overlaps(library, l.zoom_rect()));
+            assert_eq!(l.compact, w < 1600.0 || h < 900.0);
+        }
+        // The full-size layout keeps the mockup's sizes.
+        let l = HudLayout::new(Vec2::new(1920.0, 1080.0));
+        assert_eq!((l.margin, l.inspector_width, l.slot), (24.0, 320.0, 64.0));
+        assert!(l.zoom_beside_minimap);
+        assert!(l.signals.x > 500.0);
     }
 }
