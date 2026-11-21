@@ -51,7 +51,7 @@ below 1600 x 900):
 | Top right | Build status: built and part count, or the loop/build error (click for details). |
 | Right | Inspector of the selected part: label, width, parameters, live values (Q/D/EN for a register), input drive, readout format, Watch, Open inside, Delete, wires. |
 | Bottom left | Minimap (click or drag to move the view) and zoom; the percentage fits the circuit. |
-| Bottom centre | Parts bar: Logic, Memory, In & out, Routing, Arithmetic and Chips (saved workspaces and demos as cells); the width of new parts; the wire tool. |
+| Bottom centre | Parts bar: Logic, Memory, In & out, Routing, Arithmetic and Chips (saved workspaces, demos and gallery items as cells); the width of new parts; the wire tool. |
 | Bottom right | Signals: live values of watched parts, inputs, clocks, registers and outputs. |
 
 Keys (ignored while a text field has focus): `1`–`9` arm a part from the
