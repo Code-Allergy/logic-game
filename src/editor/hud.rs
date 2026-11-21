@@ -482,11 +482,31 @@ const SLOT_TEXT_PAD: f32 = 8.0;
 /// Font sizes a slot's text tries, largest first.
 const SLOT_TEXT_SIZES: [f32; 6] = [13.0, 12.0, 11.0, 10.0, 9.0, 8.0];
 
+/// Rows a chip's name may take.
+const CHIP_TEXT_ROWS: usize = 3;
+
+/// Font sizes a chip's name tries, largest first.
+const CHIP_TEXT_SIZES: [f32; 6] = [9.5, 9.0, 8.5, 8.0, 7.5, 7.0];
+
 /// `text` laid out centred for a slot face with `width` of room: at the
-/// largest of [`SLOT_TEXT_SIZES`] where no word is wider than the room and
+/// largest of [`SLOT_TEXT_SIZES`] where no word (or hyphenated part of
+/// one) is wider than the room and
 /// it takes at most two lines. Returns the galley and whether it fits (at
 /// the smallest size otherwise).
 fn slot_label(ctx: &egui::Context, text: &str, width: f32) -> (Arc<egui::Galley>, bool) {
+    fit_label(ctx, text, width, f32::INFINITY, &SLOT_TEXT_SIZES, 2)
+}
+
+/// [`slot_label`] with a height limit, the sizes to try and the most rows
+/// allowed.
+fn fit_label(
+    ctx: &egui::Context,
+    text: &str,
+    width: f32,
+    height: f32,
+    sizes: &[f32],
+    max_rows: usize,
+) -> (Arc<egui::Galley>, bool) {
     let layout = |size: f32, wrap: f32| {
         let mut job =
             egui::text::LayoutJob::simple(text.to_owned(), heavy(size), Color32::PLACEHOLDER, wrap);
@@ -494,12 +514,14 @@ fn slot_label(ctx: &egui::Context, text: &str, width: f32) -> (Arc<egui::Galley>
         ctx.fonts_mut(|f| f.layout_job(job))
     };
     let mut last = None;
-    for size in SLOT_TEXT_SIZES {
+    for &size in sizes {
+        // egui breaks rows at spaces and after hyphens.
         let words_fit = text
             .split_whitespace()
+            .flat_map(|w| w.split_inclusive('-'))
             .all(|w| layout_word(ctx, w, size) <= width);
         let galley = layout(size, width);
-        let fits = words_fit && galley.rows.len() <= 2;
+        let fits = words_fit && galley.rows.len() <= max_rows && galley.size().y <= height;
         if fits {
             return (galley, true);
         }
@@ -535,9 +557,17 @@ fn chip_name(painter: &egui::Painter, face: egui::Rect, name: &str, colour: Colo
         face.min + egui::vec2(3.0, 15.0),
         face.max - egui::vec2(3.0, 3.0),
     );
-    let galley = painter.layout(name.to_string(), heavy(9.5), colour, area.width() - 2.0);
+    let (galley, _) = fit_label(
+        painter.ctx(),
+        name,
+        area.width() - 2.0,
+        area.height(),
+        &CHIP_TEXT_SIZES,
+        CHIP_TEXT_ROWS,
+    );
+    // Centred rows are laid out about x = 0: centre the rect.
     let pos = egui::pos2(
-        area.center().x - galley.size().x * 0.5,
+        area.center().x - galley.rect.center().x,
         (area.center().y - galley.size().y * 0.5).max(area.min.y),
     );
     painter.with_clip_rect(area).galley(pos, galley, colour);
@@ -1352,6 +1382,31 @@ mod tests {
                         assert!(size >= 10.0, "{title}: {size} in a {side} slot");
                     }
                 }
+            }
+        }
+    }
+
+    /// Every demo and gallery name fits its Chips slot (whole words, at
+    /// most three rows) in the full layout; in the compact one no word is
+    /// cut either (a very long name may lose its last row; the tooltip
+    /// has it whole).
+    #[test]
+    fn chip_names_fit_their_slots() {
+        let ctx = fonts_ctx();
+        let catalog = demos::catalog().unwrap();
+        for screen in [Vec2::new(1920.0, 1080.0), Vec2::new(1280.0, 720.0)] {
+            let layout = crate::ui_style::HudLayout::new(screen);
+            let side = layout.slot;
+            // As `chip_name` lays it out: 3 a side less 2, below the key.
+            let room = side - 6.0 - 2.0;
+            let (height, rows) = if layout.compact {
+                (f32::INFINITY, usize::MAX)
+            } else {
+                (side - 18.0, CHIP_TEXT_ROWS)
+            };
+            for demo in catalog.demos.iter().chain(&catalog.gallery) {
+                let (_, fits) = fit_label(&ctx, &demo.title, room, height, &CHIP_TEXT_SIZES, rows);
+                assert!(fits, "{} does not fit a {side} slot", demo.title);
             }
         }
     }
