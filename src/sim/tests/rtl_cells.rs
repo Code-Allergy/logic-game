@@ -31,14 +31,16 @@ const SELECT: &str = include_str!("../../../examples/rtl/select.json");
 const FLOPS: &str = include_str!("../../../examples/rtl/flops.json");
 const MEMORY: &str = include_str!("../../../examples/rtl/memory.json");
 const MAC: &str = include_str!("../../../examples/rtl/mac.json");
+const DPRAM: &str = include_str!("../../../examples/rtl/dpram.json");
 
-const FIXTURES: [(&str, &str); 6] = [
+const FIXTURES: [(&str, &str); 7] = [
     ("arith", ARITH),
     ("shift", SHIFT),
     ("compare", COMPARE),
     ("select", SELECT),
     ("flops", FLOPS),
     ("memory", MEMORY),
+    ("dpram", DPRAM),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -868,10 +870,20 @@ fn memories_match_the_oracle() {
         |_, i| rom[i[1] as usize],
     );
 
-    // Single port: a Ram (initial contents through a Rom), read first.
+    // Single port: a dual-port RAM holding the initial contents itself,
+    // read first.
     let imported = import_top(MEMORY, "spram");
-    assert_eq!(count(&imported, |k| matches!(k, GateKind::Ram { .. })), 1);
     let init: Vec<u64> = (0..16).map(|i| 0xA0 + i).collect();
+    let ram2 = GateKind::Ram2 {
+        addr_bits: 4,
+        w: 8,
+        reads: 1,
+        mask: false,
+        init: init.clone(),
+    };
+    assert_eq!(count(&imported, |k| *k == ram2), 1);
+    assert_eq!(count(&imported, |k| matches!(k, GateKind::Rom { .. })), 0);
+    assert_eq!(count(&imported, |k| matches!(k, GateKind::Xor { .. })), 0);
     check_cycles(
         &mut compiled(&imported),
         &[("we", 1, 40), ("addr", 4, 0), ("din", 8, 0)],
@@ -908,9 +920,17 @@ fn memories_match_the_oracle() {
         },
     );
 
-    // Byte enables, read at once.
+    // Byte enables, read at once: a per-bit write enable.
+    let imported = import_top(MEMORY, "bytes");
+    assert_eq!(
+        count(&imported, |k| matches!(
+            k,
+            GateKind::Ram2 { mask: true, .. }
+        )),
+        1
+    );
     check_cycles(
-        &mut sim(MEMORY, "bytes"),
+        &mut compiled(&imported),
         &[("we", 2, 0), ("addr", 3, 0), ("din", 16, 0)],
         &["dout"],
         vec![0u64; 8],
@@ -927,17 +947,25 @@ fn memories_match_the_oracle() {
         },
     );
 
-    // Separate read and write addresses: registers, with initial contents.
+    // Separate read and write addresses: one dual-port RAM with two read
+    // ports, holding the initial contents.
     let imported = import_top(MEMORY, "regfile");
     assert!(
-        imported
+        !imported
             .warnings
             .iter()
             .any(|w| w.contains("built from registers")),
         "{:?}",
         imported.warnings
     );
-    assert_eq!(count(&imported, |k| matches!(k, GateKind::Ram { .. })), 0);
+    assert_eq!(
+        count(&imported, |k| matches!(k, GateKind::Ram2 { reads: 2, .. })),
+        1
+    );
+    assert_eq!(
+        count(&imported, |k| matches!(k, GateKind::Register { .. })),
+        0
+    );
     let init: Vec<u64> = (0..8).map(|i| 0x11 * i).collect();
     check_cycles(
         &mut compiled(&imported),
@@ -965,12 +993,182 @@ fn memories_match_the_oracle() {
     );
 }
 
+/// A 1024 x 16 memory read and written at different addresses: one
+/// dual-port RAM with its initial contents, checked against a Rust model.
+#[test]
+fn large_dual_port_memory_matches_the_oracle() {
+    let imported = import_top(DPRAM, "dpram");
+    let init: Vec<u64> = (0..1024u64)
+        .map(|i| ((i * 0x0101) ^ 0x5A5A) & 0xFFFF)
+        .collect();
+    let rams: Vec<&GateKind> = imported
+        .workspace
+        .root
+        .nodes
+        .iter()
+        .map(|n| &n.kind)
+        .filter(|k| matches!(k, GateKind::Ram2 { .. }))
+        .collect();
+    assert_eq!(
+        rams,
+        [&GateKind::Ram2 {
+            addr_bits: 10,
+            w: 16,
+            reads: 2,
+            mask: false,
+            init: init.clone(),
+        }]
+    );
+    // Only the RAM and the read register: no word registers, no muxes.
+    assert_eq!(count(&imported, |k| matches!(k, GateKind::Mux { .. })), 0);
+    assert_eq!(count(&imported, |k| matches!(k, GateKind::Delay { .. })), 1);
+    assert!(imported.warnings.iter().all(|w| !w.contains("registers")));
+
+    // Random traffic; ra and rb often hit a word just written.
+    let mut s = compiled(&imported);
+    let mut mem = init;
+    let mut rd2 = mem[0];
+    let mut rng = Rng::new(0x6470);
+    let mut recent: Vec<u64> = vec![0];
+    for t in 0..4000 {
+        let mut addr = || {
+            if rng.percent(50) {
+                *rng.pick(&recent)
+            } else {
+                rng.next_u64() & 1023
+            }
+        };
+        let (wa, ra, rb) = (addr(), addr(), addr());
+        let we = u64::from(rng.percent(40));
+        let wd = rng.next_u64() & 0xFFFF;
+        let got = step(
+            &mut s,
+            &[("we", we), ("wa", wa), ("ra", ra), ("rb", rb), ("wd", wd)],
+            &["rd1", "rd2"],
+        );
+        // rd1 reads the memory as committed; rd2 shows the word read at the
+        // previous tick.
+        assert_eq!(got, [mem[ra as usize], rd2], "tick {t}");
+        rd2 = mem[rb as usize];
+        if we == 1 {
+            mem[wa as usize] = wd;
+            recent.push(wa);
+        }
+    }
+    // Every word, read back through both ports.
+    for a in 0..1024 {
+        step(&mut s, &[("we", 0), ("ra", a), ("rb", a)], &[]);
+        let got = step(&mut s, &[("ra", a)], &["rd1", "rd2"]);
+        assert_eq!(got, [mem[a as usize]; 2], "word {a}");
+    }
+}
+
+/// Nine read ports: two dual-port RAMs (eight ports and one) written
+/// alike, with byte enables and a clocked transparent port.
+#[test]
+fn many_read_ports_match_the_oracle() {
+    let imported = import_top(DPRAM, "multiread");
+    let reads: Vec<u8> = imported
+        .workspace
+        .root
+        .nodes
+        .iter()
+        .filter_map(|n| match n.kind {
+            GateKind::Ram2 {
+                reads, mask: true, ..
+            } => Some(reads),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, [8, 1]);
+    let mut inputs: Vec<In> = vec![("we", 2, 0), ("wa", 5, 0), ("wd", 16, 0)];
+    const RA: [&str; 9] = [
+        "ra0", "ra1", "ra2", "ra3", "ra4", "ra5", "ra6", "ra7", "ra8",
+    ];
+    const RD: [&str; 9] = [
+        "rd0", "rd1", "rd2", "rd3", "rd4", "rd5", "rd6", "rd7", "rd8",
+    ];
+    inputs.extend(RA.iter().map(|&a| (a, 5, 0)));
+    check_cycles(
+        &mut compiled(&imported),
+        &inputs,
+        &RD,
+        (vec![0u64; 32], 0u64),
+        26,
+        1500,
+        |(mem, r8), i| {
+            let mut out: Vec<u64> = (0..8).map(|k| mem[i[3 + k] as usize]).collect();
+            out.push(*r8);
+            out
+        },
+        |(mem, _), i| {
+            let (we, wa, wd) = (i[0], i[1] as usize, i[2]);
+            let keep =
+                (if we & 1 == 1 { 0 } else { 0xFF }) | (if we & 2 == 2 { 0 } else { 0xFF00 });
+            let mut mem = mem.clone();
+            mem[wa] = mem[wa] & keep | wd & !keep & 0xFFFF;
+            let r8 = mem[i[11] as usize];
+            (mem, r8)
+        },
+    );
+}
+
+/// Two write ports: registers per word, the second port winning at the same
+/// address, with a read port that sees both writes.
+#[test]
+fn two_write_ports_match_the_oracle() {
+    let imported = import_top(DPRAM, "twowrite");
+    assert!(
+        imported
+            .warnings
+            .iter()
+            .any(|w| w.contains("several write ports, so it is built from registers")),
+        "{:?}",
+        imported.warnings
+    );
+    assert_eq!(count(&imported, |k| matches!(k, GateKind::Ram2 { .. })), 0);
+    assert_eq!(
+        count(&imported, |k| matches!(k, GateKind::Register { w: 8 })),
+        16
+    );
+    let init: Vec<u64> = (0..16).map(|i| 3 * i).collect();
+    check_cycles(
+        &mut compiled(&imported),
+        &[
+            ("wea", 1, 50),
+            ("waa", 4, 0),
+            ("wda", 8, 0),
+            ("web", 1, 50),
+            ("wab", 4, 0),
+            ("wdb", 8, 0),
+            ("ra", 4, 0),
+            ("rb", 4, 0),
+        ],
+        &["r1", "r2"],
+        (init, 0u64),
+        27,
+        1500,
+        |(mem, r2), i| vec![mem[i[6] as usize], *r2],
+        |(mem, _), i| {
+            let mut mem = mem.clone();
+            if i[0] == 1 {
+                mem[i[1] as usize] = i[2];
+            }
+            if i[3] == 1 {
+                mem[i[4] as usize] = i[5];
+            }
+            let r2 = mem[i[7] as usize];
+            (mem, r2)
+        },
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // A larger design
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The multiply-accumulate unit (`examples/rtl/mac.v`): $mem_v2 built from
-/// registers, $mul, $add, $sub, $sshr, $eq, $pmux, $adff with an
+/// The multiply-accumulate unit (`examples/rtl/mac.v`): $mem_v2 as a
+/// dual-port RAM with initial contents, $mul, $add, $sub, $sshr, $eq, $pmux, $adff with an
 /// active-low reset, and a signed $gt.
 #[test]
 fn multiply_accumulate_unit_matches_the_oracle() {
@@ -982,14 +1180,20 @@ fn multiply_accumulate_unit_matches_the_oracle() {
         acc: u64,
     }
     let imported = import_top(MAC, "mac");
+    let coef = [1i64, 2, -3, 4, 5, -6, 7, -8];
     for ty in [
-        GateKind::Register { w: 8 },
+        GateKind::Ram2 {
+            addr_bits: 3,
+            w: 8,
+            reads: 1,
+            mask: false,
+            init: coef.iter().map(|&c| c as u64 & 255).collect(),
+        },
         GateKind::Delay { w: 20 },
         GateKind::LtU { w: 20 },
     ] {
         assert!(count(&imported, |k| *k == ty) > 0, "{ty:?}");
     }
-    let coef = [1i64, 2, -3, 4, 5, -6, 7, -8];
     let inputs: [In; 6] = [
         ("rst_n", 1, 95),
         ("x", 8, 0),
@@ -1091,18 +1295,29 @@ fn memory(size: u64, abits: u64, same_address: bool, wr: u64) -> String {
 
 #[test]
 fn exotic_cells_are_refused_with_a_message() {
-    // Memories: big with two addresses, two write ports, unmerged ports.
-    assert!(import_yosys_json(&memory(1024, 10, true, 1), &ImportOptions::default()).is_ok());
-    assert!(import_yosys_json(&memory(64, 6, false, 1), &ImportOptions::default()).is_ok());
-    let message = refused(&memory(128, 7, false, 1));
+    // Memories: any size with two addresses, two write ports up to 64
+    // words, more refused; unmerged ports.
+    for (size, abits) in [(1024, 10), (64, 6), (128, 7), (1 << 20, 20)] {
+        let imported = import_yosys_json(&memory(size, abits, false, 1), &ImportOptions::default())
+            .unwrap_or_else(|e| panic!("{size} words: {e}"));
+        assert_eq!(
+            count(&imported, |k| matches!(k, GateKind::Ram2 { .. })),
+            1,
+            "{size} words"
+        );
+    }
+    assert!(import_yosys_json(&memory(16, 4, true, 2), &ImportOptions::default()).is_ok());
+    assert!(import_yosys_json(&memory(64, 6, false, 2), &ImportOptions::default()).is_ok());
+    let message = refused(&memory(128, 7, false, 2));
     for part in [
         "memory m",
-        "128 words",
+        "2 write ports and 128 words",
         "built from registers, up to 64 words",
     ] {
         assert!(message.contains(part), "{part:?} in {message:?}");
     }
-    assert!(refused(&memory(16, 4, true, 2)).contains("2 write ports; at most one"));
+    let message = refused(&memory((1 << 20) + 1, 21, false, 1));
+    assert!(message.contains("1 to 2^20 are supported"), "{message}");
     let memrd = netlist(&[], &[("$memrd", json!({}), json!({}))]);
     assert!(refused(&memrd).contains("run `memory_collect`"));
     for (ty, advice) in [

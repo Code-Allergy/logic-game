@@ -1,7 +1,8 @@
 # RTL import and auto-layout
 
 Status: implemented for #42 (`src/sim/rtl.rs` with `src/sim/rtl/`,
-`src/sim/layout.rs`, `examples/rtl_import.rs`); more cells in deviation 60.
+`src/sim/layout.rs`, `examples/rtl_import.rs`); more cells in deviation 60;
+memories on the dual-port RAM in deviation 71.
 
 A circuit written in Verilog (or anything else Yosys reads) can be brought
 in as an editable workspace: Yosys writes a JSON netlist, the importer maps
@@ -37,6 +38,7 @@ produced by Yosys. Each `.json` has the Verilog it stands for next to it:
 | `select.json` | `$pmux` (a case statement, one-hot selects), `$bmux`, `$demux`, `$bwmux`, `$bweqx`, `$lut` |
 | `flops.json` | `$adff`, `$adffe`, `$sdff`, `$sdffe`, `$sdffce`, `$dffsr`, `$dffsre`, `$aldff`, `$ff`, ten gate-level flip-flops, latches |
 | `memory.json` | a two-port ROM, single-port RAMs (read first, write first, byte enables) and a register file |
+| `dpram.json` | a 1024 x 16 dual-port RAM with initial contents, a memory with nine read ports and byte enables, and one with two write ports |
 | `mac.json` | a pipelined multiply-accumulate unit with a coefficient memory |
 
 The files with several modules are imported one module at a time with
@@ -123,8 +125,8 @@ constant has stages only for its 1 bits.
 | `$adlatch`, `$_DLATCH_*_` with a reset | `DLatch` with enable `EN \| ARST` and D `Mux(ARST, D, value)` |
 | `$dlatchsr`, `$_DLATCHSR_*_`, `$sr`, `$_SR_*_` | `(Mux(EN, state, D) \| SET) & !CLR` (for `$sr`: `state`) on the output, held in a `Delay` |
 | `$mem_v2`, `$mem` without a write port | a `Rom` per read port holding `INIT` |
-| `$mem_v2`, `$mem` with every read port at the write address | a `Ram` (see below) |
-| `$mem_v2`, `$mem` read at other addresses, up to 64 words | a `Register` per word, `Eq` and `And` to enable it, a `Mux` tree per read port |
+| `$mem_v2`, `$mem` with one write port | a `Ram2` (dual-port RAM) holding `INIT`, one read port per read port (see below) |
+| `$mem_v2`, `$mem` with several write ports, up to 64 words | a `Register` per word, `Eq` and `And` to enable it, a `Mux` tree per read port |
 | `$scopeinfo` | ignored |
 
 Active-low controls (`*_POLARITY` 0, or `N` in a gate-level name) get a
@@ -133,25 +135,34 @@ Active-low controls (`*_POLARITY` 0, or `N` in a gate-level name) get a
 `$_DFFSR_PNP_` is clock, set, clear; `$_ALDFF_PP_` clock, load. Every
 combination of `P`, `N`, `0` and `1` is accepted.
 
-**Memories.** A memory has at most one write port. Its per-bit write
-enable is one enable when all bits are the same signal (the usual case);
-otherwise (byte enables) the word written is `(WR_DATA & WR_EN) | (old &
-!WR_EN)`. A read port with `RD_CLK_ENABLE` is clocked: a `Delay` (or a
-`Register` when `RD_EN` is not constant 1) after the read. A clocked port
-reads the old word (read first), or the word being written when the port
-is transparent (`RD_TRANSPARENCY_MASK`, or `RD_TRANSPARENT` of `$mem`)
-and `RD_COLLISION_X_MASK` does not mark the pair as undefined.
+**Memories.** A memory with one write port becomes a `Ram2`, the
+simulator's dual-port RAM: one write port and up to eight read ports, each
+with its own address, so the read addresses need not be the write address
+and the size can be anything up to 2^20 words. The `Ram2` holds `INIT` as
+its initial contents (`init`). A memory with more than eight read ports
+becomes several `Ram2` copies, written alike, each serving up to eight
+ports. The per-bit write enable is one enable when all bits are the same
+signal (the usual case); otherwise (byte enables) it is the `Ram2`'s
+per-bit enable (`"mask": true`). A read port with `RD_CLK_ENABLE` is
+clocked: a `Delay` (or a `Register` when `RD_EN` is not constant 1) after
+the read. A clocked port reads the old word (read first), or the word
+being written when the port is transparent to the write port
+(`RD_TRANSPARENCY_MASK`, or `RD_TRANSPARENT` of `$mem`) and
+`RD_COLLISION_X_MASK` does not mark the pair as undefined: then an `Eq`
+of the two addresses (none when they are the same bits) selects the word
+being written (`(WR_DATA & WR_EN) | (old & !WR_EN)` with byte enables).
 
-The simulator's `Ram` has one address for reading and writing, so a
-memory becomes a `Ram` only when every read port reads at exactly the
-write address bits (a single-port RAM). A `Ram` powers up at 0 and the
-editor's `Ram` has no initial contents, so a memory with `INIT` holds
-`word ^ INIT[addr]`: a `Rom` of the initial contents at the same address
-is `Xor`-ed in on the way in and out, which reads as `INIT` until a word
-is written, exactly. A memory read at another address than the one
-written (a register file, a FIFO) is built from a `Register` per word,
-with the same `Xor` for initial contents, up to 64 words (a warning says
-so). Addresses are cut to the bits the size needs; writes with a higher
+A memory with several write ports is built from a `Register` per word,
+up to 64 words (a warning says so): each word takes the write ports in
+order, so a later port wins at the same address, which is Yosys's
+priority (`WR_PRIORITY_MASK` can only give a later port priority over an
+earlier one, and where it gives none the result is undefined). Initial
+contents are kept by storing `word ^ INIT[addr]` in each register (they
+power up at 0), with the constant `Xor`-ed in on the way in and out. A
+clocked transparent read port sees every write port it is transparent
+to, in the same order.
+
+Addresses are cut to the bits the size needs; writes with a higher
 address bit set do nothing.
 
 Operands are extended or cut to the result width as Verilog does: sign
@@ -206,9 +217,9 @@ The import fails with a message naming the module and cell when:
   (floored division is not mapped; `/` and `%` are), `$lcu`/`$sop`/`$fa`
   (run `techmap`), `$tribuf` (no tri-state wires), and `$memrd`/`$memwr`/
   `$meminit` (run `memory_collect` to make a `$mem_v2`);
-- a memory has more than one write port, an `OFFSET`, wide ports, read
-  port resets or initial values, more than 2^20 words, or reads at
-  another address than the one written with more than 64 words;
+- a memory has an `OFFSET`, wide ports, read port resets or initial
+  values, more than 2^20 words, or several write ports and more than 64
+  words;
 - a `$bmux` or `$demux` has more than 10 select bits, or a `$lut` more
   than 20 inputs;
 - a port or cell pin is wider than 64 bits;
@@ -267,9 +278,9 @@ workspace name, the same documents).
   only orders nodes to keep crossings low. Long edges get no dummy nodes.
 - Multiple clock domains: every flip-flop runs on the one tick.
   Asynchronous resets are approximated (above).
-- Memories with several write ports, and large memories read and written
-  at different addresses (the `Ram` primitive has one address). A
-  dual-port `Ram` primitive would lift the second limit.
+- Memories with several write ports and more than 64 words: `Ram2` has one
+  write port, so they would need a primitive with several (or banking
+  with a live-value table).
 - Floored division, `$pow` with a variable exponent, `$macc`, `$fsm` and
   the formal and print cells.
 - No new primitive was added for multiplication, division or shifts:

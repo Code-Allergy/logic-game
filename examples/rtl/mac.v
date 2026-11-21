@@ -3,8 +3,8 @@
 // produced by Yosys).
 //
 // A pipelined multiply-accumulate unit: every tick it multiplies x by the
-// next coefficient (a register-built memory of eight signed words, which
-// can be rewritten), and one tick later adds the product to the
+// next coefficient (a memory of eight signed words, which can be
+// rewritten: a dual-port RAM), and one tick later adds the product to the
 // accumulator, subtracts it, halves the accumulator or clears it. The reset
 // is asynchronous and active low. `over` says the accumulator is past 1000.
 

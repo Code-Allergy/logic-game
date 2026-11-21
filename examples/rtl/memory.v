@@ -12,7 +12,8 @@ module rom(input clk, input [3:0] a1, a2, output [7:0] d1, output reg [7:0] d2);
   always @(posedge clk) d2 <= mem[a2];
 endmodule
 
-// One address for reading and writing: a RAM. The read is clocked and reads
+// One address for reading and writing (a dual-port RAM with one read
+// port at the write address). The read is clocked and reads
 // the old word (read first). Contents: mem[i] = 8'hA0 + i.
 module spram(input clk, we, input [3:0] addr, input [7:0] din, output reg [7:0] dout);
   reg [7:0] mem [0:15];
@@ -46,7 +47,7 @@ module bytes(input clk, input [1:0] we, input [2:0] addr, input [15:0] din,
   assign dout = mem[addr];
 endmodule
 
-// Reads at other addresses than the write: built from registers. r1 reads
+// Reads at other addresses than the write: a dual-port RAM. r1 reads
 // at once; r2 at the tick, seeing a word written in the same tick (write
 // first). Contents: mem[i] = 8'h11 * i.
 module regfile(input clk, we, input [2:0] wa, ra, rb, input [7:0] wd,
