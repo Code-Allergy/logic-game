@@ -43,10 +43,16 @@ pub fn bitblast(src: &Design) -> Design {
             NodeKind::Delay { w } => per_bit(&mut b, *w, NodeKind::Delay { w: 1 }),
             NodeKind::Register { w } => per_bit(&mut b, *w, NodeKind::Register { w: 1 }),
             NodeKind::DLatch { w } => per_bit(&mut b, *w, NodeKind::DLatch { w: 1 }),
-            NodeKind::SrLatch | NodeKind::Ram { .. } => vec![b.node(node.kind.clone(), &[])],
+            NodeKind::SrLatch | NodeKind::Ram { .. } | NodeKind::Screen { .. } => {
+                vec![b.node(node.kind.clone(), &[])]
+            }
             NodeKind::Instance(_) => panic!("bitblast: instances are not supported"),
             _ => continue,
         };
+        if node.outputs.is_empty() {
+            placeholders.insert(id, nodes);
+            continue;
+        }
         let q = if matches!(node.kind, NodeKind::Ram { .. }) {
             let word = b.out(nodes[0], 0);
             b.bus_expand(word)
@@ -137,8 +143,8 @@ pub fn bitblast(src: &Design) -> Design {
                     }
                 }
             }
-            NodeKind::Ram { .. } => {
-                for k in 0..3 {
+            NodeKind::Ram { .. } | NodeKind::Screen { .. } => {
+                for k in 0..node.inputs.len() {
                     if let Some(src) = pin(k) {
                         let word = b.bus_collect(&src);
                         b.connect(word, (nodes[0], k as u8));

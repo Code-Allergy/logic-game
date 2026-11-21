@@ -646,7 +646,7 @@ fn each_pass_alone_and_together_matches_the_reference() {
     use crate::testkit::diff;
     for (name, opts) in pass_variants() {
         let n = diff::sweep(&diff::standard_configs(), 25, 15, &opts);
-        assert_eq!(n, 150, "{name}");
+        assert_eq!(n, 175, "{name}");
         // Bit-blasted designs are full of constants and duplicate logic.
         for d in [
             crate::testkit::bitblast::bitblast(&fixtures::cpu(&fixtures::MULTIPLY_PROGRAM)),

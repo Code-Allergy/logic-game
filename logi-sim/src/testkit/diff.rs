@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::random::{GenConfig, generate};
 use super::rng::Rng;
-use crate::compile::{Options, compile};
+use crate::compile::{Options, StateLoc, compile};
 use crate::netlist::{Design, mask};
 use crate::reference::Reference;
 use crate::sim::{Sim, SimOptions};
@@ -98,6 +98,43 @@ pub fn check_design_with(
                 return Err(DiffError::Mismatch(Mismatch {
                     tick: t,
                     what: format!("output {port} ({:?})", p.name),
+                    sim: s,
+                    reference: r,
+                }));
+            }
+        }
+        // State: every register's word and every memory (RAMs and
+        // screens, which have no outputs to compare).
+        for key in &program.state_keys {
+            let path = &key.path;
+            let (s, r, what) = match key.loc {
+                StateLoc::Slot(slot) => (
+                    sim.read(slot),
+                    reference
+                        .state(&path.instances, path.node)
+                        .unwrap_or(u64::MAX),
+                    format!("state {path:?}"),
+                ),
+                StateLoc::Mem(m) => {
+                    let mem = sim.mem(m);
+                    let theirs = reference.mem(&path.instances, path.node).unwrap_or(&[]);
+                    let at = (0..mem.len().max(theirs.len()))
+                        .find(|&a| mem.get(a) != theirs.get(a))
+                        .unwrap_or(usize::MAX);
+                    if at == usize::MAX {
+                        continue;
+                    }
+                    (
+                        mem.get(at).copied().unwrap_or(u64::MAX),
+                        theirs.get(at).copied().unwrap_or(u64::MAX),
+                        format!("memory {path:?}[{at}]"),
+                    )
+                }
+            };
+            if s != r {
+                return Err(DiffError::Mismatch(Mismatch {
+                    tick: t,
+                    what,
                     sim: s,
                     reference: r,
                 }));
@@ -202,5 +239,10 @@ pub fn standard_configs() -> Vec<GenConfig> {
             ..Default::default()
         },
         GenConfig::dag(0, 200, 32),
+        GenConfig {
+            state_percent: 40,
+            screens: true,
+            ..Default::default()
+        },
     ]
 }

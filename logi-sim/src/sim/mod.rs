@@ -142,6 +142,9 @@ pub struct Sim {
     pool: Option<pool::Pool>,
     slots: Vec<u64>,
     mems: Vec<Vec<u64>>,
+    /// Per memory, a count of the commits that wrote it (see
+    /// [`Sim::mem_version`]).
+    mem_writes: Vec<u64>,
     tick: u64,
     /// Root input values, applied to their slots at the start of each settle.
     inputs: Vec<u64>,
@@ -192,6 +195,7 @@ impl Sim {
             options,
             pool,
             slots: vec![0; program.slot_count as usize],
+            mem_writes: vec![0; program.mems.len()],
             mems,
             tick: 0,
             inputs: vec![0; program.ports.inputs.len()],
@@ -279,6 +283,21 @@ impl Sim {
         &self.mems[index as usize]
     }
 
+    /// Changes whenever memory `index` may have changed: a count of the
+    /// writes (and clears) committed to it, plus state imports. Lets a
+    /// reader that copies a memory (a screen) skip unchanged ones.
+    pub fn mem_version(&self, index: u32) -> u64 {
+        self.mem_writes[index as usize]
+    }
+
+    /// Memory index of the RAM or screen at `path` (its `StateKey`).
+    pub fn mem_index(&self, path: &NodePath) -> Option<u32> {
+        self.program.state_keys.iter().find_map(|k| match k.loc {
+            StateLoc::Mem(m) if k.path == *path => Some(m),
+            _ => None,
+        })
+    }
+
     pub fn tick_count(&self) -> u64 {
         self.tick
     }
@@ -316,6 +335,13 @@ impl Sim {
                         let m = self.mems.get_unchecked_mut(mem as usize);
                         let a = *self.slots.get_unchecked(addr as usize) as usize & (m.len() - 1);
                         *m.get_unchecked_mut(a) = *self.slots.get_unchecked(data as usize);
+                        *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
+                    }
+                },
+                Commit::MemClear { mem, en } => unsafe {
+                    if *self.slots.get_unchecked(en as usize) != 0 {
+                        self.mems.get_unchecked_mut(mem as usize).fill(0);
+                        *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
                     }
                 },
             }
@@ -390,6 +416,7 @@ impl Sim {
                 }
                 StateLoc::Mem(m) => {
                     let d = &program.mems[m as usize];
+                    self.mem_writes[m as usize] += 1;
                     let mem = &mut self.mems[m as usize];
                     match snap.mems.get(&key.path) {
                         Some((ab, w, data)) if *ab == d.addr_bits && *w == d.width => {
@@ -531,6 +558,9 @@ fn check(p: &Program) -> Result<(), BadProgram> {
                     && slot_ok(we)
                     && slot_ok(addr)
                     && slot_ok(data)
+            }
+            Commit::MemClear { mem, en } => {
+                (mem as usize) < p.mems.len() && p.mems[mem as usize].writable && slot_ok(en)
             }
         };
         if !ok {

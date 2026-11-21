@@ -10,7 +10,8 @@
 //! `tick()` is:
 //! 1. **Commit.** Apply every [`Commit`] in order. A commit only reads
 //!    `next`/snapshot slots, which no commit writes, so the order is
-//!    irrelevant.
+//!    irrelevant, except that a [`Commit::MemClear`] comes before the
+//!    write to the same memory that follows it.
 //! 2. **Advance** the tick count, then apply staged root-input writes to
 //!    their port slots.
 //! 3. **Settle.** Run the blocks in order. Instructions in a block share one
@@ -225,6 +226,10 @@ pub enum Commit {
         addr: u32,
         data: u32,
     },
+    /// `if slots[en] != 0 { mems[mem].fill(0) }` (a Pixel screen's
+    /// `clear`; `en` is a snapshot). Emitted just before the screen's
+    /// `RamWrite`, and applied first: the one order that matters.
+    MemClear { mem: u32, en: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

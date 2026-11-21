@@ -141,6 +141,59 @@ fn steps_run_while_paused_and_probes_read_back() {
     assert_eq!(f.values.len(), 3, "readback is exactly the probes");
 }
 
+fn ram_node(d: &Design) -> NodeId {
+    d.root_def()
+        .nodes
+        .iter()
+        .find(|(_, n)| matches!(n.kind, NodeKind::Ram { .. }))
+        .unwrap()
+        .0
+}
+
+/// Memory probes copy a whole memory into the frame once per frame, and
+/// only when it changed (the `Arc` stays the same otherwise).
+#[test]
+fn mem_probes_copy_changed_memories_once_per_frame() {
+    let (d, en, ..) = counter_design(false);
+    let ram = ram_node(&d);
+    let clock = FakeClock::new();
+    let c = || clock.read();
+    let mut e = LocalEngine::new(Options::debug());
+    e.load(&d, 1);
+    e.core.set_input(en, 1);
+    e.core.set_mem_probes(vec![
+        MemProbe {
+            path: Vec::new(),
+            node: ram,
+        },
+        MemProbe {
+            path: vec![ram],
+            node: ram,
+        }, // no such instance
+    ]);
+    e.core.step(6);
+    e.run_frame(Duration::from_secs(1), &c);
+    let first = e.frame().mems[0].clone().expect("resolved");
+    assert_eq!(e.frame().mems[1], None);
+    // The count is written at address count: 0..=4 by now (en is staged
+    // for a tick).
+    assert_eq!(&first[..6], &[0, 1, 2, 3, 4, 0]);
+    assert_eq!(first.len(), 16);
+    // Paused: nothing changes, the frame keeps the same copy.
+    e.run_frame(Duration::from_secs(1), &c);
+    assert!(Arc::ptr_eq(e.frame().mems[0].as_ref().unwrap(), &first));
+    e.core.step(1);
+    e.run_frame(Duration::from_secs(1), &c);
+    let next = e.frame().mems[0].clone().unwrap();
+    assert!(!Arc::ptr_eq(&next, &first));
+    assert_eq!(next[5], 5);
+    // An edit keeps the probe (and the memory).
+    let (d2, ..) = counter_design(true);
+    e.load(&d2, 2);
+    e.run_frame(Duration::from_secs(1), &c);
+    assert_eq!(e.frame().mems[0].as_deref().map(|m| m[5]), Some(5));
+}
+
 /// Probes on nets that live only in a packed lane (lane slots) and a
 /// threaded `Sim` read the same values as an unpacked, single-threaded
 /// engine (#41).
@@ -326,6 +379,27 @@ mod threaded {
         let f = e.frame();
         assert_eq!((f.tick, f.values[0], f.revision), (10, 9, 1));
         assert_eq!(e.tick_count(), 10);
+    }
+
+    #[test]
+    fn mem_probes_on_the_worker() {
+        let (d, en, ..) = counter_design(false);
+        let e = loaded(&d);
+        e.set_input(en, 1);
+        e.set_mem_probes(vec![MemProbe {
+            path: Vec::new(),
+            node: ram_node(&d),
+        }]);
+        e.step(4);
+        e.sync();
+        let m = e.frame().mems[0].clone().unwrap();
+        assert_eq!(&m[..4], &[0, 1, 2, 0]);
+        // A request while paused still gets an answer.
+        e.step(1);
+        e.sync();
+        e.request_mems();
+        e.sync();
+        assert_eq!(e.frame().mems[0].as_ref().unwrap()[3], 3);
     }
 
     #[test]

@@ -57,6 +57,7 @@ pub(super) fn simplify(
                     commit_read[s as usize] = true;
                 }
             }
+            Commit::MemClear { en, .. } => commit_read[en as usize] = true,
         }
     }
 
@@ -179,6 +180,10 @@ pub(super) fn simplify(
                 addr: resolve(&mut repl, addr),
                 data: resolve(&mut repl, data),
             },
+            Commit::MemClear { mem, en } => Commit::MemClear {
+                mem,
+                en: resolve(&mut repl, en),
+            },
         };
     }
     for p in &mut ports.outputs {
@@ -218,6 +223,7 @@ pub(super) fn simplify(
                         mark(s, &mut live_slot, &mut stack);
                     }
                 }
+                Commit::MemClear { en, .. } => mark(en, &mut live_slot, &mut stack),
             }
         }
         for &s in &probes {
