@@ -645,8 +645,7 @@ impl ModuleBuilder<'_> {
             let word = self.bitwise(of, Op::Xor, &state, &k_bits);
             let mut new = word.clone();
             let mut sel = Bit::Zero;
-            for j in 0..writes.len() {
-                let (_, we, _, waddr) = &enables[j];
+            for (j, (_, we, _, waddr)) in enables.iter().enumerate() {
                 let hit = self.eq_v(of, waddr, &const_word(k as u64, need));
                 let hit = self.and1(of, *we, hit);
                 let written = merged(self, j, &new);
