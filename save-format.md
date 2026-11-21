@@ -115,6 +115,7 @@ from 0 in the order listed.
 | `DLatch` | `w` | en(1), d | q |
 | `SrLatch` | – | s(1), r(1) | q(1) |
 | `Ram` | `addr_bits`, `w` | addr, we(1), wdata | rdata(w) |
+| `Ram2` | `addr_bits`, `w`, `reads` (1..=8), `mask` (bool, optional, default false), `init` (array of integers, optional) | waddr, we(1, or w with `mask`), wdata, raddr0 .. raddr{reads-1} | rdata0 .. rdata{reads-1} (w) |
 | `SubCircuit` | `definition` (circuit id) | the definition's inputs | the definition's outputs |
 
 Semantics are those of `docs/sim-v2-design.md` section 3.

@@ -183,9 +183,83 @@ fn fixtures_match_the_reference() {
         counter(8),
         counter_bitblasted(8),
         register_file(3, 16),
+        register_file_ram2(3, 16, &[1, 2, 3]),
+        fifo(3, 8),
         sr_latch_nor_delayed(),
     ] {
         differential(&d, 7, 100);
+    }
+}
+
+#[test]
+fn ram2_loops_follow_each_read_port() {
+    let ram2 = || NodeKind::Ram2 {
+        addr_bits: 2,
+        w: 2,
+        reads: 2,
+        mask: true,
+        init: Arc::from(vec![]),
+    };
+    // rdata0 -> raddr1 and rdata1 -> the write port compile.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let a = b.input("a", 2);
+    let (ram, _) = b.state_placeholder(ram2());
+    let q0 = b.out(ram, 0);
+    let q1 = b.out(ram, 1);
+    b.connect(a, (ram, 3));
+    b.connect(q0, (ram, 4));
+    for pin in 0..3 {
+        b.connect(q1, (ram, pin));
+    }
+    b.output("q1", q1);
+    differential(&d, 3, 50);
+
+    // rdata0 -> raddr0 is a loop.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let (ram, _) = b.state_placeholder(ram2());
+    let q0 = b.out(ram, 0);
+    b.connect(q0, (ram, 3));
+    assert_eq!(loops_of(&d), vec![vec![at(&[], ram)]]);
+}
+
+#[test]
+fn ram2_lowers_to_one_memory_and_one_commit() {
+    for mask in [false, true] {
+        let mut d = Design::new("top");
+        let r = d.root;
+        let mut b = d.builder(r);
+        let waddr = b.input("waddr", 4);
+        let we = b.input("we", if mask { 8 } else { 1 });
+        let wdata = b.input("wdata", 8);
+        let ra: Vec<_> = (0..3).map(|k| b.input(format!("r{k}"), 4)).collect();
+        let q = b.ram2(waddr, we, wdata, &ra, &[9; 16]);
+        for (k, &q) in q.iter().enumerate() {
+            b.output(format!("q{k}"), q);
+        }
+        let p = compile_ok(&d);
+        check_program_invariants(&p);
+        assert_eq!(p.mems.len(), 1);
+        assert!(p.mems[0].writable);
+        assert_eq!(p.commits.len(), 1);
+        assert_eq!(
+            matches!(p.commits[0], Commit::RamWriteMasked { .. }),
+            mask,
+            "{:?}",
+            p.commits[0]
+        );
+        let reads = p
+            .blocks
+            .iter()
+            .filter(|b| b.op == Op::MemRead)
+            .map(|b| b.len)
+            .sum::<u32>();
+        assert_eq!(reads, 3);
+        assert_eq!(p.state_keys.len(), 1);
+        differential(&d, mask as u64, 100);
     }
 }
 
@@ -712,6 +786,32 @@ fn constant_folding_and_identities() {
         "x & 0xFF aliases x"
     );
     assert!(count(&d, &Options::unoptimized()) >= 8);
+}
+
+/// Immediates are not slots: a concatenation whose shift is past the slot
+/// count (a small design with a constant in the high bits) compiles, with
+/// every pass on its own and with all of them.
+#[test]
+fn immediates_past_the_slot_count_are_not_read_as_slots() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let k = b.zero(3);
+    let y = b.merge(&[x, k, x]);
+    b.output("y", y);
+    let s = b.split(x, 5, 3);
+    let z = b.merge(&[k, s]);
+    b.output("z", z);
+    for (name, opts) in pass_variants() {
+        let p = compile(&d, &opts).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let mut s = sim(p);
+        s.set("x", 0xA7);
+        s.tick();
+        assert_eq!(s.get("y"), 0xA7 << 11 | 0xA7, "{name}");
+        assert_eq!(s.get("z"), 0b101 << 3, "{name}");
+    }
+    differential(&d, 7, 10);
 }
 
 #[test]

@@ -596,7 +596,7 @@ pub fn primitive_kind(ty: &str, params: &Map<String, Value>) -> Result<GateKind,
     for (k, v) in params {
         let v = match (k.as_str(), v) {
             ("value", v) => int_from_text(v)?,
-            ("contents", Value::Array(items)) => Value::Array(
+            ("contents" | "init", Value::Array(items)) => Value::Array(
                 items
                     .iter()
                     .map(int_from_text)

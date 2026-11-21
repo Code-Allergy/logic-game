@@ -1,0 +1,1283 @@
+{
+  "creator": "hand-written in the format of Yosys write_json",
+  "modules": {
+    "adff": {
+      "attributes": {
+        "src": "flops.v:9"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "rst": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 4, 5, 6, 7 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 8, 9, 10, 11 ]
+        }
+      },
+      "cells": {
+        "$adff$flops.v:10$11": {
+          "hide_name": 1,
+          "type": "$adff",
+          "parameters": {
+            "ARST_POLARITY": "00000000000000000000000000000001",
+            "ARST_VALUE": "1001",
+            "CLK_POLARITY": "00000000000000000000000000000001",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:10"
+          },
+          "port_directions": {
+            "ARST": "input",
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "ARST": [ 3 ],
+            "CLK": [ 2 ],
+            "D": [ 4, 5, 6, 7 ],
+            "Q": [ 8, 9, 10, 11 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "rst": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 4, 5, 6, 7 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 8, 9, 10, 11 ],
+          "attributes": {}
+        }
+      }
+    },
+    "adffe": {
+      "attributes": {
+        "src": "flops.v:14"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "rst_n": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "en": {
+          "direction": "input",
+          "bits": [ 4 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 5, 6, 7, 8 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 9, 10, 11, 12 ]
+        }
+      },
+      "cells": {
+        "$adffe$flops.v:15$11": {
+          "hide_name": 1,
+          "type": "$adffe",
+          "parameters": {
+            "ARST_POLARITY": "00000000000000000000000000000000",
+            "ARST_VALUE": "0110",
+            "CLK_POLARITY": "00000000000000000000000000000001",
+            "EN_POLARITY": "00000000000000000000000000000001",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:15"
+          },
+          "port_directions": {
+            "ARST": "input",
+            "CLK": "input",
+            "D": "input",
+            "EN": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "ARST": [ 3 ],
+            "CLK": [ 2 ],
+            "D": [ 5, 6, 7, 8 ],
+            "EN": [ 4 ],
+            "Q": [ 9, 10, 11, 12 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "rst_n": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {}
+        },
+        "en": {
+          "hide_name": 0,
+          "bits": [ 4 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 5, 6, 7, 8 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 9, 10, 11, 12 ],
+          "attributes": {}
+        }
+      }
+    },
+    "sdff": {
+      "attributes": {
+        "src": "flops.v:19"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "rst": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 4, 5, 6, 7 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 8, 9, 10, 11 ]
+        }
+      },
+      "cells": {
+        "$sdff$flops.v:20$11": {
+          "hide_name": 1,
+          "type": "$sdff",
+          "parameters": {
+            "CLK_POLARITY": "00000000000000000000000000000001",
+            "SRST_POLARITY": "00000000000000000000000000000001",
+            "SRST_VALUE": "0101",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:20"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "D": "input",
+            "Q": "output",
+            "SRST": "input"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "D": [ 4, 5, 6, 7 ],
+            "Q": [ 8, 9, 10, 11 ],
+            "SRST": [ 3 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "rst": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 4, 5, 6, 7 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 8, 9, 10, 11 ],
+          "attributes": {}
+        }
+      }
+    },
+    "sdffe": {
+      "attributes": {
+        "src": "flops.v:25"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "rst": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "en": {
+          "direction": "input",
+          "bits": [ 4 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 5, 6, 7, 8 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 9, 10, 11, 12 ]
+        }
+      },
+      "cells": {
+        "$sdffe$flops.v:26$11": {
+          "hide_name": 1,
+          "type": "$sdffe",
+          "parameters": {
+            "CLK_POLARITY": "00000000000000000000000000000001",
+            "EN_POLARITY": "00000000000000000000000000000001",
+            "SRST_POLARITY": "00000000000000000000000000000001",
+            "SRST_VALUE": "0101",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:26"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "D": "input",
+            "EN": "input",
+            "Q": "output",
+            "SRST": "input"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "D": [ 5, 6, 7, 8 ],
+            "EN": [ 4 ],
+            "Q": [ 9, 10, 11, 12 ],
+            "SRST": [ 3 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "rst": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {}
+        },
+        "en": {
+          "hide_name": 0,
+          "bits": [ 4 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 5, 6, 7, 8 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 9, 10, 11, 12 ],
+          "attributes": {}
+        }
+      }
+    },
+    "sdffce": {
+      "attributes": {
+        "src": "flops.v:31"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "rst_n": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "en": {
+          "direction": "input",
+          "bits": [ 4 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 5, 6, 7, 8 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 9, 10, 11, 12 ]
+        }
+      },
+      "cells": {
+        "$sdffce$flops.v:32$11": {
+          "hide_name": 1,
+          "type": "$sdffce",
+          "parameters": {
+            "CLK_POLARITY": "00000000000000000000000000000001",
+            "EN_POLARITY": "00000000000000000000000000000001",
+            "SRST_POLARITY": "00000000000000000000000000000000",
+            "SRST_VALUE": "1010",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:32"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "D": "input",
+            "EN": "input",
+            "Q": "output",
+            "SRST": "input"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "D": [ 5, 6, 7, 8 ],
+            "EN": [ 4 ],
+            "Q": [ 9, 10, 11, 12 ],
+            "SRST": [ 3 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "rst_n": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {}
+        },
+        "en": {
+          "hide_name": 0,
+          "bits": [ 4 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 5, 6, 7, 8 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 9, 10, 11, 12 ],
+          "attributes": {}
+        }
+      }
+    },
+    "dffsr": {
+      "attributes": {
+        "src": "flops.v:40"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "set": {
+          "direction": "input",
+          "bits": [ 3, 4, 5, 6 ]
+        },
+        "clr": {
+          "direction": "input",
+          "bits": [ 7, 8, 9, 10 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 11, 12, 13, 14 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 15, 16, 17, 18 ]
+        }
+      },
+      "cells": {
+        "$dffsr$flops.v:41$11": {
+          "hide_name": 1,
+          "type": "$dffsr",
+          "parameters": {
+            "CLK_POLARITY": "00000000000000000000000000000001",
+            "CLR_POLARITY": "00000000000000000000000000000001",
+            "SET_POLARITY": "00000000000000000000000000000001",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:41"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "CLR": "input",
+            "D": "input",
+            "Q": "output",
+            "SET": "input"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "CLR": [ 7, 8, 9, 10 ],
+            "D": [ 11, 12, 13, 14 ],
+            "Q": [ 15, 16, 17, 18 ],
+            "SET": [ 3, 4, 5, 6 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "set": {
+          "hide_name": 0,
+          "bits": [ 3, 4, 5, 6 ],
+          "attributes": {}
+        },
+        "clr": {
+          "hide_name": 0,
+          "bits": [ 7, 8, 9, 10 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 11, 12, 13, 14 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 15, 16, 17, 18 ],
+          "attributes": {}
+        }
+      }
+    },
+    "dffsre": {
+      "attributes": {
+        "src": "flops.v:45"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "en": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "set": {
+          "direction": "input",
+          "bits": [ 4, 5, 6, 7 ]
+        },
+        "clr_n": {
+          "direction": "input",
+          "bits": [ 8, 9, 10, 11 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 12, 13, 14, 15 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 16, 17, 18, 19 ]
+        }
+      },
+      "cells": {
+        "$dffsre$flops.v:46$11": {
+          "hide_name": 1,
+          "type": "$dffsre",
+          "parameters": {
+            "CLK_POLARITY": "00000000000000000000000000000001",
+            "CLR_POLARITY": "00000000000000000000000000000000",
+            "EN_POLARITY": "00000000000000000000000000000001",
+            "SET_POLARITY": "00000000000000000000000000000001",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:46"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "CLR": "input",
+            "D": "input",
+            "EN": "input",
+            "Q": "output",
+            "SET": "input"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "CLR": [ 8, 9, 10, 11 ],
+            "D": [ 12, 13, 14, 15 ],
+            "EN": [ 3 ],
+            "Q": [ 16, 17, 18, 19 ],
+            "SET": [ 4, 5, 6, 7 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "en": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {}
+        },
+        "set": {
+          "hide_name": 0,
+          "bits": [ 4, 5, 6, 7 ],
+          "attributes": {}
+        },
+        "clr_n": {
+          "hide_name": 0,
+          "bits": [ 8, 9, 10, 11 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 12, 13, 14, 15 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 16, 17, 18, 19 ],
+          "attributes": {}
+        }
+      }
+    },
+    "aldff": {
+      "attributes": {
+        "src": "flops.v:50"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "load": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "ad": {
+          "direction": "input",
+          "bits": [ 4, 5, 6, 7 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 8, 9, 10, 11 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 12, 13, 14, 15 ]
+        }
+      },
+      "cells": {
+        "$aldff$flops.v:51$11": {
+          "hide_name": 1,
+          "type": "$aldff",
+          "parameters": {
+            "ALOAD_POLARITY": "00000000000000000000000000000001",
+            "CLK_POLARITY": "00000000000000000000000000000001",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:51"
+          },
+          "port_directions": {
+            "AD": "input",
+            "ALOAD": "input",
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "AD": [ 4, 5, 6, 7 ],
+            "ALOAD": [ 3 ],
+            "CLK": [ 2 ],
+            "D": [ 8, 9, 10, 11 ],
+            "Q": [ 12, 13, 14, 15 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "load": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {}
+        },
+        "ad": {
+          "hide_name": 0,
+          "bits": [ 4, 5, 6, 7 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 8, 9, 10, 11 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 12, 13, 14, 15 ],
+          "attributes": {}
+        }
+      }
+    },
+    "ff": {
+      "attributes": {
+        "src": "flops.v:56"
+      },
+      "ports": {
+        "d": {
+          "direction": "input",
+          "bits": [ 2, 3, 4, 5 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 6, 7, 8, 9 ]
+        }
+      },
+      "cells": {
+        "$ff$flops.v:57$11": {
+          "hide_name": 1,
+          "type": "$ff",
+          "parameters": {
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:57"
+          },
+          "port_directions": {
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "D": [ 2, 3, 4, 5 ],
+            "Q": [ 6, 7, 8, 9 ]
+          }
+        }
+      },
+      "netnames": {
+        "d": {
+          "hide_name": 0,
+          "bits": [ 2, 3, 4, 5 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 6, 7, 8, 9 ],
+          "attributes": {}
+        }
+      }
+    },
+    "gates": {
+      "attributes": {
+        "src": "flops.v:70"
+      },
+      "ports": {
+        "c": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "r": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "s": {
+          "direction": "input",
+          "bits": [ 4 ]
+        },
+        "e": {
+          "direction": "input",
+          "bits": [ 5 ]
+        },
+        "l": {
+          "direction": "input",
+          "bits": [ 6 ]
+        },
+        "ad": {
+          "direction": "input",
+          "bits": [ 7 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 18, 19, 20, 21, 22, 23, 24, 25, 26, 27 ]
+        }
+      },
+      "cells": {
+        "\\q_reg[ 0 ]": {
+          "hide_name": 0,
+          "type": "$_DFF_PN0_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:71"
+          },
+          "port_directions": {
+            "C": "input",
+            "R": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "R": [ 3 ],
+            "D": [ 8 ],
+            "Q": [ 18 ]
+          }
+        },
+        "\\q_reg[ 1 ]": {
+          "hide_name": 0,
+          "type": "$_DFF_PP1_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:72"
+          },
+          "port_directions": {
+            "C": "input",
+            "R": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "R": [ 3 ],
+            "D": [ 9 ],
+            "Q": [ 19 ]
+          }
+        },
+        "\\q_reg[ 2 ]": {
+          "hide_name": 0,
+          "type": "$_DFFE_PN0P_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:73"
+          },
+          "port_directions": {
+            "C": "input",
+            "R": "input",
+            "E": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "R": [ 3 ],
+            "E": [ 5 ],
+            "D": [ 10 ],
+            "Q": [ 20 ]
+          }
+        },
+        "\\q_reg[ 3 ]": {
+          "hide_name": 0,
+          "type": "$_SDFF_PP0_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:74"
+          },
+          "port_directions": {
+            "C": "input",
+            "R": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "R": [ 3 ],
+            "D": [ 11 ],
+            "Q": [ 21 ]
+          }
+        },
+        "\\q_reg[ 4 ]": {
+          "hide_name": 0,
+          "type": "$_SDFFE_PN1P_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:75"
+          },
+          "port_directions": {
+            "C": "input",
+            "R": "input",
+            "E": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "R": [ 3 ],
+            "E": [ 5 ],
+            "D": [ 12 ],
+            "Q": [ 22 ]
+          }
+        },
+        "\\q_reg[ 5 ]": {
+          "hide_name": 0,
+          "type": "$_SDFFCE_PP1N_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:76"
+          },
+          "port_directions": {
+            "C": "input",
+            "R": "input",
+            "E": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "R": [ 3 ],
+            "E": [ 5 ],
+            "D": [ 13 ],
+            "Q": [ 23 ]
+          }
+        },
+        "\\q_reg[ 6 ]": {
+          "hide_name": 0,
+          "type": "$_DFFSR_PNP_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:77"
+          },
+          "port_directions": {
+            "C": "input",
+            "S": "input",
+            "R": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "S": [ 4 ],
+            "R": [ 3 ],
+            "D": [ 14 ],
+            "Q": [ 24 ]
+          }
+        },
+        "\\q_reg[ 7 ]": {
+          "hide_name": 0,
+          "type": "$_DFFSRE_PPNP_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:78"
+          },
+          "port_directions": {
+            "C": "input",
+            "S": "input",
+            "R": "input",
+            "E": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "S": [ 4 ],
+            "R": [ 3 ],
+            "E": [ 5 ],
+            "D": [ 15 ],
+            "Q": [ 25 ]
+          }
+        },
+        "\\q_reg[ 8 ]": {
+          "hide_name": 0,
+          "type": "$_ALDFF_PP_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:79"
+          },
+          "port_directions": {
+            "C": "input",
+            "L": "input",
+            "AD": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "L": [ 6 ],
+            "AD": [ 7 ],
+            "D": [ 16 ],
+            "Q": [ 26 ]
+          }
+        },
+        "\\q_reg[ 9 ]": {
+          "hide_name": 0,
+          "type": "$_ALDFFE_PNP_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:80"
+          },
+          "port_directions": {
+            "C": "input",
+            "L": "input",
+            "E": "input",
+            "AD": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "L": [ 6 ],
+            "E": [ 5 ],
+            "AD": [ 7 ],
+            "D": [ 17 ],
+            "Q": [ 27 ]
+          }
+        }
+      },
+      "netnames": {
+        "c": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "r": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {}
+        },
+        "s": {
+          "hide_name": 0,
+          "bits": [ 4 ],
+          "attributes": {}
+        },
+        "e": {
+          "hide_name": 0,
+          "bits": [ 5 ],
+          "attributes": {}
+        },
+        "l": {
+          "hide_name": 0,
+          "bits": [ 6 ],
+          "attributes": {}
+        },
+        "ad": {
+          "hide_name": 0,
+          "bits": [ 7 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 18, 19, 20, 21, 22, 23, 24, 25, 26, 27 ],
+          "attributes": {}
+        }
+      }
+    },
+    "latches": {
+      "attributes": {
+        "src": "flops.v:81"
+      },
+      "ports": {
+        "e": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "r": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 4, 5, 6, 7 ]
+        },
+        "s": {
+          "direction": "input",
+          "bits": [ 8, 9 ]
+        },
+        "k": {
+          "direction": "input",
+          "bits": [ 10, 11 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 12, 13, 14, 15 ]
+        },
+        "qa": {
+          "direction": "output",
+          "bits": [ 16, 17, 18, 19 ]
+        },
+        "qs": {
+          "direction": "output",
+          "bits": [ 20, 21 ]
+        },
+        "qd": {
+          "direction": "output",
+          "bits": [ 22, 23 ]
+        },
+        "qg": {
+          "direction": "output",
+          "bits": [ 24, 25, 26, 27 ]
+        }
+      },
+      "cells": {
+        "$dlatch$flops.v:82$11": {
+          "hide_name": 1,
+          "type": "$dlatch",
+          "parameters": {
+            "EN_POLARITY": "00000000000000000000000000000001",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:82"
+          },
+          "port_directions": {
+            "D": "input",
+            "EN": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "D": [ 4, 5, 6, 7 ],
+            "EN": [ 2 ],
+            "Q": [ 12, 13, 14, 15 ]
+          }
+        },
+        "$adlatch$flops.v:83$12": {
+          "hide_name": 1,
+          "type": "$adlatch",
+          "parameters": {
+            "ARST_POLARITY": "00000000000000000000000000000001",
+            "ARST_VALUE": "1010",
+            "EN_POLARITY": "00000000000000000000000000000001",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "flops.v:83"
+          },
+          "port_directions": {
+            "ARST": "input",
+            "D": "input",
+            "EN": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "ARST": [ 3 ],
+            "D": [ 4, 5, 6, 7 ],
+            "EN": [ 2 ],
+            "Q": [ 16, 17, 18, 19 ]
+          }
+        },
+        "$sr$flops.v:84$13": {
+          "hide_name": 1,
+          "type": "$sr",
+          "parameters": {
+            "CLR_POLARITY": "00000000000000000000000000000001",
+            "SET_POLARITY": "00000000000000000000000000000001",
+            "WIDTH": "00000000000000000000000000000010"
+          },
+          "attributes": {
+            "src": "flops.v:84"
+          },
+          "port_directions": {
+            "CLR": "input",
+            "Q": "output",
+            "SET": "input"
+          },
+          "connections": {
+            "CLR": [ 10, 11 ],
+            "Q": [ 20, 21 ],
+            "SET": [ 8, 9 ]
+          }
+        },
+        "$dlatchsr$flops.v:85$14": {
+          "hide_name": 1,
+          "type": "$dlatchsr",
+          "parameters": {
+            "CLR_POLARITY": "00000000000000000000000000000001",
+            "EN_POLARITY": "00000000000000000000000000000001",
+            "SET_POLARITY": "00000000000000000000000000000001",
+            "WIDTH": "00000000000000000000000000000010"
+          },
+          "attributes": {
+            "src": "flops.v:85"
+          },
+          "port_directions": {
+            "CLR": "input",
+            "D": "input",
+            "EN": "input",
+            "Q": "output",
+            "SET": "input"
+          },
+          "connections": {
+            "CLR": [ 10, 11 ],
+            "D": [ 4, 5 ],
+            "EN": [ 2 ],
+            "Q": [ 22, 23 ],
+            "SET": [ 8, 9 ]
+          }
+        },
+        "$dlatch_p$flops.v:86$15": {
+          "hide_name": 1,
+          "type": "$_DLATCH_P_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:86"
+          },
+          "port_directions": {
+            "D": "input",
+            "E": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "D": [ 4 ],
+            "E": [ 2 ],
+            "Q": [ 24 ]
+          }
+        },
+        "$dlatch_np0$flops.v:87$16": {
+          "hide_name": 1,
+          "type": "$_DLATCH_NP0_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:87"
+          },
+          "port_directions": {
+            "D": "input",
+            "E": "input",
+            "Q": "output",
+            "R": "input"
+          },
+          "connections": {
+            "D": [ 5 ],
+            "E": [ 2 ],
+            "Q": [ 25 ],
+            "R": [ 3 ]
+          }
+        },
+        "$sr_pn$flops.v:88$17": {
+          "hide_name": 1,
+          "type": "$_SR_PN_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:88"
+          },
+          "port_directions": {
+            "Q": "output",
+            "R": "input",
+            "S": "input"
+          },
+          "connections": {
+            "Q": [ 26 ],
+            "R": [ 10 ],
+            "S": [ 8 ]
+          }
+        },
+        "$dlatchsr_ppp$flops.v:89$18": {
+          "hide_name": 1,
+          "type": "$_DLATCHSR_PPP_",
+          "parameters": {},
+          "attributes": {
+            "src": "flops.v:89"
+          },
+          "port_directions": {
+            "D": "input",
+            "E": "input",
+            "Q": "output",
+            "R": "input",
+            "S": "input"
+          },
+          "connections": {
+            "D": [ 7 ],
+            "E": [ 2 ],
+            "Q": [ 27 ],
+            "R": [ 11 ],
+            "S": [ 9 ]
+          }
+        }
+      },
+      "netnames": {
+        "e": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {}
+        },
+        "r": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {}
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 4, 5, 6, 7 ],
+          "attributes": {}
+        },
+        "s": {
+          "hide_name": 0,
+          "bits": [ 8, 9 ],
+          "attributes": {}
+        },
+        "k": {
+          "hide_name": 0,
+          "bits": [ 10, 11 ],
+          "attributes": {}
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 12, 13, 14, 15 ],
+          "attributes": {}
+        },
+        "qa": {
+          "hide_name": 0,
+          "bits": [ 16, 17, 18, 19 ],
+          "attributes": {}
+        },
+        "qs": {
+          "hide_name": 0,
+          "bits": [ 20, 21 ],
+          "attributes": {}
+        },
+        "qd": {
+          "hide_name": 0,
+          "bits": [ 22, 23 ],
+          "attributes": {}
+        },
+        "qg": {
+          "hide_name": 0,
+          "bits": [ 24, 25, 26, 27 ],
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

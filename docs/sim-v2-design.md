@@ -108,16 +108,19 @@ State (output depends on committed state; next state is computed at settle):
 | `DLatch{w}` | en(1), d → q | `en ? d : state` | `en ? d : state` (transparent) |
 | `SrLatch` | s, r → q | `r ? 0 : s ? 1 : state` | state |
 | `Ram{addr_bits, w}` | addr, we(1), wdata → rdata | write at commit | `mem[addr]` (combinational read) |
+| `Ram2{addr_bits, w, reads, mask}` | waddr, we(1 or w), wdata, raddr0.. → rdata0.. | write at commit (`mask`: the bits set in `we`) | `rdata_k = mem[raddr_k]` (combinational read) |
 
 Combinational dependency edges for loop detection and ranking are: every
-input→output of a combinational node, `DLatch` en/d→q, and `Ram`/`Rom`
-addr→data. `Delay`, `Register` and `SrLatch` outputs have no combinational
-dependency on their inputs.
+input→output of a combinational node, `DLatch` en/d→q, `Ram`/`Rom`
+addr→data, and `Ram2` raddr_k→rdata_k (each read address feeds only its
+own read data). `Delay`, `Register` and `SrLatch` outputs have no
+combinational dependency on their inputs.
 
 `Counter8`/`Counter64`/`BusExpand`/`BusReduceOr`/`Demux` are not primitives;
 the builder provides them as helpers composed from the table above.
-Later additions (`Sub`, shifts, `Mul`, n-way mux, dual-port RAM, bus-conflict
-detection for `Switch`) are additive and do not change the model.
+Later additions (`Sub`, shifts, `Mul`, n-way mux, bus-conflict detection
+for `Switch`) are additive and do not change the model; the dual-port RAM
+was added this way (`Ram2`, section 13 item 70).
 
 ## 4. Authoring IR (`logi_sim::netlist`)
 
@@ -898,3 +901,87 @@ ambiguous. Each is small and can be revisited.
     `render_svg` checks; a test now also checks that no wire of either CPU
     passes through a box (the other items are only checked for
     overlapping boxes, as before).
+60. **More RTL cells, by composition.** The importer (`src/sim/rtl.rs`
+    and `src/sim/rtl/`) maps arithmetic (`$mul`, `$div`, `$mod`, `$neg`,
+    `$alu`), every shift, the ordered comparisons, `$pmux`/`$bmux`/
+    `$demux`, `$lut`, flip-flops with synchronous and asynchronous
+    resets, sets, clears and loads (word and gate level), latches and
+    memories (`docs/rtl-import.md` has the table). No primitive was added
+    to `logi_sim`: a multiplier is shift and add (`Switch`, `Add`), a
+    divider restoring division (`Add`, `Or`, `Mux`), a variable shift a
+    barrel of `Mux` stages, `$lt` an `LtU` with the sign bits inverted
+    when signed. A `Mul` or `Shift` primitive would need the IR, the
+    reference interpreter, the compiler's lowering and simplification,
+    the runtime, the editor's `GateKind`, the palette and the save format
+    to agree, for cells that composition already computes exactly; the
+    cost is node count (a 32-bit multiplier is 63 primitives plus
+    adapters). Asynchronous controls cannot act between ticks (D2): the
+    output shows the reset value at once through a `Mux` (or `Or`/`And`
+    for set and clear) after the state element, and the state element
+    stores it at the next tick, with a warning; a design whose
+    asynchronous reset depends on its own outputs within a tick becomes
+    a combinational loop. Undefined results (`$pmux` with several selects,
+    division by 0, `$shiftx` out of range) take a fixed value. `inout`
+    ports stay refused rather than read as outputs. Generated adapters
+    gain `Extend` for a repeated bit (sign extension), and helper nodes
+    nobody reads are dropped.
+61. **RTL memories.** (Superseded by item 71: a memory with one write
+    port is now a `Ram2`.) `$mem_v2` and `$mem` (one write port at most)
+    became a `Rom` per read port when nothing writes them, a `Ram` when
+    every read port reads at the write address, and otherwise a
+    `Register` per word (up to 64 words) with a `Mux` tree per read port,
+    because the `Ram` primitive has a single address. The editor's `Ram`
+    has no initial contents (`GateKind::Ram` drops the netlist's `init`),
+    so initial contents are kept without changing the save format: the
+    state element holds `word ^ init[addr]`, with the initial word from a
+    `Rom` at the same address (or a constant per register), which is exact
+    and powers up reading `init`. A clocked read port is a `Delay` or
+    `Register` after the read, reading the old word or, when transparent,
+    the word being written. Building this exposed a compiler bug, fixed in
+    `logi_sim::compile::simplify`: constant identities looked up
+    immediates (a concatenation's shift) as slots, which panicked when a
+    shift was past the slot count (a small design with a constant in the
+    high bits of a `Merge`).
+70. **Dual-port RAM (`Ram2`).** `NodeKind::Ram2 { addr_bits, w, reads,
+    mask, init }` is a memory with one write port and `reads` independent
+    read ports (1 to `MAX_READ_PORTS` = 8). Pins: `waddr(addr_bits)`,
+    `we`, `wdata(w)`, then `raddr0 .. raddr{reads-1}` (each
+    `addr_bits`); outputs `rdata0 .. rdata{reads-1}` (each `w`). With
+    `mask` false `we` is 1 bit; with `mask` true it is `w` bits, a per-bit
+    write enable: the commit stores `(old & !we) | (wdata & we)`. The
+    timing is `Ram`'s exactly: every read is combinational from committed
+    memory, the write port is sampled at the end of the settle and
+    applied at the next commit, so a read at the address being written
+    returns the old word during that tick and the new one after the next
+    (a `Ram2` with one read port at the write address behaves as a `Ram`,
+    which a test checks tick by tick). Only `raddr_k → rdata_k` is
+    combinational (`CombDeps::Diagonal`), so a read port may be addressed
+    by another port's data (pointer chasing) and any read data may feed
+    the write port. In every layer it is a `Ram` with more read ports: the
+    interpreter keeps the pending write as `(addr, data, mask)` (a `Ram`'s
+    mask is all ones); the compiler emits one memory, one `MemRead` per
+    read port, snapshot copies of the write port and one commit
+    (`Commit::RamWrite`, or the new `Commit::RamWriteMasked`); the runtime
+    checks and applies it like `RamWrite`. `MemRead` is never packed, so
+    lane packing needs nothing. State carry-over is the `Ram`'s: one
+    `StateKey` with `StateLoc::Mem` per node, contents kept across edits
+    while the geometry `(addr_bits, w)` is unchanged; a new read port
+    count or `mask` keeps them, and so does a new `init` (the contents
+    are state; `init` is only the reset value), while a new geometry
+    resets them to `init`. The random generator draws it (one to three read ports, with
+    or without a mask; its write port is wired late, like other state
+    inputs), and bit-blasting keeps it whole. In the editor it is
+    `GateKind::Ram2` ("DUAL-PORT RAM" in the State group of the palette,
+    a violet tile taller per read port), saved as `"type": "Ram2"` in
+    versions 5 and 6 (`"DualPortRam"` is accepted when reading), with
+    `mask` and `init` optional.
+71. **RTL memories on `Ram2`.** `$mem_v2`/`$mem` with one write port (at
+    any size up to 2^20 words, any read addresses) become one `Ram2`
+    holding `INIT` directly, with a read port per memory read port (a
+    memory with more than eight becomes several copies written alike).
+    Byte enables use the per-bit write enable. This replaces the `Ram`
+    with an `Xor`-ed `Rom` of initial contents and the register file of
+    item 61, which was limited to 64 words. Only memories with several
+    write ports are still built from a `Register` per word (up to 64
+    words, a later port winning at the same address); larger ones are
+    refused.
