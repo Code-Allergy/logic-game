@@ -16,7 +16,8 @@ pub enum PartTab {
     InOut,
     Routing,
     Arithmetic,
-    /// Saved workspaces and demos, placed as subcircuit cells.
+    /// Saved workspaces, demos and gallery items, placed as subcircuit
+    /// cells.
     Chips,
 }
 
@@ -193,28 +194,6 @@ pub fn kind_blurb(kind: &GateKind) -> &'static str {
     }
 }
 
-/// The short text on a part slot without a glyph.
-pub fn slot_text(kind: &GateKind) -> &'static str {
-    use GateKind as G;
-    match kind {
-        G::Input { .. } => "IN",
-        G::Output { .. } => "OUT",
-        G::Display { .. } => "SHOW",
-        G::Const { .. } => "K",
-        G::Clock { .. } => "CLK",
-        G::Register { .. } => "REG",
-        G::DLatch { .. } => "D-L",
-        G::SrLatch => "SR",
-        G::Delay { .. } => "DLY",
-        G::ReduceOr { .. } => "ANY",
-        G::ReduceAnd { .. } => "ALL",
-        G::ReduceXor { .. } => "PAR",
-        G::Switch { .. } => "SW",
-        G::Extend { .. } => "EXT",
-        other => other.display_name(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,7 +259,6 @@ mod tests {
             for kind in kinds {
                 assert!(!kind_title(&kind).is_empty());
                 assert!(!kind_blurb(&kind).is_empty());
-                assert!(slot_text(&kind).len() <= 6, "{kind:?}");
             }
         }
     }

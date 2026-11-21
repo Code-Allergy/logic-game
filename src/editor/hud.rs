@@ -14,6 +14,8 @@
 //!
 //! Every card is placed by [`HudLayout`].
 
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{
@@ -38,7 +40,7 @@ use crate::{GameState, MainCamera};
 use super::EditorState;
 use super::parts::{
     KEYED_SLOTS, PartTab, SLOT_KEYS, kind_blurb, kind_title, slot_for_key, slot_key_label,
-    slot_text, tab_kinds,
+    tab_kinds,
 };
 use super::workspace::read_workspace;
 
@@ -460,21 +462,56 @@ fn part_slot(
         SlotItem::Kind(kind) => {
             let c = face.center() + egui::vec2(0.0, 3.0);
             if !paint_gate_glyph(painter, c, kind, text_colour) {
-                let text = slot_text(kind);
-                let size = if text.len() > 4 { 11.0 } else { 13.0 };
-                painter.text(
-                    c,
-                    Align2::CENTER_CENTER,
-                    text,
-                    FontId::monospace(size),
-                    text_colour,
-                );
+                // The inspector's name for the kind, as large as fits.
+                let (galley, _) =
+                    slot_label(ui.ctx(), kind_title(kind), face.width() - SLOT_TEXT_PAD);
+                // Centred rows are laid out about x = 0: centre the rect.
+                let pos = c - galley.rect.center().to_vec2();
+                painter.galley(pos, galley, text_colour);
             }
         }
         SlotItem::Saved(name) => chip_name(painter, face, name, text_colour),
         SlotItem::Demo(demo) => chip_name(painter, face, &demo.title, text_colour),
     }
     response
+}
+
+/// Room left and right of a slot's text, together.
+const SLOT_TEXT_PAD: f32 = 8.0;
+
+/// Font sizes a slot's text tries, largest first.
+const SLOT_TEXT_SIZES: [f32; 6] = [13.0, 12.0, 11.0, 10.0, 9.0, 8.0];
+
+/// `text` laid out centred for a slot face with `width` of room: at the
+/// largest of [`SLOT_TEXT_SIZES`] where no word is wider than the room and
+/// it takes at most two lines. Returns the galley and whether it fits (at
+/// the smallest size otherwise).
+fn slot_label(ctx: &egui::Context, text: &str, width: f32) -> (Arc<egui::Galley>, bool) {
+    let layout = |size: f32, wrap: f32| {
+        let mut job =
+            egui::text::LayoutJob::simple(text.to_owned(), heavy(size), Color32::PLACEHOLDER, wrap);
+        job.halign = egui::Align::Center;
+        ctx.fonts_mut(|f| f.layout_job(job))
+    };
+    let mut last = None;
+    for size in SLOT_TEXT_SIZES {
+        let words_fit = text
+            .split_whitespace()
+            .all(|w| layout_word(ctx, w, size) <= width);
+        let galley = layout(size, width);
+        let fits = words_fit && galley.rows.len() <= 2;
+        if fits {
+            return (galley, true);
+        }
+        last = Some(galley);
+    }
+    (last.expect("at least one size"), false)
+}
+
+fn layout_word(ctx: &egui::Context, word: &str, size: f32) -> f32 {
+    ctx.fonts_mut(|f| f.layout_no_wrap(word.to_owned(), heavy(size), Color32::PLACEHOLDER))
+        .size()
+        .x
 }
 
 fn kind_has_glyph(kind: &GateKind) -> bool {
@@ -1280,6 +1317,43 @@ mod tests {
 
     fn close(a: Vec2, b: Vec2) -> bool {
         (a - b).length() < 1e-3
+    }
+
+    /// A context with the Workshop fonts installed.
+    fn fonts_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::ui_style::workshop_fonts());
+        for _ in 0..2 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        }
+        assert!(crate::ui_style::workshop_fonts_ready(&ctx));
+        ctx
+    }
+
+    /// Slots without a glyph show the inspector's name for the kind
+    /// (`kind_title`), whole words, at a readable size, in both layouts.
+    #[test]
+    fn slot_text_is_the_inspector_name_and_fits() {
+        let ctx = fonts_ctx();
+        for screen in [Vec2::new(1920.0, 1080.0), Vec2::new(1280.0, 720.0)] {
+            let side = crate::ui_style::HudLayout::new(screen).slot;
+            for tab in PartTab::ALL {
+                for kind in tab_kinds(tab, 8) {
+                    if kind_has_glyph(&kind) {
+                        continue;
+                    }
+                    let title = kind_title(&kind);
+                    let (galley, fits) = slot_label(&ctx, title, side - SLOT_TEXT_PAD);
+                    assert!(fits, "{title} does not fit a {side} slot");
+                    assert_eq!(galley.text(), title);
+                    let size = galley.job.sections[0].format.font_id.size;
+                    assert!(size >= 8.0, "{title}: {size}");
+                    if side >= 64.0 {
+                        assert!(size >= 10.0, "{title}: {size} in a {side} slot");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
