@@ -867,10 +867,15 @@ ambiguous. Each is small and can be revisited.
     rounded up to the grid for wider ones such as a `Display`), 60 apart,
     splits right and merges left with separate stacks. Only generated
     positions change: ids, wiring and behaviour are the same, so existing
-    files load the same circuits. Some curriculum demos still have
-    overlapping boxes (two word inputs whose split columns meet in
+    files load the same circuits. The curriculum demos that still had
+    overlapping boxes (two word inputs whose split columns met in
     `ripple_adder/adder8` and `mux/mux2x8`, and the AND/OR arrays spaced 40
-    apart in `alu/alu8`); the no-overlap test covers the gallery only.
+    apart in `alu/alu8`) were re-laid out by hand, as were the other
+    demos (positions only: ids, wiring and behaviour are unchanged), and
+    the no-overlap and on-grid test now covers the curriculum as well as
+    the gallery. A wire from a word input to its own generated split
+    column still passes over the splits above its own; that follows from
+    the fixed adapter placement and cannot be avoided by moving nodes.
 49. **Preview renderer.** `examples/render_svg.rs` writes SVG previews of
     circuits (see `docs/save-format.md`, "Previews") and reports
     overlapping boxes and wires drawn through boxes. It is a development

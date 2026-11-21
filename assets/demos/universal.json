@@ -7,9 +7,9 @@
       "name": "not",
       "title": "NOT from NAND",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-150, 0]},
-        {"name": "n", "type": "Nand", "at": [0, 0]},
-        {"name": "Y", "type": "Output", "at": [150, 0]}
+        {"name": "A", "type": "Input", "at": [0, 0]},
+        {"name": "n", "type": "Nand", "at": [140, 0]},
+        {"name": "Y", "type": "Output", "at": [280, 0]}
       ],
       "wires": [["A", "n.a", "n.b"], ["n", "Y"]]
     },
@@ -17,11 +17,11 @@
       "name": "and",
       "title": "AND from NAND",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-200, 50]},
-        {"name": "B", "type": "Input", "at": [-200, -50]},
-        {"name": "n1", "type": "Nand", "at": [-50, 0]},
-        {"name": "n2", "type": "Nand", "at": [50, 0]},
-        {"name": "Y", "type": "Output", "at": [200, 0]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "n1", "type": "Nand", "at": [140, 0]},
+        {"name": "n2", "type": "Nand", "at": [280, 0]},
+        {"name": "Y", "type": "Output", "at": [420, 0]}
       ],
       "wires": [["A", "n1.a"], ["B", "n1.b"], ["n1", "n2.a", "n2.b"], ["n2", "Y"]]
     },
@@ -29,12 +29,12 @@
       "name": "or",
       "title": "OR from NAND",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-200, 50]},
-        {"name": "B", "type": "Input", "at": [-200, -50]},
-        {"name": "na", "type": "Nand", "at": [-50, 50]},
-        {"name": "nb", "type": "Nand", "at": [-50, -50]},
-        {"name": "n", "type": "Nand", "at": [50, 0]},
-        {"name": "Y", "type": "Output", "at": [200, 0]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "na", "type": "Nand", "at": [140, 40]},
+        {"name": "nb", "type": "Nand", "at": [140, -40]},
+        {"name": "n", "type": "Nand", "at": [280, 0]},
+        {"name": "Y", "type": "Output", "at": [420, 0]}
       ],
       "wires": [
         ["A", "na.a", "na.b"],
@@ -48,13 +48,13 @@
       "name": "xor",
       "title": "XOR from NAND",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-250, 50]},
-        {"name": "B", "type": "Input", "at": [-250, -50]},
-        {"name": "n1", "type": "Nand", "at": [-120, 0]},
-        {"name": "n2", "type": "Nand", "at": [0, 60]},
-        {"name": "n3", "type": "Nand", "at": [0, -60]},
-        {"name": "n4", "type": "Nand", "at": [120, 0]},
-        {"name": "Y", "type": "Output", "at": [250, 0]}
+        {"name": "A", "type": "Input", "at": [0, 80]},
+        {"name": "B", "type": "Input", "at": [0, -80]},
+        {"name": "n1", "type": "Nand", "at": [140, 0]},
+        {"name": "n2", "type": "Nand", "at": [280, 80]},
+        {"name": "n3", "type": "Nand", "at": [280, -80]},
+        {"name": "n4", "type": "Nand", "at": [420, 0]},
+        {"name": "Y", "type": "Output", "at": [560, 0]}
       ],
       "wires": [
         ["A", "n1.a", "n2.a"],
@@ -69,9 +69,9 @@
       "name": "nor_not",
       "title": "NOT from NOR",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-150, 0]},
-        {"name": "n", "type": "Nor", "at": [0, 0]},
-        {"name": "Y", "type": "Output", "at": [150, 0]}
+        {"name": "A", "type": "Input", "at": [0, 0]},
+        {"name": "n", "type": "Nor", "at": [140, 0]},
+        {"name": "Y", "type": "Output", "at": [280, 0]}
       ],
       "wires": [["A", "n.a", "n.b"], ["n", "Y"]]
     },
@@ -79,11 +79,11 @@
       "name": "nor_or",
       "title": "OR from NOR",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-200, 50]},
-        {"name": "B", "type": "Input", "at": [-200, -50]},
-        {"name": "n1", "type": "Nor", "at": [-50, 0]},
-        {"name": "n2", "type": "Nor", "at": [50, 0]},
-        {"name": "Y", "type": "Output", "at": [200, 0]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "n1", "type": "Nor", "at": [140, 0]},
+        {"name": "n2", "type": "Nor", "at": [280, 0]},
+        {"name": "Y", "type": "Output", "at": [420, 0]}
       ],
       "wires": [["A", "n1.a"], ["B", "n1.b"], ["n1", "n2.a", "n2.b"], ["n2", "Y"]]
     },
@@ -91,12 +91,12 @@
       "name": "nor_and",
       "title": "AND from NOR",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-200, 50]},
-        {"name": "B", "type": "Input", "at": [-200, -50]},
-        {"name": "na", "type": "Nor", "at": [-50, 50]},
-        {"name": "nb", "type": "Nor", "at": [-50, -50]},
-        {"name": "n", "type": "Nor", "at": [50, 0]},
-        {"name": "Y", "type": "Output", "at": [200, 0]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "na", "type": "Nor", "at": [140, 40]},
+        {"name": "nb", "type": "Nor", "at": [140, -40]},
+        {"name": "n", "type": "Nor", "at": [280, 0]},
+        {"name": "Y", "type": "Output", "at": [420, 0]}
       ],
       "wires": [
         ["A", "na.a", "na.b"],
@@ -110,24 +110,24 @@
       "name": "universal",
       "title": "NAND and NOR are universal",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-350, 100]},
-        {"name": "B", "type": "Input", "at": [-350, -100]},
-        {"name": "nand_not", "use": "not", "at": [-100, 300]},
-        {"name": "nand_and", "use": "and", "at": [-100, 200]},
-        {"name": "nand_or", "use": "or", "at": [-100, 100]},
-        {"name": "nand_xor", "use": "xor", "at": [-100, 0]},
-        {"name": "nor_not_a", "use": "nor_not", "at": [-100, -100]},
-        {"name": "nor_or_ab", "use": "nor_or", "at": [-100, -200]},
-        {"name": "nor_and_ab", "use": "nor_and", "at": [-100, -300]},
-        {"name": "xor_prim", "type": "Xor", "label": "XOR primitive", "at": [-100, -420]},
-        {"name": "y1", "type": "Output", "label": "NOT A (NAND)", "at": [200, 300]},
-        {"name": "y2", "type": "Output", "label": "A AND B (NAND)", "at": [200, 200]},
-        {"name": "y3", "type": "Output", "label": "A OR B (NAND)", "at": [200, 100]},
-        {"name": "y4", "type": "Output", "label": "A XOR B (NAND)", "at": [200, 0]},
-        {"name": "y5", "type": "Output", "label": "NOT A (NOR)", "at": [200, -100]},
-        {"name": "y6", "type": "Output", "label": "A OR B (NOR)", "at": [200, -200]},
-        {"name": "y7", "type": "Output", "label": "A AND B (NOR)", "at": [200, -300]},
-        {"name": "y8", "type": "Output", "label": "A XOR B (primitive)", "at": [200, -420]}
+        {"name": "A", "type": "Input", "at": [0, 80]},
+        {"name": "B", "type": "Input", "at": [0, -80]},
+        {"name": "nand_not", "use": "not", "at": [280, 280]},
+        {"name": "nand_and", "use": "and", "at": [280, 200]},
+        {"name": "nand_or", "use": "or", "at": [280, 120]},
+        {"name": "nand_xor", "use": "xor", "at": [280, 40]},
+        {"name": "nor_not_a", "use": "nor_not", "at": [280, -40]},
+        {"name": "nor_or_ab", "use": "nor_or", "at": [280, -120]},
+        {"name": "nor_and_ab", "use": "nor_and", "at": [280, -200]},
+        {"name": "xor_prim", "type": "Xor", "label": "XOR primitive", "at": [280, -280]},
+        {"name": "y1", "type": "Output", "label": "NOT A (NAND)", "at": [420, 280]},
+        {"name": "y2", "type": "Output", "label": "A AND B (NAND)", "at": [420, 200]},
+        {"name": "y3", "type": "Output", "label": "A OR B (NAND)", "at": [420, 120]},
+        {"name": "y4", "type": "Output", "label": "A XOR B (NAND)", "at": [420, 40]},
+        {"name": "y5", "type": "Output", "label": "NOT A (NOR)", "at": [420, -40]},
+        {"name": "y6", "type": "Output", "label": "A OR B (NOR)", "at": [420, -120]},
+        {"name": "y7", "type": "Output", "label": "A AND B (NOR)", "at": [420, -200]},
+        {"name": "y8", "type": "Output", "label": "A XOR B (primitive)", "at": [420, -280]}
       ],
       "wires": [
         [

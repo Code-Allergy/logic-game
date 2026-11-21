@@ -7,12 +7,12 @@
       "name": "mux4x8",
       "title": "8-bit 4-to-1 multiplexer (mux tree)",
       "nodes": [
-        {"name": "Sel", "type": "Input", "w": 2, "at": [-300, 250]},
-        {"name": "D", "type": "Input", "w": 8, "at": [-300, 120], "count": 4, "step": [0, -80]},
-        {"name": "low", "use": "mux/mux2x8", "label": "D0 or D1", "at": [-50, 80]},
-        {"name": "high", "use": "mux/mux2x8", "label": "D2 or D3", "at": [-50, -80]},
-        {"name": "top", "use": "mux/mux2x8", "label": "low or high", "at": [150, 0]},
-        {"name": "Y", "type": "Output", "w": 8, "at": [300, 0]}
+        {"name": "Sel", "type": "Input", "w": 2, "at": [0, -320]},
+        {"name": "D", "type": "Input", "w": 8, "at": [0, 80], "count": 4, "step": [0, -80]},
+        {"name": "low", "use": "mux/mux2x8", "label": "D0 or D1", "at": [280, 40]},
+        {"name": "high", "use": "mux/mux2x8", "label": "D2 or D3", "at": [280, -120]},
+        {"name": "top", "use": "mux/mux2x8", "label": "low or high", "at": [420, -40]},
+        {"name": "Y", "type": "Output", "w": 8, "at": [560, -40]}
       ],
       "wires": [
         ["Sel:0", "low.Sel", "high.Sel"],
@@ -30,14 +30,14 @@
       "name": "main",
       "title": "Mux tree",
       "nodes": [
-        {"name": "Sel", "type": "Input", "w": 2, "at": [-350, 250]},
-        {"name": "D", "type": "Input", "w": 8, "at": [-350, 120], "count": 4, "step": [0, -80]},
-        {"name": "tree", "use": "mux4x8", "label": "Mux tree (gates)", "at": [0, 150]},
-        {"name": "p_low", "type": "Mux", "w": 8, "at": [-50, -100]},
-        {"name": "p_high", "type": "Mux", "w": 8, "at": [-50, -200]},
-        {"name": "p_top", "type": "Mux", "w": 8, "label": "Mux primitives", "at": [100, -150]},
-        {"name": "y_tree", "type": "Output", "w": 8, "label": "Y (gates)", "at": [300, 150]},
-        {"name": "y_prim", "type": "Output", "w": 8, "label": "Y (Mux)", "at": [300, -150]}
+        {"name": "Sel", "type": "Input", "w": 2, "at": [0, -320]},
+        {"name": "D", "type": "Input", "w": 8, "at": [0, 80], "count": 4, "step": [0, -80]},
+        {"name": "tree", "use": "mux4x8", "label": "Mux tree (gates)", "at": [280, 120]},
+        {"name": "p_low", "type": "Mux", "w": 8, "at": [280, -40]},
+        {"name": "p_high", "type": "Mux", "w": 8, "at": [280, -160]},
+        {"name": "p_top", "type": "Mux", "w": 8, "label": "Mux primitives", "at": [420, -100]},
+        {"name": "y_tree", "type": "Output", "w": 8, "label": "Y (gates)", "at": [560, 120]},
+        {"name": "y_prim", "type": "Output", "w": 8, "label": "Y (Mux)", "at": [560, -100]}
       ],
       "wires": [
         ["Sel", "tree.Sel"],
