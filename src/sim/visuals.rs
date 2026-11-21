@@ -21,7 +21,10 @@
 //!   the loop in the open view ([`LoopHighlight`]) until a later compile
 //!   succeeds;
 //! - a [`Theme`] change recolours the shared materials, wires and texts
-//!   once.
+//!   once;
+//! - the gate being dragged comes to the front, with its wires above the
+//!   other wires, and stays there after the drop until another gate is
+//!   dragged ([`OnTop`]).
 //!
 //! [`SimulationVisualsPlugin`] has no rendering, window or egui
 //! dependencies (it creates the mesh and material stores when they are
@@ -42,7 +45,7 @@ use super::bridge::sync_design_system;
 use super::view::CircuitView;
 use super::{
     CircuitLibrary, DisplayConfig, GateIdentity, GateKind, GateLabel, GateType, GateValues,
-    LogicDisplay, SelectedGate, SimDiagnostics, WireEndpoints, WireState,
+    LogicDisplay, Selected, SelectedGate, SimDiagnostics, WireEndpoints, WireState,
     calculate_connection_geometry, format_value,
 };
 use crate::theme::{Palette, Theme};
@@ -187,6 +190,22 @@ pub fn wire_label_text(value: u64, width: u8) -> String {
 fn wire_depth(entity: Entity) -> f32 {
     crate::temp::CONNECTION_Z_LEVEL - (entity.to_bits() % 997) as f32 * WIRE_STAGGER
 }
+
+/// Depth of a wire of the [`OnTop`] gate: above every other wire (keeping
+/// the stagger among its own), still below the wire labels and gates.
+fn lifted_wire_depth(entity: Entity) -> f32 {
+    wire_depth(entity) + 998.0 * WIRE_STAGGER
+}
+
+/// z of the [`OnTop`] gate. Every other gate sits at 0, and a tile's art
+/// spans local z -0.7 (the selection halo) to 0.5 (texts), so the lifted
+/// tile with all its pins, labels and caption draws above every other.
+pub const ON_TOP_Z: f32 = 2.0;
+
+/// The gate last dragged: drawn in front of the others (z [`ON_TOP_Z`]),
+/// its wires above the other wires. At most one gate has it.
+#[derive(Component, Debug)]
+pub struct OnTop;
 
 /// Value of a gate's main signal: the output of an input, the input of
 /// anything else.
@@ -659,6 +678,64 @@ pub fn apply_loop_highlight_system(
             commands.entity(entity).insert(LoopHighlight);
         } else if !wanted && marked {
             commands.entity(entity).remove::<LoopHighlight>();
+        }
+    }
+}
+
+/// Bring the gate being dragged (it has [`Selected`] and moved) to the
+/// front: z [`ON_TOP_Z`] and [`OnTop`]; the gate that was in front goes
+/// back to z 0. The order holds after the drop ("last dragged on top").
+pub fn bring_dragged_gate_to_front_system(
+    mut commands: Commands,
+    mut dragged: Query<(Entity, &mut Transform), (With<Selected>, Changed<Transform>)>,
+    mut on_top: Query<(Entity, &mut Transform), (With<OnTop>, Without<Selected>)>,
+) {
+    let mut lifted = false;
+    for (entity, mut transform) in &mut dragged {
+        if transform.translation.z != ON_TOP_Z {
+            transform.translation.z = ON_TOP_Z;
+            commands.entity(entity).try_insert(OnTop);
+            lifted = true;
+        }
+    }
+    if !lifted {
+        return;
+    }
+    for (entity, mut transform) in &mut on_top {
+        transform.translation.z = 0.0;
+        commands.entity(entity).try_remove::<OnTop>();
+    }
+}
+
+/// Lift the wires of the [`OnTop`] gate above the other wires, and put
+/// those of a gate that left the front back. Runs only when the front
+/// gate changes.
+pub fn lift_front_wires_system(
+    added: Query<&GateIdentity, Added<OnTop>>,
+    mut removed: RemovedComponents<OnTop>,
+    identities: Query<&GateIdentity>,
+    front: Query<&GateIdentity, With<OnTop>>,
+    mut wires: Query<(Entity, &WireEndpoints, &mut Transform), Without<GateIdentity>>,
+) {
+    let dropped: Vec<Uuid> = removed
+        .read()
+        .filter_map(|e| identities.get(e).ok().map(|id| id.uuid))
+        .collect();
+    if added.is_empty() && dropped.is_empty() {
+        return;
+    }
+    let lifted: HashSet<Uuid> = front.iter().map(|id| id.uuid).collect();
+    for (entity, ep, mut transform) in &mut wires {
+        let ends = [ep.source_gate, ep.sink_gate];
+        let z = if ends.iter().any(|id| lifted.contains(id)) {
+            lifted_wire_depth(entity)
+        } else if ends.iter().any(|id| dropped.contains(id)) {
+            wire_depth(entity)
+        } else {
+            continue;
+        };
+        if transform.translation.z != z {
+            transform.translation.z = z;
         }
     }
 }
@@ -1194,6 +1271,8 @@ impl Plugin for SimulationVisualsPlugin {
                     (attach_gate_visuals_system, attach_wire_visuals_system),
                     apply_loop_highlight_system,
                     update_selection_halo_system,
+                    bring_dragged_gate_to_front_system,
+                    lift_front_wires_system,
                     (
                         update_gate_state_system,
                         update_logic_displays_system,

@@ -56,7 +56,7 @@ pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin
 pub use view::{
     CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame,
 };
-pub use visuals::{EntityWorkCounter, LoopHighlight, SimulationVisualsPlugin};
+pub use visuals::{EntityWorkCounter, LoopHighlight, ON_TOP_Z, OnTop, SimulationVisualsPlugin};
 
 use bevy::prelude::*;
 use bevy::reflect::Reflect;

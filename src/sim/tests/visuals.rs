@@ -12,7 +12,8 @@ use crate::sim::bridge::loop_message;
 use crate::sim::visuals::{DisplayedValue, LoopOutline, WireValueLabel};
 use crate::sim::{
     CircuitLibrary, CloseView, EntityWorkCounter, GateMoved, GateProbes, InstanceViewItem,
-    LogicDisplay, LoopHighlight, OpenInstanceView, RegisterDefinitions, SimulationVisualsPlugin,
+    LogicDisplay, LoopHighlight, OnTop, OpenInstanceView, RegisterDefinitions, Selected,
+    SimulationVisualsPlugin,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -344,6 +345,98 @@ fn dragging_a_gate_moves_only_its_wires_and_does_not_recompile() {
         },
     );
     assert_eq!(app.world().resource::<SimBridge>().revision(), revision);
+}
+
+/// Highest and lowest z at which `entity` or any of its descendants draws
+/// (the transform chain, without the propagation plugins).
+fn z_span(app: &App, entity: Entity, parent_z: f32) -> (f32, f32) {
+    let z = parent_z + app.world().get::<Transform>(entity).unwrap().translation.z;
+    let mut span = (z, z);
+    if let Some(children) = app.world().get::<Children>(entity) {
+        for &child in children {
+            let (lo, hi) = z_span(app, child, z);
+            span = (span.0.min(lo), span.1.max(hi));
+        }
+    }
+    span
+}
+
+/// Right-drag `gate` one step, as `gate_selection_system` and
+/// `drag_selected_system` do.
+fn drag(app: &mut App, gate: Entity, to: Vec2) {
+    let selected: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(app.world())
+        .collect();
+    for e in selected {
+        app.world_mut().entity_mut(e).remove::<Selected>();
+    }
+    app.world_mut()
+        .entity_mut(gate)
+        .insert(Selected { offset: Vec2::ZERO });
+    let mut t = app.world_mut().get_mut::<Transform>(gate).unwrap();
+    t.translation.x = to.x;
+    t.translation.y = to.y;
+    app.update();
+}
+
+/// The dragged gate, with its pins, labels and caption, draws above every
+/// other tile, and its wires above the other wires; it stays in front
+/// after the drop until another gate is dragged.
+#[test]
+fn the_dragged_gate_draws_on_top() {
+    let mut app = visual_app();
+    let a = create_gate(&mut app, GateKind::Input { w: 8 }, "A");
+    let b = create_gate(&mut app, GateKind::Input { w: 1 }, "B");
+    let reg = create_gate(&mut app, GateKind::Register { w: 8 }, "R");
+    let y = create_gate(&mut app, GateKind::Output { w: 8 }, "Y");
+    create_wire(&mut app, b, 0, reg, 0);
+    create_wire(&mut app, a, 0, reg, 1);
+    create_wire(&mut app, reg, 0, y, 0);
+    idle_frames(&mut app, 2);
+    let gates = [a, b, reg, y];
+    let in_front = |app: &App, top: Entity| {
+        let (top_lo, _) = z_span(app, top, 0.0);
+        gates
+            .iter()
+            .filter(|g| **g != top)
+            .all(|g| z_span(app, *g, 0.0).1 < top_lo)
+    };
+    let wire_z = |app: &mut App, w: Entity| app.world().get::<Transform>(w).unwrap().translation.z;
+
+    // Drag the register over A: it and all its art are in front.
+    drag(&mut app, reg, Vec2::ZERO);
+    assert!(in_front(&app, reg), "the dragged tile is above every other");
+    let into_y = wire_into(&mut app, y);
+    let a_reg = wire_between(&mut app, a, reg);
+    let b_reg = wire_between(&mut app, b, reg);
+    // A wire of another gate, for comparison: A to a new output.
+    let z = create_gate(&mut app, GateKind::Output { w: 8 }, "Z");
+    create_wire(&mut app, a, 0, z, 0);
+    let a_z = wire_into(&mut app, z);
+    for w in [into_y, a_reg, b_reg] {
+        assert!(
+            wire_z(&mut app, w) > wire_z(&mut app, a_z),
+            "its wires are on top"
+        );
+    }
+
+    // Dropped (Selected stays until the next press): still in front.
+    idle_frames(&mut app, 2);
+    assert!(in_front(&app, reg));
+
+    // Drag B: B comes to the front, the register goes back.
+    drag(&mut app, b, Vec2::new(10.0, 0.0));
+    assert!(in_front(&app, b));
+    assert!(!in_front(&app, reg));
+    assert!(app.world().get::<OnTop>(reg).is_none());
+    assert_eq!(
+        app.world().get::<Transform>(reg).unwrap().translation.z,
+        0.0
+    );
+    assert!(wire_z(&mut app, into_y) < wire_z(&mut app, b_reg));
+    assert!(wire_z(&mut app, into_y) < crate::temp::CONNECTION_Z_LEVEL + 1e-6);
 }
 
 #[test]
