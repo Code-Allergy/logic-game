@@ -7,18 +7,18 @@
       "name": "adder8",
       "title": "8-bit ripple-carry adder",
       "nodes": [
-        {"name": "A", "type": "Input", "w": 8, "at": [-300, 120]},
-        {"name": "B", "type": "Input", "w": 8, "at": [-300, 0]},
-        {"name": "Cin", "type": "Input", "at": [-300, -120]},
+        {"name": "A", "type": "Input", "w": 8, "at": [0, 0]},
+        {"name": "B", "type": "Input", "w": 8, "at": [0, -480]},
+        {"name": "Cin", "type": "Input", "at": [0, 80]},
         {
           "name": "fa",
           "use": "full_adder/full_adder",
-          "at": [0, 280],
+          "at": [360, -40],
           "count": 8,
-          "step": [0, -80]
+          "step": [0, -120]
         },
-        {"name": "Sum", "type": "Output", "w": 8, "at": [300, 60]},
-        {"name": "Cout", "type": "Output", "at": [300, -300]}
+        {"name": "Sum", "type": "Output", "w": 8, "at": [640, -460]},
+        {"name": "Cout", "type": "Output", "at": [640, -880]}
       ],
       "wires": [
         ["A", "fa.A"],
@@ -33,15 +33,15 @@
       "name": "main",
       "title": "Ripple-carry adder beside the Add primitive",
       "nodes": [
-        {"name": "A", "type": "Input", "w": 8, "at": [-300, 120]},
-        {"name": "B", "type": "Input", "w": 8, "at": [-300, 0]},
-        {"name": "Cin", "type": "Input", "at": [-300, -120]},
-        {"name": "ripple", "use": "adder8", "label": "8-bit ripple adder", "at": [0, 80]},
-        {"name": "add", "type": "Add", "w": 8, "label": "Add primitive", "at": [0, -120]},
-        {"name": "sum_gates", "type": "Output", "w": 8, "label": "Sum (gates)", "at": [300, 120]},
-        {"name": "cout_gates", "type": "Output", "label": "Cout (gates)", "at": [300, 40]},
-        {"name": "sum_add", "type": "Output", "w": 8, "label": "Sum (Add)", "at": [300, -80]},
-        {"name": "cout_add", "type": "Output", "label": "Cout (Add)", "at": [300, -160]}
+        {"name": "A", "type": "Input", "w": 8, "at": [0, 80]},
+        {"name": "B", "type": "Input", "w": 8, "at": [0, 0]},
+        {"name": "Cin", "type": "Input", "at": [0, -80]},
+        {"name": "ripple", "use": "adder8", "label": "8-bit ripple adder", "at": [280, 80]},
+        {"name": "add", "type": "Add", "w": 8, "label": "Add primitive", "at": [280, -80]},
+        {"name": "sum_gates", "type": "Output", "w": 8, "label": "Sum (gates)", "at": [560, 120]},
+        {"name": "cout_gates", "type": "Output", "label": "Cout (gates)", "at": [560, 40]},
+        {"name": "sum_add", "type": "Output", "w": 8, "label": "Sum (Add)", "at": [560, -40]},
+        {"name": "cout_add", "type": "Output", "label": "Cout (Add)", "at": [560, -120]}
       ],
       "wires": [
         ["A", "ripple.A", "add.a"],
