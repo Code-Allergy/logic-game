@@ -221,21 +221,25 @@ pub const DEFAULT_DEMO: &str = "counter";
 fn load_default_circuit_system(
     mut loaded: Local<bool>,
     gates: Query<(), With<GateIdentity>>,
-    mut pending: MessageReader<LoadWorkspaceEvent>,
-    mut load: MessageWriter<LoadWorkspaceEvent>,
+    // Reading and writing the same message in one system needs a
+    // `ParamSet`: Bevy refuses the two as conflicting parameters.
+    mut messages: ParamSet<(
+        MessageReader<LoadWorkspaceEvent>,
+        MessageWriter<LoadWorkspaceEvent>,
+    )>,
 ) {
     if *loaded || !gates.is_empty() {
         return;
     }
     *loaded = true;
-    if !pending.is_empty() {
-        pending.clear();
+    if !messages.p0().is_empty() {
+        messages.p0().clear();
         return;
     }
     match demos::catalog() {
         Ok(catalog) => {
             if let Some(demo) = catalog.get(DEFAULT_DEMO) {
-                load.write(LoadWorkspaceEvent {
+                messages.p1().write(LoadWorkspaceEvent {
                     name: demo.title.clone(),
                     workspace: Arc::clone(&demo.workspace),
                     read_only: true,
@@ -287,5 +291,58 @@ fn hide_circuit_system(mut items: Query<&mut Visibility, CircuitItem>) {
 fn show_circuit_system(mut items: Query<&mut Visibility, CircuitItem>) {
     for mut visibility in &mut items {
         *visibility = Visibility::Visible;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_message::<LoadWorkspaceEvent>()
+            .add_systems(Update, load_default_circuit_system);
+        app
+    }
+
+    fn loads(app: &App) -> Vec<String> {
+        let messages = app.world().resource::<Messages<LoadWorkspaceEvent>>();
+        messages
+            .iter_current_update_messages()
+            .map(|m| m.name.clone())
+            .collect()
+    }
+
+    /// The system's parameters are valid (Bevy panics on its first run if
+    /// they conflict), and with nothing pending it opens the default demo.
+    #[test]
+    fn default_circuit_loads_when_nothing_is_pending() {
+        let mut app = app();
+        app.update();
+        let title = demos::catalog()
+            .unwrap()
+            .get(DEFAULT_DEMO)
+            .unwrap()
+            .title
+            .clone();
+        assert_eq!(loads(&app), vec![title]);
+        app.update();
+        assert!(loads(&app).is_empty(), "only the first time");
+    }
+
+    /// A demo picked on the map is already on its way: no default demo.
+    #[test]
+    fn a_pending_load_wins_over_the_default_circuit() {
+        let mut app = app();
+        let workspace = Arc::clone(&demos::catalog().unwrap().get("gates").unwrap().workspace);
+        app.world_mut().write_message(LoadWorkspaceEvent {
+            name: "picked".into(),
+            workspace,
+            read_only: true,
+        });
+        app.update();
+        // The picked load was written before this update; the system wrote
+        // nothing of its own.
+        assert!(loads(&app).is_empty(), "{:?}", loads(&app));
     }
 }
