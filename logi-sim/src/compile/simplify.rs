@@ -373,7 +373,11 @@ enum Outcome {
 /// Identities with a constant operand, or with a constant result.
 fn const_identity(op: Op, i: &Instr, w: u8, c: &dyn Fn(u32) -> Option<u64>) -> Outcome {
     let m = mask(w);
-    let (ca, cb, cc) = (c(i.a), c(i.b), c(i.c));
+    // Only slot operands: a literal operand (a shift, a clock period) is
+    // not a slot and may be past the end of the slot table.
+    let (sa, sb, sc) = op.slot_operands();
+    let slot = |is: bool, s: u32| if is { c(s) } else { None };
+    let (ca, cb, cc) = (slot(sa, i.a), slot(sb, i.b), slot(sc, i.c));
     match op {
         Op::And => match (ca, cb) {
             (Some(0), _) | (_, Some(0)) => Outcome::Const(0),
