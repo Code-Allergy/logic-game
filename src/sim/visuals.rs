@@ -682,13 +682,18 @@ pub fn apply_loop_highlight_system(
     }
 }
 
+/// A gate being dragged: it has [`Selected`] and moved.
+type BeingDragged = (With<Selected>, Changed<Transform>);
+/// The gate in front, when it is not the one being dragged.
+type InFrontNotDragged = (With<OnTop>, Without<Selected>);
+
 /// Bring the gate being dragged (it has [`Selected`] and moved) to the
 /// front: z [`ON_TOP_Z`] and [`OnTop`]; the gate that was in front goes
 /// back to z 0. The order holds after the drop ("last dragged on top").
 pub fn bring_dragged_gate_to_front_system(
     mut commands: Commands,
-    mut dragged: Query<(Entity, &mut Transform), (With<Selected>, Changed<Transform>)>,
-    mut on_top: Query<(Entity, &mut Transform), (With<OnTop>, Without<Selected>)>,
+    mut dragged: Query<(Entity, &mut Transform), BeingDragged>,
+    mut on_top: Query<(Entity, &mut Transform), InFrontNotDragged>,
 ) {
     let mut lifted = false;
     for (entity, mut transform) in &mut dragged {
