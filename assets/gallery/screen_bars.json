@@ -1,0 +1,76 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "bars",
+  "circuits": [
+    {
+      "name": "bars",
+      "title": "Colour bars",
+      "nodes": [
+        {"name": "one", "type": "Const", "value": 1, "at": [0, 0]},
+        {"name": "one_f", "type": "Const", "value": 1, "at": [500, -280]},
+        {"name": "t", "type": "Register", "w": 10, "label": "beam time", "at": [160, 100]},
+        {"name": "tinc", "type": "Add", "w": 10, "label": "+1", "at": [160, -60]},
+        {
+          "name": "h",
+          "type": "Split",
+          "w": 10,
+          "lo": 0,
+          "len": 6,
+          "label": "column",
+          "at": [340, 260]
+        },
+        {
+          "name": "bar",
+          "type": "Split",
+          "w": 10,
+          "lo": 2,
+          "len": 3,
+          "label": "bar",
+          "at": [340, 140]
+        },
+        {
+          "name": "lower",
+          "type": "Split",
+          "w": 10,
+          "lo": 9,
+          "len": 1,
+          "label": "lower half",
+          "at": [340, 20]
+        },
+        {"name": "hs", "type": "ReduceAnd", "w": 6, "label": "column 63", "at": [500, 300]},
+        {"name": "vs", "type": "ReduceAnd", "w": 10, "label": "last tick", "at": [500, -120]},
+        {"name": "f", "type": "Register", "w": 3, "label": "frame", "at": [660, -120]},
+        {"name": "finc", "type": "Add", "w": 3, "label": "+1", "at": [660, -260]},
+        {"name": "shift", "type": "Add", "w": 3, "label": "bar + frame", "at": [660, 80]},
+        {"name": "colour", "type": "Merge", "widths": [3, 1], "label": "colour", "at": [820, 40]},
+        {
+          "name": "screen",
+          "type": "Screen",
+          "mode": "Scanline",
+          "width": 32,
+          "height": 16,
+          "palette": "Colors16",
+          "scale": 8,
+          "label": "Scanline",
+          "at": [1120, 40]
+        }
+      ],
+      "wires": [
+        ["one", "t.en", "tinc.cin"],
+        ["one_f", "finc.cin"],
+        ["t", "tinc.a", "h", "bar", "lower", "vs"],
+        ["tinc.sum", "t.d"],
+        ["h", "hs"],
+        ["hs", "screen.hsync"],
+        ["vs", "screen.vsync", "f.en"],
+        ["f", "finc.a", "shift.b"],
+        ["finc.sum", "f.d"],
+        ["bar", "shift.a"],
+        ["shift.sum", "colour.a0"],
+        ["lower", "colour.a1"],
+        ["colour", "screen.colour"]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "mul4",
+  "circuits": [
+    {
+      "name": "mul4",
+      "title": "4x4 array multiplier",
+      "nodes": [
+        {"name": "B", "type": "Input", "w": 4, "at": [0, 440]},
+        {"name": "A", "type": "Input", "w": 4, "at": [0, 280]},
+        {
+          "name": "b",
+          "type": "Split",
+          "w": 4,
+          "lo": "{i}",
+          "len": 1,
+          "label": "B{i}",
+          "at": [160, 360],
+          "count": 4,
+          "step": [300, 0]
+        },
+        {
+          "name": "pp",
+          "type": "Switch",
+          "w": 4,
+          "label": "A x B{i}",
+          "at": [160, 120],
+          "count": 4,
+          "step": [300, 0]
+        },
+        {
+          "name": "first",
+          "type": "Split",
+          "w": 4,
+          "lo": 0,
+          "len": 1,
+          "label": "bit 0",
+          "at": [380, -240]
+        },
+        {
+          "name": "hs0",
+          "type": "Split",
+          "w": 4,
+          "lo": 1,
+          "len": 3,
+          "label": ">> 1",
+          "at": [380, -80]
+        },
+        {"name": "z", "type": "Const", "value": 0, "at": [480, -160]},
+        {"name": "nb1", "type": "Merge", "widths": [3, 1], "at": [480, -80]},
+        {"name": "zc1", "type": "Const", "value": 0, "at": [600, -160]},
+        {"name": "r1", "use": "cla_adder/ripple4", "label": "add row 1", "at": [600, 0]},
+        {
+          "name": "lo1",
+          "type": "Split",
+          "w": 4,
+          "lo": 0,
+          "len": 1,
+          "label": "bit 0",
+          "at": [680, -240]
+        },
+        {
+          "name": "hs1",
+          "type": "Split",
+          "w": 4,
+          "lo": 1,
+          "len": 3,
+          "label": ">> 1",
+          "at": [680, -80]
+        },
+        {"name": "nb2", "type": "Merge", "widths": [3, 1], "at": [780, -80]},
+        {"name": "zc2", "type": "Const", "value": 0, "at": [900, -160]},
+        {"name": "r2", "use": "cla_adder/ripple4", "label": "add row 2", "at": [900, 0]},
+        {
+          "name": "lo2",
+          "type": "Split",
+          "w": 4,
+          "lo": 0,
+          "len": 1,
+          "label": "bit 0",
+          "at": [980, -240]
+        },
+        {
+          "name": "hs2",
+          "type": "Split",
+          "w": 4,
+          "lo": 1,
+          "len": 3,
+          "label": ">> 1",
+          "at": [980, -80]
+        },
+        {"name": "nb3", "type": "Merge", "widths": [3, 1], "at": [1080, -80]},
+        {"name": "zc3", "type": "Const", "value": 0, "at": [1200, -160]},
+        {"name": "r3", "use": "cla_adder/ripple4", "label": "add row 3", "at": [1200, 0]},
+        {"name": "prod", "type": "Merge", "widths": [1, 1, 1, 4, 1], "at": [1440, -400]},
+        {"name": "P", "type": "Output", "w": 8, "at": [1580, -400]},
+        {"name": "show", "type": "Display", "w": 8, "label": "A x B", "at": [1600, -540]}
+      ],
+      "wires": [
+        ["B", "b"],
+        ["A", "pp.d"],
+        ["b", "pp.en"],
+        ["pp[0]", "first", "hs0"],
+        ["hs0", "nb1.a0"],
+        ["z", "nb1.a1"],
+        ["pp[1]", "r1.A"],
+        ["nb1", "r1.B"],
+        ["zc1", "r1.Cin"],
+        ["r1.Sum", "lo1", "hs1"],
+        ["hs1", "nb2.a0"],
+        ["r1.Cout", "nb2.a1"],
+        ["pp[2]", "r2.A"],
+        ["nb2", "r2.B"],
+        ["zc2", "r2.Cin"],
+        ["r2.Sum", "lo2", "hs2"],
+        ["hs2", "nb3.a0"],
+        ["r2.Cout", "nb3.a1"],
+        ["pp[3]", "r3.A"],
+        ["nb3", "r3.B"],
+        ["zc3", "r3.Cin"],
+        ["first", "prod.a0"],
+        ["lo1", "prod.a1"],
+        ["lo2", "prod.a2"],
+        ["r3.Sum", "prod.a3"],
+        ["r3.Cout", "prod.a4"],
+        ["prod", "P", "show"]
+      ]
+    }
+  ]
+}

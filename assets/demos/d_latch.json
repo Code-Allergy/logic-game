@@ -1,0 +1,46 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "d_latch",
+      "title": "D latch",
+      "nodes": [
+        {"name": "D", "type": "Input", "at": [0, 80]},
+        {"name": "E", "type": "Input", "at": [0, -80]},
+        {"name": "not_d", "use": "gates/not", "at": [140, -160]},
+        {"name": "set", "use": "gates/and", "at": [280, 80]},
+        {"name": "reset", "use": "gates/and", "at": [280, -80]},
+        {"name": "latch", "use": "sr_latch/sr_latch", "at": [420, 0]},
+        {"name": "Q", "type": "Output", "at": [560, 0]}
+      ],
+      "wires": [
+        ["D", "set.A", "not_d.A"],
+        ["not_d", "reset.A"],
+        ["E", "set.B", "reset.B"],
+        ["set", "latch.S"],
+        ["reset", "latch.R"],
+        ["latch.Q", "Q"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "D latch",
+      "nodes": [
+        {"name": "D", "type": "Input", "at": [0, 80]},
+        {"name": "E", "type": "Input", "at": [0, -80]},
+        {"name": "latch", "use": "d_latch", "label": "D latch (gates)", "at": [280, 80]},
+        {"name": "prim", "type": "DLatch", "label": "DLatch primitive", "at": [280, -80]},
+        {"name": "q_gates", "type": "Output", "label": "Q (gates)", "at": [420, 80]},
+        {"name": "q_prim", "type": "Output", "label": "Q (DLatch)", "at": [420, -80]}
+      ],
+      "wires": [
+        ["D", "latch.D", "prim.d"],
+        ["E", "latch.E", "prim.en"],
+        ["latch", "q_gates"],
+        ["prim", "q_prim"]
+      ]
+    }
+  ]
+}

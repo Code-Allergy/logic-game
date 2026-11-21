@@ -1,0 +1,223 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "cpu",
+  "circuits": [
+    {
+      "name": "cpu",
+      "title": "CPU: Fibonacci",
+      "nodes": [
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Clock",
+          "at": [0, -600]
+        },
+        {"name": "one", "type": "Const", "value": 1, "at": [0, 360]},
+        {"name": "zero", "type": "Const", "w": 8, "value": 0, "at": [0, 240]},
+        {"name": "inc", "use": "ripple_adder/adder8", "label": "pc + 1", "at": [180, 360]},
+        {"name": "pc", "use": "register/register8", "label": "program counter", "at": [180, 120]},
+        {
+          "name": "rom",
+          "type": "Rom",
+          "addr_bits": 8,
+          "w": 16,
+          "contents": [
+            "0x1401", "0x180C", "0x8000", "0x4C01", "0x7101", "0x7703", "0xDA01", "0x3209",
+            "0x2002", "0x8000", "0xF000"
+          ],
+          "label": "program",
+          "at": [360, 120]
+        },
+        {
+          "name": "f_op",
+          "type": "Split",
+          "w": 16,
+          "lo": 12,
+          "len": 4,
+          "label": "op",
+          "at": [520, 440]
+        },
+        {
+          "name": "f_alu",
+          "type": "Split",
+          "w": 16,
+          "lo": 12,
+          "len": 2,
+          "label": "ALU op",
+          "at": [520, 360]
+        },
+        {
+          "name": "f_rd",
+          "type": "Split",
+          "w": 16,
+          "lo": 10,
+          "len": 2,
+          "label": "rd",
+          "at": [520, 280]
+        },
+        {
+          "name": "f_rs",
+          "type": "Split",
+          "w": 16,
+          "lo": 8,
+          "len": 2,
+          "label": "rs",
+          "at": [520, 200]
+        },
+        {
+          "name": "f_rt",
+          "type": "Split",
+          "w": 16,
+          "lo": 0,
+          "len": 2,
+          "label": "rt",
+          "at": [520, 120]
+        },
+        {
+          "name": "f_imm",
+          "type": "Split",
+          "w": 16,
+          "lo": 0,
+          "len": 8,
+          "label": "imm",
+          "at": [520, -120]
+        },
+        {
+          "name": "control",
+          "type": "Rom",
+          "addr_bits": 4,
+          "w": 8,
+          "contents": [0, 3, 4, 8, 1, 1, 1, 1, 16, 0, 0, 0, 65, 65, 65, 32],
+          "label": "decoder (microcode)",
+          "at": [680, 440]
+        },
+        {
+          "name": "c_we",
+          "type": "Split",
+          "w": 8,
+          "lo": 0,
+          "len": 1,
+          "label": "write reg",
+          "at": [840, 720]
+        },
+        {
+          "name": "c_ldi",
+          "type": "Split",
+          "w": 8,
+          "lo": 1,
+          "len": 1,
+          "label": "load imm",
+          "at": [840, 640]
+        },
+        {
+          "name": "c_jmp",
+          "type": "Split",
+          "w": 8,
+          "lo": 2,
+          "len": 1,
+          "label": "jump",
+          "at": [840, 560]
+        },
+        {
+          "name": "c_jz",
+          "type": "Split",
+          "w": 8,
+          "lo": 3,
+          "len": 1,
+          "label": "jump if 0",
+          "at": [840, 480]
+        },
+        {
+          "name": "c_out",
+          "type": "Split",
+          "w": 8,
+          "lo": 4,
+          "len": 1,
+          "label": "output",
+          "at": [840, 400]
+        },
+        {
+          "name": "c_hlt",
+          "type": "Split",
+          "w": 8,
+          "lo": 5,
+          "len": 1,
+          "label": "halt",
+          "at": [840, 320]
+        },
+        {
+          "name": "c_bimm",
+          "type": "Split",
+          "w": 8,
+          "lo": 6,
+          "len": 1,
+          "label": "B = imm",
+          "at": [840, 240]
+        },
+        {
+          "name": "regs",
+          "use": "register_file/regfile4x8",
+          "label": "registers r0-r3",
+          "at": [1060, 160]
+        },
+        {"name": "bsel", "use": "mux/mux2x8", "label": "register or imm", "at": [1180, 40]},
+        {"name": "alu", "use": "alu/alu8", "label": "ALU", "at": [1340, 180]},
+        {"name": "wdata", "use": "mux/mux2x8", "label": "ALU or imm", "at": [1500, 300]},
+        {"name": "any", "type": "ReduceOr", "w": 8, "label": "rs not 0", "at": [1180, -160]},
+        {"name": "is_zero", "type": "Not", "at": [1340, -160]},
+        {"name": "taken", "type": "And", "label": "JZ taken", "at": [1500, -160]},
+        {"name": "jump", "type": "Or", "label": "jump", "at": [1660, -180]},
+        {"name": "target", "use": "mux/mux2x8", "label": "pc + 1 or target", "at": [360, -280]},
+        {"name": "hold", "use": "mux/mux2x8", "label": "stay on HLT", "at": [180, -280]},
+        {
+          "name": "out",
+          "use": "register/register8",
+          "label": "output register",
+          "at": [1500, -520]
+        },
+        {"name": "Out", "type": "Display", "w": 8, "label": "Out", "at": [1700, -520]},
+        {"name": "OutPort", "type": "Output", "w": 8, "label": "Out value", "at": [1680, -640]},
+        {"name": "PC", "type": "Output", "w": 8, "at": [360, -40]},
+        {"name": "Halted", "type": "Output", "at": [1140, -500]}
+      ],
+      "wires": [
+        ["clock", "pc.Clk", "regs.Clk", "out.Clk"],
+        ["one", "pc.Load", "inc.Cin"],
+        ["zero", "inc.B"],
+        ["pc", "inc.A", "rom", "hold.B", "PC"],
+        ["rom", "f_op", "f_alu", "f_rd", "f_rs", "f_rt", "f_imm"],
+        ["f_op", "control"],
+        ["control", "c_we", "c_ldi", "c_jmp", "c_jz", "c_out", "c_hlt", "c_bimm"],
+        ["c_we", "regs.WE"],
+        ["f_rd", "regs.WAddr"],
+        ["f_rs", "regs.RA"],
+        ["f_rt", "regs.RB"],
+        ["regs.QA", "alu.A", "any", "out.D"],
+        ["regs.QB", "bsel.A"],
+        ["f_imm", "bsel.B", "wdata.B", "target.B"],
+        ["c_bimm", "bsel.Sel"],
+        ["bsel", "alu.B"],
+        ["f_alu", "alu.Op"],
+        ["alu.Y", "wdata.A"],
+        ["c_ldi", "wdata.Sel"],
+        ["wdata", "regs.WData"],
+        ["any", "is_zero"],
+        ["c_jz", "taken.a"],
+        ["is_zero", "taken.b"],
+        ["c_jmp", "jump.a"],
+        ["taken", "jump.b"],
+        ["inc.Sum", "target.A"],
+        ["jump", "target.Sel"],
+        ["target", "hold.A"],
+        ["c_hlt", "hold.Sel", "Halted"],
+        ["hold", "pc.D"],
+        ["c_out", "out.Load"],
+        ["out", "Out", "OutPort"]
+      ]
+    }
+  ]
+}

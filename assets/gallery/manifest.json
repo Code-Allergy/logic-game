@@ -1,0 +1,243 @@
+{
+  "format": "gatequest-gallery",
+  "version": 1,
+  "categories": [
+    { "id": "combinational", "title": "Combinational logic" },
+    { "id": "sequential", "title": "Sequential logic" },
+    { "id": "systems", "title": "Systems" },
+    { "id": "displays", "title": "Displays" }
+  ],
+  "items": [
+    {
+      "id": "majority",
+      "category": "combinational",
+      "title": "Majority vote",
+      "description": "The output is 1 when at least two of the three inputs are 1: (A and B) or (B and C) or (A and C). Three copies of a signal voted this way outvote one faulty copy.",
+      "uses": []
+    },
+    {
+      "id": "comparator",
+      "category": "combinational",
+      "title": "One-bit comparator",
+      "description": "Compares two bits: Gt is A and not B, Lt is not A and B, and Eq is 1 when neither is, that is when A equals B. The magnitude comparator builds on it.",
+      "uses": []
+    },
+    {
+      "id": "magnitude",
+      "category": "combinational",
+      "title": "4-bit magnitude comparator",
+      "description": "Four one-bit comparators, one per bit. A > B if the highest bit where they differ has A = 1: the chain of AND and OR gates passes that decision up from bit 0 to bit 3. Shown beside the Eq and LtU primitives.",
+      "uses": ["comparator/cmp1"]
+    },
+    {
+      "id": "parity",
+      "category": "combinational",
+      "title": "Parity generator",
+      "description": "A tree of XOR gates tells whether an 8-bit word has an odd number of 1s. Sent with the word, this parity bit lets the receiver detect a single flipped bit. Shown beside the ReduceXor primitive.",
+      "uses": []
+    },
+    {
+      "id": "gray_code",
+      "category": "combinational",
+      "title": "Gray code",
+      "description": "In Gray code, neighbouring numbers differ in exactly one bit. Binary to Gray is B XOR (B shifted right by one); Gray to binary undoes it with a chain of XORs from the top bit down. The second circuit gets the original number back.",
+      "uses": []
+    },
+    {
+      "id": "priority_encoder",
+      "category": "combinational",
+      "title": "Priority encoder",
+      "description": "Y is the number of the highest input bit that is 1, and Valid says whether any is. A chain of multiplexers passes a number up from bit 0 to bit 7; every bit that is set replaces it with its own index, so the highest one wins.",
+      "uses": []
+    },
+    {
+      "id": "seven_segment",
+      "category": "combinational",
+      "title": "7-segment display",
+      "description": "A ROM holds the pattern of lit segments for each hex digit 0 to F; the seven outputs a to g are arranged like the segments of a digit. Change Digit and watch the figure change.",
+      "uses": []
+    },
+    {
+      "id": "bcd_to_binary",
+      "category": "combinational",
+      "title": "BCD to binary",
+      "description": "Turns two decimal digits (tens and ones, 4 bits each) into one binary number: Tens x 10 + Ones, where Tens x 10 is Tens x 8 + Tens x 2 and multiplying by a power of two is a shift. Uses two ripple-carry adders.",
+      "uses": ["ripple_adder/adder8"]
+    },
+    {
+      "id": "barrel_shifter",
+      "category": "combinational",
+      "title": "Barrel shifter",
+      "description": "Shifts A left by S places (0 to 7) in three stages: shift by 1 if bit 0 of S is set, then by 2 if bit 1 is set, then by 4 if bit 2 is set. Each stage is a word multiplexer choosing between its input and the shifted input.",
+      "uses": ["mux/mux2x8"]
+    },
+    {
+      "id": "cla_adder",
+      "category": "combinational",
+      "title": "Carry-lookahead adder",
+      "description": "A ripple adder waits for each carry to pass through every bit before it. The lookahead unit computes every carry at once from the generate (A and B) and propagate (A xor B) bits: carry k+1 is 1 if bit k generates one, or a lower bit generates one and every bit above it propagates. Shown beside a 4-bit ripple adder.",
+      "uses": ["full_adder/full_adder"]
+    },
+    {
+      "id": "multiplier",
+      "category": "combinational",
+      "title": "4x4 array multiplier",
+      "description": "Multiplies like long multiplication in binary: each bit of B either keeps a copy of A or zeroes it, giving four partial products. Three rows of 4-bit ripple adders add them, each row shifted one place; one bit of the product falls out of every row.",
+      "uses": ["cla_adder/ripple4"]
+    },
+    {
+      "id": "edge_detector",
+      "category": "sequential",
+      "title": "Edge detector",
+      "description": "A Delay remembers the input from the last tick, so 'now 1 and was 0' is a rising edge and 'now 0 and was 1' a falling edge. Each output flashes for exactly one tick; later circuits use the rising-edge detector to act once per clock period.",
+      "uses": []
+    },
+    {
+      "id": "shift_register",
+      "category": "sequential",
+      "title": "Shift register",
+      "description": "Four flip-flops in a row, each one's output feeding the next one's input. On every rising clock edge the bits move one place to the right and Data enters on the left. Set Data and watch the pattern travel along the lights.",
+      "uses": ["flip_flop/dff"]
+    },
+    {
+      "id": "johnson_counter",
+      "category": "sequential",
+      "title": "Johnson counter",
+      "description": "A shift register whose last output is fed back, inverted, to its first input. It fills up with 1s, then with 0s, and repeats: four flip-flops give eight states, and neighbouring states differ in one bit.",
+      "uses": ["flip_flop/dff"]
+    },
+    {
+      "id": "lfsr",
+      "category": "sequential",
+      "title": "Pseudo-random numbers (LFSR)",
+      "description": "A linear-feedback shift register: each clock it shifts left and feeds in the XNOR of bits 7, 5, 4 and 3. The numbers look random but repeat after 255 steps, every 8-bit value except 255 appearing once.",
+      "uses": ["register/register8"]
+    },
+    {
+      "id": "clock_divider",
+      "category": "sequential",
+      "title": "Clock divider",
+      "description": "Each bit of a binary counter changes half as often as the bit below it, so bit 0 is the clock divided by 2, bit 1 by 4, and so on. Built on the 8-bit counter from the curriculum.",
+      "uses": ["counter/counter8"]
+    },
+    {
+      "id": "updown_counter",
+      "category": "sequential",
+      "title": "Up/down counter",
+      "description": "On every rising clock edge while Enable is 1, the register loads Q + 1 when Up is 1 and Q - 1 when Up is 0. Subtracting 1 is adding 255: the carry out of the top bit is simply dropped.",
+      "uses": ["mux/mux2x8", "register/register8", "ripple_adder/adder8"]
+    },
+    {
+      "id": "bcd_counter",
+      "category": "sequential",
+      "title": "BCD counter",
+      "description": "Two decimal digits counting 00 to 99. Each digit is a counter that goes back to 0 after Last (here 9) and then gives a one-tick Carry, which steps the next digit. Reset clears both.",
+      "uses": ["edge_detector/rising"]
+    },
+    {
+      "id": "debouncer",
+      "category": "sequential",
+      "title": "Debouncer",
+      "description": "A real button bounces between 0 and 1 for a moment when pressed. The debouncer keeps the last four samples and only changes its output when all four agree: all 1 sets the latch, all 0 resets it.",
+      "uses": []
+    },
+    {
+      "id": "pwm",
+      "category": "sequential",
+      "title": "PWM generator",
+      "description": "Pulse-width modulation: a 4-bit counter runs from 0 to 15 over and over, and the output is 1 while the count is below Duty. So the output is on for Duty out of every 16 ticks, which is how a digital pin dims a light.",
+      "uses": ["magnitude/mag4"]
+    },
+    {
+      "id": "sequence_detector",
+      "category": "sequential",
+      "title": "Sequence detector",
+      "description": "A finite-state machine that lights Found after the bits 1, 0, 1, 1 arrive in a row (overlaps count). Set Bit, then press Step: the state register moves to the state the table gives for the old state and the new bit. State 4 means the pattern was just seen.",
+      "uses": ["edge_detector/rising"]
+    },
+    {
+      "id": "traffic_light",
+      "category": "sequential",
+      "title": "Traffic light",
+      "description": "A counter steps through ten phases, one per clock period, and a ROM turns each phase into lights: north-south green for four phases, yellow for one, then the same for east-west while north-south is red. The counter is the BCD counter's digit with Last = 9.",
+      "uses": ["bcd_counter/mod_counter", "edge_detector/rising"]
+    },
+    {
+      "id": "stopwatch",
+      "category": "sequential",
+      "title": "Stopwatch",
+      "description": "Three digit counters in a chain count tenths, seconds and tens of seconds (up to 59.9); a digit's carry steps the next one. Run starts and stops counting, Reset clears the time. One clock period is a tenth.",
+      "uses": ["bcd_counter/mod_counter", "edge_detector/rising"]
+    },
+    {
+      "id": "stack",
+      "category": "systems",
+      "title": "Stack",
+      "description": "A last-in, first-out store of up to eight bytes in a RAM. Push writes Data at the current depth and adds one; Pop takes one off, so Top shows the byte pushed most recently. Pushing when Full and popping when Empty are ignored.",
+      "uses": ["edge_detector/rising"]
+    },
+    {
+      "id": "uart_tx",
+      "category": "systems",
+      "title": "UART transmitter",
+      "description": "Sends a byte one bit at a time, the way a serial port does: the line idles at 1, then a 0 start bit, the eight data bits from bit 0 up, and a 1 stop bit, one bit per clock period. A 10-bit shift register holds the frame and a counter counts the bits still to send.",
+      "uses": ["edge_detector/rising"]
+    },
+    {
+      "id": "reaction_timer",
+      "category": "systems",
+      "title": "Reaction timer",
+      "description": "A small game. Press Start: after a random wait of 8 to 15 clock periods (from the LFSR), GO! lights and the time starts counting. Press Stop as fast as you can; the display shows how many periods you took. Pressing Stop before GO! lights Too soon!",
+      "uses": ["bcd_counter/mod_counter", "edge_detector/rising", "lfsr/lfsr8"]
+    },
+    {
+      "id": "cpu_fibonacci",
+      "category": "systems",
+      "title": "CPU: Fibonacci",
+      "description": "The curriculum's CPU with three more instructions, ADDI, SUBI and ANDI (ops 12 to 14: rd = rs op imm, the ALU's B input switched to the immediate). Its program prints the Fibonacci numbers 0, 1, 1, 2, 3, 5, ... 144 on Out, using OR r, r as a move and SUBI to count the loop down, then halts.",
+      "uses": ["alu/alu8", "mux/mux2x8", "register/register8", "register_file/regfile4x8", "ripple_adder/adder8"]
+    },
+    {
+      "id": "cpu16",
+      "category": "systems",
+      "title": "16-bit CPU of gates",
+      "description": "A multi-cycle 16-bit CPU in which every register bit is a flip-flop of gates: program counter, instruction register, eight registers r0-r7, the A, B and Y latches, the stack pointer, a 16-word stack memory, the flags and the state. Each instruction takes three or four clock periods: fetch, decode (read registers), execute (ALU), and write back for instructions that write a register or memory; the control unit is hard-wired logic (a 4-to-16 decoder, an OR plane and the state flip-flops), not microcode. The program ROM and the 256-word data RAM are primitives. Instructions are 16 bits: op (15-12), rd (11-9), rs (8-6), rt (5-3), fn (2-0); imm8 is bits 7-0, simm6 bits 5-0 sign-extended. Ops: 1 ALU rd = rs fn rt (fn 0 ADD, 1 SUB, 2 AND, 3 OR, 4 XOR, 5 NOT rs, 6 SHL rs, 7 SHR rs), 2 CMP rs, rt (flags of rs - rt), 3 LDI rd, imm8, 4 ADDI rd = rs + simm6, 5 LD rd = RAM[rs + simm6], 6 ST RAM[rs + simm6] = rd, 8 JMP imm8, 9 branch to imm8 if the condition in bits 11-9 holds (0 Z, 1 not Z, 2 C, 3 not C, 4 N, 5 not N, 6 always), 10 CALL imm8 (push the return address on a 16-word stack), 11 RET, 12 OUT rs, 15 HLT, the rest NOP. ALU, ADDI and CMP set Z, N and C (C: the adder's carry, which for SUB and CMP means no borrow; the bit shifted out for shifts; 0 for logic). The program prints the primes below 250 on Out: it keeps the primes found in the data RAM and tests each odd candidate by CALLing a subroutine that divides by repeated subtraction (and CALLs another), then halts.",
+      "uses": ["cla_adder/cla4", "decoder/decoder2", "flip_flop/dff", "mux/mux2", "mux/mux2x8", "register/register8"]
+    },
+    {
+      "id": "cpu16_rtl",
+      "category": "systems",
+      "title": "16-bit CPU of words",
+      "description": "The 16-bit CPU of gates again, with the same instruction set and the same program, built from word primitives (Register, Add, Mux, Ram, Rom) instead of gates: it runs one instruction per tick, with the control signals from a 16-word control ROM. Its Out sequence is the same as the gate CPU's (the primes below 250), at a small fraction of the simulation cost.",
+      "uses": []
+    },
+    {
+      "id": "screen_plotter",
+      "category": "displays",
+      "title": "Screen: bouncing plotter",
+      "description": "A screen in pixel-port mode paints the pixel at (x, y) each tick that draw is on, and keeps it. A step counter moves the pen once every 16 ticks; x and y fold its low bits into a back-and-forth sweep (x xor 31 on the way back), so the pen bounces around the 32 by 16 screen, and the colour changes every lap. Clear blanks the screen.",
+      "uses": []
+    },
+    {
+      "id": "screen_xor",
+      "category": "displays",
+      "title": "Screen: XOR pattern",
+      "description": "A framebuffer screen shows its own video memory, written like a RAM: address y x 32 + x, one 4-bit colour per pixel. A counter sweeps all 1024 addresses, about once a second at the default speed, writing (x xor y) + frame; each sweep adds one to the frame, so the pattern's colours cycle.",
+      "uses": []
+    },
+    {
+      "id": "screen_bars",
+      "category": "displays",
+      "title": "Screen: scanline colour bars",
+      "description": "A scanline screen works like a TV: every tick the beam paints one colour and moves right; hsync starts the next line and vsync the next frame. A counter makes a 64-tick line (32 pixels, then 31 blanking ticks past the right edge, then hsync) and a 16-line frame ending in vsync. Eight bars, brighter in the lower half, shift by one each frame.",
+      "uses": []
+    },
+    {
+      "id": "screen_text",
+      "category": "displays",
+      "title": "Screen: text",
+      "description": "A text screen's memory holds one character code per cell, and a built-in 8 by 8 font draws it: write 72 and an H appears. A counter copies a message ROM into the 32 by 4 cells (bit 7 inverts the title row). Hold Write to put Char (an ASCII code) into Cell (row x 32 + column) by hand.",
+      "uses": []
+    }
+  ]
+}

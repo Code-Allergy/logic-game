@@ -1,0 +1,58 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "barrel",
+  "circuits": [
+    {
+      "name": "barrel",
+      "title": "Barrel shifter",
+      "nodes": [
+        {"name": "A", "type": "Input", "w": 8, "at": [0, 0]},
+        {"name": "S", "type": "Input", "w": 3, "at": [0, -240]},
+        {
+          "name": "s",
+          "type": "Split",
+          "w": 3,
+          "lo": "{i}",
+          "len": 1,
+          "label": "S{i}",
+          "at": [300, -140],
+          "count": 3,
+          "step": [300, 0]
+        },
+        {"name": "z1", "type": "Const", "value": 0, "at": [100, 200]},
+        {"name": "lo1", "type": "Split", "w": 8, "lo": 0, "len": 7, "at": [100, 100]},
+        {"name": "sh1", "type": "Merge", "widths": [1, 7], "label": "A << 1", "at": [200, 100]},
+        {"name": "st1", "use": "mux/mux2x8", "label": "shift by 1?", "at": [300, 0]},
+        {"name": "z2", "type": "Const", "w": 2, "value": 0, "at": [400, 200]},
+        {"name": "lo2", "type": "Split", "w": 8, "lo": 0, "len": 6, "at": [400, 100]},
+        {"name": "sh2", "type": "Merge", "widths": [2, 6], "label": "<< 2", "at": [500, 100]},
+        {"name": "st2", "use": "mux/mux2x8", "label": "shift by 2?", "at": [600, 0]},
+        {"name": "z4", "type": "Const", "w": 4, "value": 0, "at": [700, 200]},
+        {"name": "lo4", "type": "Split", "w": 8, "lo": 0, "len": 4, "at": [700, 100]},
+        {"name": "sh4", "type": "Merge", "widths": [4, 4], "label": "<< 4", "at": [800, 100]},
+        {"name": "st4", "use": "mux/mux2x8", "label": "shift by 4?", "at": [900, 0]},
+        {"name": "Y", "type": "Output", "w": 8, "at": [1060, 0]}
+      ],
+      "wires": [
+        ["A", "st1.A", "lo1"],
+        ["S", "s"],
+        ["z1", "sh1.a0"],
+        ["lo1", "sh1.a1"],
+        ["sh1", "st1.B"],
+        ["s[0]", "st1.Sel"],
+        ["st1", "st2.A", "lo2"],
+        ["z2", "sh2.a0"],
+        ["lo2", "sh2.a1"],
+        ["sh2", "st2.B"],
+        ["s[1]", "st2.Sel"],
+        ["st2", "st4.A", "lo4"],
+        ["z4", "sh4.a0"],
+        ["lo4", "sh4.a1"],
+        ["sh4", "st4.B"],
+        ["s[2]", "st4.Sel"],
+        ["st4", "Y"]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,130 @@
+{
+  "format": "gatequest-demos",
+  "version": 1,
+  "levels": [
+    { "level": 1, "title": "Gates", "description": "Six little tiles that each decide one thing. Everything on this road is built from them." },
+    { "level": 2, "title": "Adding bits", "description": "Two gates add two bits. Chain the halves and three bits add up, carry and all." },
+    { "level": 3, "title": "Adding words", "description": "Eight full adders in a row add whole numbers, the carry rippling from bit to bit." },
+    { "level": 4, "title": "Choosing: decoders and multiplexers", "short": "Choosing", "description": "A number picks one line out of many, or one word out of many. This is how a computer chooses." },
+    { "level": 5, "title": "Feedback", "description": "Feed a gate its own output and it remembers. One loop holds one bit." },
+    { "level": 6, "title": "Latches and flip-flops", "short": "Latches", "description": "Put a gate in front of the loop and the bit changes only when told: on a level, then on a clock edge." },
+    { "level": 7, "title": "Registers and counters", "short": "Registers", "description": "Flip-flops in a row hold a whole number. Feed a register its own value plus one and it counts." },
+    { "level": 8, "title": "Register file", "description": "Four registers behind one write port and two read ports: the CPU's scratch pad." },
+    { "level": 9, "title": "ALU", "description": "Add, subtract, AND and OR in one box, with flags that say whether the result was zero or carried." },
+    { "level": 10, "title": "A small CPU", "short": "CPU", "description": "A counter walks through a program; each instruction steers the register file and the ALU. The end of the road." }
+  ],
+  "demos": [
+    {
+      "id": "gates",
+      "level": 1,
+      "title": "Logic gates",
+      "description": "The six basic gates side by side: NOT, AND, OR, XOR, NAND and NOR. Toggle the inputs A and B and watch every output. Each gate is also a tiny definition (open one to see inside); the demos above build on them.",
+      "uses": []
+    },
+    {
+      "id": "universal",
+      "level": 1,
+      "title": "NAND and NOR are universal",
+      "description": "NOT, AND, OR and XOR built only from NAND gates, and NOT, OR and AND built only from NOR gates. Any circuit can be made from just one of these two gates. The XOR primitive is shown for comparison.",
+      "uses": []
+    },
+    {
+      "id": "half_adder",
+      "level": 2,
+      "title": "Half adder",
+      "description": "Adds two bits: Sum = A XOR B, Carry = A AND B. Built from the XOR and AND gate definitions of level 1.",
+      "uses": ["gates/and", "gates/xor"]
+    },
+    {
+      "id": "full_adder",
+      "level": 2,
+      "title": "Full adder",
+      "description": "Adds three bits (A, B and a carry in) with two half adders and an OR. This is the building block of every adder that follows.",
+      "uses": ["gates/or", "half_adder/half_adder"]
+    },
+    {
+      "id": "ripple_adder",
+      "level": 3,
+      "title": "Ripple-carry adder",
+      "description": "An 8-bit adder: eight full adders in a row, each carry out feeding the next carry in. Shown beside the word-level Add primitive, which computes the same result in one step.",
+      "uses": ["full_adder/full_adder"]
+    },
+    {
+      "id": "decoder",
+      "level": 4,
+      "title": "Decoder",
+      "description": "A 2-to-4 decoder turns a 2-bit number S into four lines, exactly one of them on: line i is on when S = i. Built from NOT and AND gates.",
+      "uses": ["gates/and", "gates/not"]
+    },
+    {
+      "id": "mux",
+      "level": 4,
+      "title": "Multiplexer",
+      "description": "A 2-to-1 multiplexer passes A when Sel is 0 and B when Sel is 1. Eight of them side by side switch a whole 8-bit word. Shown beside the Mux primitive.",
+      "uses": ["gates/and", "gates/not", "gates/or"]
+    },
+    {
+      "id": "mux_tree",
+      "level": 4,
+      "title": "Mux tree",
+      "description": "Three 2-to-1 word multiplexers in a tree pick one of four 8-bit words D0 to D3: the low bit of Sel chooses within each pair, the high bit between the pairs. Shown beside the same tree of Mux primitives.",
+      "uses": ["mux/mux2x8"]
+    },
+    {
+      "id": "sr_latch",
+      "level": 5,
+      "title": "SR latch",
+      "description": "Two NOR gates feeding each other remember one bit: S sets it, R resets it. A loop of gates has no stable meaning on its own, so the loop goes through a Delay, which holds the bit from one tick to the next: loops need state. Q changes one tick after S or R. Shown beside the SrLatch primitive, which behaves the same.",
+      "uses": ["gates/nor"]
+    },
+    {
+      "id": "d_latch",
+      "level": 6,
+      "title": "D latch",
+      "description": "An SR latch with gating in front: while E is 1 the latch copies D (one tick later), while E is 0 it keeps its bit. Shown beside the DLatch primitive, which is transparent in the same tick.",
+      "uses": ["gates/and", "gates/not", "sr_latch/sr_latch"]
+    },
+    {
+      "id": "flip_flop",
+      "level": 6,
+      "title": "Edge-triggered flip-flop",
+      "description": "Two D latches in series, master and slave, enabled by opposite clock levels. The master follows D while Clk is 0; when Clk rises the slave takes the master's bit. So Q changes only on a rising clock edge (one tick after it).",
+      "uses": ["d_latch/d_latch", "gates/not"]
+    },
+    {
+      "id": "register",
+      "level": 7,
+      "title": "Register",
+      "description": "Eight flip-flops store an 8-bit word. A 2-to-1 multiplexer in front of each one feeds back its own bit unless Load is 1, so the register only takes D on a rising Clk edge while Load is set. The Register primitive beside it has no clock: it takes D at every tick while its enable is 1.",
+      "uses": ["flip_flop/dff", "mux/mux2"]
+    },
+    {
+      "id": "counter",
+      "level": 7,
+      "title": "Counter",
+      "description": "A register plus a ripple-carry adder: on every rising clock edge the register loads Q + 1 while Enable is 1, or 0 while Reset is 1. Set Enable and run the clock. Beside it, the same counter from word-level primitives (Register, Add, Mux) with a rising-edge detector made of a Delay; both always show the same count.",
+      "uses": ["gates/or", "mux/mux2x8", "register/register8", "ripple_adder/adder8"]
+    },
+    {
+      "id": "register_file",
+      "level": 8,
+      "title": "Register file",
+      "description": "Four 8-bit registers r0 to r3 with one write port and two read ports. The decoder turns WAddr into one write enable; on a rising Clk edge with WE set, WData lands in that register. Two mux trees read the registers chosen by RA and RB at any time.",
+      "uses": ["decoder/decoder2", "gates/and", "mux_tree/mux4x8", "register/register8"]
+    },
+    {
+      "id": "alu",
+      "level": 9,
+      "title": "ALU",
+      "description": "An 8-bit arithmetic logic unit. Op selects the result: 0 = A + B, 1 = A - B (B is inverted by XOR gates and the carry in is set), 2 = A AND B, 3 = A OR B. Carry is the adder's carry out (for subtraction, 1 means no borrow); Zero is 1 when the result is 0.",
+      "uses": ["gates/and", "gates/not", "gates/or", "gates/xor", "mux_tree/mux4x8", "ripple_adder/adder8"]
+    },
+    {
+      "id": "cpu",
+      "level": 10,
+      "title": "A small CPU",
+      "description": "A program counter, a program in ROM, a microcode ROM that decodes each instruction, the register file and the ALU. Instructions are 16 bits: op (bits 12-15), rd (10-11), rs (8-9), and an 8-bit immediate whose low two bits name rt. Ops: 1 LDI rd, imm; 2 JMP imm; 3 JZ rs, imm; 4 ADD, 5 SUB, 6 AND, 7 OR rd = rs op rt; 8 OUT rs; 15 HLT. One instruction runs per clock cycle. The program multiplies 5 by 7 by repeated addition and outputs 35 before it halts.",
+      "uses": ["alu/alu8", "gates/and", "gates/not", "gates/or", "mux/mux2x8", "register/register8", "register_file/regfile4x8", "ripple_adder/adder8"]
+    }
+  ]
+}

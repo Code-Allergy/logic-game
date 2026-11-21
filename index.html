@@ -8,10 +8,32 @@
         <!-- <link data-trunk rel="copy-dir" href="credits"/>
         <link data-trunk rel="copy-file" href="build/windows/icon.ico"/> -->
         <!-- <link rel="icon" href="icon.ico"> -->
+        <style>
+            html, body, .game-container, #gatequest-canvas {
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+            }
+
+            html, body {
+                background: #0a1c3d;
+                overflow: hidden;
+            }
+
+            .game-container {
+                position: relative;
+                display: block;
+            }
+
+            #gatequest-canvas {
+                display: block;
+                background: #0a1c3d;
+            }
+        </style>
         <!-- <link data-trunk rel="inline" href="build/web/styles.css"/> -->
-    <link rel="modulepreload" href="./gate_quest-443a8a8e917345f9.js" crossorigin="anonymous" integrity="sha384-8HtrGZlL3GUP43n/EwAnK3J1Za5YV9imry0Lw/5RpjAjMDRrME4y5OMnlP3IiWO0"><link rel="preload" href="./gate_quest-443a8a8e917345f9_bg.wasm" crossorigin="anonymous" integrity="sha384-PueybHit+Z+WFKzTvu1b+/UrtlGnn5x0IJP69EuFiLKQZer2l4xjOrrFXSuGaNNk" as="fetch" type="application/wasm"></head>
+    <link rel="modulepreload" href="./gate_quest-eef0045b966e75c0.js" crossorigin="anonymous" integrity="sha384-w3avXiB3PMwGhr6Lwu0xzHXoCOs04iyoiGrydYMNTxspcq2E6B9f0G0qwmpK0pLW"><link rel="preload" href="./gate_quest-8109923f1480c23d_bg.wasm" crossorigin="anonymous" integrity="sha384-ZlPK8LYtxKzfjInRMHp7p72Fd2jzQyEY5iAQWd7NxfEM4kTAA0LXA7MbQOK+7Ke3" as="fetch" type="application/wasm"></head>
     <body>
-        <!-- <link data-trunk rel="inline" href="build/web/sound.js"/> -->
         <div class="game-container">
             <div class="lds-dual-ring"></div>
             <canvas id="gatequest-canvas">
@@ -20,8 +42,9 @@
         </div>
     
 <script type="module">
-import init, * as bindings from './gate_quest-443a8a8e917345f9.js';
-const wasm = await init({ module_or_path: './gate_quest-443a8a8e917345f9_bg.wasm' });
+import init, * as bindings from './gate_quest-eef0045b966e75c0.js';
+
+const wasm = await init({ module_or_path: './gate_quest-8109923f1480c23d_bg.wasm' });
 
 
 window.wasmBindings = bindings;

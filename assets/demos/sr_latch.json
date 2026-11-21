@@ -1,0 +1,47 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "sr_latch",
+      "title": "SR latch (two NORs and a Delay)",
+      "nodes": [
+        {"name": "S", "type": "Input", "at": [0, 40]},
+        {"name": "R", "type": "Input", "at": [0, -80]},
+        {"name": "nor_s", "use": "gates/nor", "at": [140, 40]},
+        {"name": "nor_r", "use": "gates/nor", "at": [280, -80]},
+        {"name": "state", "type": "Delay", "label": "state (Delay)", "at": [420, 160]},
+        {"name": "Q", "type": "Output", "at": [560, 160]},
+        {"name": "Qn", "type": "Output", "at": [560, 40]}
+      ],
+      "wires": [
+        ["S", "nor_s.A"],
+        ["state", "nor_s.B", "Q"],
+        ["R", "nor_r.A"],
+        ["nor_s", "nor_r.B", "Qn"],
+        ["nor_r", "state"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "SR latch",
+      "nodes": [
+        {"name": "S", "type": "Input", "at": [0, 80]},
+        {"name": "R", "type": "Input", "at": [0, -80]},
+        {"name": "latch", "use": "sr_latch", "label": "SR latch (gates)", "at": [280, 80]},
+        {"name": "prim", "type": "SrLatch", "label": "SrLatch primitive", "at": [280, -80]},
+        {"name": "q_gates", "type": "Output", "label": "Q (gates)", "at": [420, 120]},
+        {"name": "qn_gates", "type": "Output", "label": "Qn (gates)", "at": [420, 40]},
+        {"name": "q_prim", "type": "Output", "label": "Q (SrLatch)", "at": [420, -80]}
+      ],
+      "wires": [
+        ["S", "latch.S", "prim.s"],
+        ["R", "latch.R", "prim.r"],
+        ["latch.Q", "q_gates"],
+        ["latch.Qn", "qn_gates"],
+        ["prim", "q_prim"]
+      ]
+    }
+  ]
+}

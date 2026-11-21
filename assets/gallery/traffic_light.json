@@ -1,0 +1,69 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "traffic",
+  "circuits": [
+    {
+      "name": "traffic",
+      "title": "Traffic light",
+      "nodes": [
+        {"name": "nine", "type": "Const", "w": 4, "value": 9, "at": [0, 160]},
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 8,
+          "duty": 4,
+          "phase": 4,
+          "label": "Clock",
+          "at": [0, 0]
+        },
+        {"name": "Reset", "type": "Input", "at": [0, -160]},
+        {"name": "tick", "use": "edge_detector/rising", "label": "rising edge", "at": [160, 0]},
+        {"name": "phase", "use": "bcd_counter/mod_counter", "label": "phase 0-9", "at": [340, 0]},
+        {
+          "name": "lights",
+          "type": "Rom",
+          "addr_bits": 4,
+          "w": 6,
+          "contents": [12, 12, 12, 12, 10, 33, 33, 33, 33, 17],
+          "label": "light pattern",
+          "at": [500, 0]
+        },
+        {"name": "show", "type": "Display", "w": 4, "label": "Phase", "at": [520, -300]},
+        {
+          "name": "ns",
+          "type": "Split",
+          "w": 6,
+          "lo": "{i}",
+          "len": 1,
+          "at": [660, 280],
+          "count": 3,
+          "step": [0, -80]
+        },
+        {"name": "ew_r", "type": "Split", "w": 6, "lo": 3, "len": 1, "at": [660, -120]},
+        {"name": "ew_y", "type": "Split", "w": 6, "lo": 4, "len": 1, "at": [660, -200]},
+        {"name": "ew_g", "type": "Split", "w": 6, "lo": 5, "len": 1, "at": [660, -280]},
+        {"name": "ns_red", "type": "Output", "label": "North-south red", "at": [800, 280]},
+        {"name": "ns_yellow", "type": "Output", "label": "North-south yellow", "at": [800, 200]},
+        {"name": "ns_green", "type": "Output", "label": "North-south green", "at": [800, 120]},
+        {"name": "ew_red", "type": "Output", "label": "East-west red", "at": [800, -120]},
+        {"name": "ew_yellow", "type": "Output", "label": "East-west yellow", "at": [800, -200]},
+        {"name": "ew_green", "type": "Output", "label": "East-west green", "at": [800, -280]}
+      ],
+      "wires": [
+        ["clock", "tick"],
+        ["tick", "phase.Step"],
+        ["Reset", "phase.Clear"],
+        ["nine", "phase.Last"],
+        ["phase.Q", "lights", "show"],
+        ["lights", "ns", "ew_r", "ew_y", "ew_g"],
+        ["ns[0]", "ns_red"],
+        ["ns[1]", "ns_yellow"],
+        ["ns[2]", "ns_green"],
+        ["ew_r", "ew_red"],
+        ["ew_y", "ew_yellow"],
+        ["ew_g", "ew_green"]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "seg7",
+      "title": "7-segment decoder",
+      "nodes": [
+        {"name": "D", "type": "Input", "w": 4, "at": [0, 0]},
+        {
+          "name": "rom",
+          "type": "Rom",
+          "addr_bits": 4,
+          "w": 7,
+          "contents": [
+            "0x3F", "0x06", "0x5B", "0x4F", "0x66", "0x6D", "0x7D", "0x07", "0x7F", "0x6F", "0x77",
+            "0x7C", "0x39", "0x5E", "0x79", "0x71"
+          ],
+          "label": "segment patterns",
+          "at": [160, 0]
+        },
+        {
+          "name": "s",
+          "type": "Split",
+          "w": 7,
+          "lo": "{i}",
+          "len": 1,
+          "at": [320, 240],
+          "count": 7,
+          "step": [0, -80]
+        },
+        {"name": "a", "type": "Output", "at": [460, 240]},
+        {"name": "b", "type": "Output", "at": [460, 160]},
+        {"name": "c", "type": "Output", "at": [460, 80]},
+        {"name": "d", "type": "Output", "at": [460, 0]},
+        {"name": "e", "type": "Output", "at": [460, -80]},
+        {"name": "f", "type": "Output", "at": [460, -160]},
+        {"name": "g", "type": "Output", "at": [460, -240]}
+      ],
+      "wires": [
+        ["D", "rom"],
+        ["rom", "s"],
+        ["s[0]", "a"],
+        ["s[1]", "b"],
+        ["s[2]", "c"],
+        ["s[3]", "d"],
+        ["s[4]", "e"],
+        ["s[5]", "f"],
+        ["s[6]", "g"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "7-segment display",
+      "nodes": [
+        {"name": "D", "type": "Input", "w": 4, "label": "Digit", "at": [0, 0]},
+        {"name": "dec", "use": "seg7", "label": "decoder", "at": [200, 0]},
+        {"name": "a", "type": "Output", "at": [520, 160]},
+        {"name": "f", "type": "Output", "at": [440, 80]},
+        {"name": "b", "type": "Output", "at": [600, 80]},
+        {"name": "g", "type": "Output", "at": [520, 0]},
+        {"name": "e", "type": "Output", "at": [440, -80]},
+        {"name": "c", "type": "Output", "at": [600, -80]},
+        {"name": "d", "type": "Output", "at": [520, -160]},
+        {"name": "show", "type": "Display", "w": 4, "label": "Digit (hex)", "at": [520, -300]}
+      ],
+      "wires": [
+        ["D", "dec", "show"],
+        ["dec.a", "a"],
+        ["dec.b", "b"],
+        ["dec.c", "c"],
+        ["dec.d", "d"],
+        ["dec.e", "e"],
+        ["dec.f", "f"],
+        ["dec.g", "g"]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "cmp1",
+  "circuits": [
+    {
+      "name": "cmp1",
+      "title": "One-bit comparator",
+      "nodes": [
+        {"name": "A", "type": "Input", "at": [0, 80]},
+        {"name": "B", "type": "Input", "at": [0, -80]},
+        {"name": "na", "type": "Not", "label": "not A", "at": [140, 40]},
+        {"name": "nb", "type": "Not", "label": "not B", "at": [140, -40]},
+        {"name": "gt", "type": "And", "label": "A and not B", "at": [280, 120]},
+        {"name": "lt", "type": "And", "label": "not A and B", "at": [280, -120]},
+        {"name": "eq", "type": "Nor", "label": "neither", "at": [420, 0]},
+        {"name": "Gt", "type": "Output", "at": [560, 120]},
+        {"name": "Eq", "type": "Output", "at": [560, 0]},
+        {"name": "Lt", "type": "Output", "at": [560, -120]}
+      ],
+      "wires": [
+        ["A", "gt.a", "na"],
+        ["B", "lt.b", "nb"],
+        ["na", "lt.a"],
+        ["nb", "gt.b"],
+        ["gt", "Gt", "eq.a"],
+        ["lt", "Lt", "eq.b"],
+        ["eq", "Eq"]
+      ]
+    }
+  ]
+}
