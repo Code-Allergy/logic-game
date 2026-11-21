@@ -869,3 +869,45 @@ fn fibonacci_cpu_prints_the_sequence() {
     assert_eq!(value_at(&mut app, "Out"), 144);
     assert_eq!(value_at(&mut app, "PC"), halt_pc);
 }
+
+/// The CPU's output sequence until it halts (one tick at a time).
+fn fibonacci_until_halt(app: &mut App) -> Vec<u64> {
+    let mut seen: Vec<u64> = vec![value_at(app, "Out value")];
+    let mut ticks = 0;
+    while value_at(app, "Halted") == 0 {
+        run(app, 1);
+        ticks += 1;
+        assert!(ticks < 2000, "the CPU did not halt");
+        let v = value_at(app, "Out value");
+        if seen.last() != Some(&v) {
+            seen.push(v);
+        }
+    }
+    seen
+}
+
+/// Reset (the transport's Reset button and `R`) returns a halted CPU to
+/// power-on: tick 0, registers and RAM cleared, the program runs again
+/// from the start.
+#[test]
+fn reset_restarts_the_fibonacci_cpu() {
+    let mut app = open("cpu_fibonacci");
+    let first = fibonacci_until_halt(&mut app);
+    assert_eq!(first, [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]);
+    assert!(app.world().resource::<SimBridge>().tick_count() > 0);
+    let running = app.world().resource::<SimBridge>().is_running();
+
+    app.world().resource::<SimBridge>().reset();
+    settle(&mut app);
+    assert_eq!(app.world().resource::<SimBridge>().tick_count(), 0);
+    assert_eq!(app.world().resource::<SimBridge>().is_running(), running);
+    assert_eq!(value_at(&mut app, "Halted"), 0);
+    assert_eq!(value_at(&mut app, "PC"), 0);
+    assert_eq!(value_at(&mut app, "Out value"), 0);
+
+    let again = fibonacci_until_halt(&mut app);
+    assert_eq!(
+        again, first,
+        "it prints 0, 1, 1, 2, … again (repeats show once)"
+    );
+}

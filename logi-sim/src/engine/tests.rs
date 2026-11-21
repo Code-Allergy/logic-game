@@ -141,6 +141,31 @@ fn steps_run_while_paused_and_probes_read_back() {
     assert_eq!(f.values.len(), 3, "readback is exactly the probes");
 }
 
+#[test]
+fn reset_returns_to_tick_zero_and_keeps_inputs_and_rate() {
+    let (d, en, q, mem) = counter_design(false);
+    let clock = FakeClock::new();
+    let c = || clock.read();
+    let mut e = LocalEngine::new(Options::debug());
+    e.core.reset(); // before any load: no-op
+    e.load(&d, 1);
+    e.core.set_input(en, 1);
+    e.core.set_probes(probes(q, mem));
+    e.core.step(9);
+    e.run_frame(Duration::from_secs(1), &c);
+    assert_eq!((e.frame().tick, e.frame().values[0]), (9, 8));
+    e.core.step(100); // queued steps are dropped by the reset
+    e.core.reset();
+    assert_eq!(e.core.tick_count(), 0);
+    assert_eq!(e.run_frame(Duration::from_secs(1), &c), 0);
+    assert_eq!((e.frame().tick, e.frame().values[0]), (0, 0));
+    assert_eq!(e.core.rate(), Rate::Paused);
+    // `en` is still driven: the counter runs again from 0.
+    e.core.step(5);
+    e.run_frame(Duration::from_secs(1), &c);
+    assert_eq!((e.frame().tick, e.frame().values[0]), (5, 5));
+}
+
 /// Probes on nets that live only in a packed lane (lane slots) and a
 /// threaded `Sim` read the same values as an unpacked, single-threaded
 /// engine (#41).
@@ -326,6 +351,21 @@ mod threaded {
         let f = e.frame();
         assert_eq!((f.tick, f.values[0], f.revision), (10, 9, 1));
         assert_eq!(e.tick_count(), 10);
+    }
+
+    #[test]
+    fn reset_on_the_worker() {
+        let (d, en, q, mem) = counter_design(false);
+        let e = loaded(&d);
+        e.set_input(en, 1);
+        e.set_probes(probes(q, mem));
+        e.step(10);
+        e.reset();
+        e.sync();
+        assert_eq!((e.tick_count(), e.frame().values[0]), (0, 0));
+        e.step(3);
+        e.sync();
+        assert_eq!((e.tick_count(), e.frame().values[0]), (3, 3));
     }
 
     #[test]

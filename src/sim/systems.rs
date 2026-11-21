@@ -294,8 +294,8 @@ pub fn format_tick(tick: u64) -> String {
     out
 }
 
-/// The transport card, top centre: run, pause, step, speed chips (and a
-/// `⋯` popover with the exact rate), and the tick.
+/// The transport card, top centre: run, pause, step, reset (also `R`),
+/// speed chips (and a `⋯` popover with the exact rate), and the tick.
 #[allow(clippy::too_many_arguments)]
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
@@ -306,6 +306,7 @@ pub fn simulation_config_ui_system(
     time: Res<Time>,
     game_state: Res<State<crate::GameState>>,
     theme: Res<Theme>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut more_open: Local<bool>,
 ) -> Result<(), BevyError> {
     if game_state.get() != &crate::GameState::Simulating {
@@ -327,6 +328,7 @@ pub fn simulation_config_ui_system(
         None => "measuring…".to_owned(),
     };
     let mut speed: Option<Option<f64>> = None;
+    let mut reset = keys.just_pressed(KeyCode::KeyR) && !ctx.egui_wants_keyboard_input();
     egui::Area::new(egui::Id::new("hud_transport"))
         .anchor(egui::Align2::CENTER_TOP, [0.0, layout.margin])
         .order(egui::Order::Middle)
@@ -354,6 +356,15 @@ pub fn simulation_config_ui_system(
                             .clicked()
                         {
                             bridge.step(1);
+                        }
+                        if chunky_button(ui, &palette, "Reset", false)
+                            .on_hover_text(
+                                "Back to tick 0: registers and memories to their \
+                                 initial values, inputs kept (R)",
+                            )
+                            .clicked()
+                        {
+                            reset = true;
                         }
                         rule(ui, &palette, 30.0);
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -397,6 +408,10 @@ pub fn simulation_config_ui_system(
                     });
                 });
         });
+    if reset {
+        bridge.reset();
+        tick_rate_meter.reset(0);
+    }
     if let Some(choice) = speed {
         match choice {
             Some(hz) => {

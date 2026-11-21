@@ -1008,6 +1008,18 @@ impl SimBridge {
         });
     }
 
+    /// Return the simulation to power-on: tick 0, every register, RAM,
+    /// latch, delay and clock phase at its initial value (ROM and RAM
+    /// contents from their `init`), root inputs kept at their driven
+    /// values. The run/pause state and tick rate are unchanged.
+    pub fn reset(&self) {
+        self.with_runtime(|rt| match rt {
+            #[cfg(not(target_arch = "wasm32"))]
+            Runtime::Threaded(engine) => engine.reset(),
+            Runtime::Local { engine, .. } => engine.core.reset(),
+        });
+    }
+
     pub fn tick_count(&self) -> u64 {
         self.with_runtime(|rt| match rt {
             #[cfg(not(target_arch = "wasm32"))]
