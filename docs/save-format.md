@@ -115,9 +115,24 @@ from 0 in the order listed.
 | `DLatch` | `w` | en(1), d | q |
 | `SrLatch` | – | s(1), r(1) | q(1) |
 | `Ram` | `addr_bits`, `w` | addr, we(1), wdata | rdata(w) |
+| `Ram2` | `addr_bits`, `w`, `reads` (1..=8), `mask` (bool, optional, default false), `init` (array of integers, optional) | waddr, we(1, or w with `mask`), wdata, raddr0 .. raddr{reads-1} | rdata0 .. rdata{reads-1} (w) |
 | `SubCircuit` | `definition` (circuit id) | the definition's inputs | the definition's outputs |
 
 Semantics are those of `docs/sim-v2-design.md` section 3.
+
+`Ram2` is the dual-port RAM: one write port and `reads` read ports with
+their own addresses, all read combinationally (the write lands at the next
+tick, as for `Ram`). With `"mask": true` the `we` pin is as wide as the
+word and writes only the bits that are set. `init` gives the contents at
+reset (missing words are 0; at most `2^addr_bits` entries); a running
+circuit keeps its contents when `init` is edited. `"DualPortRam"` is read
+as `Ram2`. In version 6 the pins are named `waddr`, `we`, `wdata`,
+`raddr0`.. and `rdata0`..:
+
+```json
+{"name": "regs", "type": "Ram2", "addr_bits": 4, "w": 16, "reads": 2,
+ "init": ["0x1234", 7], "at": [200, 0]}
+```
 
 ## Wire
 
@@ -239,7 +254,7 @@ that number: `{"name": "bit", "type": "Split", "w": 8, "lo": "{i}", "len":
 "w": 3, "value": "{i}", "count": 8, …}` the constants 0 to 7. The elements
 of an array must still have the same pins (the same widths), and `{i}`
 outside an array is just text. `w` defaults to `1` for every kind that has one;
-`value` and the entries of `contents` may be strings in hex (`"0x1F"`),
+`value` and the entries of `contents` and `init` may be strings in hex (`"0x1F"`),
 binary (`"0b101"`) or decimal, with `_` separators allowed. Parameters a
 kind does not have are refused, and so are invalid ones (for example a
 `Split` past its input width).
