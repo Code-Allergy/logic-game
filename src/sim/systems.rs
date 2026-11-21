@@ -9,8 +9,9 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use uuid::Uuid;
 
+use crate::camera::{FIT_PADDING, FitView, fit_view, scale_for_wpp};
 use crate::theme::Theme;
-use crate::ui_style::{caption, chunky_button, egui_color};
+use crate::ui_style::{HudLayout, caption, chunky_button, egui_color};
 use crate::{
     MainCamera, UiPointerState, editor::workspace::save_workspace,
     temp::GateComponentSelectionEvent,
@@ -82,15 +83,21 @@ pub fn sync_bench_theme_system(
     }
 }
 
-/// Fit the camera to the circuit after a workspace load.
+type FitGate = (With<GateIdentity>, Without<MainCamera>);
+
+/// Fit the camera to the circuit after a workspace load, a view change
+/// or a [`FitView`] request: the circuit is centred in the canvas area
+/// the HUD cards leave free ([`HudLayout::free_area`]).
 pub fn fit_camera_to_circuit_system(
     active: Res<crate::sim::ActiveCircuit>,
     view: Res<CircuitView>,
+    mut requests: MessageReader<FitView>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<(&mut Projection, &mut Transform), With<MainCamera>>,
-    gates: Query<&Transform, (With<GateIdentity>, Without<MainCamera>)>,
+    gates: Query<(&Transform, &GateType), FitGate>,
 ) {
-    if !active.is_changed() && !view.is_changed() {
+    let requested = requests.read().count() > 0;
+    if !active.is_changed() && !view.is_changed() && !requested {
         return;
     }
     let (Ok((mut projection, mut transform)), Ok(window)) =
@@ -98,25 +105,22 @@ pub fn fit_camera_to_circuit_system(
     else {
         return;
     };
-    let mut min = Vec2::splat(f32::INFINITY);
-    let mut max = Vec2::splat(f32::NEG_INFINITY);
-    for t in &gates {
-        min = min.min(t.translation.truncate());
-        max = max.max(t.translation.truncate());
-    }
-    if !min.x.is_finite() {
+    let Some(content) = gates
+        .iter()
+        .map(|(t, ty)| Rect::from_center_size(t.translation.truncate(), ty.kind.size()))
+        .reduce(|a, b| a.union(b))
+    else {
         return;
-    }
-    let center = (min + max) * 0.5;
-    let size = (max - min).max(Vec2::ONE);
-    let scale = ((size.x / window.width().max(1.0)).max(size.y / window.height().max(1.0)) * 1.3)
-        .clamp(0.1, 10.0);
+    };
+    let screen = window.size();
+    let free = HudLayout::new(screen).free_area();
+    let (centre, wpp) = fit_view(content, screen, free, FIT_PADDING);
     if let Projection::Orthographic(ortho) = projection.as_mut() {
-        ortho.scale = scale;
+        ortho.scale = scale_for_wpp(ortho, screen.y, wpp);
         ortho.near = -10_000.0;
         ortho.far = 10_000.0;
     }
-    transform.translation = Vec3::new(center.x, center.y, 1000.0);
+    transform.translation = Vec3::new(centre.x, centre.y, 1000.0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -3,11 +3,11 @@
 //! Exposes all public modules and shared constants used by `main.rs`.
 
 use bevy::{
-    camera::ScalingMode, input::mouse::MouseWheel, platform::collections::HashMap, prelude::*,
-    window::PrimaryWindow,
+    camera::ScalingMode, platform::collections::HashMap, prelude::*, window::PrimaryWindow,
 };
 use bevy_egui::EguiContexts;
 
+pub mod camera;
 pub mod editor;
 pub mod fonts;
 pub mod selection;
@@ -99,15 +99,4 @@ pub fn configure_camera_scaling(
     Ok(())
 }
 
-pub fn zoom_camera(
-    mut scroll_evr: MessageReader<MouseWheel>,
-    mut cameras: Query<&mut Projection, With<MainCamera>>,
-) -> Result {
-    let mut proj = cameras.single_mut()?;
-    if let Projection::Orthographic(ortho) = proj.as_mut() {
-        for ev in scroll_evr.read() {
-            ortho.scale = (ortho.scale * (1.0 - ev.y * 0.1)).clamp(0.1, 10.0);
-        }
-    }
-    Ok(())
-}
+pub use camera::{pan_camera, zoom_camera};
