@@ -78,7 +78,8 @@
         },
         {"name": "x", "type": "Xor", "w": 5, "label": "x: 0 to 31 and back", "at": [960, 260]},
         {"name": "y", "type": "Xor", "w": 4, "label": "y: 0 to 15 and back", "at": [960, -40]},
-        {"name": "Clear", "type": "Input", "at": [960, -300]},
+        {"name": "pen", "type": "Const", "value": 1, "label": "pen down", "at": [1080, -180]},
+        {"name": "Clear", "type": "Input", "at": [1120, -320]},
         {
           "name": "screen",
           "type": "Screen",
@@ -92,7 +93,8 @@
         }
       ],
       "wires": [
-        ["one", "p.en", "pinc.cin", "cinc.cin", "screen.draw"],
+        ["one", "p.en", "pinc.cin", "cinc.cin"],
+        ["pen", "screen.draw"],
         ["p", "pinc.a", "step"],
         ["pinc.sum", "p.d"],
         ["step", "c.en"],
