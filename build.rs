@@ -1,9 +1,16 @@
 use std::env;
+use std::path::Path;
+
+/// The Windows executable icon, when the packaging files are present.
+const ICON_RC: &str = "build-files/windows/icon.rc";
 
 fn main() {
     let target = env::var("TARGET").unwrap();
-    if target.contains("windows") {
-        // on windows we will set our game icon as icon for the executable
-        embed_resource::compile("build-files/windows/icon.rc");
+    // on windows we set our game icon as icon for the executable. The
+    // packaging files are not in the repository at the moment; without
+    // this check `rc.exe` fails on the missing file and the Windows build
+    // with it.
+    if target.contains("windows") && Path::new(ICON_RC).exists() {
+        embed_resource::compile(ICON_RC);
     }
 }

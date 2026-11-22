@@ -164,11 +164,9 @@ pub fn challenge_card_system(
     }
     let palette = theme.palette;
     let layout = hud_layout(ctx);
-    let mut room = layout.library_rect();
-    // Below the Undo and Redo card when those do not fit in the file card.
-    if !super::undo::fits_in_file_card(super::ui::file_card_room(&layout)) {
-        room.min.y += super::undo::UNDO_CARD_HEIGHT + layout.gap;
-    }
+    // A challenge is editable: below the Undo and Redo card when they
+    // have one.
+    let room = layout.left_column_rect(!layout.undo_in_file_card());
     let completed = progress.is_completed(&current.id);
     let (mut check, mut restart, mut fold) = (false, false, false);
     egui::Area::new(egui::Id::new("hud_challenge"))

@@ -879,6 +879,39 @@ fn paint_tool_slot(
 // Build status pill
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The build status card's contents: a dot, `text`, and the `note`
+/// (`details`/`hide`) when there is an error. Clicking it toggles the
+/// details. At most [`crate::ui_style::STATUS_WIDTH`] wide.
+pub fn status_card(
+    ui: &mut Ui,
+    palette: &Palette,
+    dot: Color,
+    text: &str,
+    note: Option<&str>,
+) -> egui::Response {
+    card(palette)
+        .inner_margin(egui::Margin::symmetric(16, 0))
+        .show(ui, |ui| {
+            ui.set_height(crate::ui_style::TOP_CARD_HEIGHT - 5.0);
+            ui.horizontal_centered(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                ui.painter().circle(
+                    r.center(),
+                    6.0,
+                    egui_color(dot),
+                    stroke(2.0, egui_color(palette.ink)),
+                );
+                ui.label(egui::RichText::new(text).font(heavy(14.0)));
+                if let Some(note) = note {
+                    ui.label(caption(palette, note));
+                }
+            })
+            .response
+            .interact(Sense::click())
+        })
+        .inner
+}
+
 /// Top right: whether the circuit built, its part count, and loop or
 /// build errors (click for the details, which also open by themselves
 /// when a new error appears).
@@ -919,68 +952,59 @@ pub fn build_pill_system(
         ),
     };
     let mut toggle = false;
+    let hover = match diagnostics.running_revision {
+        Some(rev) => format!("Running revision {rev}"),
+        None => "Compiling…".to_string(),
+    };
+    let note = error.map(|_| if *details_open { "hide" } else { "details" });
     egui::Area::new(egui::Id::new("hud_build"))
         .anchor(Align2::RIGHT_TOP, [-layout.margin, layout.margin])
         .order(Order::Middle)
         .show(ctx, |ui| {
-            card(&palette)
-                .inner_margin(egui::Margin::symmetric(16, 0))
-                .show(ui, |ui| {
-                    ui.set_height(crate::ui_style::TOP_CARD_HEIGHT - 5.0);
-                    let response = ui
-                        .horizontal_centered(|ui| {
-                            let (r, _) =
-                                ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                            ui.painter().circle(
-                                r.center(),
-                                6.0,
-                                egui_color(dot),
-                                stroke(2.0, egui_color(palette.ink)),
-                            );
-                            ui.label(egui::RichText::new(&text).font(heavy(14.0)));
-                            if error.is_some() {
-                                ui.label(caption(
-                                    &palette,
-                                    if *details_open { "hide" } else { "details" },
-                                ));
-                            }
-                        })
-                        .response
-                        .interact(Sense::click());
-                    let hover = match diagnostics.running_revision {
-                        Some(rev) => format!("Running revision {rev}"),
-                        None => "Compiling…".to_string(),
-                    };
-                    if response.on_hover_text(hover).clicked() {
-                        toggle = true;
-                    }
-                });
+            if status_card(ui, &palette, dot, &text, note)
+                .on_hover_text(hover)
+                .clicked()
+            {
+                toggle = true;
+            }
         });
     if toggle && error.is_some() {
         *details_open = !*details_open;
     }
     if let (Some(error), true) = (error, *details_open) {
         let fault = egui_color(palette.fault_text);
+        // Beside the inspector column, which a selection opens below the
+        // status card.
+        let rect = layout.build_details_rect();
+        let frame = card(&palette);
+        let inner = egui::vec2(rect.width(), rect.height()) - frame.total_margin().sum();
         egui::Area::new(egui::Id::new("hud_build_details"))
-            .anchor(Align2::RIGHT_TOP, [-layout.margin, layout.top_band()])
+            .anchor(
+                Align2::RIGHT_TOP,
+                [rect.max.x - layout.screen.x, rect.min.y],
+            )
             .order(Order::Foreground)
             .show(ctx, |ui| {
-                card(&palette).show(ui, |ui| {
-                    ui.set_max_width(layout.inspector_width);
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Edit {} not applied; the previous circuit keeps running.",
-                            error.revision
-                        ))
-                        .font(heavy(14.0))
-                        .color(fault),
-                    );
-                    for message in &error.messages {
-                        ui.colored_label(fault, message);
-                    }
-                    if error.loops.iter().any(|l| !l.is_empty()) {
-                        ui.label("The parts and wires on the loop are outlined in red.");
-                    }
+                frame.show(ui, |ui| {
+                    ui.set_max_width(inner.x);
+                    egui::ScrollArea::vertical()
+                        .max_height(inner.y)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Edit {} not applied; the previous circuit keeps running.",
+                                    error.revision
+                                ))
+                                .font(heavy(14.0))
+                                .color(fault),
+                            );
+                            for message in &error.messages {
+                                ui.colored_label(fault, message);
+                            }
+                            if error.loops.iter().any(|l| !l.is_empty()) {
+                                ui.label("The parts and wires on the loop are outlined in red.");
+                            }
+                        });
                 });
             });
     }
@@ -1464,6 +1488,31 @@ mod tests {
                 let (_, fits) = fit_label(&ctx, &demo.title, room, height, &CHIP_TEXT_SIZES, rows);
                 assert!(fits, "{} does not fit a {side} slot", demo.title);
             }
+        }
+    }
+
+    /// The build status card's widest texts fit the room the layout
+    /// keeps for it.
+    #[test]
+    fn status_card_fits_its_room() {
+        let theme = Theme::day();
+        let ctx = crate::ui_style::test_ui::ctx(&theme);
+        let p = theme.palette;
+        for (text, note) in [
+            ("Built · 99999 parts", None),
+            ("Building…", None),
+            ("Loop error", Some("details")),
+            ("Build error", Some("details")),
+            ("Build error", Some("hide")),
+        ] {
+            let rect = crate::ui_style::test_ui::measure(&ctx, |ui| {
+                status_card(ui, &p, p.fault, text, note);
+            });
+            assert!(
+                rect.width() <= crate::ui_style::STATUS_WIDTH,
+                "{text}: {}",
+                rect.width()
+            );
         }
     }
 

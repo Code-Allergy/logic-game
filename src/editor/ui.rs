@@ -11,10 +11,11 @@ use bevy_egui::{
 };
 use uuid::Uuid;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeMode};
 use crate::ui_style::{
-    HudIcon, HudLayout, TOP_CARD_HEIGHT, caption, card, chunky_button, chunky_icon_button,
-    day_night_button, egui_color, heavy, stroke,
+    HudIcon, HudLayout, ICON_BUTTON_WIDTH, TOP_CARD_HEIGHT, UNDO_BUTTONS_WIDTH, caption, card,
+    chunky_button, chunky_button_width, chunky_icon_button, day_night_button, egui_color, heavy,
+    stroke,
 };
 use crate::{
     GameState,
@@ -32,6 +33,7 @@ use super::workspace::{
     WEB_SAVE_UNAVAILABLE, load_saved_workspace_names, name_key, read_workspace,
 };
 use super::{EditorState, LoadWorkspaceEvent, SaveWorkspaceEvent};
+use crate::sim::HistoryCommand;
 
 /// The web build has no file system (yet): no saving, loading or placing
 /// saved workspaces there.
@@ -237,18 +239,209 @@ fn origin(read_only: bool, demo: Option<&Demo>) -> String {
 /// The file card's second line: origin, the open view's path, and
 /// whether the work is saved (or read-only).
 pub fn file_subtitle(origin: &str, breadcrumb: &str, read_only: bool, dirty: bool) -> String {
+    let (path, state) = file_subtitle_parts(origin, breadcrumb, read_only, dirty);
+    format!("{path} · {state}")
+}
+
+/// [`file_subtitle`] in its two parts: the path (which the card may
+/// shorten) and the state (which it always shows whole).
+pub fn file_subtitle_parts(
+    origin: &str,
+    breadcrumb: &str,
+    read_only: bool,
+    dirty: bool,
+) -> (String, &'static str) {
     let state = match (read_only, dirty) {
         (true, _) => "read-only",
         (false, true) => "unsaved",
         (false, false) => "saved",
     };
-    format!("{origin} › {} · {state}", breadcrumb.replace(" / ", " › "))
+    (
+        format!("{origin} › {}", breadcrumb.replace(" / ", " › ")),
+        state,
+    )
 }
 
-/// Room for the file card's text and the Undo and Redo buttons: the card
-/// stops short of the transport card.
-pub fn file_card_room(layout: &HudLayout) -> f32 {
-    (layout.screen.x - 640.0) * 0.5 - layout.margin - layout.gap - 238.0
+/// What the file card shows.
+pub struct FileCardView<'a> {
+    pub title: &'a str,
+    /// Origin and the open view's path ([`file_subtitle_parts`]).
+    pub path: &'a str,
+    /// `saved`, `unsaved` or `read-only`.
+    pub state: &'a str,
+    /// The subtitle's tooltip.
+    pub note: &'a str,
+    /// Subcircuit views open: one shows a back button, two or more also
+    /// a back-to-root button.
+    pub depth: usize,
+    pub library_open: bool,
+    /// The Undo and Redo buttons, in the card: whether there is something
+    /// to undo and to redo. `None` for a read-only demo, or when they
+    /// have a card of their own ([`HudLayout::undo_in_file_card`]).
+    pub undo: Option<(bool, bool)>,
+}
+
+/// What was clicked on the file card this frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FileCardClicks {
+    pub back: bool,
+    pub root: bool,
+    pub map: bool,
+    pub library: bool,
+    pub theme: Option<ThemeMode>,
+    pub history: Option<HistoryCommand>,
+}
+
+/// Card padding and outline, left and right, of the file card.
+const FILE_CARD_PAD: (i8, i8) = (10, 12);
+/// The badge, and the space after it and after the text.
+const FILE_BADGE: f32 = 38.0;
+const FILE_TEXT_GAP: f32 = 12.0;
+const FILE_BUTTON_GAP: f32 = 8.0;
+/// The most the title and subtitle take.
+const FILE_TEXT_MAX: f32 = 300.0;
+/// The least room for the path before the save state; with less, the
+/// card shows the state alone.
+const FILE_PATH_MIN: f32 = 40.0;
+/// The Library button keeps its word while the text keeps this much.
+const FILE_TEXT_WITH_LIBRARY_WORD: f32 = 200.0;
+
+/// The file card's contents (top left), at most `layout.file_rect()`
+/// wide: the badge, the title and subtitle (shortened to fit, the save
+/// state always whole), and the back, map, library and day/night
+/// buttons.
+pub fn file_card(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    view: &FileCardView,
+    layout: &HudLayout,
+) -> FileCardClicks {
+    let palette = &theme.palette;
+    let mut clicks = FileCardClicks::default();
+    let frame = card(palette).inner_margin(egui::Margin {
+        left: FILE_CARD_PAD.0,
+        right: FILE_CARD_PAD.1,
+        top: 0,
+        bottom: 0,
+    });
+    let outline = frame.total_margin().sum().x;
+    let room = layout.file_rect().width() - outline;
+    frame.show(ui, |ui| {
+        ui.set_height(TOP_CARD_HEIGHT - frame.total_margin().sum().y);
+        ui.set_max_width(room);
+        let back = match view.depth {
+            0 => 0,
+            1 => 1,
+            _ => 2,
+        };
+        let back_w: f32 = ["←", "⇤"][..back]
+            .iter()
+            .map(|label| chunky_button_width(ui, *label))
+            .sum();
+        let buttons = back + 3; // back, map, library, day/night
+        let undo_w = if view.undo.is_some() {
+            UNDO_BUTTONS_WIDTH
+        } else {
+            0.0
+        };
+        let fixed = FILE_BADGE
+            + 2.0 * FILE_TEXT_GAP
+            + undo_w
+            + back_w
+            + 2.0 * ICON_BUTTON_WIDTH
+            + (buttons - 1) as f32 * FILE_BUTTON_GAP;
+        let word = chunky_button_width(ui, "☰ Library");
+        let icon = chunky_button_width(ui, "☰");
+        let library_label = if !layout.compact && room - fixed - word >= FILE_TEXT_WITH_LIBRARY_WORD
+        {
+            "☰ Library"
+        } else {
+            "☰"
+        };
+        let library_w = if library_label == "☰" { icon } else { word };
+        let text_width = (room - fixed - library_w).min(FILE_TEXT_MAX);
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = FILE_TEXT_GAP;
+            let (badge, _) =
+                ui.allocate_exact_size(egui::vec2(FILE_BADGE, FILE_BADGE), Sense::hover());
+            ui.painter().rect(
+                badge,
+                CornerRadius::same(10),
+                egui_color(palette.on),
+                stroke(2.5, egui_color(palette.ink)),
+                StrokeKind::Inside,
+            );
+            ui.painter().text(
+                badge.center(),
+                Align2::CENTER_CENTER,
+                "GQ",
+                heavy(15.0),
+                egui_color(palette.on_ink),
+            );
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.set_max_width(text_width);
+                ui.add_space(9.0);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(view.title).font(heavy(16.0))).truncate(),
+                );
+                let secondary = egui_color(palette.text_secondary);
+                let state = format!(" · {}", view.state);
+                let state_w = ui
+                    .painter()
+                    .layout_no_wrap(state.clone(), egui::FontId::proportional(12.0), secondary)
+                    .size()
+                    .x;
+                let path_w = text_width - state_w;
+                // One text line tall, not a widget row.
+                ui.spacing_mut().interact_size.y = 0.0;
+                let crumb = ui
+                    .horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        // Too little room for a useful path: the state alone
+                        // (the tooltip has the path).
+                        if path_w < FILE_PATH_MIN {
+                            ui.label(egui::RichText::new(view.state).size(12.0).color(secondary));
+                            return;
+                        }
+                        ui.scope(|ui| {
+                            ui.set_max_width(path_w);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(view.path).size(12.0).color(secondary),
+                                )
+                                .truncate(),
+                            );
+                        });
+                        ui.label(egui::RichText::new(state).size(12.0).color(secondary));
+                    })
+                    .response;
+                crumb.on_hover_text(view.note);
+            });
+            ui.spacing_mut().item_spacing.x = FILE_BUTTON_GAP;
+            if let Some(can) = view.undo {
+                clicks.history = super::undo::undo_buttons(ui, palette, can);
+            }
+            if back >= 1 {
+                clicks.back = chunky_button(ui, palette, "←", false)
+                    .on_hover_text("Back to the parent circuit")
+                    .clicked();
+            }
+            if back >= 2 {
+                clicks.root = chunky_button(ui, palette, "⇤", false)
+                    .on_hover_text("Back to the root circuit")
+                    .clicked();
+            }
+            clicks.map = chunky_icon_button(ui, palette, HudIcon::Map, false)
+                .on_hover_text("Demo map: the road from one gate to a CPU")
+                .clicked();
+            clicks.library = chunky_button(ui, palette, library_label, view.library_open)
+                .on_hover_text("Workspaces, demos, gallery, import and save")
+                .clicked();
+            clicks.theme = day_night_button(ui, theme);
+        });
+    });
+    clicks
 }
 
 /// The file card (top left), the Library drawer it opens, the wire
@@ -380,7 +573,6 @@ pub fn editor_ui_system(
     let mut place_saved: Option<String> = None;
     let mut close_requested: Option<bool> = None;
     let mut open_definition: Option<Uuid> = None;
-    let mut theme_wanted = None;
     let mut open_map = false;
     let mut open_challenge = None;
     let table = views.definition_table(&library);
@@ -411,116 +603,51 @@ pub fn editor_ui_system(
         .current_workspace
         .clone()
         .unwrap_or_else(|| active.name.clone());
-    let subtitle = file_subtitle(
-        &origin(active.read_only, open_demo),
-        &breadcrumb,
-        active.read_only,
-        files.revision.is_dirty(),
-    );
-    // Room for the text: the card stops short of the transport card. The
-    // Undo and Redo buttons go in the card when there is room, else in a
-    // card of their own below it.
-    let room = file_card_room(&layout);
-    let undo_inline = active.read_only || super::undo::fits_in_file_card(room);
-    let text_width = (room - if undo_inline { undo.width(8.0) } else { 0.0 }).clamp(90.0, 300.0);
+    let from = origin(active.read_only, open_demo);
+    let (read_only, dirty) = (active.read_only, files.revision.is_dirty());
+    let (path, state) = file_subtitle_parts(&from, &breadcrumb, read_only, dirty);
+    let subtitle = file_subtitle(&from, &breadcrumb, read_only, dirty);
+    let card_view = FileCardView {
+        title: &title,
+        path: &path,
+        state,
+        note: view_note.as_deref().unwrap_or(&subtitle),
+        depth: views.view.frames().len(),
+        library_open: editor_state.library_open,
+        undo: if undo.in_own_card(&layout) {
+            None
+        } else {
+            undo.state()
+        },
+    };
+    let room = layout.file_rect();
+    let mut clicks = FileCardClicks::default();
     egui::Area::new(egui::Id::new("hud_file"))
-        .anchor(Align2::LEFT_TOP, [layout.margin, layout.margin])
+        .fixed_pos(egui::pos2(room.min.x, room.min.y))
         .order(Order::Middle)
         .show(ctx, |ui| {
-            card(&palette)
-                .inner_margin(egui::Margin {
-                    left: 10,
-                    right: 12,
-                    top: 0,
-                    bottom: 0,
-                })
-                .show(ui, |ui| {
-                    ui.set_height(TOP_CARD_HEIGHT - 5.0);
-                    ui.horizontal_centered(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
-                        let (badge, _) =
-                            ui.allocate_exact_size(egui::vec2(38.0, 38.0), Sense::hover());
-                        ui.painter().rect(
-                            badge,
-                            CornerRadius::same(10),
-                            egui_color(palette.on),
-                            stroke(2.5, egui_color(palette.ink)),
-                            StrokeKind::Inside,
-                        );
-                        ui.painter().text(
-                            badge.center(),
-                            Align2::CENTER_CENTER,
-                            "GQ",
-                            heavy(15.0),
-                            egui_color(palette.on_ink),
-                        );
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.set_max_width(text_width);
-                            ui.add_space(9.0);
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(&title).font(heavy(16.0)))
-                                    .truncate(),
-                            );
-                            let crumb = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&subtitle)
-                                        .size(12.0)
-                                        .color(egui_color(palette.text_secondary)),
-                                )
-                                .truncate(),
-                            );
-                            match &view_note {
-                                Some(note) => crumb.on_hover_text(note),
-                                None => crumb.on_hover_text(&subtitle),
-                            };
-                        });
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        if undo_inline {
-                            undo.buttons(ui, &palette);
-                        }
-                        if !views.view.is_root() {
-                            if chunky_button(ui, &palette, "←", false)
-                                .on_hover_text("Back to the parent circuit")
-                                .clicked()
-                            {
-                                close_requested = Some(false);
-                            }
-                            if views.view.frames().len() > 1
-                                && chunky_button(ui, &palette, "⇤", false)
-                                    .on_hover_text("Back to the root circuit")
-                                    .clicked()
-                            {
-                                close_requested = Some(true);
-                            }
-                        }
-                        if chunky_icon_button(ui, &palette, HudIcon::Map, false)
-                            .on_hover_text("Demo map: the road from one gate to a CPU")
-                            .clicked()
-                        {
-                            open_map = true;
-                        }
-                        let library_label = if layout.compact { "☰" } else { "☰ Library" };
-                        if chunky_button(ui, &palette, library_label, editor_state.library_open)
-                            .on_hover_text("Workspaces, demos, gallery, import and save")
-                            .clicked()
-                        {
-                            editor_state.library_open = !editor_state.library_open;
-                        }
-                        theme_wanted = day_night_button(ui, &theme);
-                    });
-                });
+            clicks = file_card(ui, &theme, &card_view, &layout);
         });
-    if !undo_inline {
-        undo.card(ctx, &palette, &layout, editor_state.library_open);
+    if clicks.back {
+        close_requested = Some(false);
     }
-    if let Some(mode) = theme_wanted {
+    if clicks.root {
+        close_requested = Some(true);
+    }
+    open_map |= clicks.map;
+    if clicks.library {
+        editor_state.library_open = !editor_state.library_open;
+    }
+    if let Some(mode) = clicks.theme {
         theme.set(mode);
     }
+    undo.send(clicks.history);
+    undo.card(ctx, &palette, &layout);
 
     // ── Library drawer ─────────────────────────────────────────────────
     if editor_state.library_open {
-        let rect = layout.library_rect();
+        // Below the Undo and Redo card, when they have one.
+        let rect = layout.left_column_rect(undo.in_own_card(&layout));
         let frame = card(&palette);
         let inner = egui::vec2(rect.width(), rect.height()) - frame.total_margin().sum();
         egui::Area::new(egui::Id::new("hud_library"))
@@ -1088,6 +1215,62 @@ fn draw_pin_selector(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The file card stays within its room, beside the transport card,
+    /// with a long demo title and path, in nested views (both back
+    /// buttons), with the library open or closed, at the named sizes of
+    /// the layout test.
+    #[test]
+    fn file_card_fits_its_room() {
+        let theme = Theme::day();
+        let ctx = crate::ui_style::test_ui::ctx(&theme);
+        let sizes = [
+            (1280.0, 720.0),
+            (1366.0, 768.0),
+            (1440.0, 900.0),
+            (1536.0, 864.0),
+            (1600.0, 900.0),
+            (1600.0, 1000.0),
+            (1920.0, 1080.0),
+            (2560.0, 1440.0),
+        ];
+        let long_path = file_subtitle_parts(
+            "Demos › Level 12",
+            "16-bit CPU of gates / ALU16 / ADD16 / FA",
+            true,
+            false,
+        );
+        for (w, h) in sizes {
+            let layout = HudLayout::new(Vec2::new(w, h));
+            let room = layout.file_rect();
+            // The Undo and Redo buttons are in the card only when the
+            // layout says there is room.
+            let undo = layout.undo_in_file_card().then_some((true, false));
+            for depth in 0..=3 {
+                for library_open in [false, true] {
+                    let view = FileCardView {
+                        title: "16-bit CPU of gates",
+                        path: &long_path.0,
+                        state: long_path.1,
+                        note: "",
+                        depth,
+                        library_open,
+                        undo,
+                    };
+                    let rect = crate::ui_style::test_ui::measure(&ctx, |ui| {
+                        file_card(ui, &theme, &view, &layout);
+                    });
+                    assert!(
+                        rect.width() <= room.width() + 0.5,
+                        "{} > {} at {w}x{h}, depth {depth}",
+                        rect.width(),
+                        room.width()
+                    );
+                    assert!((rect.height() - TOP_CARD_HEIGHT).abs() < 0.5);
+                }
+            }
+        }
+    }
 
     #[test]
     fn file_subtitle_reads_origin_path_and_state() {

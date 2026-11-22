@@ -68,21 +68,60 @@ pub fn undo_keys_system(
     Ok(())
 }
 
-/// Width of the two buttons in a row with `spacing` between items.
-pub fn buttons_width(spacing: f32) -> f32 {
-    2.0 * (40.0 + spacing)
+/// The Undo and Redo buttons, greyed out when there is nothing to undo
+/// (`can.0`) or redo (`can.1`); the command clicked, if any.
+pub fn undo_buttons(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    can: (bool, bool),
+) -> Option<HistoryCommand> {
+    let buttons = [
+        (
+            HudIcon::Undo,
+            HistoryCommand::Undo,
+            can.0,
+            format!("Undo ({MODIFIER}+Z)"),
+        ),
+        (
+            HudIcon::Redo,
+            HistoryCommand::Redo,
+            can.1,
+            format!("Redo ({MODIFIER}+Shift+Z or {MODIFIER}+Y)"),
+        ),
+    ];
+    let mut clicked = None;
+    for (icon, command, enabled, hint) in buttons {
+        let response = ui
+            .add_enabled_ui(enabled, |ui| chunky_icon_button(ui, palette, icon, false))
+            .inner;
+        if response
+            .on_hover_text(&hint)
+            .on_disabled_hover_text(hint)
+            .clicked()
+        {
+            clicked = Some(command);
+        }
+    }
+    clicked
 }
 
-/// Whether the buttons fit in the file card (its text keeps at least 90
-/// px), given the room the file card has for text and buttons; else
-/// they get a card of their own below it.
-pub fn fits_in_file_card(room: f32) -> bool {
-    room - buttons_width(8.0) >= 90.0
+/// The buttons in a card of their own ([`crate::ui_style::UNDO_CARD`]).
+pub fn undo_card(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    can: (bool, bool),
+) -> Option<HistoryCommand> {
+    card(palette)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                undo_buttons(ui, palette, can)
+            })
+            .inner
+        })
+        .inner
 }
-
-/// Height of the buttons' own card: a 40 px button with its 3 px edge,
-/// 8 px padding and the 2.5 px outline on each side.
-pub const UNDO_CARD_HEIGHT: f32 = 40.0 + 3.0 + 2.0 * 8.0 + 2.0 * 2.5;
 
 /// What the Undo and Redo buttons need.
 #[derive(SystemParam)]
@@ -94,83 +133,46 @@ pub struct UndoControls<'w> {
 }
 
 impl UndoControls<'_> {
-    /// Width the buttons take in a row with `spacing` between items (none
-    /// for a read-only demo, which has no history).
-    pub fn width(&self, spacing: f32) -> f32 {
-        if self.active.read_only {
-            0.0
-        } else {
-            buttons_width(spacing)
-        }
-    }
-
-    /// The Undo and Redo buttons, greyed out when there is nothing to undo
-    /// or redo.
-    pub fn buttons(&mut self, ui: &mut egui::Ui, palette: &Palette) {
-        if self.active.read_only {
-            return;
-        }
-        let buttons = [
+    /// Whether there is something to undo and to redo; `None` for a
+    /// read-only demo, which has no history (and no buttons).
+    pub fn state(&self) -> Option<(bool, bool)> {
+        (!self.active.read_only).then(|| {
             (
-                HudIcon::Undo,
-                HistoryCommand::Undo,
                 self.history.can_undo(&self.revision),
-                format!("Undo ({MODIFIER}+Z)"),
-            ),
-            (
-                HudIcon::Redo,
-                HistoryCommand::Redo,
                 self.history.can_redo(),
-                format!("Redo ({MODIFIER}+Shift+Z or {MODIFIER}+Y)"),
-            ),
-        ];
-        for (icon, command, enabled, hint) in buttons {
-            let response = ui
-                .add_enabled_ui(enabled, |ui| chunky_icon_button(ui, palette, icon, false))
-                .inner;
-            if response
-                .on_hover_text(&hint)
-                .on_disabled_hover_text(hint)
-                .clicked()
-            {
-                self.commands.write(command);
-            }
+            )
+        })
+    }
+
+    /// Whether the buttons are shown in a card of their own: the file
+    /// card has no room for them ([`HudLayout::undo_in_file_card`]).
+    pub fn in_own_card(&self, layout: &HudLayout) -> bool {
+        !self.active.read_only && !layout.undo_in_file_card()
+    }
+
+    /// Undo or redo, as a button asked.
+    pub fn send(&mut self, command: Option<HistoryCommand>) {
+        if let Some(command) = command {
+            self.commands.write(command);
         }
     }
-}
 
-impl UndoControls<'_> {
-    /// The buttons in a card of their own, for a window too narrow to fit
-    /// them in the file card: below it, or beside the Library drawer when
-    /// it is open.
-    pub fn card(
-        &mut self,
-        ctx: &egui::Context,
-        palette: &Palette,
-        layout: &HudLayout,
-        library_open: bool,
-    ) {
-        if self.active.read_only {
+    /// The buttons in a card of their own, below the file card
+    /// ([`HudLayout::undo_rect`]), when [`Self::in_own_card`].
+    pub fn card(&mut self, ctx: &egui::Context, palette: &Palette, layout: &HudLayout) {
+        if !self.in_own_card(layout) {
             return;
         }
-        let x = if library_open {
-            layout.margin + layout.library_width + layout.gap
-        } else {
-            layout.margin
+        let Some(can) = self.state() else {
+            return;
         };
-        egui::Area::new(egui::Id::new("hud_undo"))
-            .fixed_pos(egui::pos2(x, layout.top_band()))
+        let rect = layout.undo_rect();
+        let command = egui::Area::new(egui::Id::new("hud_undo"))
+            .fixed_pos(egui::pos2(rect.min.x, rect.min.y))
             .order(egui::Order::Middle)
-            .show(ctx, |ui| {
-                card(palette)
-                    .inner_margin(egui::Margin::same(8))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            self.buttons(ui, palette);
-                        });
-                    });
-            });
+            .show(ctx, |ui| undo_card(ui, palette, can))
+            .inner;
+        self.send(command);
     }
 }
 
@@ -203,5 +205,21 @@ mod tests {
         assert_eq!(shortcut(&keys(&[], KeyZ)), None, "a bare Z is not undo");
         assert_eq!(shortcut(&keys(&[ShiftLeft], KeyZ)), None);
         assert_eq!(shortcut(&keys(&[ControlLeft], KeyX)), None);
+    }
+
+    /// The card is as large as the layout reserves for it.
+    #[test]
+    fn the_undo_card_fits_its_rect() {
+        let theme = crate::theme::Theme::day();
+        let ctx = crate::ui_style::test_ui::ctx(&theme);
+        let rect = crate::ui_style::test_ui::measure(&ctx, |ui| {
+            undo_card(ui, &theme.palette, (true, false));
+        });
+        let size = crate::ui_style::UNDO_CARD;
+        assert!(
+            rect.width() <= size.x + 0.5 && rect.height() <= size.y + 0.5,
+            "{rect:?} in {size:?}"
+        );
+        assert!(rect.width() >= size.x - 2.0 && rect.height() >= size.y - 2.0);
     }
 }
