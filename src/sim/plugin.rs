@@ -22,9 +22,9 @@ use crate::sim::{
         request_screens_system, sync_design_system, update_tickrate_system,
     },
     systems::{
-        drag_selected_system, draw_sim_background_system, fit_camera_to_circuit_system,
-        gate_selection_system, save_on_exit_system, simulation_config_ui_system,
-        sync_bench_theme_system, ui_for_selected_gate, update_inputs_on_left_click,
+        CanvasCursor, CanvasPointer, canvas_cursor_system, canvas_pointer_system,
+        draw_sim_background_system, fit_camera_to_circuit_system, save_on_exit_system,
+        simulation_config_ui_system, sync_bench_theme_system, ui_for_selected_gate,
         update_selected_gate, update_spatial_grid_system, workspace_io_system,
     },
     view::{
@@ -33,6 +33,7 @@ use crate::sim::{
     },
     visuals::SimulationVisualsPlugin,
 };
+use crate::sim::{HistoryCommand, UndoHistory, history::edit_history_system};
 
 use super::demos;
 use super::spatial_grid::SpatialGrid;
@@ -93,6 +94,8 @@ impl Plugin for SimulationRuntimePlugin {
             .init_resource::<AuthoringFeedback>()
             .init_resource::<SimulationConfig>()
             .init_resource::<TickRateMeter>()
+            .init_resource::<UndoHistory>()
+            .add_message::<HistoryCommand>()
             .add_message::<CreateGate>()
             .add_message::<CreateWire>()
             .add_message::<DeleteGate>()
@@ -138,6 +141,8 @@ impl Plugin for SimulationRuntimePlugin {
                 )
                     .chain(),
             )
+            // After every edit of the frame, including a view's write-back.
+            .add_systems(Update, edit_history_system.after(write_back_view_system))
             .add_systems(PostUpdate, sync_design_system);
     }
 }
@@ -148,6 +153,8 @@ impl Plugin for SimulationViewPlugin {
 
         app.add_plugins(SimulationVisualsPlugin)
             .init_resource::<SelectedGate>()
+            .init_resource::<CanvasCursor>()
+            .init_resource::<CanvasPointer>()
             .add_message::<crate::camera::FitView>()
             .insert_resource(SpatialGrid::new(100.0))
             .register_type::<crate::sim::LogicDisplay>()
@@ -197,10 +204,8 @@ impl Plugin for SimulationViewPlugin {
             .add_systems(
                 Update,
                 (
-                    gate_selection_system.before(drag_selected_system),
-                    drag_selected_system,
+                    (canvas_cursor_system, canvas_pointer_system).chain(),
                     update_spatial_grid_system,
-                    update_inputs_on_left_click,
                     update_selected_gate,
                 )
                     .run_if(in_state(state.clone())),
@@ -209,7 +214,7 @@ impl Plugin for SimulationViewPlugin {
                 bevy_egui::EguiPrimaryContextPass,
                 (simulation_config_ui_system, ui_for_selected_gate),
             )
-            .add_systems(Update, save_on_exit_system);
+            .add_systems(Last, save_on_exit_system.after(bevy::window::ExitSystems));
     }
 }
 
@@ -244,6 +249,7 @@ fn load_default_circuit_system(
                     name: demo.title.clone(),
                     workspace: Arc::clone(&demo.workspace),
                     read_only: true,
+                    unsaved: false,
                 });
             }
         }
@@ -340,6 +346,7 @@ mod tests {
             name: "picked".into(),
             workspace,
             read_only: true,
+            unsaved: false,
         });
         app.update();
         // The picked load was written before this update; the system wrote

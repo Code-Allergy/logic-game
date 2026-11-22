@@ -1,0 +1,16 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "main",
+      "title": "4-bit counter",
+      "nodes": [
+        {"name": "En", "type": "Input", "at": [0, 0]},
+        {"name": "Count", "type": "Output", "w": 4, "at": [480, 0]}
+      ],
+      "wires": []
+    }
+  ]
+}

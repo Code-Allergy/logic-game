@@ -2,17 +2,13 @@
 //!
 //! Exposes all public modules and shared constants used by `main.rs`.
 
-use bevy::{
-    camera::ScalingMode, platform::collections::HashMap, prelude::*, window::PrimaryWindow,
-};
+use bevy::{camera::ScalingMode, prelude::*, window::PrimaryWindow};
 use bevy_egui::EguiContexts;
 
 pub mod camera;
 pub mod editor;
 pub mod fonts;
-pub mod selection;
 pub mod settings;
-pub mod settings_overlay;
 pub mod sim;
 pub mod theme;
 pub mod title;
@@ -39,9 +35,11 @@ pub const GAME_WEB_TAG: &str = "#gatequest-canvas";
 #[derive(Component)]
 pub struct MainCamera;
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, PartialEq)]
 pub struct UiPointerState {
     pub over_egui: bool,
+    /// A text field has the keyboard: canvas keys (arrows) are ignored.
+    pub wants_keyboard: bool,
 }
 
 #[derive(States, Debug, Clone, Eq, PartialEq, Hash, Default)]
@@ -57,33 +55,19 @@ pub enum GameState {
     Settings,
 }
 
-#[derive(Resource)]
-pub struct GameSettings {
-    pub resolution: (u32, u32),
-    pub fullscreen: bool,
-    pub vsync: bool,
-    pub volume: f32,
-    pub controls: HashMap<String, String>,
-}
-
-impl Default for GameSettings {
-    fn default() -> Self {
-        GameSettings {
-            resolution: (1920, 1080),
-            fullscreen: false,
-            vsync: true,
-            volume: 0.5,
-            controls: HashMap::new(),
-        }
-    }
-}
-
 pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
     commands.spawn((Camera2d, MainCamera, Transform::from_xyz(0.0, 0.0, 1000.0)));
 }
 
 pub fn update_ui_pointer_state(mut state: ResMut<UiPointerState>, mut contexts: EguiContexts) {
-    state.over_egui = matches!(contexts.ctx_mut(), Ok(ctx) if ctx.is_pointer_over_egui());
+    let (over_egui, wants_keyboard) = match contexts.ctx_mut() {
+        Ok(ctx) => (ctx.is_pointer_over_egui(), ctx.egui_wants_keyboard_input()),
+        Err(_) => (false, false),
+    };
+    state.set_if_neq(UiPointerState {
+        over_egui,
+        wants_keyboard,
+    });
 }
 
 pub fn configure_camera_scaling(
@@ -102,4 +86,4 @@ pub fn configure_camera_scaling(
     Ok(())
 }
 
-pub use camera::{pan_camera, zoom_camera};
+pub use camera::{key_pan_camera, pan_camera, zoom_camera};

@@ -10,6 +10,8 @@
 //! - [`source`] – save format version 6, the hand-editable authoring form
 //!   (names, arrays, bus wiring), and its expansion into documents.
 //! - [`demos`] – the built-in demos, loaded from `assets/demos/`.
+//! - [`challenges`] – the build-it challenges on the demo road and their
+//!   checks.
 //! - [`rtl`] – RTL import: a Yosys JSON netlist becomes a workspace.
 //! - [`netlist`] – a workspace as a `logi_sim` design, for simulating it
 //!   without the app (tests, benchmarks).
@@ -17,6 +19,7 @@
 //! - [`routing`] – orthogonal wire routing on the grid.
 //! - [`bridge`] – `SimBridge`: maps the ECS onto a `logi_sim` v2 `Design`,
 //!   sends revisions to the engine and reads probes back.
+//! - [`history`] – undo and redo of edits (workspace snapshots).
 //! - [`view`] – instance views: opening a subcircuit shows its definition
 //!   with live values probed from the running root simulation.
 //! - [`visuals`] – change-driven gate and wire visuals, loop highlight.
@@ -37,8 +40,10 @@ mod tests;
 pub mod art;
 pub mod authoring;
 pub mod bridge;
+pub mod challenges;
 pub mod demos;
 pub mod document;
+pub mod history;
 pub mod kind;
 pub mod layout;
 pub mod netlist;
@@ -59,6 +64,7 @@ pub use document::{
     CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, PinAddr,
     WorkspaceDocument,
 };
+pub use history::{HISTORY_LIMIT, HistoryCommand, UndoHistory};
 pub use kind::{GateKind, MAX_SCREEN_SCALE, SCREEN_BEZEL, ScreenMode, ScreenPalette, TEXT_CELL};
 pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin};
 pub use view::{

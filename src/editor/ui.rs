@@ -13,8 +13,9 @@ use uuid::Uuid;
 
 use crate::theme::{Theme, ThemeMode};
 use crate::ui_style::{
-    HudIcon, HudLayout, ICON_BUTTON_WIDTH, TOP_CARD_HEIGHT, caption, card, chunky_button,
-    chunky_button_width, chunky_icon_button, day_night_button, egui_color, heavy, stroke,
+    HudIcon, HudLayout, ICON_BUTTON_WIDTH, TOP_CARD_HEIGHT, UNDO_BUTTONS_WIDTH, caption, card,
+    chunky_button, chunky_button_width, chunky_icon_button, day_night_button, egui_color, heavy,
+    stroke,
 };
 use crate::{
     GameState,
@@ -26,9 +27,17 @@ use crate::{
     },
 };
 
+use super::files::{OpenRequest, PendingOpen, open_now, request_open};
 use super::hud::hud_layout;
+use super::workspace::{
+    WEB_SAVE_UNAVAILABLE, load_saved_workspace_names, name_key, read_workspace,
+};
 use super::{EditorState, LoadWorkspaceEvent, SaveWorkspaceEvent};
-use crate::editor::workspace::{load_saved_workspace_names, read_workspace, save_workspace};
+use crate::sim::HistoryCommand;
+
+/// The web build has no file system (yet): no saving, loading or placing
+/// saved workspaces there.
+const CAN_SAVE: bool = cfg!(not(target_arch = "wasm32"));
 
 fn gate_name(label: &GateLabel, ty: &GateType) -> String {
     if label.value.trim().is_empty() {
@@ -125,6 +134,98 @@ pub struct EditorWriters<'w> {
     save: MessageWriter<'w, SaveWorkspaceEvent>,
 }
 
+/// The save state and the keyboard (Ctrl+S / Cmd+S).
+#[derive(SystemParam)]
+pub struct FileParams<'w> {
+    revision: Res<'w, WorkspaceRevision>,
+    keys: Option<Res<'w, ButtonInput<KeyCode>>>,
+}
+
+/// Ctrl+S (Cmd+S on macOS; either in the browser) was pressed.
+pub fn save_shortcut(keys: &ButtonInput<KeyCode>) -> bool {
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let cmd = keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight]);
+    let modifier = if cfg!(target_os = "macos") {
+        cmd
+    } else if cfg!(target_arch = "wasm32") {
+        ctrl || cmd
+    } else {
+        ctrl
+    };
+    modifier && keys.just_pressed(KeyCode::KeyS)
+}
+
+/// The player's answer to the unsaved-changes question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// The unsaved-changes question, over everything (Esc or a click outside
+/// cancels).
+fn confirm_card(
+    ctx: &egui::Context,
+    palette: &crate::theme::Palette,
+    name: &str,
+    pending: &PendingOpen,
+) -> Option<Answer> {
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("hud_unsaved_changes"))
+        .frame(card(palette).inner_margin(egui::Margin::same(18)))
+        .show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(egui::RichText::new("Unsaved changes").font(heavy(18.0)));
+            ui.add_space(6.0);
+            ui.label(format!(
+                "\"{name}\" has changes that are not saved. Save them before you {}?",
+                pending.request.describe()
+            ));
+            if !CAN_SAVE {
+                ui.add_space(4.0);
+                ui.colored_label(
+                    egui_color(palette.text_secondary),
+                    format!("{WEB_SAVE_UNAVAILABLE} Discarding loses the changes."),
+                );
+            }
+            if let Some(error) = &pending.error {
+                ui.add_space(4.0);
+                ui.colored_label(egui_color(palette.fault_text), error);
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if CAN_SAVE
+                    && ui
+                        .add_enabled_ui(!pending.awaiting_save, |ui| {
+                            chunky_button(ui, palette, "Save", true)
+                        })
+                        .inner
+                        .clicked()
+                {
+                    answer = Some(Answer::Save);
+                }
+                if chunky_button(ui, palette, "Discard", false)
+                    .on_hover_text("Throw the changes away")
+                    .clicked()
+                {
+                    answer = Some(Answer::Discard);
+                }
+                if chunky_button(ui, palette, "Cancel", false)
+                    .on_hover_text("Keep working on this workspace (Esc)")
+                    .clicked()
+                {
+                    answer = Some(Answer::Cancel);
+                }
+            });
+        });
+    if answer.is_none() && modal.should_close() {
+        answer = Some(Answer::Cancel);
+    }
+    answer
+}
+
 /// Where the open circuit comes from, for the file card's breadcrumb.
 fn origin(read_only: bool, demo: Option<&Demo>) -> String {
     match demo {
@@ -174,6 +275,10 @@ pub struct FileCardView<'a> {
     /// a back-to-root button.
     pub depth: usize,
     pub library_open: bool,
+    /// The Undo and Redo buttons, in the card: whether there is something
+    /// to undo and to redo. `None` for a read-only demo, or when they
+    /// have a card of their own ([`HudLayout::undo_in_file_card`]).
+    pub undo: Option<(bool, bool)>,
 }
 
 /// What was clicked on the file card this frame.
@@ -184,6 +289,7 @@ pub struct FileCardClicks {
     pub map: bool,
     pub library: bool,
     pub theme: Option<ThemeMode>,
+    pub history: Option<HistoryCommand>,
 }
 
 /// Card padding and outline, left and right, of the file card.
@@ -233,8 +339,14 @@ pub fn file_card(
             .map(|label| chunky_button_width(ui, *label))
             .sum();
         let buttons = back + 3; // back, map, library, day/night
+        let undo_w = if view.undo.is_some() {
+            UNDO_BUTTONS_WIDTH
+        } else {
+            0.0
+        };
         let fixed = FILE_BADGE
             + 2.0 * FILE_TEXT_GAP
+            + undo_w
             + back_w
             + 2.0 * ICON_BUTTON_WIDTH
             + (buttons - 1) as f32 * FILE_BUTTON_GAP;
@@ -307,6 +419,9 @@ pub fn file_card(
                 crumb.on_hover_text(view.note);
             });
             ui.spacing_mut().item_spacing.x = FILE_BUTTON_GAP;
+            if let Some(can) = view.undo {
+                clicks.history = super::undo::undo_buttons(ui, palette, can);
+            }
             if back >= 1 {
                 clicks.back = chunky_button(ui, palette, "←", false)
                     .on_hover_text("Back to the parent circuit")
@@ -340,14 +455,18 @@ pub fn editor_ui_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     button_input: Res<ButtonInput<MouseButton>>,
-    game_state: Res<State<GameState>>,
-    active: Res<ActiveCircuit>,
-    revision: Res<WorkspaceRevision>,
+    (game_state, active): (Res<State<GameState>>, Res<ActiveCircuit>),
+    files: FileParams,
     library: Res<CircuitLibrary>,
     gates: Query<(&GateIdentity, &GateType, &GateLabel)>,
     mut theme: ResMut<Theme>,
     mut next_state: ResMut<NextState<GameState>>,
     mut seen_active: Local<Option<(Uuid, String)>>,
+    mut undo: super::undo::UndoControls,
+    (progress, active_challenge): (
+        Res<super::demo_map::progress::DemoProgress>,
+        Res<super::challenge::ActiveChallenge>,
+    ),
 ) -> Result<(), BevyError> {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -394,6 +513,55 @@ pub fn editor_ui_system(
         editor_state.saved_workspaces = Some(load_saved_workspace_names().unwrap_or_default());
     }
 
+    // ── Unsaved changes ────────────────────────────────────────────────
+    // A request parked by `request_open` waits here for the player.
+    if let Some(mut pending) = editor_state.pending_open.take() {
+        if pending.awaiting_save {
+            match editor_state.last_save.clone() {
+                Some(Ok(_)) if !files.revision.is_dirty() => {
+                    open_now(Some(&mut editor_state), &mut writers.load, pending.request);
+                    return Ok(());
+                }
+                Some(Err(err)) => {
+                    pending.awaiting_save = false;
+                    pending.error = Some(err);
+                }
+                _ => {}
+            }
+        }
+        match confirm_card(ctx, &palette, &active.name, &pending) {
+            Some(Answer::Save) => {
+                pending.awaiting_save = true;
+                pending.error = None;
+                editor_state.last_save = None;
+                writers.save.write(SaveWorkspaceEvent {
+                    name: active.name.clone(),
+                });
+                editor_state.pending_open = Some(pending);
+            }
+            Some(Answer::Discard) => {
+                open_now(Some(&mut editor_state), &mut writers.load, pending.request);
+                return Ok(());
+            }
+            Some(Answer::Cancel) => {}
+            None => editor_state.pending_open = Some(pending),
+        }
+    }
+
+    // ── Ctrl+S / Cmd+S ─────────────────────────────────────────────────
+    if editor_state.pending_open.is_none()
+        && files.keys.as_deref().is_some_and(save_shortcut)
+        && !ctx.egui_wants_keyboard_input()
+    {
+        if CAN_SAVE {
+            writers.save.write(SaveWorkspaceEvent {
+                name: active.name.clone(),
+            });
+        } else {
+            editor_state.status = Some(WEB_SAVE_UNAVAILABLE.to_string());
+        }
+    }
+
     let catalog = demos::catalog();
     let open_demo = catalog.ok().and_then(|c| c.by_root(active.uuid));
     let mut place_catalog: Option<&Demo> = None;
@@ -406,6 +574,7 @@ pub fn editor_ui_system(
     let mut close_requested: Option<bool> = None;
     let mut open_definition: Option<Uuid> = None;
     let mut open_map = false;
+    let mut open_challenge = None;
     let table = views.definition_table(&library);
     let breadcrumb = views.view.breadcrumb(&active.name);
     let view_note = views.view.frames().last().map(|frame| {
@@ -435,7 +604,7 @@ pub fn editor_ui_system(
         .clone()
         .unwrap_or_else(|| active.name.clone());
     let from = origin(active.read_only, open_demo);
-    let (read_only, dirty) = (active.read_only, revision.is_dirty());
+    let (read_only, dirty) = (active.read_only, files.revision.is_dirty());
     let (path, state) = file_subtitle_parts(&from, &breadcrumb, read_only, dirty);
     let subtitle = file_subtitle(&from, &breadcrumb, read_only, dirty);
     let card_view = FileCardView {
@@ -445,6 +614,11 @@ pub fn editor_ui_system(
         note: view_note.as_deref().unwrap_or(&subtitle),
         depth: views.view.frames().len(),
         library_open: editor_state.library_open,
+        undo: if undo.in_own_card(&layout) {
+            None
+        } else {
+            undo.state()
+        },
     };
     let room = layout.file_rect();
     let mut clicks = FileCardClicks::default();
@@ -467,10 +641,13 @@ pub fn editor_ui_system(
     if let Some(mode) = clicks.theme {
         theme.set(mode);
     }
+    undo.send(clicks.history);
+    undo.card(ctx, &palette, &layout);
 
     // ── Library drawer ─────────────────────────────────────────────────
     if editor_state.library_open {
-        let rect = layout.library_rect();
+        // Below the Undo and Redo card, when they have one.
+        let rect = layout.left_column_rect(undo.in_own_card(&layout));
         let frame = card(&palette);
         let inner = egui::vec2(rect.width(), rect.height()) - frame.total_margin().sum();
         egui::Area::new(egui::Id::new("hud_library"))
@@ -525,25 +702,42 @@ pub fn editor_ui_system(
                     }
                 });
             }
+            if CAN_SAVE {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut editor_state.workspace_file_name)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+            }
             ui.horizontal(|ui| {
-                ui.label("Name");
-                ui.add(
-                    egui::TextEdit::singleline(&mut editor_state.workspace_file_name)
-                        .desired_width(f32::INFINITY),
-                );
-            });
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!active.read_only, egui::Button::new("Save")).clicked()
-                    && !editor_state.workspace_file_name.trim().is_empty()
-                {
-                    let name = editor_state.workspace_file_name.trim().to_string();
-                    editor_state.current_workspace = Some(name.clone());
-                    writers.save.write(SaveWorkspaceEvent { name });
+                if CAN_SAVE {
+                    let typed = editor_state.workspace_file_name.trim().to_string();
+                    let save_as = name_key(&typed) != name_key(&active.name);
+                    let (label, hint) = if save_as {
+                        ("Save as new", "Save a copy under this name; it becomes the open workspace")
+                    } else {
+                        ("Save", "Save this workspace (Ctrl+S)")
+                    };
+                    if ui
+                        .add_enabled(!active.read_only && !typed.is_empty(), egui::Button::new(label))
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        writers.save.write(SaveWorkspaceEvent { name: typed });
+                    }
                 }
                 if ui.button("New empty workspace").clicked() {
                     new_workspace = true;
                 }
             });
+            if !CAN_SAVE {
+                ui.colored_label(
+                    info,
+                    format!("{WEB_SAVE_UNAVAILABLE} Your edits last until you close the page."),
+                );
+            }
             // Import RTL… (native only: the web build has no file system).
             if cfg!(not(target_arch = "wasm32")) {
                 ui.horizontal(|ui| {
@@ -619,6 +813,17 @@ pub fn editor_ui_system(
                 }
             }
 
+            egui::CollapsingHeader::new(egui::RichText::new("Challenges").font(heavy(15.0)))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Build it yourself: each opens the ports ready to wire, and Check tests your circuit.").size(12.0));
+                    open_challenge = super::challenge::library_list(
+                        ui,
+                        &palette,
+                        &progress,
+                        active_challenge.id.as_deref(),
+                    );
+                });
+
             egui::CollapsingHeader::new(egui::RichText::new("My workspaces").font(heavy(15.0)))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -626,6 +831,9 @@ pub fn editor_ui_system(
                 editor_state.saved_workspaces = None;
             }
             match editor_state.saved_workspaces.as_deref() {
+                _ if !CAN_SAVE => {
+                    ui.label(WEB_SAVE_UNAVAILABLE);
+                }
                 Some([]) | None => {
                     ui.label("No saved workspace files yet.");
                 }
@@ -665,9 +873,11 @@ pub fn editor_ui_system(
                 .show(ui, |ui| {
             for tip in [
                 "1–9: pick a part from the open tab; click or drag it onto the canvas",
-                "Left-click: select a part (inspector: toggle inputs, edit, delete); \
-                 empty canvas: deselect",
-                "Right-drag: move a part · Middle-drag: pan · Wheel: zoom",
+                "Left-click: select a part and flip a 1-bit input (inspector: edit, \
+                 delete, set wider inputs); empty canvas: deselect",
+                "Left- or right-drag: move a part · Middle-drag or arrow keys: pan · \
+                 Wheel: zoom",
+                "Space: run or pause",
                 "Delete: delete the selected part",
                 "W: wire tool (click source, then sink, choose pins)",
                 "F: fit the circuit · R: reset to tick 0",
@@ -685,6 +895,18 @@ pub fn editor_ui_system(
     if open_map {
         editor_state.library_open = false;
         next_state.set(GameState::DemoMap);
+        return Ok(());
+    }
+
+    if let Some(challenge) = open_challenge {
+        editor_state.library_open = false;
+        request_open(
+            &mut editor_state,
+            &mut writers.load,
+            &active,
+            &files.revision,
+            super::challenge::challenge_request(challenge, false),
+        );
         return Ok(());
     }
 
@@ -722,30 +944,17 @@ pub fn editor_ui_system(
         }
     }
 
-    let load = &mut writers.load;
-    let mut open = |editor_state: &mut EditorState,
-                    name: String,
-                    ws: Arc<WorkspaceDocument>,
-                    read_only: bool| {
-        editor_state.current_workspace = Some(name.clone());
-        editor_state.workspace_file_name = name.clone();
-        editor_state.selected_gate_type = None;
-        editor_state.clear_connection();
-        load.write(LoadWorkspaceEvent {
-            name,
-            workspace: ws,
-            read_only,
-        });
-    };
-
+    // Everything below replaces the open circuit: through the
+    // unsaved-changes guard.
+    let mut request: Option<OpenRequest> = None;
     if let Some(demo) = open_catalog {
-        editor_state.status = None;
-        open(
-            &mut editor_state,
-            demo.title.clone(),
-            Arc::clone(&demo.workspace),
-            true,
-        );
+        request = Some(OpenRequest::Workspace {
+            name: demo.title.clone(),
+            workspace: Arc::clone(&demo.workspace),
+            read_only: true,
+            unsaved: false,
+            status: None,
+        });
     }
 
     // An imported netlist opens as an unsaved, editable workspace.
@@ -758,17 +967,17 @@ pub fn editor_ui_system(
             });
         match result {
             Ok(import) => {
-                editor_state.status = Some(if import.warnings.is_empty() {
-                    format!("Imported {path}. Save the workspace to keep it.")
-                } else {
-                    format!("Imported {path}: {}", import.warnings.join("; "))
+                request = Some(OpenRequest::Workspace {
+                    name: import.name,
+                    workspace: Arc::new(import.workspace),
+                    read_only: false,
+                    unsaved: true,
+                    status: Some(if import.warnings.is_empty() {
+                        format!("Imported {path}. Save the workspace to keep it.")
+                    } else {
+                        format!("Imported {path}: {}", import.warnings.join("; "))
+                    }),
                 });
-                open(
-                    &mut editor_state,
-                    import.name,
-                    Arc::new(import.workspace),
-                    false,
-                );
             }
             Err(err) => {
                 warn!("Cannot import {path}: {err}");
@@ -778,41 +987,41 @@ pub fn editor_ui_system(
     }
 
     if new_workspace {
-        editor_state.status = None;
-        let root = crate::sim::CircuitDocument::new("workspace");
-        open(
-            &mut editor_state,
-            "workspace".into(),
-            Arc::new(WorkspaceDocument::new(root)),
-            false,
-        );
+        request = Some(OpenRequest::New);
     }
 
-    // An editable copy under fresh ids, saved right away so it is listed
-    // with the saved workspaces.
+    // An editable copy under fresh ids, saved right away (under a free
+    // name) so it is listed with the saved workspaces.
     if copy_demo && let Some(demo) = open_demo {
-        let name = format!("{} (copy)", demo.title);
-        let copy = demos::editable_copy(&demo.workspace, &name);
-        editor_state.status = Some(match save_workspace(&name, &copy) {
-            Ok(()) => format!("Copied \"{}\" to your workspace \"{name}\".", demo.title),
-            Err(err) => format!("Copied \"{}\" (not saved to disk: {err}).", demo.title),
-        });
-        editor_state.saved_workspaces = None;
-        open(&mut editor_state, name, Arc::new(copy), false);
+        request = Some(OpenRequest::CopyDemo(demo.id.clone()));
     }
 
     if let Some(name) = load_saved {
         // Reads the disk once, on the click.
         match read_workspace(&name) {
             Ok(ws) => {
-                editor_state.status = None;
-                open(&mut editor_state, name, Arc::new(ws), false);
+                request = Some(OpenRequest::Workspace {
+                    name,
+                    workspace: Arc::new(ws),
+                    read_only: false,
+                    unsaved: false,
+                    status: None,
+                });
             }
             Err(err) => {
                 warn!("Cannot load workspace {name}: {err}");
                 editor_state.status = Some(err.to_string());
             }
         }
+    }
+    if let Some(request) = request {
+        request_open(
+            &mut editor_state,
+            &mut writers.load,
+            &active,
+            &files.revision,
+            request,
+        );
     }
 
     // ── Wire builder ───────────────────────────────────────────────────
@@ -1034,6 +1243,9 @@ mod tests {
         for (w, h) in sizes {
             let layout = HudLayout::new(Vec2::new(w, h));
             let room = layout.file_rect();
+            // The Undo and Redo buttons are in the card only when the
+            // layout says there is room.
+            let undo = layout.undo_in_file_card().then_some((true, false));
             for depth in 0..=3 {
                 for library_open in [false, true] {
                     let view = FileCardView {
@@ -1043,6 +1255,7 @@ mod tests {
                         note: "",
                         depth,
                         library_open,
+                        undo,
                     };
                     let rect = crate::ui_style::test_ui::measure(&ctx, |ui| {
                         file_card(ui, &theme, &view, &layout);

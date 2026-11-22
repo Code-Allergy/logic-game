@@ -9,7 +9,10 @@
 //!   and names the next stop.
 //! - The level panel (right): the stop's title and description, its demos
 //!   as cards with a thumbnail ([`thumbnail`]) and a visited box, and
-//!   "Open" and "Copy to my workshop".
+//!   "Open" and "Copy to my workshop"; below them its build-it challenges
+//!   ([`challenges`]), each with a done box and "Build it", which opens
+//!   the challenge in the editor. A stop with challenges wears a
+//!   "done/total" pill.
 //! - The gallery shelf (bottom): category chips and a row of cards; a
 //!   click opens the item.
 //!
@@ -18,6 +21,7 @@
 //! in [`progress::DemoProgress`] (whoever opens them). The app still starts
 //! on the title menu.
 
+pub mod challenges;
 pub mod progress;
 pub mod road;
 pub mod thumbnail;
@@ -31,12 +35,12 @@ use bevy_egui::{
 };
 
 use crate::GameState;
-use crate::sim::{ActiveCircuit, Demo, DemoCatalog, LoadWorkspaceEvent, demos};
+use crate::sim::{ActiveCircuit, Demo, DemoCatalog, LoadWorkspaceEvent, WorkspaceRevision, demos};
 use crate::theme::{Palette, Theme, ThemeMode};
 use crate::ui_style::{HudIcon, egui_color, heavy, paint_icon, stroke};
 
 use super::EditorState;
-use super::workspace::save_workspace;
+use super::files::{OpenRequest, open_now, request_open};
 use bevy_egui::egui::emath::GuiRounding as _;
 use progress::{DemoProgress, RoadStatus, StopState, road_status};
 use road::{LabelSide, MapLayout, stop_size};
@@ -150,6 +154,7 @@ enum Action {
     SelectDemo(String),
     Open(&'static Demo),
     Copy(&'static Demo),
+    OpenChallenge(&'static crate::sim::challenges::Challenge),
     Tick(String, bool),
     Category(Option<String>),
     Theme(ThemeMode),
@@ -376,6 +381,7 @@ pub fn demo_map_system(
     editor: Option<ResMut<EditorState>>,
     mut load: MessageWriter<LoadWorkspaceEvent>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
+    open: (Option<Res<ActiveCircuit>>, Option<Res<WorkspaceRevision>>),
 ) -> Result {
     if game_state.get() != &GameState::DemoMap {
         return Ok(());
@@ -421,7 +427,15 @@ pub fn demo_map_system(
             ui.set_clip_rect(full);
             paint_bench(ui.painter(), &kit, full);
             header(ui, &kit, &layout, &theme, &mut actions);
-            road_map(ui, &kit, &layout, catalog, &status, &map, &mut actions);
+            road_map(
+                ui,
+                &kit,
+                &layout,
+                catalog,
+                (&status, &progress),
+                &map,
+                &mut actions,
+            );
             level_panel(ui, &kit, &layout, catalog, &progress, &map, &mut actions);
             gallery_shelf(ui, &kit, &layout, catalog, &progress, &map, &mut actions);
         });
@@ -450,25 +464,20 @@ pub fn demo_map_system(
                 open_in_editor(
                     editor.as_deref_mut(),
                     &mut load,
-                    demo.title.clone(),
-                    Arc::clone(&demo.workspace),
-                    true,
+                    &open,
+                    OpenRequest::Workspace {
+                        name: demo.title.clone(),
+                        workspace: Arc::clone(&demo.workspace),
+                        read_only: true,
+                        unsaved: false,
+                        status: None,
+                    },
                 );
                 next_state.set(GameState::Simulating);
             }
             Action::Copy(demo) => {
                 // As the Library's "Copy to my workspace": fresh ids, saved
-                // right away.
-                let name = format!("{} (copy)", demo.title);
-                let copy = demos::editable_copy(&demo.workspace, &name);
-                let status = match save_workspace(&name, &copy) {
-                    Ok(()) => format!("Copied \"{}\" to your workspace \"{name}\".", demo.title),
-                    Err(err) => format!("Copied \"{}\" (not saved to disk: {err}).", demo.title),
-                };
-                if let Some(editor) = editor.as_deref_mut() {
-                    editor.status = Some(status);
-                    editor.saved_workspaces = None;
-                }
+                // right away under a free name.
                 if progress.mark_opened(&demo.id)
                     && let Err(e) = progress.save()
                 {
@@ -477,9 +486,17 @@ pub fn demo_map_system(
                 open_in_editor(
                     editor.as_deref_mut(),
                     &mut load,
-                    name,
-                    Arc::new(copy),
-                    false,
+                    &open,
+                    OpenRequest::CopyDemo(demo.id.clone()),
+                );
+                next_state.set(GameState::Simulating);
+            }
+            Action::OpenChallenge(challenge) => {
+                open_in_editor(
+                    editor.as_deref_mut(),
+                    &mut load,
+                    &open,
+                    super::challenge::challenge_request(challenge, false),
                 );
                 next_state.set(GameState::Simulating);
             }
@@ -489,26 +506,21 @@ pub fn demo_map_system(
     Ok(())
 }
 
-/// Load `workspace` into the editor (as the Library does).
+/// Open `request` in the editor as the Library does: behind the
+/// unsaved-changes guard, which the workshop shows.
 fn open_in_editor(
     editor: Option<&mut EditorState>,
     load: &mut MessageWriter<LoadWorkspaceEvent>,
-    name: String,
-    workspace: Arc<crate::sim::WorkspaceDocument>,
-    read_only: bool,
+    (active, revision): &(Option<Res<ActiveCircuit>>, Option<Res<WorkspaceRevision>>),
+    request: OpenRequest,
 ) {
-    if let Some(editor) = editor {
-        editor.current_workspace = Some(name.clone());
-        editor.workspace_file_name = name.clone();
-        editor.selected_gate_type = None;
-        editor.library_open = false;
-        editor.clear_connection();
+    match (editor, active, revision) {
+        (Some(editor), Some(active), Some(revision)) => {
+            editor.library_open = false;
+            request_open(editor, load, active, revision, request);
+        }
+        (editor, _, _) => open_now(editor, load, request),
     }
-    load.write(LoadWorkspaceEvent {
-        name,
-        workspace,
-        read_only,
-    });
 }
 
 /// The bench: ground and dot grid.
@@ -633,7 +645,7 @@ fn road_map(
     kit: &Kit,
     layout: &MapLayout,
     catalog: &'static DemoCatalog,
-    status: &RoadStatus,
+    (status, progress): (&RoadStatus, &DemoProgress),
     map: &DemoMapState,
     actions: &mut Vec<Action>,
 ) {
@@ -737,6 +749,8 @@ fn road_map(
             stroke(kit.line(if current || last { 3.0 } else { 2.5 }), kit.ink()),
             StrokeKind::Inside,
         );
+        let (done, total) = challenges::level_count(catalog, level.level, progress);
+        challenges::stop_badge(painter, kit, face, done, total);
         let (number_colour, label_colour) = match state {
             StopState::Visited => (p.on_ink, p.text),
             StopState::Current => (p.text, p.text),
@@ -857,16 +871,16 @@ fn road_map(
         kit.text(painter, pos, align, text, font, p.text);
     }
 
-    progress_card(ui, kit, layout, catalog, status, actions);
+    progress_card(ui, kit, layout, catalog, (status, progress), actions);
 }
 
-/// "Your road so far": a bar, "N of M demos opened", the next stop.
+/// "Your road so far": a bar, "N/M demos · K/L challenges", the next stop.
 fn progress_card(
     ui: &Ui,
     kit: &Kit,
     layout: &MapLayout,
     catalog: &DemoCatalog,
-    status: &RoadStatus,
+    (status, progress): (&RoadStatus, &DemoProgress),
     actions: &mut Vec<Action>,
 ) {
     let s = kit.s;
@@ -909,7 +923,17 @@ fn progress_card(
         painter,
         at(16.0, 72.0),
         Align2::LEFT_CENTER,
-        format!("{} of {} demos opened", status.opened, status.total),
+        if catalog.challenges.is_empty() {
+            format!("{} of {} demos opened", status.opened, status.total)
+        } else {
+            let done = progress.completed_of(catalog.challenges.iter().map(|c| c.id.as_str()));
+            format!(
+                "{}/{} demos · {done}/{} challenges",
+                status.opened,
+                status.total,
+                catalog.challenges.len()
+            )
+        },
         FontId::monospace(11.0 * s),
         p.text,
     );
@@ -1063,6 +1087,20 @@ fn level_panel(
                         selected.is_some_and(|d| d.id == demo.id),
                         actions,
                     );
+                }
+                let level_challenges = challenges::of_level(catalog, level.level);
+                if !level_challenges.is_empty() {
+                    let (done, total) = challenges::level_count(catalog, level.level, progress);
+                    challenges::heading(ui, kit, done, total);
+                    for challenge in level_challenges {
+                        challenges::card(
+                            ui,
+                            kit,
+                            challenge,
+                            progress.is_completed(&challenge.id),
+                            actions,
+                        );
+                    }
                 }
                 ui.add_space((4.0 * s).round());
             });

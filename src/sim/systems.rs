@@ -11,22 +11,20 @@ use uuid::Uuid;
 
 use crate::camera::{FIT_PADDING, FitView, fit_view, scale_for_wpp};
 use crate::editor::parts::{kind_blurb, kind_title};
+use crate::editor::workspace::{OnConflict, WEB_SAVE_UNAVAILABLE, WorkspaceStore, exit_save_plan};
 use crate::theme::{Family, Theme};
 use crate::ui_style::{
     HudIcon, HudLayout, caption, card, chip, chip_sized, chunky_button, chunky_icon_button,
     egui_color, format_live_value, heavy, rule, stroke,
 };
-use crate::{
-    MainCamera, UiPointerState, editor::workspace::save_workspace,
-    temp::GateComponentSelectionEvent,
-};
+use crate::{MainCamera, UiPointerState, temp::GateComponentSelectionEvent};
 
 use super::{
-    AuthoringFeedback, CircuitLibrary, CircuitReader, DeleteGate, DeleteWire, DisplayConfig,
-    DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind, GateLabel, GateLabelChanged,
-    GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected, SelectedGate, SetGateKind,
-    SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter, WireEndpoints,
-    WireState, WorkspaceRevision, art,
+    ActiveCircuit, AuthoringFeedback, CircuitLibrary, CircuitMember, CircuitReader, DeleteGate,
+    DeleteWire, DisplayConfig, DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind,
+    GateLabel, GateLabelChanged, GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected,
+    SelectedGate, SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig,
+    TickRateMeter, WireEndpoints, WireState, WorkspaceRevision, art,
     spatial_grid::SpatialGrid,
     view::{CircuitView, InstanceViewItem, OpenInstanceView},
 };
@@ -183,36 +181,214 @@ pub fn canvas_click(hit: Option<Entity>, selected: &mut SelectedGate) -> Option<
     hit
 }
 
-/// Left-click selects a gate; a left click on empty canvas (not over the
-/// HUD) clears the selection.
-pub fn update_inputs_on_left_click(
+/// The cursor over the canvas this frame: window position (logical
+/// pixels, y down) and world position, or `None` outside the window.
+/// [`canvas_cursor_system`] fills it in; the pointer systems only read it.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct CanvasCursor {
+    pub screen: Option<Vec2>,
+    pub world: Option<Vec2>,
+}
+
+/// Track the cursor in [`CanvasCursor`] (left as it is without a window
+/// or camera, as in headless tests).
+pub fn canvas_cursor_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
-    ui_pointer: Res<UiPointerState>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-    query: Query<(Entity, &Transform, &GateType)>,
-    mut select_writer: MessageWriter<GateComponentSelectionEvent>,
-    mut selected: ResMut<SelectedGate>,
+    mut cursor: ResMut<CanvasCursor>,
 ) {
-    if ui_pointer.over_egui || !mouse_button_input.just_pressed(MouseButton::Left) {
-        return;
-    }
-    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single())
+    let (Ok(window), Ok((camera, camera_transform))) = (q_window.single(), q_camera.single())
     else {
         return;
     };
-    let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
+    *cursor = CanvasCursor {
+        screen: window.cursor_position(),
+        world: cursor_world_pos(window, camera, camera_transform),
+    };
+}
+
+/// Pixels the pointer must travel with the left button held on a part
+/// before the press becomes a move instead of a click.
+pub const DRAG_THRESHOLD: f32 = 5.0;
+
+/// A press on the canvas being followed until its release.
+#[derive(Debug, Clone, Copy)]
+pub struct CanvasPress {
+    pub button: MouseButton,
+    /// The part under the pointer when pressed.
+    pub gate: Option<Entity>,
+    /// Window position of the press.
+    pub start: Vec2,
+    /// The part's position minus the pointer's world position at the press.
+    pub offset: Vec2,
+    /// The part follows the pointer (a right press on a part at once, a
+    /// left press once it moved [`DRAG_THRESHOLD`]).
+    pub dragging: bool,
+    /// The pointer travelled past [`DRAG_THRESHOLD`].
+    pub moved: bool,
+}
+
+/// The press on the canvas, if a mouse button went down on it.
+#[derive(Resource, Debug, Default)]
+pub struct CanvasPointer {
+    pub press: Option<CanvasPress>,
+}
+
+impl CanvasPointer {
+    /// A part is being dragged.
+    pub fn dragging(&self) -> bool {
+        self.press.is_some_and(|p| p.dragging)
+    }
+}
+
+/// The value a click on an input part sets: a 1-bit input toggles. A
+/// wider input is only selected (its value is set in the inspector, where
+/// each bit has a chip), so a click never changes a bus by surprise.
+pub fn input_click_value(kind: &GateKind, value: u64) -> Option<u64> {
+    match kind {
+        GateKind::Input { w: 1 } => Some(value ^ 1),
+        _ => None,
+    }
+}
+
+#[derive(SystemParam)]
+pub struct CanvasPointerWriters<'w> {
+    select: MessageWriter<'w, GateComponentSelectionEvent>,
+    inputs: MessageWriter<'w, SetInputValue>,
+}
+
+type CanvasGate = (
+    Entity,
+    &'static mut Transform,
+    &'static GateType,
+    Option<&'static InputDrive>,
+    Has<InstanceViewItem>,
+);
+
+/// Mouse buttons on the canvas (not over the HUD):
+///
+/// - a left press on a part selects it (on empty canvas, clears the
+///   selection); released without moving, it toggles a 1-bit input (also
+///   in a read-only demo: inputs may change there), see
+///   [`input_click_value`];
+/// - a left drag on a part, past [`DRAG_THRESHOLD`], moves it, and a right
+///   drag picks it up at once; it moves on the snap grid
+///   ([`SNAP`](super::layout::SNAP)), point to point.
+///
+/// Nothing moves in a read-only demo, and with a part armed or the wire
+/// tool on a left click only picks (no move, no toggle). The moved part
+/// keeps [`Selected`] (drawn on top) until the next drag.
+#[allow(clippy::too_many_arguments)]
+pub fn canvas_pointer_system(
+    ui_pointer: Res<UiPointerState>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    cursor: Res<CanvasCursor>,
+    active: Res<crate::sim::ActiveCircuit>,
+    editor: Option<Res<crate::editor::EditorState>>,
+    mut pointer: ResMut<CanvasPointer>,
+    mut selected: ResMut<SelectedGate>,
+    mut gates: Query<CanvasGate, With<GateIdentity>>,
+    dragged: Query<Entity, With<Selected>>,
+    mut commands: Commands,
+    mut writers: CanvasPointerWriters,
+) {
+    let tool_in_hand = editor
+        .as_ref()
+        .is_some_and(|e| e.connection_mode || e.selected_gate_type.is_some());
+    let start_drag = |commands: &mut Commands, gate: Entity, offset: Vec2| {
+        for e in &dragged {
+            commands.entity(e).remove::<Selected>();
+        }
+        commands.entity(gate).insert(Selected { offset });
+    };
+
+    // A new press.
+    for button in [MouseButton::Left, MouseButton::Right] {
+        if !buttons.just_pressed(button) || pointer.press.is_some() || ui_pointer.over_egui {
+            continue;
+        }
+        let (Some(screen), Some(world)) = (cursor.screen, cursor.world) else {
+            continue;
+        };
+        let target = gates
+            .iter()
+            .find(|(_, t, ty, ..)| hit(t, &ty.kind, world))
+            .map(|(entity, t, ..)| (entity, t.translation.truncate() - world));
+        let mut press = CanvasPress {
+            button,
+            gate: target.map(|(e, _)| e),
+            start: screen,
+            offset: target.map_or(Vec2::ZERO, |(_, o)| o),
+            dragging: false,
+            moved: false,
+        };
+        if button == MouseButton::Left {
+            let mut next = *selected;
+            if let Some(entity) = canvas_click(press.gate, &mut next) {
+                writers.select.write(GateComponentSelectionEvent { entity });
+            }
+            selected.set_if_neq(next);
+        } else if let Some(gate) = press.gate
+            && !active.read_only
+        {
+            start_drag(&mut commands, gate, press.offset);
+            press.dragging = true;
+        }
+        pointer.press = Some(press);
+    }
+
+    let Some(mut press) = pointer.press else {
         return;
     };
-    let target = query
-        .iter()
-        .find(|(_, t, ty)| hit(t, &ty.kind, world))
-        .map(|(entity, ..)| entity);
-    let mut next = *selected;
-    if let Some(entity) = canvas_click(target, &mut next) {
-        select_writer.write(GateComponentSelectionEvent { entity });
+    // Movement.
+    if let Some(screen) = cursor.screen
+        && screen.distance(press.start) > DRAG_THRESHOLD
+    {
+        press.moved = true;
     }
-    selected.set_if_neq(next);
+    let held = buttons.pressed(press.button);
+    if held
+        && press.moved
+        && !press.dragging
+        && press.button == MouseButton::Left
+        && !active.read_only
+        && !tool_in_hand
+        && let Some(gate) = press.gate
+    {
+        start_drag(&mut commands, gate, press.offset);
+        press.dragging = true;
+    }
+    if press.dragging
+        && let Some(gate) = press.gate
+        && let Ok((_, mut transform, ..)) = gates.get_mut(gate)
+    {
+        // The part jumps from point to point of the snap grid as it
+        // follows the pointer; a right press without a move leaves it.
+        let at = transform.translation.truncate();
+        let to = match cursor.world {
+            Some(world) if held && press.moved => super::layout::snap_to_grid(world + press.offset),
+            _ => at,
+        };
+        if at != to {
+            transform.translation.x = to.x;
+            transform.translation.y = to.y;
+        }
+    }
+    if held {
+        pointer.press = Some(press);
+        return;
+    }
+    // Released: a click on a 1-bit input toggles it.
+    pointer.press = None;
+    if press.button == MouseButton::Left
+        && !press.moved
+        && !tool_in_hand
+        && let Some(gate) = press.gate
+        && let Ok((entity, _, ty, Some(drive), false)) = gates.get(gate)
+        && let Some(value) = input_click_value(&ty.kind, drive.value)
+    {
+        writers.inputs.write(SetInputValue { entity, value });
+    }
 }
 
 /// Update [`SelectedGate`] when a selection event fires.
@@ -222,72 +398,6 @@ pub fn update_selected_gate(
 ) {
     for event in event_reader.read() {
         selected_gate.0 = Some(event.entity);
-    }
-}
-
-/// Right-click to select and drag gates.
-#[allow(clippy::too_many_arguments)]
-pub fn gate_selection_system(
-    q_window: Query<&Window, With<PrimaryWindow>>,
-    q_camera: Query<(&Camera, &GlobalTransform)>,
-    grid: Res<SpatialGrid>,
-    ui_pointer: Res<UiPointerState>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-    query: Query<(&Transform, &GateType), With<GateIdentity>>,
-    mut commands: Commands,
-    selected_query: Query<Entity, With<Selected>>,
-    active: Res<crate::sim::ActiveCircuit>,
-) {
-    // Gates of a read-only demo cannot be dragged.
-    if ui_pointer.over_egui
-        || active.read_only
-        || !mouse_button_input.just_pressed(MouseButton::Right)
-    {
-        return;
-    }
-    for e in &selected_query {
-        commands.entity(e).remove::<Selected>();
-    }
-    let (Ok(window), Ok((camera, global_transform))) = (q_window.single(), q_camera.single())
-    else {
-        return;
-    };
-    let Some(world) = cursor_world_pos(window, camera, global_transform) else {
-        return;
-    };
-    for entity in grid.query_near(world, 100.0) {
-        if let Ok((transform, ty)) = query.get(entity)
-            && hit(transform, &ty.kind, world)
-        {
-            let offset = transform.translation.truncate() - world;
-            commands.entity(entity).insert(Selected { offset });
-            break;
-        }
-    }
-}
-
-/// Move the selected gate while the right mouse button is held.
-pub fn drag_selected_system(
-    q_window: Query<&Window, With<PrimaryWindow>>,
-    q_camera: Query<(&Camera, &GlobalTransform)>,
-    ui_pointer: Res<UiPointerState>,
-    mut query: Query<(&mut Transform, &Selected), With<GateIdentity>>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-) {
-    if ui_pointer.over_egui || !mouse_button_input.pressed(MouseButton::Right) {
-        return;
-    }
-    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single())
-    else {
-        return;
-    };
-    let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
-        return;
-    };
-    for (mut transform, selected) in &mut query {
-        let new_pos = world + selected.offset;
-        transform.translation.x = new_pos.x;
-        transform.translation.y = new_pos.y;
     }
 }
 
@@ -386,9 +496,9 @@ pub fn transport_card(
             let running = state.running;
             let run = if layout.compact {
                 chunky_button(ui, palette, "▶", running).on_hover_text(if running {
-                    "Running"
+                    "Running (Space pauses)"
                 } else {
-                    "Run"
+                    "Run (Space)"
                 })
             } else {
                 chunky_button(
@@ -397,10 +507,11 @@ pub fn transport_card(
                     if running { "▶ Running" } else { "▶ Run" },
                     running,
                 )
+                .on_hover_text("Run (Space)")
             };
             clicked.run = run.clicked();
             clicked.pause = chunky_icon_button(ui, palette, HudIcon::Pause, false)
-                .on_hover_text("Pause")
+                .on_hover_text("Pause (Space)")
                 .clicked();
             clicked.step = chunky_button(ui, palette, "Step", false)
                 .on_hover_text("One tick")
@@ -490,6 +601,7 @@ pub fn transport_more_card(
 
 /// The transport card, top centre: run, pause, step, reset (also `R`),
 /// speed chips (and a `⋯` popover with the exact rate), and the tick.
+/// `Space` runs or pauses (not while a text field has the keyboard).
 #[allow(clippy::too_many_arguments)]
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
@@ -521,6 +633,14 @@ pub fn simulation_config_ui_system(
         Some(rate) => format_si_hz(rate),
         None => "measuring…".to_owned(),
     };
+    // `Space` runs or pauses; not while a widget has the keyboard focus
+    // (Space would also press a focused button).
+    let typing = ctx.egui_wants_keyboard_input();
+    let focused = ctx.memory(|m| m.focused().is_some());
+    if keys.just_pressed(KeyCode::Space) && !typing && !focused {
+        let running = bridge.is_running();
+        bridge.set_running(!running);
+    }
     let state = TransportState {
         running: bridge.is_running(),
         tick: tick_count,
@@ -545,8 +665,7 @@ pub fn simulation_config_ui_system(
     if clicked.step {
         bridge.step(1);
     }
-    let reset =
-        clicked.reset || (keys.just_pressed(KeyCode::KeyR) && !ctx.egui_wants_keyboard_input());
+    let reset = clicked.reset || (keys.just_pressed(KeyCode::KeyR) && !typing);
     if clicked.more {
         *more_open = !*more_open;
     }
@@ -1316,47 +1435,106 @@ pub fn ui_for_selected_gate(
 // Save
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn save_on_exit_system(mut exit_events: MessageReader<AppExit>, reader: CircuitReader) {
-    // A read-only demo is not the player's work; it is never saved.
-    if exit_events.read().next().is_none() || reader.active.read_only {
+/// Save the open workspace when the app exits, if that would otherwise
+/// lose work (see [`exit_save_plan`]).
+///
+/// Runs in [`Last`] after [`bevy::window::ExitSystems`]: closing the
+/// window sends [`AppExit`] from `Last` (bevy_window's exit condition)
+/// and the title menu's Exit sends it in `Update`; the runner stops after
+/// the frame in which it was sent, so this is the last system that sees
+/// it, with the circuit still in the world.
+pub fn save_on_exit_system(
+    mut exit_events: MessageReader<AppExit>,
+    reader: CircuitReader,
+    revision: Res<WorkspaceRevision>,
+) {
+    if exit_events.read().next().is_none() {
         return;
     }
-    let name = if reader.active.name.trim().is_empty() {
-        "simulation".to_string()
-    } else {
-        reader.active.name.clone()
+    let store = WorkspaceStore::player();
+    let active = &reader.active;
+    let workspace = reader.workspace();
+    let empty = workspace.root.nodes.is_empty();
+    let Some(plan) = exit_save_plan(
+        store.as_ref(),
+        &active.name,
+        active.uuid,
+        active.read_only,
+        revision.is_dirty(),
+        empty,
+    ) else {
+        return;
     };
-    match save_workspace(&name, &reader.workspace()) {
-        Ok(()) => info!("Saved simulation workspace: {name}"),
-        Err(err) => error!("Failed to save simulation: {err}"),
+    let Some(store) = store else { return };
+    match store.save_open(&plan.name, &plan.name, workspace, OnConflict::Rename) {
+        Ok(saved) => info!(
+            "Saved workspace \"{}\" on exit in {}",
+            saved.name,
+            store.dir().display()
+        ),
+        Err(err) => error!("{err}"),
     }
 }
 
-/// Write the open circuit to disk on [`SaveWorkspaceEvent`].
+/// Write the open circuit to disk on [`SaveWorkspaceEvent`]. Saving under
+/// another name is a Save As: the saved copy gets a fresh root id and
+/// becomes the open workspace (the old file is left as it was). A name
+/// that holds a different workspace is refused.
+#[allow(clippy::too_many_arguments)]
 pub fn workspace_io_system(
     mut save_events: MessageReader<SaveWorkspaceEvent>,
-    reader: CircuitReader,
+    mut circuit: ParamSet<(CircuitReader, ResMut<ActiveCircuit>)>,
+    mut members: Query<&mut CircuitMember, Allow<bevy::ecs::entity_disabling::Disabled>>,
     mut revision: ResMut<WorkspaceRevision>,
     mut feedback: ResMut<AuthoringFeedback>,
     editor_state: Option<ResMut<crate::editor::EditorState>>,
 ) {
-    let mut saved = false;
-    for ev in save_events.read() {
-        if reader.active.read_only {
-            feedback.refuse(crate::sim::READ_ONLY_MESSAGE.into());
-            continue;
-        }
-        match save_workspace(&ev.name, &reader.workspace()) {
-            Ok(()) => {
-                revision.mark_saved();
-                feedback.message = Some(format!("Saved workspace \"{}\"", ev.name));
-                saved = true;
+    let Some(name) = save_events.read().last().map(|ev| ev.name.clone()) else {
+        return;
+    };
+    let reader = circuit.p0();
+    let previous = reader.active.name.clone();
+    let old_root = reader.active.uuid;
+    let result = if reader.active.read_only {
+        Err(crate::sim::READ_ONLY_MESSAGE.to_string())
+    } else {
+        match WorkspaceStore::player() {
+            Some(store) => {
+                store.save_open(&name, &previous, reader.workspace(), OnConflict::Refuse)
             }
-            Err(err) => feedback.message = Some(format!("Failed to save \"{}\": {err}", ev.name)),
+            None => Err(WEB_SAVE_UNAVAILABLE.to_string()),
         }
-    }
-    if saved && let Some(mut editor_state) = editor_state {
-        editor_state.saved_workspaces = None;
+    };
+    let outcome = match result {
+        Ok(saved) => {
+            revision.mark_saved();
+            if saved.root != old_root || saved.name != previous {
+                // The open workspace is now the saved one. No change
+                // detection: the camera stays where it is.
+                let mut active = circuit.p1();
+                let active = active.bypass_change_detection();
+                active.uuid = saved.root;
+                active.name = saved.name.clone();
+                for mut member in &mut members {
+                    if member.circuit_uuid == old_root {
+                        member.circuit_uuid = saved.root;
+                    }
+                }
+            }
+            let message = saved.message(&previous);
+            feedback.message = Some(message.clone());
+            Ok(message)
+        }
+        Err(err) => {
+            feedback.refuse(err.clone());
+            Err(err)
+        }
+    };
+    if let Some(mut editor_state) = editor_state {
+        if outcome.is_ok() {
+            editor_state.saved_workspaces = None;
+        }
+        editor_state.last_save = Some(outcome);
     }
 }
 

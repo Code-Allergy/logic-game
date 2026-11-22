@@ -620,6 +620,7 @@ pub fn parts_bar_system(
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     active: Res<ActiveCircuit>,
     game_state: Res<State<GameState>>,
+    challenge: Res<super::challenge::ActiveChallenge>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         state.dragging_part = None;
@@ -632,6 +633,21 @@ pub fn parts_bar_system(
     let palette = theme.palette;
     let layout = hud_layout(ctx);
     let items = slot_items(state.part_tab, &state);
+    // While a challenge is open, parts outside its rules are greyed out.
+    let open_challenge = challenge.challenge();
+    let refused: Vec<Option<String>> = items
+        .iter()
+        .map(|item| {
+            super::challenge::refusal(
+                open_challenge,
+                open_challenge.is_none_or(|c| match item {
+                    SlotItem::Kind(kind) => c.allows_kind(kind),
+                    SlotItem::Demo(demo) => c.allows_chip(&demo.workspace),
+                    SlotItem::Saved(_) => true,
+                }),
+            )
+        })
+        .collect();
 
     let mut activate: Option<usize> = None;
     let mut drag: Option<usize> = None;
@@ -674,15 +690,24 @@ pub fn parts_bar_system(
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = SLOT_GAP;
                     for (i, item) in items.iter().enumerate() {
-                        let response = part_slot(
-                            ui,
-                            &palette,
-                            slots,
-                            slot_key_label(i),
-                            item,
-                            item.is_armed(&state),
-                        )
-                        .on_hover_text(item.hover());
+                        let response = ui
+                            .add_enabled_ui(refused[i].is_none(), |ui| {
+                                part_slot(
+                                    ui,
+                                    &palette,
+                                    slots,
+                                    slot_key_label(i),
+                                    item,
+                                    item.is_armed(&state),
+                                )
+                            })
+                            .inner
+                            .on_hover_text(item.hover())
+                            .on_disabled_hover_text(format!(
+                                "{}\n\n{}",
+                                item.hover(),
+                                refused[i].as_deref().unwrap_or_default()
+                            ));
                         if response.drag_started() {
                             drag = Some(i);
                         } else if response.clicked() {
@@ -738,12 +763,15 @@ pub fn parts_bar_system(
             if keys.just_pressed(key)
                 && let Some(slot) = slot_for_key(key)
                 && slot < items.len()
+                && refused[slot].is_none()
             {
                 activate = Some(slot);
             }
         }
     }
-    let mut status = state.status.take();
+    // Only a failed slot writes a status: writing it back every frame
+    // would mark the state changed and keep the toast up for good.
+    let mut status = None;
     if let Some(i) = activate {
         let item = &items[i];
         if item.is_armed(&state) {
@@ -757,7 +785,9 @@ pub fn parts_bar_system(
     {
         state.dragging_part = Some(pick);
     }
-    state.status = status;
+    if status.is_some() {
+        state.status = status;
+    }
 
     // Drag and drop onto the canvas.
     if let Some((kind, label)) = state.dragging_part.clone() {
@@ -1239,6 +1269,30 @@ fn paint_signal(ui: &Ui, palette: &Palette, rect: egui::Rect, width: u8, value: 
 /// Seconds a toast stays up.
 const TOAST_SECS: f32 = 6.0;
 
+/// One toast source (authoring feedback, workspace status): a message
+/// shows for [`TOAST_SECS`] from when it appears or changes, or is sent
+/// again, then hides until the next one.
+#[derive(Debug, Default)]
+pub struct ToastSlot {
+    last: Option<String>,
+    age: f32,
+}
+
+impl ToastSlot {
+    /// The message to show this frame. `message` is the source's current
+    /// message, `resent` whether it was written again this frame (an
+    /// identical message counts as new then), `dt` the frame time.
+    pub fn tick(&mut self, message: Option<&String>, resent: bool, dt: f32) -> Option<String> {
+        if resent || message != self.last.as_ref() {
+            self.last = message.cloned();
+            self.age = 0.0;
+        } else {
+            self.age += dt;
+        }
+        self.last.clone().filter(|_| self.age <= TOAST_SECS)
+    }
+}
+
 /// Above the parts bar: the last authoring message (a refused edit, a
 /// save) and the editor's workspace status, for a few seconds each.
 pub fn toast_system(
@@ -1248,23 +1302,25 @@ pub fn toast_system(
     mut state: ResMut<EditorState>,
     time: Res<Time>,
     game_state: Res<State<GameState>>,
-    mut shown_for: Local<f32>,
+    mut slots: Local<(ToastSlot, ToastSlot)>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
     }
-    if feedback.is_changed() || state.is_changed() && state.status.is_some() {
-        *shown_for = 0.0;
-    } else {
-        *shown_for += time.delta_secs();
-    }
-    let messages: Vec<String> = feedback
-        .message
-        .iter()
-        .chain(state.status.iter())
-        .cloned()
-        .collect();
-    if messages.is_empty() || *shown_for > TOAST_SECS {
+    let dt = time.delta_secs();
+    // Feedback is only written by authoring commands, so a change is a
+    // new message. The status is compared by value: other edits of the
+    // editor state (arming a part) must not bring an old one back.
+    let messages: Vec<String> = [
+        slots
+            .0
+            .tick(feedback.message.as_ref(), feedback.is_changed(), dt),
+        slots.1.tick(state.status.as_ref(), false, dt),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if messages.is_empty() {
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
@@ -1485,6 +1541,34 @@ mod tests {
             .collect();
         assert_eq!(ids, want);
         assert!(ids.contains(&"cpu_fibonacci"));
+    }
+
+    #[test]
+    fn toasts_expire_and_come_back_only_for_a_new_message() {
+        let saved = "Saved \"adder\"".to_string();
+        let mut slot = ToastSlot::default();
+        assert_eq!(slot.tick(None, false, 0.1), None);
+        // Shown from when it appears, for TOAST_SECS, then hidden although
+        // the message stays set.
+        assert_eq!(slot.tick(Some(&saved), false, 0.1), Some(saved.clone()));
+        let frame = 1.0 / 60.0;
+        let mut frames = 0;
+        while slot.tick(Some(&saved), false, frame).is_some() {
+            frames += 1;
+            assert!(frames < 1000, "the toast never expires");
+        }
+        assert!((frames as f32 * frame - TOAST_SECS).abs() < 0.1);
+        assert_eq!(slot.tick(Some(&saved), false, frame), None);
+        // A different message shows again; so does the same one re-sent.
+        let other = "Cannot load".to_string();
+        assert_eq!(slot.tick(Some(&other), false, frame), Some(other.clone()));
+        for _ in 0..1000 {
+            slot.tick(Some(&other), false, frame);
+        }
+        assert_eq!(slot.tick(Some(&other), true, frame), Some(other.clone()));
+        // Cleared, then set again: shown.
+        assert_eq!(slot.tick(None, false, frame), None);
+        assert_eq!(slot.tick(Some(&other), false, frame), Some(other));
     }
 
     #[test]

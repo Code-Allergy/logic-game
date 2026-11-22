@@ -291,7 +291,7 @@ fn dragging_a_gate_moves_only_its_wires_and_does_not_recompile() {
     let into_y = wire_into(&mut app, y);
     let into_z = wire_into(&mut app, z);
 
-    // Drag `and` over several frames, as `drag_selected_system` does.
+    // Drag `and` over several frames, as `canvas_pointer_system` does.
     clear_changes(&mut app);
     for step in 1..=5 {
         app.world_mut()
@@ -404,8 +404,8 @@ fn z_span(app: &App, entity: Entity, parent_z: f32) -> (f32, f32) {
     span
 }
 
-/// Right-drag `gate` one step, as `gate_selection_system` and
-/// `drag_selected_system` do.
+/// Drag `gate` one step, as `canvas_pointer_system` does (it marks the
+/// dragged part [`Selected`] and moves it).
 fn drag(app: &mut App, gate: Entity, to: Vec2) {
     let selected: Vec<Entity> = app
         .world_mut()
