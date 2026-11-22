@@ -25,6 +25,7 @@ use bevy_egui::{
 use uuid::Uuid;
 
 use crate::camera::{FitView, MAX_WPP, MIN_WPP, scale_for_wpp, visible_world, world_per_pixel};
+use crate::sim::systems::CanvasPointer;
 use crate::sim::{
     ActiveCircuit, AuthoringFeedback, CircuitLibrary, CreateGate, Demo, GateIdentity, GateKind,
     GateLabel, GateType, GateValues, RegisterDefinitions, SelectedGate, SimDiagnostics,
@@ -195,7 +196,7 @@ pub fn minimap_system(
                     rect.center(),
                     Align2::CENTER_CENTER,
                     "empty",
-                    FontId::proportional(12.0),
+                    FontId::proportional(13.0),
                     egui_color(palette.text_faint),
                 );
                 return;
@@ -402,6 +403,10 @@ fn paint_gate_glyph(painter: &egui::Painter, c: Pos2, kind: &GateKind, ink: Colo
     true
 }
 
+/// The key number in a slot's top-left corner: its size and offset.
+const KEY_HINT_SIZE: f32 = 12.0;
+const KEY_HINT_AT: egui::Vec2 = egui::vec2(6.0, 3.0);
+
 /// One parts-bar slot: a chunky tile with its key number, a glyph or
 /// short name, lifting on hover and marigold while armed.
 fn part_slot(
@@ -447,14 +452,14 @@ fn part_slot(
     let text_colour = egui_color(if armed { palette.on_ink } else { palette.text });
     if let Some(key) = key {
         painter.text(
-            face.min + egui::vec2(7.0, 4.0),
+            face.min + KEY_HINT_AT,
             Align2::LEFT_TOP,
             key,
-            FontId::monospace(10.0),
+            FontId::monospace(KEY_HINT_SIZE),
             egui_color(if armed {
                 palette.on_ink
             } else {
-                palette.text_faint
+                palette.text_secondary
             }),
         );
     }
@@ -676,7 +681,7 @@ pub fn parts_bar_system(
                         } else {
                             "drag, or press a number"
                         })
-                        .size(12.0)
+                        .size(13.0)
                         .color(egui_color(palette.text_secondary)),
                     );
                 }
@@ -849,14 +854,14 @@ fn paint_tool_slot(
         StrokeKind::Inside,
     );
     painter.text(
-        face.min + egui::vec2(7.0, 4.0),
+        face.min + KEY_HINT_AT,
         Align2::LEFT_TOP,
         "W",
-        FontId::monospace(10.0),
+        FontId::monospace(KEY_HINT_SIZE),
         egui_color(if on {
             palette.on_ink
         } else {
-            palette.text_faint
+            palette.text_secondary
         }),
     );
     let c = face.center() + egui::vec2(0.0, 2.0);
@@ -1136,7 +1141,7 @@ pub fn signals_card_system(
                 ui.label(
                     egui::RichText::new("live")
                         .monospace()
-                        .size(11.0)
+                        .size(12.0)
                         .color(egui_color(palette.text_secondary)),
                 );
             });
@@ -1166,7 +1171,7 @@ pub fn signals_card_system(
                     ui.allocate_exact_size(egui::vec2(name_w, row_h - 6.0), Sense::click());
                 let galley = ui.painter().layout(
                     row.name.clone(),
-                    FontId::monospace(12.0),
+                    FontId::monospace(13.0),
                     egui_color(palette.text),
                     f32::INFINITY,
                 );
@@ -1257,7 +1262,7 @@ fn paint_signal(ui: &Ui, palette: &Palette, rect: egui::Rect, width: u8, value: 
         rect.center(),
         Align2::CENTER_CENTER,
         format_live_value(width, value),
-        FontId::monospace(12.0),
+        FontId::monospace(13.0),
         egui_color(text),
     );
 }
@@ -1381,7 +1386,8 @@ pub fn escape(state: &mut EditorState, selected: &mut SelectedGate) {
 }
 
 /// `Esc` drops the armed part, the wire tool and the Library drawer, or
-/// with none of those clears the selection (see [`escape`]); `W`
+/// with none of those clears the selection (see [`escape`]); during a
+/// wire drag it only drops the wire; `W`
 /// toggles the wire tool; `F` fits the view. Ignored while a text field
 /// has the keyboard. (`1`–`9` are handled by the parts bar, `T` by the
 /// theme, `Delete` by the inspector.)
@@ -1392,6 +1398,7 @@ pub fn editor_keys_system(
     mut fit: MessageWriter<FitView>,
     game_state: Res<State<GameState>>,
     mut selected: Option<ResMut<SelectedGate>>,
+    canvas: Option<Res<CanvasPointer>>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -1403,7 +1410,10 @@ pub fn editor_keys_system(
     if ctx.egui_wants_keyboard_input() {
         return Ok(());
     }
-    if keys.just_pressed(KeyCode::Escape) {
+    // `Esc` during a wire drag drops the wire (the canvas pointer sees to
+    // it) and nothing else.
+    let wiring = canvas.is_some_and(|c| c.wiring());
+    if keys.just_pressed(KeyCode::Escape) && !wiring {
         let mut next = selected.as_deref().copied().unwrap_or_default();
         escape(&mut state, &mut next);
         if let Some(selected) = selected.as_mut() {

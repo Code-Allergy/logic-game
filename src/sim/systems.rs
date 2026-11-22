@@ -9,7 +9,7 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use uuid::Uuid;
 
-use crate::camera::{FIT_PADDING, FitView, fit_view, scale_for_wpp};
+use crate::camera::{FIT_PADDING, FitView, fit_view_around, scale_for_wpp};
 use crate::editor::parts::{kind_blurb, kind_title};
 use crate::editor::workspace::{OnConflict, WEB_SAVE_UNAVAILABLE, WorkspaceStore, exit_save_plan};
 use crate::theme::{Family, Theme};
@@ -20,13 +20,16 @@ use crate::ui_style::{
 use crate::{MainCamera, UiPointerState, temp::GateComponentSelectionEvent};
 
 use super::{
-    ActiveCircuit, AuthoringFeedback, CircuitLibrary, CircuitMember, CircuitReader, DeleteGate,
-    DeleteWire, DisplayConfig, DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind,
-    GateLabel, GateLabelChanged, GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected,
-    SelectedGate, SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig,
-    TickRateMeter, WireEndpoints, WireState, WorkspaceRevision, art,
+    ActiveCircuit, AuthoringFeedback, CircuitLibrary, CircuitMember, CircuitReader, CreateWire,
+    DeleteGate, DeleteWire, DisplayConfig, DisplayConfigChanged, DisplayRadix, GateIdentity,
+    GateKind, GateLabel, GateLabelChanged, GateType, GateValues, InputDrive, SaveWorkspaceEvent,
+    Selected, SelectedGate, SetGateKind, SetInputValue, SimBridge, SimDiagnostics,
+    SimulationConfig, TickRateMeter, WireEndpoints, WireState, WorkspaceRevision, art,
+    art::PinLayout,
     spatial_grid::SpatialGrid,
     view::{CircuitView, InstanceViewItem, OpenInstanceView},
+    visuals::TileSpec,
+    wiring::{self, PinPointer, PinRef},
 };
 
 /// The bench: one quad with the dot-grid texture repeated across it.
@@ -97,6 +100,7 @@ pub fn fit_camera_to_circuit_system(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<(&mut Projection, &mut Transform), With<MainCamera>>,
     gates: Query<(&Transform, &GateType), FitGate>,
+    settings: Option<Res<crate::settings::Settings>>,
 ) {
     let requested = requests.read().count() > 0;
     if !active.is_changed() && !view.is_changed() && !requested {
@@ -107,16 +111,20 @@ pub fn fit_camera_to_circuit_system(
     else {
         return;
     };
-    let Some(content) = gates
-        .iter()
-        .map(|(t, ty)| Rect::from_center_size(t.translation.truncate(), ty.kind.size()))
-        .reduce(|a, b| a.union(b))
-    else {
+    let bounds = |input_only: bool| {
+        gates
+            .iter()
+            .filter(|(_, ty)| !input_only || ty.kind.is_input())
+            .map(|(t, ty)| Rect::from_center_size(t.translation.truncate(), ty.kind.size()))
+            .reduce(|a, b| a.union(b))
+    };
+    let Some(content) = bounds(false) else {
         return;
     };
     let screen = window.size();
-    let free = HudLayout::new(screen).free_area();
-    let (centre, wpp) = fit_view(content, screen, free, FIT_PADDING);
+    let scale = crate::ui_style::ui_scale_for(settings.as_deref(), screen);
+    let free = HudLayout::scaled(screen, scale).free_area_in_window(scale);
+    let (centre, wpp) = fit_view_around(content, bounds(true), screen, free, FIT_PADDING);
     if let Projection::Orthographic(ortho) = projection.as_mut() {
         ortho.scale = scale_for_wpp(ortho, screen.y, wpp);
         ortho.near = -10_000.0;
@@ -188,6 +196,8 @@ pub fn canvas_click(hit: Option<Entity>, selected: &mut SelectedGate) -> Option<
 pub struct CanvasCursor {
     pub screen: Option<Vec2>,
     pub world: Option<Vec2>,
+    /// World units per screen pixel (the zoom), for pin reach.
+    pub world_per_pixel: f32,
 }
 
 /// Track the cursor in [`CanvasCursor`] (left as it is without a window
@@ -201,9 +211,20 @@ pub fn canvas_cursor_system(
     else {
         return;
     };
+    let screen = window.cursor_position();
+    let world = cursor_world_pos(window, camera, camera_transform);
+    // Orthographic: one pixel across is the same world length anywhere.
+    let world_per_pixel = match (
+        camera.viewport_to_world_2d(camera_transform, Vec2::ZERO),
+        camera.viewport_to_world_2d(camera_transform, Vec2::X),
+    ) {
+        (Ok(a), Ok(b)) => a.distance(b),
+        _ => cursor.world_per_pixel,
+    };
     *cursor = CanvasCursor {
-        screen: window.cursor_position(),
-        world: cursor_world_pos(window, camera, camera_transform),
+        screen,
+        world,
+        world_per_pixel,
     };
 }
 
@@ -226,6 +247,14 @@ pub struct CanvasPress {
     pub dragging: bool,
     /// The pointer travelled past [`DRAG_THRESHOLD`].
     pub moved: bool,
+    /// The pin under a left press that may start a wire (in an editable
+    /// circuit with no part armed).
+    pub pin: Option<PinRef>,
+    /// A wire is being dragged out of [`pin`](Self::pin) (it moved past
+    /// [`DRAG_THRESHOLD`]).
+    pub wire: bool,
+    /// `Esc` cancelled the wire: the release does nothing.
+    pub cancelled: bool,
 }
 
 /// The press on the canvas, if a mouse button went down on it.
@@ -238,6 +267,12 @@ impl CanvasPointer {
     /// A part is being dragged.
     pub fn dragging(&self) -> bool {
         self.press.is_some_and(|p| p.dragging)
+    }
+
+    /// A wire is being dragged out of a pin (or was, until `Esc`, with the
+    /// button still down).
+    pub fn wiring(&self) -> bool {
+        self.press.is_some_and(|p| p.wire)
     }
 }
 
@@ -255,6 +290,17 @@ pub fn input_click_value(kind: &GateKind, value: u64) -> Option<u64> {
 pub struct CanvasPointerWriters<'w> {
     select: MessageWriter<'w, GateComponentSelectionEvent>,
     inputs: MessageWriter<'w, SetInputValue>,
+    create_wire: MessageWriter<'w, CreateWire>,
+    feedback: ResMut<'w, AuthoringFeedback>,
+}
+
+/// What dragging a wire out of a pin reads besides the parts.
+#[derive(SystemParam)]
+pub struct WireDragParams<'w, 's> {
+    pins: ResMut<'w, PinPointer>,
+    keys: Option<Res<'w, ButtonInput<KeyCode>>>,
+    library: Res<'w, CircuitLibrary>,
+    wires: Query<'w, 's, &'static WireEndpoints>,
 }
 
 type CanvasGate = (
@@ -263,6 +309,12 @@ type CanvasGate = (
     &'static GateType,
     Option<&'static InputDrive>,
     Has<InstanceViewItem>,
+    (
+        &'static GateIdentity,
+        Option<&'static GateLabel>,
+        Option<&'static PinLayout>,
+        Option<&'static TileSpec>,
+    ),
 );
 
 /// Mouse buttons on the canvas (not over the HUD):
@@ -274,12 +326,18 @@ type CanvasGate = (
 /// - a left drag on a part, past [`DRAG_THRESHOLD`], moves it, and a right
 ///   drag picks it up at once; it moves on the snap grid
 ///   ([`SNAP`](super::layout::SNAP)), point to point;
+/// - a left drag that starts on a pin ([`wiring::pin_under`]) drags out a
+///   wire instead; released on a pin it makes the wire, or says why not
+///   ([`wiring::drop_outcome`]); `Esc` drops it. [`PinPointer`] tracks the
+///   hovered pin and the wire in hand for drawing;
 /// - a `Shift`+left press is a multi-selection gesture
-///   ([`super::multi_select`]) and is not handled here.
+///   ([`super::multi_select`]) and is not handled here, also on a pin
+///   (Shift+click on a part's pin adds the part to the selection).
 ///
-/// Nothing moves in a read-only demo, and with a part armed or the wire
-/// tool on a left click only picks (no move, no toggle). The moved part
-/// keeps [`Selected`] (drawn on top) until the next drag.
+/// Nothing moves and no wire is made in a read-only demo, and with a part
+/// armed or the wire tool on a left click only picks (no move, no toggle;
+/// the wire tool still drags wires). The moved part keeps [`Selected`]
+/// (drawn on top) until the next drag.
 #[allow(clippy::too_many_arguments)]
 pub fn canvas_pointer_system(
     ui_pointer: Res<UiPointerState>,
@@ -293,19 +351,36 @@ pub fn canvas_pointer_system(
     dragged: Query<Entity, With<Selected>>,
     mut commands: Commands,
     mut writers: CanvasPointerWriters,
-    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mut wiring: WireDragParams,
 ) {
-    let shift = keys
+    let shift = wiring
+        .keys
         .as_ref()
         .is_some_and(|k| super::multi_select::shift_held(k));
     let tool_in_hand = editor
         .as_ref()
         .is_some_and(|e| e.connection_mode || e.selected_gate_type.is_some());
+    let part_armed = editor
+        .as_ref()
+        .is_some_and(|e| e.selected_gate_type.is_some());
     let start_drag = |commands: &mut Commands, gate: Entity, offset: Vec2| {
         for e in &dragged {
             commands.entity(e).remove::<Selected>();
         }
         commands.entity(gate).insert(Selected { offset });
+    };
+    let pin_at = |gates: &Query<CanvasGate, With<GateIdentity>>, world: Vec2| {
+        let pins = gates
+            .iter()
+            .flat_map(|(entity, t, .., (id, _, layout, spec))| {
+                layout
+                    .zip(spec)
+                    .into_iter()
+                    .flat_map(move |(layout, spec)| {
+                        wiring::gate_pins(entity, id.uuid, t.translation.truncate(), layout, spec)
+                    })
+            });
+        wiring::pin_under(pins, world, cursor.world_per_pixel)
     };
 
     // A new press.
@@ -325,13 +400,20 @@ pub fn canvas_pointer_system(
             .iter()
             .find(|(_, t, ty, ..)| hit(t, &ty.kind, world))
             .map(|(entity, t, ..)| (entity, t.translation.truncate() - world));
+        // A pin wins over the tile it sits on.
+        let pin = (button == MouseButton::Left && !active.read_only && !part_armed)
+            .then(|| pin_at(&gates, world))
+            .flatten();
         let mut press = CanvasPress {
             button,
-            gate: target.map(|(e, _)| e),
+            gate: pin.map(|p| p.gate).or(target.map(|(e, _)| e)),
             start: screen,
             offset: target.map_or(Vec2::ZERO, |(_, o)| o),
             dragging: false,
             moved: false,
+            pin,
+            wire: false,
+            cancelled: false,
         };
         if button == MouseButton::Left {
             let mut next = *selected;
@@ -348,7 +430,18 @@ pub fn canvas_pointer_system(
         pointer.press = Some(press);
     }
 
+    // The pin under the pointer (none while a part moves or is armed).
+    let hover = match (cursor.world, pointer.press) {
+        (Some(world), press)
+            if !ui_pointer.over_egui && !part_armed && !press.is_some_and(|p| p.dragging) =>
+        {
+            pin_at(&gates, world)
+        }
+        _ => None,
+    };
+
     let Some(mut press) = pointer.press else {
+        wiring.pins.set_if_neq(PinPointer { hover, drag: None });
         return;
     };
     // Movement.
@@ -358,9 +451,34 @@ pub fn canvas_pointer_system(
         press.moved = true;
     }
     let held = buttons.pressed(press.button);
+    if held && press.moved && !press.wire && !press.cancelled && press.pin.is_some() {
+        press.wire = true;
+    }
+    if press.wire
+        && !press.cancelled
+        && wiring
+            .keys
+            .as_ref()
+            .is_some_and(|k| k.just_pressed(KeyCode::Escape))
+        && !ui_pointer.wants_keyboard
+    {
+        press.cancelled = true;
+    }
+    let drag = match (press.pin, cursor.world) {
+        (Some(from), Some(world)) if press.wire && !press.cancelled && held => {
+            Some(wiring::WireDrag {
+                from,
+                pointer: world,
+            })
+        }
+        _ => None,
+    };
+    wiring.pins.set_if_neq(PinPointer { hover, drag });
+
     if held
         && press.moved
         && !press.dragging
+        && !press.wire
         && press.button == MouseButton::Left
         && !active.read_only
         && !tool_in_hand
@@ -389,13 +507,46 @@ pub fn canvas_pointer_system(
         pointer.press = Some(press);
         return;
     }
-    // Released: a click on a 1-bit input toggles it.
     pointer.press = None;
+    // Released: a wire dropped on a pin, or ...
+    if press.wire {
+        if !press.cancelled
+            && let Some(from) = press.pin
+        {
+            let target = cursor.world.and_then(|world| pin_at(&gates, world));
+            let name = |pin: &wiring::PinRef| match gates.get(pin.gate) {
+                Ok((_, _, ty, .., (_, label, _, _))) => {
+                    wiring::pin_title(&wiring.library, &ty.kind, label, pin)
+                }
+                Err(_) => "a pin".into(),
+            };
+            match wiring::drop_outcome(&from, target.as_ref(), name) {
+                wiring::DropOutcome::Connect(wire) => {
+                    let exists = wiring.wires.iter().any(|ep| {
+                        (ep.source_gate, ep.source_pin, ep.sink_gate, ep.sink_pin)
+                            == (
+                                wire.source_gate,
+                                wire.source_pin,
+                                wire.sink_gate,
+                                wire.sink_pin,
+                            )
+                    });
+                    if !exists {
+                        writers.create_wire.write(wire);
+                    }
+                }
+                wiring::DropOutcome::Refuse(message) => writers.feedback.refuse(message),
+                wiring::DropOutcome::Cancel => {}
+            }
+        }
+        return;
+    }
+    // ... a click on a 1-bit input toggles it.
     if press.button == MouseButton::Left
         && !press.moved
         && !tool_in_hand
         && let Some(gate) = press.gate
-        && let Ok((entity, _, ty, Some(drive), false)) = gates.get(gate)
+        && let Ok((entity, _, ty, Some(drive), false, _)) = gates.get(gate)
         && let Some(value) = input_click_value(&ty.kind, drive.value)
     {
         writers.inputs.write(SetInputValue { entity, value });
@@ -802,7 +953,7 @@ fn edit_screen_params(ui: &mut egui::Ui, palette: &crate::theme::Palette, kind: 
     if text {
         ui.label(
             egui::RichText::new("8-bit character codes (ASCII); bit 7 inverts the cell.")
-                .size(12.0)
+                .size(13.0)
                 .color(egui_color(palette.text_secondary)),
         );
     } else {
@@ -830,7 +981,7 @@ fn edit_screen_params(ui: &mut egui::Ui, palette: &crate::theme::Palette, kind: 
     };
     ui.label(
         egui::RichText::new(hint)
-            .size(12.0)
+            .size(13.0)
             .color(egui_color(palette.text_secondary)),
     );
 }
@@ -1132,7 +1283,7 @@ pub fn ui_for_selected_gate(
                                 .on_hover_text(format!("Id {}", identity.uuid));
                                 ui.label(
                                     egui::RichText::new(kind_blurb(&ty.kind))
-                                        .size(12.0)
+                                        .size(13.0)
                                         .color(c(palette.text_secondary)),
                                 );
                             });
@@ -1426,7 +1577,7 @@ pub fn ui_for_selected_gate(
                                     } else {
                                         format!("{text} (not simulated)")
                                     };
-                                    ui.label(egui::RichText::new(text).monospace().size(12.0));
+                                    ui.label(egui::RichText::new(text).monospace().size(13.0));
                                     if editable && ui.small_button("Delete").clicked() {
                                         writers.delete_wire.write(DeleteWire { entity: wire });
                                     }

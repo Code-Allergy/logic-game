@@ -11,11 +11,12 @@ use bevy_egui::{
 };
 use uuid::Uuid;
 
+use crate::settings::{Settings, UiScale, effective_ui_scale};
 use crate::theme::{Theme, ThemeMode};
 use crate::ui_style::{
     HudIcon, HudLayout, ICON_BUTTON_WIDTH, TOP_CARD_HEIGHT, UNDO_BUTTONS_WIDTH, caption, card,
-    chunky_button, chunky_button_width, chunky_icon_button, day_night_button, egui_color, heavy,
-    stroke,
+    chip, chunky_button, chunky_button_width, chunky_icon_button, day_night_button, egui_color,
+    heavy, stroke,
 };
 use crate::{
     GameState,
@@ -334,10 +335,7 @@ pub fn file_card(
             1 => 1,
             _ => 2,
         };
-        let back_w: f32 = ["←", "⇤"][..back]
-            .iter()
-            .map(|label| chunky_button_width(ui, *label))
-            .sum();
+        let back_w = back as f32 * ICON_BUTTON_WIDTH;
         let buttons = back + 3; // back, map, library, day/night
         let undo_w = if view.undo.is_some() {
             UNDO_BUTTONS_WIDTH
@@ -389,7 +387,7 @@ pub fn file_card(
                 let state = format!(" · {}", view.state);
                 let state_w = ui
                     .painter()
-                    .layout_no_wrap(state.clone(), egui::FontId::proportional(12.0), secondary)
+                    .layout_no_wrap(state.clone(), egui::FontId::proportional(13.0), secondary)
                     .size()
                     .x;
                 let path_w = text_width - state_w;
@@ -401,19 +399,19 @@ pub fn file_card(
                         // Too little room for a useful path: the state alone
                         // (the tooltip has the path).
                         if path_w < FILE_PATH_MIN {
-                            ui.label(egui::RichText::new(view.state).size(12.0).color(secondary));
+                            ui.label(egui::RichText::new(view.state).size(13.0).color(secondary));
                             return;
                         }
                         ui.scope(|ui| {
                             ui.set_max_width(path_w);
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(view.path).size(12.0).color(secondary),
+                                    egui::RichText::new(view.path).size(13.0).color(secondary),
                                 )
                                 .truncate(),
                             );
                         });
-                        ui.label(egui::RichText::new(state).size(12.0).color(secondary));
+                        ui.label(egui::RichText::new(state).size(13.0).color(secondary));
                     })
                     .response;
                 crumb.on_hover_text(view.note);
@@ -423,12 +421,12 @@ pub fn file_card(
                 clicks.history = super::undo::undo_buttons(ui, palette, can);
             }
             if back >= 1 {
-                clicks.back = chunky_button(ui, palette, "←", false)
+                clicks.back = chunky_icon_button(ui, palette, HudIcon::Back, false)
                     .on_hover_text("Back to the parent circuit")
                     .clicked();
             }
             if back >= 2 {
-                clicks.root = chunky_button(ui, palette, "⇤", false)
+                clicks.root = chunky_icon_button(ui, palette, HudIcon::BackToRoot, false)
                     .on_hover_text("Back to the root circuit")
                     .clicked();
             }
@@ -463,9 +461,11 @@ pub fn editor_ui_system(
     mut next_state: ResMut<NextState<GameState>>,
     mut seen_active: Local<Option<(Uuid, String)>>,
     mut undo: super::undo::UndoControls,
-    (progress, active_challenge): (
+    // Grouped: a system takes at most 16 parameters.
+    (progress, active_challenge, mut settings): (
         Res<super::demo_map::progress::DemoProgress>,
         Res<super::challenge::ActiveChallenge>,
+        Option<ResMut<Settings>>,
     ),
 ) -> Result<(), BevyError> {
     if game_state.get() != &GameState::Simulating {
@@ -680,7 +680,7 @@ pub fn editor_ui_system(
                         )),
                         _ => ui.label(format!("Demo, level {}: {}", demo.level, demo.title)),
                     };
-                    ui.label(egui::RichText::new(&demo.description).size(12.0));
+                    ui.label(egui::RichText::new(&demo.description).size(13.0));
                 }
                 ui.colored_label(
                     info,
@@ -694,10 +694,10 @@ pub fn editor_ui_system(
                 ui.label(format!("View: {breadcrumb}"));
                 ui.colored_label(info, note);
                 ui.horizontal(|ui| {
-                    if ui.button("← Back to parent circuit").clicked() {
+                    if ui.button("‹ Back to parent circuit").clicked() {
                         close_requested = Some(false);
                     }
-                    if views.view.frames().len() > 1 && ui.button("⇤ Back to root").clicked() {
+                    if views.view.frames().len() > 1 && ui.button("« Back to root").clicked() {
                         close_requested = Some(true);
                     }
                 });
@@ -763,7 +763,7 @@ pub fn editor_ui_system(
                     egui::CollapsingHeader::new(egui::RichText::new("Demos").font(heavy(15.0)))
                         .default_open(true)
                         .show(ui, |ui| {
-                    ui.label(egui::RichText::new("From gates to a CPU: each level is built from the ones before it. Demos open read-only.").size(12.0));
+                    ui.label(egui::RichText::new("From gates to a CPU: each level is built from the ones before it. Demos open read-only.").size(13.0));
                     if chunky_button(ui, &palette, "Open the demo map", false)
                         .on_hover_text("The road from one gate to a CPU, with your progress")
                         .clicked()
@@ -789,7 +789,7 @@ pub fn editor_ui_system(
                         });
                     egui::CollapsingHeader::new(egui::RichText::new("Gallery").font(heavy(15.0)))
                         .show(ui, |ui| {
-                    ui.label(egui::RichText::new("More circuits, from simple to complex, built from the demos and from each other. They open read-only too.").size(12.0));
+                    ui.label(egui::RichText::new("More circuits, from simple to complex, built from the demos and from each other. They open read-only too.").size(13.0));
                     let mut category = None;
                     for item in &catalog.gallery {
                         if category != item.category.as_deref() {
@@ -869,6 +869,13 @@ pub fn editor_ui_system(
             }
                 });
 
+            egui::CollapsingHeader::new(egui::RichText::new("Display").font(heavy(15.0)))
+                .show(ui, |ui| {
+                    if let Some(settings) = settings.as_deref_mut() {
+                        display_settings(ui, &palette, settings, window.size());
+                    }
+                });
+
             egui::CollapsingHeader::new(egui::RichText::new("Keys and mouse").font(heavy(15.0)))
                 .show(ui, |ui| {
             for tip in [
@@ -887,7 +894,7 @@ pub fn editor_ui_system(
                 "Esc: drop the armed part or wire tool, else deselect",
                 "T: day or night workshop",
             ] {
-                ui.label(egui::RichText::new(tip).size(12.0));
+                ui.label(egui::RichText::new(tip).size(13.0));
             }
                 });
                         });
@@ -1155,6 +1162,41 @@ pub fn editor_ui_system(
 }
 
 /// The armed part's name beside the cursor over the canvas.
+/// The Display section of the library drawer: the UI scale (Auto and
+/// the presets), and what is in effect when the window limits it.
+pub fn display_settings(
+    ui: &mut egui::Ui,
+    palette: &crate::theme::Palette,
+    settings: &mut Settings,
+    window: Vec2,
+) {
+    ui.label(caption(palette, "UI size"));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        for choice in UiScale::choices() {
+            if chip(ui, palette, choice.label(), settings.ui_scale == choice).clicked()
+                && settings.ui_scale != choice
+            {
+                settings.ui_scale = choice;
+            }
+        }
+    });
+    let asked = settings.ui_scale.requested_percent(window);
+    let shown = (effective_ui_scale(settings.ui_scale, window) * 100.0).round() as u16;
+    let note = if shown < asked {
+        format!("{shown}%: the window is too small for {asked}%.")
+    } else if settings.ui_scale == UiScale::Auto {
+        format!("{shown}% for this window.")
+    } else {
+        "Cards and text grow or shrink together.".to_string()
+    };
+    ui.label(
+        egui::RichText::new(note)
+            .size(13.0)
+            .color(egui_color(palette.text_secondary)),
+    );
+}
+
 fn ui_armed_hint(
     ctx: &egui::Context,
     palette: &crate::theme::Palette,
@@ -1167,7 +1209,7 @@ fn ui_armed_hint(
         Order::Tooltip,
         egui::Id::new("armed_hint"),
     ));
-    let galley = painter.layout_no_wrap(text.to_string(), heavy(12.0), egui_color(palette.on_ink));
+    let galley = painter.layout_no_wrap(text.to_string(), heavy(13.0), egui_color(palette.on_ink));
     let rect = egui::Rect::from_min_size(
         pos + egui::vec2(14.0, 14.0),
         galley.size() + egui::vec2(14.0, 6.0),
@@ -1222,7 +1264,7 @@ mod tests {
     /// The file card stays within its room, beside the transport card,
     /// with a long demo title and path, in nested views (both back
     /// buttons), with the library open or closed, at the named sizes of
-    /// the layout test.
+    /// the layout test and every UI scale.
     #[test]
     fn file_card_fits_its_room() {
         let theme = Theme::day();
@@ -1243,8 +1285,15 @@ mod tests {
             true,
             false,
         );
-        for (w, h) in sizes {
-            let layout = HudLayout::new(Vec2::new(w, h));
+        // Each window at every UI scale: the card is laid out in points.
+        let layouts = sizes.into_iter().flat_map(|(w, h)| {
+            crate::settings::UiScale::choices().map(move |choice| {
+                let window = Vec2::new(w, h);
+                let scale = crate::settings::effective_ui_scale(choice, window);
+                (w, h, HudLayout::scaled(window, scale))
+            })
+        });
+        for (w, h, layout) in layouts {
             let room = layout.file_rect();
             // The Undo and Redo buttons are in the card only when the
             // layout says there is room.
@@ -1271,6 +1320,31 @@ mod tests {
                     );
                     assert!((rect.height() - TOP_CARD_HEIGHT).abs() < 0.5);
                 }
+            }
+        }
+    }
+
+    /// The Display section's chips wrap inside the library drawer, in
+    /// both layouts, at every setting.
+    #[test]
+    fn display_settings_fit_the_library_drawer() {
+        let theme = Theme::night();
+        let ctx = crate::ui_style::test_ui::ctx(&theme);
+        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0)] {
+            let window = Vec2::new(w, h);
+            let layout = HudLayout::new(window);
+            // The drawer's card padding.
+            let room = layout.library_width - 2.0 * 14.0;
+            for choice in UiScale::choices() {
+                let mut settings = Settings::in_memory();
+                settings.ui_scale = choice;
+                let rect = crate::ui_style::test_ui::measure(&ctx, |ui| {
+                    ui.set_max_width(room);
+                    display_settings(ui, &theme.palette, &mut settings, window);
+                });
+                assert!(rect.width() <= room + 0.5, "{} at {w}x{h}", rect.width());
+                assert!(rect.height() < 160.0, "{} at {w}x{h}", rect.height());
+                assert_eq!(settings.ui_scale, choice, "drawing changes nothing");
             }
         }
     }

@@ -69,7 +69,9 @@ inspector), `Shift`+click adds a part to the selection or takes it out,
 `Shift`+drag on empty canvas selects the parts in a box, left- or
 right-drag moves a part (a right drag on a selected group moves the
 group; on a 10-unit snap grid, half the wire grid, so pins line up; new
-parts land on it too), middle-drag pans, the wheel zooms about the
+parts land on it too), a left drag from a pin to a pin makes a wire
+(`Esc` drops it; with `Shift` the press selects instead), middle-drag
+pans, the wheel zooms about the
 cursor.
 
 `cargo run --example screenshot -- <id> out.png [--night] [--size WxH]
@@ -83,7 +85,10 @@ challenge (the first argument `-` for its starter, or a circuit file in its
 place) and `--check` presses Check. `--confirm` shows the unsaved-changes
 question. `--drag LABEL:DX,DY` drags a part through the real pointer path.
 `--multi LABEL,...` selects several parts (the selection card), `--make-chip
-NAME` makes them a chip and `--open-chip` opens it. Run it with
+NAME` makes them a chip and `--open-chip` opens it. `--wire FROM.PIN:TO.PIN`
+drags a wire (`--hold` keeps the button down for the shot) and `--hover
+LABEL.PIN` points at a pin. `--ui-scale auto|90|100|115|130` sets the UI
+size. Run it with
 `GATEQUEST_DATA_DIR` set to a scratch folder.
 
 ## Saving
@@ -128,6 +133,9 @@ save of one writes it to the new folder (the old copy is left alone).
   workspace (under a free name if a different workspace has taken its
   name). Read-only demos and untouched or never-saved empty workspaces are
   not saved.
+- The Library's Display section sets the UI size (Auto, 90% to 130%);
+  it and the theme are kept in `.settings.json` in the workspaces folder,
+  next to the demo progress.
 - The web build has no file system yet: Save, Load and saved chips are
   hidden there, and a copied demo is editable for the session only.
 

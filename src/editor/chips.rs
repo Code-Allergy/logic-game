@@ -168,7 +168,7 @@ pub fn selection_card_system(
                         egui::RichText::new(
                             "Shift+click a part to add or remove it; Shift+drag a box to add parts.",
                         )
-                        .size(12.0)
+                        .size(13.0)
                         .color(egui_color(palette.text_secondary)),
                     );
                     ui.label(caption(&palette, "Parts"));
@@ -179,7 +179,7 @@ pub fn selection_card_system(
                     if more > 0 {
                         names.push(&more_text);
                     }
-                    ui.label(egui::RichText::new(names.join(", ")).monospace().size(12.0));
+                    ui.label(egui::RichText::new(names.join(", ")).monospace().size(13.0));
                     let ports = parts.iter().filter(|p| p.2).count();
                     if ports > 0 {
                         ui.label(
@@ -187,7 +187,7 @@ pub fn selection_card_system(
                                 "{ports} input/output/display part(s) stay outside a chip; \
                                  their wires become its ports."
                             ))
-                            .size(12.0)
+                            .size(13.0)
                             .color(egui_color(palette.text_secondary)),
                         );
                     }
@@ -272,7 +272,7 @@ fn make_chip_dialog(
                              its ports, named after what drives them.",
                             gates.len()
                         ))
-                        .size(12.0)
+                        .size(13.0)
                         .color(egui_color(palette.text_secondary)),
                     );
                     ui.label(caption(palette, "Name"));
@@ -377,7 +377,7 @@ pub fn chip_update_prompt_system(
                                 "{} instance(s) here use this workspace's version.",
                                 instances(change.id)
                             ))
-                            .size(12.0)
+                            .size(13.0)
                             .color(egui_color(palette.text_secondary)),
                         );
                     }

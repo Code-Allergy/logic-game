@@ -60,6 +60,7 @@ pub mod spatial_grid;
 pub mod systems;
 pub mod view;
 pub mod visuals;
+pub mod wiring;
 
 pub use authoring::*;
 pub use bridge::{CompileFailure, LoopNode, SimBridge, SimDiagnostics, SimRuntime};

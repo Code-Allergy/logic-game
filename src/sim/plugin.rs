@@ -32,6 +32,7 @@ use crate::sim::{
         view_navigation_system, write_back_view_system,
     },
     visuals::SimulationVisualsPlugin,
+    wiring::{PinPointer, pin_tooltip_system, wire_drag_visuals_system},
 };
 use crate::sim::{HistoryCommand, UndoHistory, history::edit_history_system};
 use crate::sim::{
@@ -171,6 +172,7 @@ impl Plugin for SimulationViewPlugin {
             .init_resource::<BoxSelect>()
             .init_resource::<CanvasCursor>()
             .init_resource::<CanvasPointer>()
+            .init_resource::<PinPointer>()
             .add_message::<crate::camera::FitView>()
             .insert_resource(SpatialGrid::new(100.0))
             .register_type::<crate::sim::LogicDisplay>()
@@ -205,7 +207,11 @@ impl Plugin for SimulationViewPlugin {
             )
             .add_systems(
                 OnExit(state.clone()),
-                (leave_bridge_system, hide_circuit_system),
+                (
+                    leave_bridge_system,
+                    hide_circuit_system,
+                    drop_canvas_pointer_system,
+                ),
             )
             .add_systems(
                 Update,
@@ -213,6 +219,7 @@ impl Plugin for SimulationViewPlugin {
                     fit_camera_to_circuit_system
                         .after(load_workspace_system)
                         .after(view_navigation_system),
+                    crate::camera::track_canvas_zoom_system,
                     workspace_io_system,
                     sync_bench_theme_system,
                 ),
@@ -232,9 +239,19 @@ impl Plugin for SimulationViewPlugin {
                 )
                     .run_if(in_state(state.clone())),
             )
+            // Also outside the state: it hides the marks once the pointer
+            // is dropped on leaving.
+            .add_systems(
+                Update,
+                wire_drag_visuals_system.after(canvas_pointer_system),
+            )
             .add_systems(
                 bevy_egui::EguiPrimaryContextPass,
-                (simulation_config_ui_system, ui_for_selected_gate),
+                (
+                    simulation_config_ui_system,
+                    ui_for_selected_gate,
+                    pin_tooltip_system.run_if(in_state(state.clone())),
+                ),
             )
             .add_systems(Last, save_on_exit_system.after(bevy::window::ExitSystems));
     }
@@ -311,6 +328,13 @@ type CircuitItem = Or<(With<GateIdentity>, With<WireIdentity>)>;
 
 /// The circuit stays in the ECS outside the simulation state; it is only
 /// hidden.
+/// Leaving the canvas drops any press in progress (a wire in hand, a part
+/// being moved) and the hovered pin.
+fn drop_canvas_pointer_system(mut pointer: ResMut<CanvasPointer>, mut pins: ResMut<PinPointer>) {
+    pointer.press = None;
+    pins.set_if_neq(PinPointer::default());
+}
+
 fn hide_circuit_system(mut items: Query<&mut Visibility, CircuitItem>) {
     for mut visibility in &mut items {
         *visibility = Visibility::Hidden;

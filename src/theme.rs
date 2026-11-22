@@ -100,7 +100,7 @@ impl Palette {
         ink: hex(0x263046),
         text: hex(0x263046),
         text_secondary: hex(0x5A6782),
-        text_faint: hex(0x8792A8),
+        text_faint: hex(0x768199),
         on: hex(0xFFB627),
         on_text: hex(0xC98A00),
         on_ink: hex(0x263046),
@@ -134,7 +134,7 @@ impl Palette {
         ink: hex(0x0B0F1A),
         text: hex(0xE8ECF4),
         text_secondary: hex(0x9AA6BE),
-        text_faint: hex(0x6B7690),
+        text_faint: hex(0x7D89A3),
         on: hex(0xFFB627),
         on_text: hex(0xFFB627),
         on_ink: hex(0x1A2030),
@@ -363,5 +363,45 @@ mod tests {
         assert_eq!(theme.palette, Palette::NIGHT);
         theme.toggle();
         assert_eq!(theme, Theme::day());
+    }
+
+    /// WCAG contrast ratio of two colours.
+    fn contrast(a: Color, b: Color) -> f32 {
+        let lum = |c: Color| {
+            let s = c.to_srgba();
+            let lin = |v: f32| {
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(s.red) + 0.7152 * lin(s.green) + 0.0722 * lin(s.blue)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// Text on the HUD's surfaces is readable in both themes: main text
+    /// and family names well above 4.5:1, secondary text (captions, key
+    /// numbers, hints) at least 4.5:1 on cards and 4:1 on buttons and
+    /// wells (not hovered), faint text (placeholders, zero values) at least 3:1 on
+    /// cards.
+    #[test]
+    fn text_contrast_is_readable_day_and_night() {
+        for p in [Palette::DAY, Palette::NIGHT] {
+            for surface in [p.tile, p.raised, p.well, p.hover] {
+                assert!(contrast(p.text, surface) >= 7.0);
+            }
+            for surface in [p.tile, p.raised, p.well] {
+                assert!(contrast(p.text_secondary, surface) >= 4.0);
+            }
+            assert!(contrast(p.text_secondary, p.tile) >= 4.5);
+            assert!(contrast(p.text_faint, p.tile) >= 3.0);
+            assert!(contrast(p.state_text, p.state_tint) >= 4.5);
+            assert!(contrast(p.text, p.io_tint) >= 4.5);
+            assert!(contrast(p.bus_text, p.tile) >= 4.5);
+            assert!(contrast(p.on_ink, p.on) >= 4.5);
+        }
     }
 }
