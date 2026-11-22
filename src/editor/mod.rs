@@ -19,12 +19,14 @@
 //! - `parts`: the parts bar's catalogue (tabs, number keys, names).
 //! - `systems`: wire-building selection.
 //! - `workspace`: on-disk workspace helpers.
+//! - `challenge`: the open build-it challenge, its card and Check.
 //! - `demo_map`: the full-screen demo map ([`crate::GameState::DemoMap`])
 //!   and the record of opened demos.
 //!
 //! The editor never mutates the circuit directly: it sends the authoring
 //! messages of [`crate::sim::authoring`].
 
+pub mod challenge;
 pub mod demo_map;
 pub mod hud;
 pub mod parts;
@@ -145,7 +147,10 @@ pub struct EditorPlugin;
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>()
+            .init_resource::<challenge::ActiveChallenge>()
             .add_plugins(demo_map::DemoMapPlugin)
+            .add_systems(Update, challenge::track_challenge_system)
+            .add_systems(EguiPrimaryContextPass, challenge::challenge_card_system)
             .add_systems(
                 EguiPrimaryContextPass,
                 (

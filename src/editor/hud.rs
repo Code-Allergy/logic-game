@@ -620,6 +620,7 @@ pub fn parts_bar_system(
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     active: Res<ActiveCircuit>,
     game_state: Res<State<GameState>>,
+    challenge: Res<super::challenge::ActiveChallenge>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         state.dragging_part = None;
@@ -632,6 +633,21 @@ pub fn parts_bar_system(
     let palette = theme.palette;
     let layout = hud_layout(ctx);
     let items = slot_items(state.part_tab, &state);
+    // While a challenge is open, parts outside its rules are greyed out.
+    let open_challenge = challenge.challenge();
+    let refused: Vec<Option<String>> = items
+        .iter()
+        .map(|item| {
+            super::challenge::refusal(
+                open_challenge,
+                open_challenge.is_none_or(|c| match item {
+                    SlotItem::Kind(kind) => c.allows_kind(kind),
+                    SlotItem::Demo(demo) => c.allows_chip(&demo.workspace),
+                    SlotItem::Saved(_) => true,
+                }),
+            )
+        })
+        .collect();
 
     let mut activate: Option<usize> = None;
     let mut drag: Option<usize> = None;
@@ -674,15 +690,24 @@ pub fn parts_bar_system(
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = SLOT_GAP;
                     for (i, item) in items.iter().enumerate() {
-                        let response = part_slot(
-                            ui,
-                            &palette,
-                            slots,
-                            slot_key_label(i),
-                            item,
-                            item.is_armed(&state),
-                        )
-                        .on_hover_text(item.hover());
+                        let response = ui
+                            .add_enabled_ui(refused[i].is_none(), |ui| {
+                                part_slot(
+                                    ui,
+                                    &palette,
+                                    slots,
+                                    slot_key_label(i),
+                                    item,
+                                    item.is_armed(&state),
+                                )
+                            })
+                            .inner
+                            .on_hover_text(item.hover())
+                            .on_disabled_hover_text(format!(
+                                "{}\n\n{}",
+                                item.hover(),
+                                refused[i].as_deref().unwrap_or_default()
+                            ));
                         if response.drag_started() {
                             drag = Some(i);
                         } else if response.clicked() {
@@ -738,6 +763,7 @@ pub fn parts_bar_system(
             if keys.just_pressed(key)
                 && let Some(slot) = slot_for_key(key)
                 && slot < items.len()
+                && refused[slot].is_none()
             {
                 activate = Some(slot);
             }

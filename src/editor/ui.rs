@@ -165,6 +165,10 @@ pub fn editor_ui_system(
     mut theme: ResMut<Theme>,
     mut next_state: ResMut<NextState<GameState>>,
     mut seen_active: Local<Option<(Uuid, String)>>,
+    (progress, active_challenge): (
+        Res<super::demo_map::progress::DemoProgress>,
+        Res<super::challenge::ActiveChallenge>,
+    ),
 ) -> Result<(), BevyError> {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -224,6 +228,7 @@ pub fn editor_ui_system(
     let mut open_definition: Option<Uuid> = None;
     let mut theme_wanted = None;
     let mut open_map = false;
+    let mut open_challenge = None;
     let table = views.definition_table(&library);
     let breadcrumb = views.view.breadcrumb(&active.name);
     let view_note = views.view.frames().last().map(|frame| {
@@ -501,6 +506,17 @@ pub fn editor_ui_system(
                 }
             }
 
+            egui::CollapsingHeader::new(egui::RichText::new("Challenges").font(heavy(15.0)))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Build it yourself: each opens the ports ready to wire, and Check tests your circuit.").size(12.0));
+                    open_challenge = super::challenge::library_list(
+                        ui,
+                        &palette,
+                        &progress,
+                        active_challenge.id.as_deref(),
+                    );
+                });
+
             egui::CollapsingHeader::new(egui::RichText::new("My workspaces").font(heavy(15.0)))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -567,6 +583,16 @@ pub fn editor_ui_system(
     if open_map {
         editor_state.library_open = false;
         next_state.set(GameState::DemoMap);
+        return Ok(());
+    }
+
+    if let Some(challenge) = open_challenge {
+        super::challenge::open_challenge(
+            challenge,
+            false,
+            Some(&mut editor_state),
+            &mut writers.load,
+        );
         return Ok(());
     }
 
