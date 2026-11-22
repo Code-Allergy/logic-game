@@ -61,7 +61,6 @@
             pkgs.trunk
             pkgs.wayland
             pkgs.vulkan-loader
-            pkgs.graphviz
           ];
 
           nativeBuildInputs = [
