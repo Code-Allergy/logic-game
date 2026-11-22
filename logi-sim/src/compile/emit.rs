@@ -565,6 +565,7 @@ pub(super) fn emit(
         views: Vec::new(),
         shadows: Vec::new(),
         shadow_nets: Vec::new(),
+        phases: None,
     };
     renumber(&mut p, &out_ops, &dsts, &plan.lane_of, &views);
     if !pending.is_empty() {

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::random::{GenConfig, generate};
 use super::rng::Rng;
-use crate::compile::{Options, StateLoc, compile};
+use crate::compile::{Options, Program, StateLoc, compile};
 use crate::netlist::{Design, mask};
 use crate::reference::Reference;
 use crate::sim::{Sim, SimOptions};
@@ -245,4 +245,125 @@ pub fn standard_configs() -> Vec<GenConfig> {
             ..Default::default()
         },
     ]
+}
+
+// ── Batches (tick fusion, clock-phase variants) ──────────────────────────
+
+/// Tick, outputs, state, every net, memories and memory versions.
+type Observed = (
+    u64,
+    Vec<u64>,
+    Vec<(String, u64)>,
+    Vec<Option<u64>>,
+    Vec<Vec<u64>>,
+    Vec<u64>,
+);
+
+/// Everything a caller can observe of `sim`: tick, outputs, state, every
+/// net in the debug map, memories and their versions.
+fn observe(sim: &Sim) -> Observed {
+    let p = sim.program();
+    let outs = (0..p.ports.outputs.len()).map(|k| sim.output(k)).collect();
+    let mut state: Vec<(String, u64)> = sim
+        .export_state()
+        .words
+        .into_iter()
+        .map(|(k, v)| (format!("{k:?}"), v))
+        .collect();
+    state.sort();
+    let mut nets = Vec::new();
+    for inst in 0..p.debug.instances.len() {
+        let path = p.debug.path(inst as u32);
+        for (net, _) in &p.debug.net_slots[inst] {
+            nets.push(sim.read_net(&path, net));
+        }
+    }
+    let mems = (0..p.mems.len() as u32)
+        .map(|m| sim.mem(m).to_vec())
+        .collect();
+    let versions = (0..p.mems.len() as u32)
+        .map(|m| sim.mem_version(m))
+        .collect();
+    (sim.tick_count(), outs, state, nets, mems, versions)
+}
+
+/// Batches of odd and even lengths from misaligned starts, inputs changed
+/// between batches, a reset and a state import in the middle: a fused
+/// `run(n)` (with and without phase variants) equals `n` single ticks of
+/// the unspecialized program at every batch boundary.
+///
+/// Runs the program as is, with phase variants off, and with fusion off.
+pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
+    let plain = SimOptions {
+        fuse: false,
+        phases: false,
+        ..SimOptions::default()
+    };
+    let mut want = Sim::with_options(Arc::clone(p), plain);
+    let mut sims = [
+        Sim::new(Arc::clone(p)),
+        Sim::with_options(
+            Arc::clone(p),
+            SimOptions {
+                phases: false,
+                ..SimOptions::default()
+            },
+        ),
+        Sim::with_options(
+            Arc::clone(p),
+            SimOptions {
+                fuse: false,
+                ..SimOptions::default()
+            },
+        ),
+    ];
+    let mut rng = Rng::new(seed);
+    let lens = [1u64, 2, 3, 5, 8, 7, 1, 1, 16, 9, 4, 6, 11, 2, 3];
+    let mut saved = None;
+    for (round, &n) in lens.iter().enumerate() {
+        for (port, q) in p.ports.inputs.iter().enumerate() {
+            let v = rng.next_u64() & mask(q.width);
+            want.set_input(port, v);
+            for s in &mut sims {
+                s.set_input(port, v);
+            }
+        }
+        for _ in 0..n {
+            want.tick();
+        }
+        for s in &mut sims {
+            s.run(n);
+        }
+        let w = observe(&want);
+        for (k, s) in sims.iter().enumerate() {
+            if observe(s) != w {
+                return Err(format!(
+                    "batch {round} (+{n} ticks, now at tick {}): runtime variant {k} differs",
+                    w.0
+                ));
+            }
+        }
+        if round == 3 {
+            saved = Some(want.export_state());
+        }
+        if round == 6 {
+            want.reset();
+            for s in &mut sims {
+                s.reset();
+            }
+        }
+        if round == 10 {
+            // Carry state in (as a recompile does) from an earlier tick
+            // of the other parity.
+            want.tick();
+            let mut snap = saved.take().expect("saved at round 3");
+            snap.tick += 1;
+            for s in &mut sims {
+                s.tick();
+                s.import_state(&snap);
+            }
+            want.import_state(&snap);
+        }
+    }
+    Ok(())
 }

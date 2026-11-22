@@ -545,6 +545,8 @@ impl Pool {
         }
         let env = Env {
             program: &sh.program,
+            instrs: &sh.program.instrs,
+            imms: &sh.program.imms,
             code: &sh.code,
             mems,
             tick,
@@ -615,6 +617,8 @@ fn worker(sh: &Shared, t: usize) {
         };
         let env = Env {
             program: &sh.program,
+            instrs: &sh.program.instrs,
+            imms: &sh.program.imms,
             code: &sh.code,
             mems,
             tick: sh.tick.load(Ordering::Relaxed),

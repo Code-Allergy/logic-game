@@ -15,8 +15,20 @@
 //!   (instructions, slots, packed words and lanes, commits, blocks).
 //! - `tick.<case>.<options>.ops`: operations executed per tick
 //!   (instructions + packed words + commits; logi-sim feature `counters`).
+//!   With clock-phase variants (issue #117) every tick runs its phase's
+//!   variant, so this is the average over whole clock periods.
+//! - `tick.<case>.<options>.run_ops`: the same for one `Sim::run` of 1000
+//!   ticks, where every tick but the last settles only what its commits
+//!   read (tick fusion).
 //! - `tick.<case>.<options>.allocs`: heap allocations in 1000 ticks
 //!   (counted by this binary's global allocator).
+//! - `program.<case>.<options>.phase_ops`: with clock-phase variants, the
+//!   average instructions plus commits per tick over one period (the
+//!   unspecialized `instrs + commits` without).
+//! - `cpu.<case>.ticks_per_instr_x100`: for the gallery CPUs, ticks per
+//!   retired CPU instruction (a change of `PC`) over a run of the program
+//!   from reset to `Halted`, times 100. Wall-clock µs per tick and per
+//!   instruction: `perf-metrics cpi <case>`.
 //! - `engine.<case>.allocs`: heap allocations in 100 engine frames (100
 //!   ticks and a probe frame of every root net each).
 //!
@@ -131,6 +143,14 @@ fn program_metrics(m: &mut Metrics, prefix: &str, p: &Program) {
         ("packed_lanes", p.packed_lanes()),
         ("commits", p.commits.len()),
         ("blocks", p.blocks.len()),
+        (
+            "phase_ops",
+            p.phases
+                .as_ref()
+                .map_or(p.instrs.len() + p.commits.len(), |ph| {
+                    ph.ops_per_tick().round() as usize
+                }),
+        ),
     ];
     for (field, v) in fields {
         m.put(format!("program.{prefix}.{field}"), "size", v as u64);
@@ -164,6 +184,90 @@ fn tick_metrics(m: &mut Metrics, prefix: &str, p: &Arc<Program>) {
     assert_eq!(c.ticks, TICKS);
     m.put(format!("tick.{prefix}.ops"), "ops", c.ops() / TICKS);
     m.put(format!("tick.{prefix}.allocs"), "allocs", allocs);
+    // One batch of the same length: fused.
+    sim.reset_counters();
+    sim.run(TICKS);
+    let c = *sim.counters();
+    assert_eq!(c.ticks, TICKS);
+    m.put(format!("tick.{prefix}.run_ops"), "ops", c.ops() / TICKS);
+}
+
+/// A gallery CPU's program from reset to `Halted` (at most `max` ticks),
+/// tick by tick, inputs at 0: `(ticks, retired instructions)`, where an
+/// instruction retires when `PC` changes.
+fn cpu_run(p: &Arc<Program>, max: u64) -> (u64, u64) {
+    let mut sim = Sim::new(Arc::clone(p));
+    let mut pc = sim.get("PC");
+    let mut retired = 0;
+    let mut ticks = 0;
+    while ticks < max && sim.get("Halted") == 0 {
+        sim.tick();
+        ticks += 1;
+        let now = sim.get("PC");
+        retired += (now != pc) as u64;
+        pc = now;
+    }
+    (ticks, retired)
+}
+
+/// Ticks per retired instruction of a gallery CPU, times 100.
+fn cpu_metrics(m: &mut Metrics, case: &str, p: &Arc<Program>) {
+    let (ticks, retired) = cpu_run(p, 2_000_000);
+    m.put(
+        format!("cpu.{case}.ticks_per_instr_x100"),
+        "ticks",
+        100 * ticks / retired.max(1),
+    );
+}
+
+/// Wall-clock µs per tick and per retired CPU instruction of a gallery
+/// CPU running its program from reset to `Halted`, again and again for
+/// about `secs` seconds: tick by tick (`Sim::tick`, what single steps and
+/// probes see) and in one `Sim::run` per program run (what the engine
+/// does at speed).
+fn cpi(name: &str, options: &str, secs: f64) {
+    let d = case(name);
+    let p = Arc::new(compile(&d, &named_options(options)).unwrap());
+    let (ticks, retired) = cpu_run(&p, 10_000_000);
+    println!(
+        "{name} {options}: {ticks} ticks, {retired} instructions per program run ({:.2} ticks/instruction)",
+        ticks as f64 / retired.max(1) as f64
+    );
+    if let Some(ph) = &p.phases {
+        println!(
+            "  phases: period {}, {:.1} ops/tick (unspecialized {})",
+            ph.period,
+            ph.ops_per_tick(),
+            p.instrs.len() + p.commits.len()
+        );
+    }
+    for mode in ["tick", "run"] {
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let mut sim = Sim::new(Arc::clone(&p));
+            let start = std::time::Instant::now();
+            let mut runs = 0u64;
+            while start.elapsed().as_secs_f64() < secs / 6.0 {
+                sim.reset();
+                if mode == "tick" {
+                    for _ in 0..ticks {
+                        sim.tick();
+                    }
+                } else {
+                    sim.run(ticks);
+                }
+                runs += 1;
+            }
+            let us = start.elapsed().as_secs_f64() * 1e6;
+            best = best.min(us / runs as f64);
+            std::hint::black_box(sim.output(0));
+        }
+        println!(
+            "  {mode:4}: {:.3} µs/tick, {:.3} µs/instruction",
+            best / ticks as f64,
+            best / retired.max(1) as f64
+        );
+    }
 }
 
 fn engine_metrics(m: &mut Metrics, case: &str, d: &Design) {
@@ -204,6 +308,9 @@ fn all_metrics() -> Value {
             let prefix = format!("{case}.{name}");
             program_metrics(&mut m, &prefix, &p);
             tick_metrics(&mut m, &prefix, &p);
+            if name == "default" && perf::CPUS.contains(&case) {
+                cpu_metrics(&mut m, case, &p);
+            }
         }
         engine_metrics(&mut m, case, &d);
     }
@@ -251,6 +358,15 @@ fn named_options(options: &str) -> Options {
             func_match: false,
             ..Options::debug()
         },
+        // Clock-phase specialization (issue #117, stage 4) off.
+        "default-nophases" => Options {
+            clock_phases: false,
+            ..Options::default()
+        },
+        "editor-nophases" => Options {
+            clock_phases: false,
+            ..Options::debug()
+        },
         // Word-level cleanup (issue #117, stage 3) off, for comparison.
         "default-nowords" => Options {
             words: false,
@@ -268,7 +384,7 @@ fn named_options(options: &str) -> Options {
             ..Options::unoptimized()
         },
         other => panic!(
-            "options {other:?}: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch, default-nowords or editor-nowords"
+            "options {other:?}: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch, default-nowords, editor-nowords, default-nophases or editor-nophases"
         ),
     }
 }
@@ -513,6 +629,13 @@ fn main() {
         Some("dump") if (2..=3).contains(&args.len()) => {
             dump(&args[1], args.get(2).map_or("default", String::as_str));
         }
+        Some("cpi") if (2..=4).contains(&args.len()) => {
+            cpi(
+                &args[1],
+                args.get(2).map_or("default", String::as_str),
+                args.get(3).map_or(3.0, |s| s.parse().expect("seconds")),
+            );
+        }
         Some("ticks") if (3..=5).contains(&args.len()) => {
             run_ticks(
                 &args[1],
@@ -524,8 +647,8 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: perf-metrics [cases | ticks <case> <n> [OPTIONS] [threads] | breakdown <case> [OPTIONS] | dump <case> [OPTIONS]]\n\
-                 OPTIONS: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch, default-nowords, editor-nowords"
+                "usage: perf-metrics [cases | ticks <case> <n> [OPTIONS] [threads] | cpi <cpu case> [OPTIONS] [seconds] | breakdown <case> [OPTIONS] | dump <case> [OPTIONS]]\n\
+                 OPTIONS: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch, default-nowords, editor-nowords, default-nophases, editor-nophases"
             );
             std::process::exit(2);
         }

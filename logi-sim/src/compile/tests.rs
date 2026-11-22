@@ -48,6 +48,33 @@ fn sim(p: Program) -> Sim {
 /// packed words) exactly, every slot is written once, and nothing reads a
 /// slot written in its own or a later rank.
 pub(crate) fn check_program_invariants(p: &Program) {
+    // Every clock-phase variant is a program over the same slots with the
+    // same invariants, and its commits read no slot one of them writes.
+    if let Some(ph) = &p.phases {
+        assert_eq!(ph.variants.len(), ph.period as usize);
+        for v in &ph.variants {
+            let mut q = p.clone();
+            q.phases = None;
+            q.blocks = v.blocks.clone();
+            q.instrs = v.instrs.clone();
+            q.imms = v.imms.clone();
+            q.commits = v.commits.clone();
+            check_program_invariants(&q);
+            let written: std::collections::HashSet<u32> = v
+                .commits
+                .iter()
+                .filter_map(|c| match *c {
+                    crate::compile::Commit::Copy { state, .. } => Some(state),
+                    _ => None,
+                })
+                .collect();
+            for c in &v.commits {
+                for r in c.reads() {
+                    assert!(!written.contains(&r), "a commit reads a committed slot");
+                }
+            }
+        }
+    }
     let mut written_rank = vec![u32::MAX; p.slot_count as usize];
     let (mut next, mut next_pack) = (0, 0);
     let part = |i: usize| p.block_parts.get(i).copied().unwrap_or(0);

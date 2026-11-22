@@ -1803,3 +1803,100 @@ fn word_cleanup_preserves_the_gate_cpu() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clock phases and tick fusion (logi-sim issue #117, stage 4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// [`lifting_matches`] for clock-phase specialization: one program variant
+/// per clock phase against the unspecialized program, every tick, outputs,
+/// state and every net.
+fn clock_phases_match(
+    name: &str,
+    design: &logi_sim::netlist::Design,
+    debug: bool,
+    ticks: u64,
+) -> (usize, usize) {
+    use logi_sim::compile::Options;
+    options_match(name, design, debug, ticks, |o| Options {
+        clock_phases: false,
+        ..o
+    })
+}
+
+/// Clock-phase variants and fused batches change nothing observable in
+/// any demo or gallery item: against the unspecialized program under the
+/// editor's options and the defaults, against the reference interpreter
+/// on every net under the editor's options, and fused `run(n)` batches
+/// against single ticks.
+#[test]
+fn clock_phases_preserve_every_demo_and_gallery_item() {
+    use logi_sim::compile::{Options, compile};
+    use logi_sim::testkit::diff::{check_batches, check_design};
+    let catalog = demos();
+    let mut specialized = 0;
+    for item in catalog.demos.iter().chain(&catalog.gallery) {
+        if item.id == "cpu16" {
+            continue; // below, for longer
+        }
+        let design = crate::sim::netlist::design_of(&item.workspace).unwrap();
+        for debug in [true, false] {
+            clock_phases_match(&item.id, &design, debug, 150);
+        }
+        check_design(&design, 3, 100, &Options::debug())
+            .unwrap_or_else(|e| panic!("{}: {e}", item.id));
+        for o in [Options::debug(), Options::default()] {
+            let p = Arc::new(compile(&design, &o).unwrap());
+            specialized += p.phases.is_some() as u32;
+            check_batches(&p, 5).unwrap_or_else(|e| panic!("{}: {e}", item.id));
+        }
+    }
+    assert!(specialized > 0, "no item has clock phases");
+}
+
+/// The gate-level CPU, specialized and not, for 5000 ticks: identical
+/// outputs, state and nets every tick; the reference interpreter agrees on
+/// every net for 600 ticks; fused batches equal single ticks. Its one
+/// two-tick clock gives two variants, each with one latch of every
+/// master/slave pair holding.
+#[test]
+fn clock_phases_preserve_the_gate_cpu() {
+    use logi_sim::compile::{Options, compile};
+    use logi_sim::testkit::diff::{check_batches, check_design};
+    let design = crate::sim::netlist::design_of(&demos().get("cpu16").unwrap().workspace).unwrap();
+    for debug in [true, false] {
+        clock_phases_match("cpu16", &design, debug, 5000);
+    }
+    check_design(&design, 3, 600, &Options::debug()).unwrap();
+    for o in [Options::debug(), Options::default()] {
+        let p = Arc::new(compile(&design, &o).unwrap());
+        let ph = p.phases.as_ref().expect("cpu16 has clock phases");
+        assert_eq!(ph.period, 2);
+        let base = (p.instrs.len() + p.commits.len()) as f64;
+        assert!(
+            ph.ops_per_tick() < 0.8 * base,
+            "{base} -> {} ops per tick",
+            ph.ops_per_tick()
+        );
+        check_batches(&p, 11).unwrap();
+        // Long batches (thousands of ticks, odd and even) against single
+        // ticks of the unspecialized program.
+        use logi_sim::sim::{Sim, SimOptions};
+        let mut fused = Sim::new(Arc::clone(&p));
+        let mut plain = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+        for n in [1u64, 999, 4000, 3, 12_345, 2, 7001] {
+            fused.run(n);
+            for _ in 0..n {
+                plain.tick();
+            }
+            assert_eq!(fused.export_state(), plain.export_state(), "+{n}");
+            for port in 0..p.ports.outputs.len() {
+                assert_eq!(fused.output(port), plain.output(port));
+            }
+            for m in 0..p.mems.len() as u32 {
+                assert_eq!(fused.mem(m), plain.mem(m));
+                assert_eq!(fused.mem_version(m), plain.mem_version(m));
+            }
+        }
+    }
+}
