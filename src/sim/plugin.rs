@@ -253,7 +253,10 @@ impl Plugin for SimulationViewPlugin {
                     pin_tooltip_system.run_if(in_state(state.clone())),
                 ),
             )
-            .add_systems(Last, save_on_exit_system.after(bevy::window::ExitSystems));
+            .add_systems(
+                Last,
+                save_on_exit_system.in_set(bevy::app::OnAppExitSystems),
+            );
     }
 }
 

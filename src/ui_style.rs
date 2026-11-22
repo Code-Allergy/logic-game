@@ -849,12 +849,25 @@ impl Plugin for WorkshopUiPlugin {
 pub(crate) mod test_ui {
     use super::*;
 
+    /// Run one egui frame with no renderer behind it. The font atlas
+    /// uploads it returns are dropped on purpose: egui asserts that a
+    /// texture delta is not dropped unapplied.
+    pub fn run(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        ui: impl FnMut(&mut Ui),
+    ) -> egui::FullOutput {
+        let mut out = ctx.run_ui(input, ui);
+        out.textures_delta.clear();
+        out
+    }
+
     /// A context with the Workshop fonts and `theme`'s style.
     pub fn ctx(theme: &Theme) -> egui::Context {
         let ctx = egui::Context::default();
         ctx.set_fonts(workshop_fonts());
         for _ in 0..2 {
-            let _ = ctx.run_ui(screen(), |_| {});
+            run(&ctx, screen(), |_| {});
         }
         assert!(workshop_fonts_ready(&ctx));
         ctx.all_styles_mut(|s| *s = workshop_style(theme));
@@ -876,7 +889,7 @@ pub(crate) mod test_ui {
     pub fn measure(ctx: &egui::Context, mut card: impl FnMut(&mut Ui)) -> egui::Rect {
         let mut rect = egui::Rect::NOTHING;
         for _ in 0..3 {
-            let _ = ctx.run_ui(screen(), |ui| {
+            run(ctx, screen(), |ui| {
                 rect = egui::Area::new(egui::Id::new("measured"))
                     .fixed_pos(egui::Pos2::ZERO)
                     .show(ui.ctx(), |ui| card(ui))
@@ -936,7 +949,7 @@ mod tests {
         ctx.set_global_style(workshop_style(&theme));
         let mut out = None;
         for _ in 0..3 {
-            out = Some(ctx.run_ui(egui::RawInput::default(), |ui| {
+            out = Some(test_ui::run(&ctx, egui::RawInput::default(), |ui| {
                 ui.add_enabled_ui(enabled, |ui| {
                     for (i, on) in chips.iter().enumerate() {
                         chip(ui, &theme.palette, format!("{i}"), *on);
@@ -1186,6 +1199,28 @@ mod tests {
         found
     }
 
+    /// Whether `c` is drawn with its own glyph in `font`, not egui's
+    /// replacement box.
+    ///
+    /// egui 0.36's `has_glyph` compares font faces: it answers false for
+    /// every character of the face that also holds the replacement glyph
+    /// `◻`, though such a character is drawn fine (`▶` is one). So a
+    /// character `has_glyph` turns down is checked once more: it is
+    /// missing only if it is drawn as the replacement glyph itself.
+    fn draws(ctx: &egui::Context, font: &FontId, c: char) -> bool {
+        ctx.fonts_mut(|f| {
+            if f.has_glyph(font, c) {
+                return true;
+            }
+            let mut atlas_rect = |c: char| {
+                let galley = f.layout_no_wrap(c.to_string(), font.clone(), egui::Color32::WHITE);
+                let uv = galley.rows[0].row.glyphs[0].uv_rect;
+                (uv.min, uv.max)
+            };
+            atlas_rect(c) != atlas_rect('◻')
+        })
+    }
+
     /// Every non-ASCII character the UI writes is in the bundled fonts or
     /// egui's fallbacks for the family it is drawn in (a missing glyph is
     /// drawn as an empty box). Arrows are only in the monospace fonts, so
@@ -1201,7 +1236,7 @@ mod tests {
             FontId::monospace(13.0),
         ];
         // The check can fail: the back arrow was an empty box.
-        assert!(!ctx.fonts_mut(|f| f.has_glyph(&families[1], '←')));
+        assert!(!draws(&ctx, &families[1], '←'));
         let found = non_ascii_in_ui_strings();
         assert!(found.contains_key(&'·') && found.contains_key(&'›'));
         for (c, place) in found {
@@ -1212,7 +1247,7 @@ mod tests {
             };
             for font in fonts {
                 assert!(
-                    ctx.fonts_mut(|f| f.has_glyph(font, c)),
+                    draws(&ctx, font, c),
                     "{c:?} ({place}) is not in {:?}",
                     font.family
                 );

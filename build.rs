@@ -11,6 +11,10 @@ fn main() {
     // this check `rc.exe` fails on the missing file and the Windows build
     // with it.
     if target.contains("windows") && Path::new(ICON_RC).exists() {
-        embed_resource::compile(ICON_RC);
+        // The icon is cosmetic: skip it when no resource compiler is
+        // installed, but fail the build if one is there and fails.
+        embed_resource::compile(ICON_RC, embed_resource::NONE)
+            .manifest_optional()
+            .unwrap();
     }
 }

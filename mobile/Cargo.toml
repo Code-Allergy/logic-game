@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib"]
 # commented out until the game exposes an app plugin it can add.
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 gate_quest = { path = ".." }
-bevy = { version = "0.19", default-features = false, features = ["android-native-activity"] }
+bevy = { version = "0.20.1", default-features = false, features = ["android-native-activity"] }
 
 [package.metadata.android]
 package = "org.codeallergy.GateQuest"

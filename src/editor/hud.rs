@@ -1444,7 +1444,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::ui_style::workshop_fonts());
         for _ in 0..2 {
-            let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+            crate::ui_style::test_ui::run(&ctx, egui::RawInput::default(), |_| {});
         }
         assert!(crate::ui_style::workshop_fonts_ready(&ctx));
         ctx

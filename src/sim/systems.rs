@@ -1603,11 +1603,12 @@ pub fn ui_for_selected_gate(
 /// Save the open workspace when the app exits, if that would otherwise
 /// lose work (see [`exit_save_plan`]).
 ///
-/// Runs in [`Last`] after [`bevy::window::ExitSystems`]: closing the
-/// window sends [`AppExit`] from `Last` (bevy_window's exit condition)
-/// and the title menu's Exit sends it in `Update`; the runner stops after
-/// the frame in which it was sent, so this is the last system that sees
-/// it, with the circuit still in the world.
+/// Runs in [`Last`] in [`bevy::app::OnAppExitSystems`], which Bevy orders
+/// after [`bevy::window::ExitSystems`] and before winit despawns the
+/// windows: closing the window sends [`AppExit`] from `Last` (bevy_window's
+/// exit condition) and the title menu's Exit sends it in `Update`; the
+/// runner stops after the frame in which it was sent, so this is the last
+/// system that sees it, with the circuit still in the world.
 pub fn save_on_exit_system(
     mut exit_events: MessageReader<AppExit>,
     reader: CircuitReader,
