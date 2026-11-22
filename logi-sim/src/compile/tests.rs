@@ -43,39 +43,75 @@ fn sim(p: Program) -> Sim {
     Sim::new(Arc::new(p))
 }
 
-/// Blocks are sorted by (rank, op), cover the instruction list exactly, and
-/// no instruction reads a slot written in its own or a later rank.
-fn check_program_invariants(p: &Program) {
+/// Blocks are sorted by (rank, op, packed first, partition), cover the
+/// instruction list (and the
+/// packed words) exactly, every slot is written once, and nothing reads a
+/// slot written in its own or a later rank.
+pub(crate) fn check_program_invariants(p: &Program) {
     let mut written_rank = vec![u32::MAX; p.slot_count as usize];
-    let mut next = 0;
-    for w in p.blocks.windows(2) {
+    let (mut next, mut next_pack) = (0, 0);
+    let part = |i: usize| p.block_parts.get(i).copied().unwrap_or(0);
+    assert!(p.block_parts.is_empty() || p.block_parts.len() == p.blocks.len());
+    for (i, w) in p.blocks.windows(2).enumerate() {
         assert!(
-            (w[0].rank, w[0].op) < (w[1].rank, w[1].op),
+            (w[0].rank, w[0].op, !w[0].packed, part(i))
+                < (w[1].rank, w[1].op, !w[1].packed, part(i + 1)),
             "blocks out of order"
         );
     }
+    // (writes, reads) of block `b`.
+    let slots = |b: &Block| -> (Vec<u32>, Vec<u32>) {
+        let range = b.start as usize..(b.start + b.len) as usize;
+        let (mut w, mut r) = (Vec::new(), Vec::new());
+        if b.packed {
+            for pk in &p.packs[range] {
+                w.push(pk.dst);
+                w.extend(
+                    p.scatters[pk.scatter_start as usize..][..pk.scatter_len as usize]
+                        .iter()
+                        .map(|x| x.slot),
+                );
+                for o in [&pk.a, &pk.b, &pk.c] {
+                    r.extend([o.base, o.splat]);
+                    r.extend(
+                        p.gathers[o.gather_start as usize..][..o.gather_len as usize]
+                            .iter()
+                            .map(|g| g.slot),
+                    );
+                }
+            }
+        } else {
+            let (sa, sb, sc) = b.op.slot_operands();
+            for ins in &p.instrs[range] {
+                w.push(ins.dst);
+                for (is_slot, s) in [(sa, ins.a), (sb, ins.b), (sc, ins.c)] {
+                    if is_slot {
+                        r.push(s);
+                    }
+                }
+            }
+        }
+        (w, r)
+    };
     for b in &p.blocks {
-        assert_eq!(b.start, next);
-        next += b.len;
-        for ins in &p.instrs[b.start as usize..(b.start + b.len) as usize] {
-            assert_eq!(
-                written_rank[ins.dst as usize],
-                u32::MAX,
-                "slot written twice"
-            );
-            written_rank[ins.dst as usize] = b.rank;
+        if b.packed {
+            assert_eq!(b.start, next_pack);
+            next_pack += b.len;
+        } else {
+            assert_eq!(b.start, next);
+            next += b.len;
+        }
+        for d in slots(b).0 {
+            assert_eq!(written_rank[d as usize], u32::MAX, "slot written twice");
+            written_rank[d as usize] = b.rank;
         }
     }
     assert_eq!(next as usize, p.instrs.len());
+    assert_eq!(next_pack as usize, p.packs.len());
     for b in &p.blocks {
-        let (sa, sb, sc) = b.op.slot_operands();
-        for ins in &p.instrs[b.start as usize..(b.start + b.len) as usize] {
-            for (is_slot, s) in [(sa, ins.a), (sb, ins.b), (sc, ins.c)] {
-                if is_slot {
-                    let r = written_rank[s as usize];
-                    assert!(r == u32::MAX || r < b.rank, "operand from same/later rank");
-                }
-            }
+        for s in slots(b).1 {
+            let r = written_rank[s as usize];
+            assert!(r == u32::MAX || r < b.rank, "operand from same/later rank");
         }
     }
     assert_eq!(
@@ -85,6 +121,14 @@ fn check_program_invariants(p: &Program) {
     );
     for &(s, _) in &p.consts {
         assert_eq!(written_rank[s as usize], u32::MAX, "const slot written");
+    }
+    // Lane words are packed destinations; lane slots resolve.
+    let dsts: std::collections::HashSet<u32> = p.packs.iter().map(|x| x.dst).collect();
+    assert!(p.lane_words.iter().all(|w| dsts.contains(w)));
+    for map in &p.debug.net_slots {
+        for (_, &s) in map {
+            assert!(p.locate(s).is_some(), "debug slot {s} out of range");
+        }
     }
 }
 

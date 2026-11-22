@@ -6,17 +6,53 @@
 //! block; each block's inner loop is a pass over a contiguous slice of
 //! instructions with one opcode.
 //!
-//! `tick()` allocates nothing and uses no locks or atomics, and the code is
-//! the same on native and wasm. Every index in the program is checked once in
-//! [`Sim::new`], so the inner loops can skip bounds checks.
+//! `tick()` allocates nothing, and the code is the same on native and wasm.
+//! Every index in the program is checked once in [`Sim::new`], so the inner
+//! loops can skip bounds checks. The program is first lowered into the
+//! runtime's own streaming encoding (`code.rs`).
+//!
+//! Single-threaded (the default), a `Sim` uses no locks or atomics. With
+//! [`SimOptions::threads`] > 1 it owns a pool of worker threads that share
+//! each settle (`pool.rs`, which documents why that is race-free); results
+//! are identical.
 
+mod code;
+#[cfg(not(target_arch = "wasm32"))]
+mod pool;
+/// No threads on wasm. `Pool` is uninhabited, so a `Sim`'s pool is always
+/// `None`, every settle takes the single-threaded path, and no thread or
+/// synchronization code is compiled in. A threaded `SimOptions` silently
+/// runs on one thread.
+#[cfg(target_arch = "wasm32")]
+mod pool {
+    pub(super) enum Pool {}
+    pub(super) struct Schedule {
+        pub phases: Vec<()>,
+    }
+    impl Schedule {
+        pub fn parallel_phases(&self) -> usize {
+            0
+        }
+    }
+    impl Pool {
+        pub fn threads(&self) -> usize {
+            match *self {}
+        }
+        pub fn schedule(&self) -> &Schedule {
+            match *self {}
+        }
+        pub fn settle(&self, _: &mut [u64], _: &[Vec<u64>], _: u64) {
+            match *self {}
+        }
+    }
+}
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::compile::{Commit, Instr, NodePath, Op, Program, StateLoc, ZERO_SLOT};
+use crate::compile::{Commit, NodePath, Op, Program, StateLoc, ZERO_SLOT};
 use crate::netlist::{NetId, NodeId, mask};
 
 /// Index of a root port, in port order.
@@ -36,8 +72,74 @@ pub struct StateSnapshot {
     pub mems: HashMap<NodePath, (u8, u8, Vec<u64>)>,
 }
 
+/// Runtime options (issue #41). Every field only changes speed, never
+/// results. [`SimOptions::default`] is single-threaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimOptions {
+    /// Re-encode blocks whose destinations are consecutive so they stream
+    /// only their operands (see `sim/code.rs`). Off runs every block from
+    /// the program's own instructions.
+    pub stream: bool,
+    /// Threads per settle, counting the caller (1 = single-threaded). The
+    /// [`Sim`] starts `threads - 1` workers and keeps them for its
+    /// lifetime; it starts none if no rank reaches `par_min`, and none on
+    /// wasm.
+    pub threads: usize,
+    /// Work (about one unit per instruction) a rank needs to be split
+    /// between threads; smaller ranks run on the calling thread.
+    pub par_min: u64,
+}
+
+/// Default [`SimOptions::par_min`] (see the design doc, section 13).
+pub const DEFAULT_PAR_MIN: u64 = 2048;
+
+impl Default for SimOptions {
+    fn default() -> Self {
+        Self {
+            stream: true,
+            threads: 1,
+            par_min: DEFAULT_PAR_MIN,
+        }
+    }
+}
+
+impl SimOptions {
+    /// Everything off: the M3 runtime.
+    pub fn baseline() -> Self {
+        Self {
+            stream: false,
+            ..Self::default()
+        }
+    }
+
+    /// The defaults with `threads` threads.
+    pub fn threaded(threads: usize) -> Self {
+        Self {
+            threads,
+            ..Self::default()
+        }
+    }
+
+    /// The defaults with one thread per available core (1 on wasm).
+    pub fn all_cores() -> Self {
+        let n = if cfg!(target_arch = "wasm32") {
+            1
+        } else {
+            std::thread::available_parallelism().map_or(1, |n| n.get())
+        };
+        Self::threaded(n)
+    }
+}
+
 pub struct Sim {
     program: Arc<Program>,
+    code: Arc<code::Code>,
+    options: SimOptions,
+    /// Worker threads, when `options.threads > 1` and some rank is large
+    /// enough. Declared before `slots` and `mems`, so it is dropped (and
+    /// its workers joined) before the buffers they may still be using are
+    /// freed, even when unwinding out of a settle.
+    pool: Option<pool::Pool>,
     slots: Vec<u64>,
     mems: Vec<Vec<u64>>,
     tick: u64,
@@ -54,7 +156,26 @@ impl Sim {
     }
 
     pub fn try_new(program: Arc<Program>) -> Result<Self, BadProgram> {
+        Self::try_with_options(program, SimOptions::default())
+    }
+
+    /// [`Sim::new`] with runtime options.
+    #[track_caller]
+    pub fn with_options(program: Arc<Program>, options: SimOptions) -> Self {
+        Self::try_with_options(program, options).unwrap_or_else(|e| panic!("bad program: {}", e.0))
+    }
+
+    /// [`Sim::try_new`] with runtime options.
+    pub fn try_with_options(
+        program: Arc<Program>,
+        options: SimOptions,
+    ) -> Result<Self, BadProgram> {
         check(&program)?;
+        let code = if options.stream {
+            code::Code::new(&program)
+        } else {
+            code::Code::plain(&program)
+        };
         let mems = program
             .mems
             .iter()
@@ -64,7 +185,12 @@ impl Sim {
                 v
             })
             .collect();
+        let code = Arc::new(code);
+        let pool = start_pool(&program, &code, &options);
         let mut sim = Sim {
+            code,
+            options,
+            pool,
             slots: vec![0; program.slot_count as usize],
             mems,
             tick: 0,
@@ -80,6 +206,23 @@ impl Sim {
 
     pub fn program(&self) -> &Arc<Program> {
         &self.program
+    }
+
+    pub fn options(&self) -> &SimOptions {
+        &self.options
+    }
+
+    /// Threads each settle uses (1 when no worker threads were started).
+    pub fn threads(&self) -> usize {
+        self.pool.as_ref().map_or(1, pool::Pool::threads)
+    }
+
+    /// `(parallel, total)` settle phases (diagnostics; `(0, 0)` when
+    /// single-threaded).
+    pub fn phases(&self) -> (usize, usize) {
+        self.pool.as_ref().map_or((0, 0), |p| {
+            (p.schedule().parallel_phases(), p.schedule().phases.len())
+        })
     }
 
     /// Set a root input. It is visible to logic at the next settle (the next
@@ -115,9 +258,15 @@ impl Sim {
         self.output(port)
     }
 
-    /// Raw slot value (see [`crate::compile::DebugMap`]).
+    /// Raw slot value (see [`crate::compile::DebugMap`]). A lane slot (at or
+    /// above `slot_count`, see [`Program::locate`]) reads its bit of the
+    /// packed word. Panics if `slot` is neither.
     pub fn read(&self, slot: u32) -> u64 {
-        self.slots[slot as usize]
+        match self.program.locate(slot) {
+            Some((s, None)) => self.slots[s as usize],
+            Some((s, Some(lane))) => (self.slots[s as usize] >> lane) & 1,
+            None => panic!("slot {slot} out of range"),
+        }
     }
 
     /// Value of an authored net, by instance path and `NetId`.
@@ -178,72 +327,23 @@ impl Sim {
         for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
             self.slots[port.slot as usize] = v;
         }
+        if let Some(pool) = &self.pool {
+            pool.settle(&mut self.slots, &self.mems, self.tick);
+            debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+            return;
+        }
         let s = self.slots.as_mut_ptr();
-        let tick = self.tick;
-        for b in &p.blocks {
-            let range = b.start as usize..(b.start + b.len) as usize;
-            let ins = &p.instrs[range.clone()];
-            let imms = &p.imms[range];
-            // SAFETY: every slot index in `ins` was checked against
-            // `slot_count` in `check`, and `slots` has that length. Reads and
-            // writes go through the raw pointer so `dst` may equal no operand
-            // (it never does in a compiled program, but it would be sound).
-            unsafe {
-                match b.op {
-                    Op::Copy => run1(s, ins, imms, |a, _, _| a),
-                    Op::Not => run1(s, ins, imms, |a, _, m| !a & m),
-                    Op::And => run2(s, ins, imms, |a, b, _, _| a & b),
-                    Op::Or => run2(s, ins, imms, |a, b, _, _| a | b),
-                    Op::Xor => run2(s, ins, imms, |a, b, _, _| a ^ b),
-                    Op::Nand => run2(s, ins, imms, |a, b, _, m| !(a & b) & m),
-                    Op::Nor => run2(s, ins, imms, |a, b, _, m| !(a | b) & m),
-                    Op::Xnor => run2(s, ins, imms, |a, b, _, m| !(a ^ b) & m),
-                    Op::Mux => run3(s, ins, imms, |a, b, c, _| if a != 0 { c } else { b }),
-                    Op::Switch => run2(s, ins, imms, |a, b, _, _| if a != 0 { b } else { 0 }),
-                    Op::AddSum => run3(s, ins, imms, |a, b, c, m| {
-                        a.wrapping_add(b).wrapping_add(c) & m
-                    }),
-                    Op::AddCarry => run3(s, ins, imms, |a, b, c, w| {
-                        ((a as u128 + b as u128 + c as u128) >> w) as u64 & 1
-                    }),
-                    Op::Eq => run2(s, ins, imms, |a, b, _, _| (a == b) as u64),
-                    Op::LtU => run2(s, ins, imms, |a, b, _, _| (a < b) as u64),
-                    Op::ReduceOr => run1(s, ins, imms, |a, _, _| (a != 0) as u64),
-                    Op::ReduceAnd => run1(s, ins, imms, |a, _, m| (a == m) as u64),
-                    Op::ReduceXor => run1(s, ins, imms, |a, _, _| (a.count_ones() & 1) as u64),
-                    Op::Shr => run1(s, ins, imms, |a, i, m| (a >> i.b) & m),
-                    Op::Concat => run2(s, ins, imms, |a, b, i, _| a | (b << i.c)),
-                    Op::Sext => run1(s, ins, imms, |a, i, m| {
-                        if (a >> (i.b - 1)) & 1 == 1 {
-                            (a | !mask(i.b as u8)) & m
-                        } else {
-                            a
-                        }
-                    }),
-                    Op::Clock => {
-                        for i in ins {
-                            let v = ((tick + i.c as u64) % i.a as u64) < i.b as u64;
-                            *s.add(i.dst as usize) = v as u64;
-                        }
-                    }
-                    Op::MemRead => {
-                        for i in ins {
-                            let m = self.mems.get_unchecked(i.b as usize);
-                            let a = *s.add(i.a as usize) as usize & (m.len() - 1);
-                            *s.add(i.dst as usize) = *m.get_unchecked(a);
-                        }
-                    }
-                    Op::SrNext => run3(s, ins, imms, |a, b, c, _| {
-                        if b != 0 {
-                            0
-                        } else if a != 0 {
-                            1
-                        } else {
-                            c
-                        }
-                    }),
-                }
-            }
+        let env = code::Env {
+            program: p,
+            code: &self.code,
+            mems: &self.mems,
+            tick: self.tick,
+        };
+        for b in &self.code.blocks {
+            // SAFETY: the program passed `check`, `code` was built from it,
+            // and `slots` has `slot_count` entries. Nothing else touches the
+            // slots meanwhile.
+            unsafe { code::exec(&env, b, 0, b.len, s) };
         }
         debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
     }
@@ -308,39 +408,30 @@ impl Sim {
     }
 }
 
-#[inline(always)]
-unsafe fn run1(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, &Instr, u64) -> u64) {
-    for (k, i) in ins.iter().enumerate() {
-        unsafe { *s.add(i.dst as usize) = f(*s.add(i.a as usize), i, *imms.get_unchecked(k)) };
+/// Worker threads for `options`, or `None`: always with one thread (the
+/// default, so nothing is spawned and the settle never touches pool or
+/// synchronization code), when no rank is large enough, and on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_pool(
+    program: &Arc<Program>,
+    code: &Arc<code::Code>,
+    options: &SimOptions,
+) -> Option<pool::Pool> {
+    if options.threads <= 1 {
+        return None;
     }
+    let sched = pool::Schedule::new(program, code, options.threads, options.par_min);
+    pool::Pool::new(
+        Arc::clone(program),
+        Arc::clone(code),
+        sched,
+        options.threads,
+    )
 }
 
-#[inline(always)]
-unsafe fn run2(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, u64, &Instr, u64) -> u64) {
-    for (k, i) in ins.iter().enumerate() {
-        unsafe {
-            *s.add(i.dst as usize) = f(
-                *s.add(i.a as usize),
-                *s.add(i.b as usize),
-                i,
-                *imms.get_unchecked(k),
-            )
-        };
-    }
-}
-
-#[inline(always)]
-unsafe fn run3(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, u64, u64, u64) -> u64) {
-    for (k, i) in ins.iter().enumerate() {
-        unsafe {
-            *s.add(i.dst as usize) = f(
-                *s.add(i.a as usize),
-                *s.add(i.b as usize),
-                *s.add(i.c as usize),
-                *imms.get_unchecked(k),
-            )
-        };
-    }
+#[cfg(target_arch = "wasm32")]
+fn start_pool(_: &Arc<Program>, _: &Arc<code::Code>, _: &SimOptions) -> Option<pool::Pool> {
+    None
 }
 
 /// Check every index the unchecked loops rely on.
@@ -354,8 +445,53 @@ fn check(p: &Program) -> Result<(), BadProgram> {
     if p.imms.len() != p.instrs.len() {
         return bad("imms and instrs differ in length".into());
     }
+    for pk in &p.packs {
+        if !slot_ok(pk.dst) || pk.dst == ZERO_SLOT {
+            return bad(format!("bad packed dst in {pk:?}"));
+        }
+        for o in [&pk.a, &pk.b, &pk.c] {
+            let end = o.gather_start as u64 + o.gather_len as u64;
+            if !slot_ok(o.base) || !slot_ok(o.splat) || o.splat_bit >= 64 {
+                return bad(format!("bad packed operand in {pk:?}"));
+            }
+            if end > p.gathers.len() as u64 {
+                return bad(format!("gathers out of range in {pk:?}"));
+            }
+        }
+        let end = pk.scatter_start as u64 + pk.scatter_len as u64;
+        if end > p.scatters.len() as u64 {
+            return bad(format!("scatters out of range in {pk:?}"));
+        }
+    }
+    for g in &p.gathers {
+        if !slot_ok(g.slot) || g.bit >= 64 || g.lane >= 64 {
+            return bad(format!("bad gather {g:?}"));
+        }
+    }
+    for x in &p.scatters {
+        if !slot_ok(x.slot) || x.slot == ZERO_SLOT || x.lane >= 64 {
+            return bad(format!("bad scatter {x:?}"));
+        }
+    }
+    if !p.block_parts.is_empty() && p.block_parts.len() != p.blocks.len() {
+        return bad("block_parts and blocks differ in length".into());
+    }
+    for &w in &p.lane_words {
+        if !slot_ok(w) {
+            return bad(format!("bad lane word {w}"));
+        }
+    }
+    if p.slot_count as u64 + 64 * p.lane_words.len() as u64 > u32::MAX as u64 + 1 {
+        return bad("too many lane slots".into());
+    }
     for b in &p.blocks {
         let end = b.start as u64 + b.len as u64;
+        if b.packed {
+            if end > p.packs.len() as u64 || !code::packable_op(b.op) {
+                return bad(format!("packed block {b:?} out of range"));
+            }
+            continue;
+        }
         if end > p.instrs.len() as u64 {
             return bad(format!("block {b:?} out of range"));
         }

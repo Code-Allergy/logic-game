@@ -6,17 +6,25 @@
 //! ```
 //!
 //! Every throughput case changes the root inputs every tick (the cost of
-//! that is included) or runs real sequential logic. Single-threaded.
+//! that is included) or runs real sequential logic. Throughput counts the
+//! same logic in every configuration: scalar instructions plus packed lanes
+//! ([`Program::work`]).
+//!
+//! The first section shows each step of the performance pass (#41)
+//! separately, as the median of `--runs N` runs (default 5; 3 with
+//! `--quick`): the M3 layout and runtime, then slot ordering, the streaming
+//! runtime, lane packing and 2/3/4 threads, each added on top of the last.
+//! The other sections run the current single-threaded defaults.
 
 use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use logi_sim::circuit::BitPackedCircuit;
-use logi_sim::compile::{Options, Program, compile};
+use logi_sim::compile::{Options, PackMode, Program, SlotOrder, compile};
 use logi_sim::netlist::{Design, mask};
 use logi_sim::prelude::{Runner, SimdRunner};
-use logi_sim::sim::Sim;
+use logi_sim::sim::{Sim, SimOptions};
 use logi_sim::testkit::{GenConfig, bitblast::bitblast, fixtures, generate, legacy::to_legacy};
 
 struct XorShift(u64);
@@ -46,11 +54,20 @@ fn measure(budget: Duration, mut step: impl FnMut(u64)) -> f64 {
     }
 }
 
-/// Throughput cases compile unoptimized, so every instruction counted is
-/// work done and the legacy baseline runs identical logic. The simplify
-/// section reports what the passes remove.
+/// Throughput cases compile with the simplify passes off, so every
+/// instruction counted is work done and the legacy baseline runs identical
+/// logic; the memory layout passes (slot order, packing) are at their
+/// defaults. The simplify section reports what the passes remove.
+fn bench_options() -> Options {
+    Options {
+        slot_order: SlotOrder::default(),
+        pack: PackMode::default(),
+        ..Options::unoptimized()
+    }
+}
+
 fn compile_timed(d: &Design) -> (Arc<Program>, f64) {
-    compile_with(d, &Options::unoptimized())
+    compile_with(d, &bench_options())
 }
 
 fn compile_with(d: &Design, opts: &Options) -> (Arc<Program>, f64) {
@@ -61,7 +78,11 @@ fn compile_with(d: &Design, opts: &Options) -> (Arc<Program>, f64) {
 
 /// Seconds per tick for `Sim`, with every input randomized each tick.
 fn time_sim(p: &Arc<Program>, budget: Duration) -> f64 {
-    let mut sim = Sim::new(Arc::clone(p));
+    time_sim_with(p, &SimOptions::default(), budget)
+}
+
+fn time_sim_with(p: &Arc<Program>, so: &SimOptions, budget: Duration) -> f64 {
+    let mut sim = Sim::with_options(Arc::clone(p), so.clone());
     let widths: Vec<u8> = p.ports.inputs.iter().map(|x| x.width).collect();
     let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
     measure(budget, |n| {
@@ -100,8 +121,14 @@ fn main() {
     } else {
         &[10_000, 100_000, 1_000_000]
     };
+    let runs: usize = std::env::args()
+        .skip_while(|a| a != "--runs")
+        .nth(1)
+        .map_or(if quick { 3 } else { 5 }, |n| n.parse().expect("--runs N"));
     let mut gate_ratio = None;
     let mut gate_compile = None;
+
+    perf_steps(quick, runs, budget);
 
     println!("== Word-level mixed-op DAGs (32-bit), inputs change every tick ==");
     for &n in sizes {
@@ -109,7 +136,7 @@ fn main() {
         let (p, _) = compile_timed(&d);
         row(
             &format!("sim dag32 ~{n}"),
-            p.instrs.len(),
+            p.work(),
             "instr",
             time_sim(&p, budget),
         );
@@ -120,7 +147,7 @@ fn main() {
         let d = generate(&GenConfig::gates(2, n, 1)).design;
         let (p, _) = compile_timed(&d);
         let sim_t = time_sim(&p, budget);
-        row(&format!("sim gates1 {n}"), p.instrs.len(), "gate", sim_t);
+        row(&format!("sim gates1 {n}"), p.work(), "gate", sim_t);
 
         let legacy = to_legacy(&d);
         let mut simd = SimdRunner::new(BitPackedCircuit::compile(&legacy.circuit));
@@ -134,12 +161,7 @@ fn main() {
             }
             black_box(simd.output(legacy.outputs[0], 0));
         });
-        row(
-            &format!("legacy SIMD gates1 {n}"),
-            p.instrs.len(),
-            "gate",
-            simd_t,
-        );
+        row(&format!("legacy SIMD gates1 {n}"), p.work(), "gate", simd_t);
         let ratio = simd_t / sim_t;
         println!("{:<34} {ratio:.2}x", "  speedup");
         if n == 1_000_000 {
@@ -159,9 +181,9 @@ fn main() {
         let t = time_sim(&p, budget);
         println!(
             "{label:<34} {:>9} instr  {:>12.0} cycles/s {:>9.1} Minstr/s",
-            p.instrs.len(),
+            p.work(),
             1.0 / t,
-            p.instrs.len() as f64 / t / 1e6
+            p.work() as f64 / t / 1e6
         );
     }
 
@@ -184,7 +206,7 @@ fn main() {
         ("datapath bit-blasted", bitblast(&dp)),
     ] {
         let (p, _) = compile_timed(&d);
-        row(label, p.instrs.len(), "instr", time_sim(&p, budget));
+        row(label, p.work(), "instr", time_sim(&p, budget));
     }
 
     println!("\n== Simplify passes: instruction count and throughput, unoptimized -> optimized ==");
@@ -197,7 +219,7 @@ fn main() {
         ("counter32 bit-blasted", fixtures::counter_bitblasted(32)),
         ("datapath bit-blasted", bitblast(&dp)),
     ] {
-        let (p0, _) = compile_timed(&d);
+        let (p0, _) = compile_with(&d, &Options::unoptimized());
         let (p1, _) = compile_with(&d, &Options::default());
         let (t0, t1) = (time_sim(&p0, budget), time_sim(&p1, budget));
         println!(
@@ -300,4 +322,145 @@ fn main() {
         ),
         None => println!("compile 1M nodes: skipped (--quick)"),
     }
+}
+
+/// Median of `runs` throughput measurements (work items per second).
+fn median_rate(
+    p: &Arc<Program>,
+    so: &SimOptions,
+    work: usize,
+    runs: usize,
+    budget: Duration,
+) -> f64 {
+    let mut v: Vec<f64> = (0..runs)
+        .map(|_| work as f64 / time_sim_with(p, so, budget))
+        .collect();
+    v.sort_by(|a, b| a.total_cmp(b));
+    v[v.len() / 2]
+}
+
+/// Per-step gains of the performance pass (#41), single- and
+/// multi-threaded, on the cases the issue names.
+fn perf_steps(quick: bool, runs: usize, budget: Duration) {
+    let dp = generate(&GenConfig {
+        seed: 3,
+        nodes: if quick { 2_000 } else { 20_000 },
+        child_defs: 0,
+        max_depth: 1,
+        max_width: 32,
+        state_percent: 20,
+        unconnected_percent: 0,
+        inputs: 16,
+        outputs: 16,
+        ..Default::default()
+    })
+    .design;
+    let big = if quick { 100_000 } else { 1_000_000 };
+    let cases: Vec<(String, Design)> = vec![
+        (
+            format!("gates1 {big} (1-bit gate DAG)"),
+            generate(&GenConfig::gates(2, big, 1)).design,
+        ),
+        (
+            "cpu bit-blasted".into(),
+            bitblast(&fixtures::cpu(&fixtures::LOOP_PROGRAM)),
+        ),
+        (
+            format!("dag32 ~{big} (word-level DAG)"),
+            generate(&GenConfig::dag(1, big, 32)).design,
+        ),
+        ("datapath bit-blasted".into(), bitblast(&dp)),
+        (
+            "gates1 10000".into(),
+            generate(&GenConfig::gates(2, 10_000, 1)).design,
+        ),
+    ];
+    let m3 = Options::unoptimized();
+    let order = Options {
+        slot_order: SlotOrder::FirstUse,
+        ..m3.clone()
+    };
+    let pack = Options {
+        pack: PackMode::Auto,
+        ..order.clone()
+    };
+    let pack_all = Options {
+        pack: PackMode::All,
+        ..order.clone()
+    };
+    let single = SimOptions::default();
+    // (label, compile options, runtime options)
+    let steps: Vec<(&str, Options, SimOptions)> = vec![
+        ("M3", m3.clone(), SimOptions::baseline()),
+        ("+order", order.clone(), SimOptions::baseline()),
+        ("+stream", order.clone(), single.clone()),
+        ("+pack", pack.clone(), single.clone()),
+        ("2T", pack.clone(), SimOptions::threaded(2)),
+        ("3T", pack.clone(), SimOptions::threaded(3)),
+        ("4T", pack.clone(), SimOptions::threaded(4)),
+        (
+            "4T part",
+            pack.clone().for_threads(4),
+            SimOptions::threaded(4),
+        ),
+        ("pack=All", pack_all.clone(), single.clone()),
+    ];
+    println!(
+        "== Performance pass (#41): each step added to the previous, M work/s, median of {runs} \
+         runs =="
+    );
+    println!(
+        "   (M3: the M3 layout and runtime; +order: SlotOrder::FirstUse; +stream: streaming \
+         runtime;\n    +pack: PackMode::Auto; nT: SimOptions::threaded(n), par_min {}; \
+         4T part: also Options::partitions = 4;\n    pack=All: +stream with every 1-bit \
+         instruction packed. Threads in use are shown when fewer than asked.)",
+        logi_sim::sim::DEFAULT_PAR_MIN
+    );
+    print!("{:<32}", "case");
+    for (label, _, _) in &steps {
+        print!(" {label:>9}");
+    }
+    println!();
+    for (label, d) in &cases {
+        let work = compile(d, &m3).expect("compile").work();
+        let mut progs: Vec<(Options, Arc<Program>)> = Vec::new();
+        let mut rates = Vec::new();
+        let mut notes = Vec::new();
+        for (_, opts, so) in &steps {
+            let p = match progs.iter().find(|(o, _)| o == opts) {
+                Some((_, p)) => Arc::clone(p),
+                None => {
+                    let p = Arc::new(compile(d, opts).expect("compile"));
+                    progs.push((opts.clone(), Arc::clone(&p)));
+                    p
+                }
+            };
+            let used = Sim::with_options(Arc::clone(&p), so.clone()).threads();
+            rates.push(median_rate(&p, so, work, runs, budget));
+            notes.push(if used < so.threads {
+                format!("({used}T)")
+            } else {
+                String::new()
+            });
+        }
+        let one = rates[3];
+        print!("{label:<32}");
+        for (r, note) in rates.iter().zip(&notes) {
+            print!(" {:>9}", format!("{:.0}{note}", r / 1e6));
+        }
+        print!("\n{:<32}", "  speedup vs M3");
+        for r in &rates {
+            print!(" {:>8.2}x", r / rates[0]);
+        }
+        print!("\n{:<32}", "  thread scaling vs +pack");
+        for (k, r) in rates.iter().enumerate() {
+            if (4..=7).contains(&k) {
+                print!(" {:>8.2}x", r / one);
+            } else {
+                print!(" {:>9}", "");
+            }
+        }
+        println!();
+    }
+    println!();
 }

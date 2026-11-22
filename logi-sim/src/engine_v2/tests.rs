@@ -141,6 +141,70 @@ fn steps_run_while_paused_and_probes_read_back() {
     assert_eq!(f.values.len(), 3, "readback is exactly the probes");
 }
 
+/// Probes on nets that live only in a packed lane (lane slots) and a
+/// threaded `Sim` read the same values as an unpacked, single-threaded
+/// engine (#41).
+#[test]
+fn probes_read_packed_lanes_and_threads() {
+    use crate::compile::PackMode;
+    use crate::testkit::{GenConfig, generate};
+    let d = generate(&GenConfig::gates(4, 20_000, 1)).design;
+    let probes: Vec<Probe> = d
+        .root_def()
+        .nets
+        .keys()
+        .map(|net| Probe { path: vec![], net })
+        .collect();
+    let clock = FakeClock::new();
+    let c = || clock.read();
+    let mut frames = Vec::new();
+    for (opts, threads) in [
+        (Options::debug(), 1),
+        (
+            Options {
+                pack: PackMode::All,
+                pack_min: 1,
+                ..Options::debug()
+            },
+            4,
+        ),
+    ] {
+        let mut e = LocalEngine::new(opts);
+        e.core.set_sim_options(crate::sim::SimOptions {
+            threads,
+            par_min: 64,
+            ..Default::default()
+        });
+        e.load(&d, 1);
+        let sim = e.core.sim().unwrap();
+        if threads > 1 {
+            assert!(sim.threads() > 1);
+            let p = sim.program();
+            assert!(p.debug.net_slots[0].values().any(|&s| s >= p.slot_count));
+        }
+        for (k, &port) in d.root_def().inputs.iter().enumerate() {
+            e.core.set_input(port, k as u64 & 1);
+        }
+        e.core.set_probes(probes.clone());
+        e.core.step(3);
+        e.run_frame(Duration::from_secs(1), &c);
+        frames.push(e.frame().values.clone());
+    }
+    assert_eq!(frames[0].len(), probes.len());
+    assert_eq!(frames[0], frames[1]);
+}
+
+/// The engine runs its `Sim` on one thread unless configured (#41).
+#[test]
+fn engine_defaults_to_one_thread() {
+    let (d, _, _, _) = counter_design(false);
+    let mut e = LocalEngine::new(Options::debug());
+    assert_eq!(e.core.sim_options().threads, 1);
+    e.load(&d, 1);
+    let sim = e.core.sim().unwrap();
+    assert_eq!((sim.threads(), sim.phases()), (1, (0, 0)));
+}
+
 #[test]
 fn unlimited_runs_until_the_budget() {
     let (d, ..) = counter_design(false);
