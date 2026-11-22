@@ -34,7 +34,9 @@ For example `cargo run -p gate_quest --features dev`, or
 The canvas and panels use the "Studio Workshop" design: chunky tiles with
 an ink outline and a solid bottom edge, cased wires (an ink casing around a
 coloured core; marigold for on, slate for off, teal for buses with a value
-pill), on a dot-grid bench. Every colour comes from the `Theme` resource
+pill), on a dot-grid bench. Wires are routed on the grid in horizontal and
+vertical runs with rounded corners, a dot where a net branches and a gap
+where one wire passes over another (`src/sim/routing.rs`). Every colour comes from the `Theme` resource
 (`src/theme.rs`), with a day and a night palette; press `T` or use the
 sun/moon button on the file card to switch.
 
@@ -47,22 +49,26 @@ below 1600 x 900):
 | Where | Card |
 |---|---|
 | Top left | File card: workspace or demo name, origin and view path, saved/unsaved/read-only. `☰ Library` opens the drawer with save, new, import RTL, copy a demo, the demos, gallery, saved workspaces and the definition table. |
-| Top centre | Transport: run, pause, step, speed chips (1 Hz, 60 Hz, 1 kHz, Max; `…` for an exact rate), tick. |
+| Top centre | Transport: run, pause, step, reset (back to tick 0, inputs kept), speed chips (1 Hz, 60 Hz, 1 kHz, Max; `…` for an exact rate), tick. |
 | Top right | Build status: built and part count, or the loop/build error (click for details). |
 | Right | Inspector of the selected part: label, width, parameters, live values (Q/D/EN for a register), input drive, readout format, Watch, Open inside, Delete, wires. |
 | Bottom left | Minimap (click or drag to move the view) and zoom; the percentage fits the circuit. |
-| Bottom centre | Parts bar: Logic, Memory, In & out, Routing, Arithmetic and Chips (saved workspaces and demos as cells); the width of new parts; the wire tool. |
+| Bottom centre | Parts bar: Logic, Memory, In & out, Routing, Arithmetic and Chips (saved workspaces, demos and gallery items as cells); the width of new parts; the wire tool. |
 | Bottom right | Signals: live values of watched parts, inputs, clocks, registers and outputs. |
 
 Keys (ignored while a text field has focus): `1`–`9` arm a part from the
-open tab (then click the canvas, or drag a slot onto it), `Esc` drops it,
-`W` wire tool, `F` fit, `Delete` deletes the selected part, `T` day or
-night. Mouse: left-click selects, right-drag moves a part, middle-drag
-pans, the wheel zooms about the cursor.
+open tab (then click the canvas, or drag a slot onto it), `Esc` drops it
+(or the wire tool, or closes the Library; with nothing to drop it clears
+the selection), `W` wire tool, `F` fit, `R` reset to tick 0, `Delete`
+deletes the selected part, `T` day or night. Mouse: left-click selects
+(on empty canvas: deselects), right-drag moves a part, middle-drag pans,
+the wheel zooms about the cursor.
 
 `cargo run --example screenshot -- <id> out.png [--night] [--size WxH]
-[--select LABEL] [--set LABEL=VALUE] [--tab NAME] [--library]` saves a
-screenshot of a demo or gallery item; `--map [--opened ID,ID,...]
+[--select LABEL] [--set LABEL=VALUE] [--tab NAME] [--library] [--editable]
+[--fit] [--definition NAME]` saves a screenshot of a demo, a gallery item
+(or `empty`, a new workspace, or `loop`, a build error) or a version 6
+file (optionally one of its definitions); `--map [--opened ID,ID,...]
 [--level N]` shows the demo map instead, with that progress (in memory).
 
 ## The demo map
@@ -119,18 +125,19 @@ workspace" makes an editable copy.
 | 9 ALU | 8-bit ALU: add, subtract, AND, OR, carry and zero flags |
 | 10 A small CPU | Program counter, ROM program, microcode, register file and ALU; multiplies 5 by 7 |
 
-A **Gallery** of 27 more circuits sits beside the curriculum in
+A **Gallery** of 29 more circuits sits beside the curriculum in
 `assets/gallery/`: combinational (comparators, parity, Gray code, priority
 encoder, 7-segment display, barrel shifter, carry-lookahead adder, array
 multiplier), sequential (shift register, LFSR, counters, debouncer, PWM,
 state machines, traffic light, stopwatch) and small systems (a stack, a
-UART transmitter, a reaction-timer game and a CPU printing Fibonacci
-numbers). See `docs/save-format.md` ("Gallery").
+UART transmitter, a reaction-timer game, a CPU printing Fibonacci
+numbers, and a 16-bit CPU of about 15 000 gates printing primes beside
+its twin of word primitives). See `docs/save-format.md` ("Gallery").
 
 `cargo run --example demo_fmt` rewrites the demo and gallery files in
 canonical form (`-- --check` checks them); `cargo run --example
 render_svg -- <id>` draws SVG previews of a demo's or gallery item's
-circuits.
+circuits (`--ortho` routes the wires as the editor does).
 
 ## Credits
 

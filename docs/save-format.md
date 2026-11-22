@@ -413,8 +413,8 @@ embedded list and the manifest agree.
 
 ## Gallery
 
-`assets/gallery/` holds the gallery: 27 more circuits beside the
-curriculum, from a majority vote to a CPU running Fibonacci. Its
+`assets/gallery/` holds the gallery: 29 more circuits beside the
+curriculum, from a majority vote to a 16-bit CPU of gates. Its
 `manifest.json` has the shape of the demo manifest with categories in
 place of levels:
 
@@ -455,7 +455,90 @@ both folders.
 |---|---|
 | Combinational | majority vote; one-bit comparator (`cmp1`); 4-bit magnitude comparator (`mag4`, beside `Eq`/`LtU`); 8-bit parity XOR tree (beside `ReduceXor`); Gray code both ways; 8-to-3 priority encoder; 7-segment decoder driving seven lights; BCD to binary; 8-bit barrel shifter; 4-bit carry-lookahead adder (`lookahead`, `cla4`, beside `ripple4`); 4x4 array multiplier |
 | Sequential | edge detector (`rising`); 4-bit shift register; Johnson counter; 8-bit LFSR (`lfsr8`); clock divider; 8-bit up/down counter; BCD counter (`mod_counter`); debouncer; PWM generator; sequence detector (1011, ROM state table); traffic light; stopwatch (59.9 s) |
-| Systems | 8-entry stack on a RAM; UART transmitter; reaction timer game (`countdown`, `timer2`); CPU with ADDI/SUBI/ANDI printing the Fibonacci numbers |
+| Systems | 8-entry stack on a RAM; UART transmitter; reaction timer game (`countdown`, `timer2`); CPU with ADDI/SUBI/ANDI printing the Fibonacci numbers; 16-bit multi-cycle CPU of gates printing the primes below 250 (`cpu16`, below); its twin of word primitives (`cpu16_rtl`) |
+
+### The 16-bit CPUs
+
+`cpu16` is the gallery's showpiece and a stress test for the simulator:
+a 16-bit CPU in which every bit of state is a curriculum flip-flop
+(`flip_flop/dff`: two D latches of gates around an SR latch of two NORs
+and a `Delay`), about 14 700 primitive nodes after flattening. Only the
+program `Rom` and the 256-word data `Ram` are memory primitives.
+`cpu16_rtl` has the same instruction set and program, built from
+`Register`, `Add`, `Mux`, `Ram` and `Rom` (about 160 nodes); the tests
+check that both print the same Out sequence as an interpreter.
+
+**Instruction set.** Instructions are 16 bits; registers r0 to r7 are
+16 bits (r0 is an ordinary register; the program keeps it 0).
+
+| Bits | 15-12 | 11-9 | 8-6 | 5-3 | 2-0 |
+|---|---|---|---|---|---|
+| Fields | op | rd (cond) | rs | rt | fn |
+
+`imm8` is bits 7-0, zero-extended; `simm6` is bits 5-0, sign-extended.
+
+| op | Instruction | Effect |
+|---|---|---|
+| 0, 7, 13, 14 | NOP | nothing |
+| 1 | ALU rd, rs, rt, fn | rd = rs fn rt; fn: 0 ADD, 1 SUB, 2 AND, 3 OR, 4 XOR, 5 NOT rs, 6 SHL rs (by 1), 7 SHR rs (by 1); sets flags |
+| 2 | CMP rs, rt | flags of rs - rt |
+| 3 | LDI rd, imm8 | rd = imm8 |
+| 4 | ADDI rd, rs, simm6 | rd = rs + simm6; sets flags |
+| 5 | LD rd, rs, simm6 | rd = RAM[rs + simm6] (low 8 address bits) |
+| 6 | ST rd, rs, simm6 | RAM[rs + simm6] = rd |
+| 8 | JMP imm8 | pc = imm8 |
+| 9 | Bcc imm8 | pc = imm8 if the condition holds: cond = bits 11-9, 0 Z, 1 not Z, 2 C, 3 not C, 4 N, 5 not N, 6 always, 7 never |
+| 10 | CALL imm8 | sp = sp - 1, stack[sp] = pc + 1, pc = imm8 |
+| 11 | RET | pc = stack[sp], sp = sp + 1 |
+| 12 | OUT rs | Out = rs |
+| 15 | HLT | stop; Halted lights |
+
+Flags: Z (result 0), N (bit 15), C: the adder's carry for ADD, ADDI, SUB
+and CMP (for a subtraction, 1 means no borrow: rs >= rt unsigned), the
+bit shifted out for SHL and SHR, 0 for the logic functions. The stack is
+16 words of gates, addressed by the low 4 bits of the 16-bit stack
+pointer, which starts at 0 (the first CALL writes word 15). The pc is 16
+bits; the program ROM sees its low 8. A multiply instruction is not
+implemented.
+
+**Multi-cycle control.** Each instruction takes three or four clock
+periods (the clock period is 2 ticks): *fetch* (IR = ROM[pc], pc = pc +
+1), *decode* (latch A = r[rs] and B = r[rt], or r[rd] for ST), *execute*
+(Y = ALU(A, B or simm6), or imm8 for LDI; flags; jumps, branches, RET,
+OUT, HLT and the stack pointer move here) and, for ALU, LDI, ADDI, LD,
+ST and CALL, *write* (r[rd] = Y or RAM[Y]; RAM[Y] = B; CALL pushes the
+pc and jumps). The state is one-hot in four flip-flops (decode, execute,
+write, halt); fetch is the NOR of the four, so reset starts in fetch.
+Control is hard-wired, not microcode: a 4-to-16 decoder of the opcode,
+an OR plane (the decoder lines ANDed with a mask and ORed) for signals
+shared by several opcodes, and AND gates of state and opcode.
+
+**Blocks** (definitions of `cpu16.json`, nodes after flattening):
+
+| Block | What | Nodes |
+|---|---|---|
+| `reg16` | 16-bit register: two `register/register8` | 293 |
+| `regfile8x16` | r0-r7: eight `reg16`, a 3-to-8 decoder, two 8-to-1 read muxes | 3 842 |
+| `ram16x16` | the stack: two banks of eight `reg16` with decoder and read mux | 6 344 |
+| `alu16` | `cla16` (four `cla_adder/cla4`), `logic16` (bit slices), shifts, 8-to-1 result mux, flags | 1 168 |
+| `pc_unit`, `sp_unit` | register, adder, next-value muxes | 670, 568 |
+| `control` | `opdecode`, `sequencer`, `branch` (flags and condition), `pc_control` | 269 |
+| `cpu16` | the whole CPU | 14 667 |
+
+`cpu16_rtl` runs one instruction per tick: a 16-word control ROM turns
+the opcode into control signals, the register file is eight `Register`s
+with two read muxes, and the stack is a 16-word `Ram`.
+
+**Program.** Both CPUs print the 53 primes below 250 (2, 3, 5, ... 241)
+and halt, after 53 493 instructions (about 363 000 ticks for `cpu16`).
+The primes found are kept in the data RAM; each odd candidate is tested
+by a subroutine `isprime`, which CALLs `divmod` (division by repeated
+subtraction) for each stored odd prime until one divides the candidate
+or the quotient is smaller than the divisor.
+
+`cargo run --release --example cpu_bench [-- N]` reports the size of both
+designs and of their compiled programs, ticks and CPU instructions per
+second over N ticks on one thread, and the gate CPU's slowdown.
 
 ### Previews
 
@@ -466,6 +549,8 @@ circuit with the editor's box sizes and colours, labels, generated adapters
 dashed, and wires straight from centre to centre as the editor draws them
 (`--ortho`: horizontal and vertical segments instead). It prints each
 circuit's node count and two layout checks: overlapping boxes and wires
-that pass through a box. The gallery was laid out by hand with it, and
-its tests check that no boxes overlap and every node is on the 20-unit
-grid.
+that pass through a box. The gallery and the curriculum demos were laid
+out by hand with it, and the tests check for both that no boxes overlap
+and every node is on the 20-unit grid. The only wires it still reports
+through boxes are a word input's own lines to its generated split column,
+which cross the splits of that column.

@@ -14,7 +14,6 @@
 //!
 //! Every card is placed by [`HudLayout`].
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -41,7 +40,7 @@ use crate::{GameState, MainCamera};
 use super::EditorState;
 use super::parts::{
     KEYED_SLOTS, PartTab, SLOT_KEYS, kind_blurb, kind_title, slot_for_key, slot_key_label,
-    slot_text, tab_kinds,
+    tab_kinds,
 };
 use super::workspace::read_workspace;
 
@@ -288,7 +287,7 @@ enum SlotItem {
     Kind(GateKind),
     /// A saved workspace, placed as a cell.
     Saved(String),
-    /// A demo, placed as a cell.
+    /// A demo or gallery item, placed as a cell.
     Demo(&'static Demo),
 }
 
@@ -315,7 +314,8 @@ impl SlotItem {
     }
 }
 
-/// The slots of a tab: its primitives, or saved workspaces then demos.
+/// The slots of a tab: its primitives, or saved workspaces, then demos,
+/// then gallery items.
 fn slot_items(tab: PartTab, state: &EditorState) -> Vec<SlotItem> {
     if tab != PartTab::Chips {
         return tab_kinds(tab, state.palette_width)
@@ -325,7 +325,7 @@ fn slot_items(tab: PartTab, state: &EditorState) -> Vec<SlotItem> {
     }
     let saved = state.saved_workspaces.iter().flatten().cloned();
     let demos = demos::catalog()
-        .map(|c| c.demos.iter())
+        .map(|c| c.demos.iter().chain(&c.gallery))
         .ok()
         .into_iter()
         .flatten();
@@ -462,21 +462,78 @@ fn part_slot(
         SlotItem::Kind(kind) => {
             let c = face.center() + egui::vec2(0.0, 3.0);
             if !paint_gate_glyph(painter, c, kind, text_colour) {
-                let text = slot_text(kind);
-                let size = if text.len() > 4 { 11.0 } else { 13.0 };
-                painter.text(
-                    c,
-                    Align2::CENTER_CENTER,
-                    text,
-                    FontId::monospace(size),
-                    text_colour,
-                );
+                // The inspector's name for the kind, as large as fits.
+                let (galley, _) =
+                    slot_label(ui.ctx(), kind_title(kind), face.width() - SLOT_TEXT_PAD);
+                // Centred rows are laid out about x = 0: centre the rect.
+                let pos = c - galley.rect.center().to_vec2();
+                painter.galley(pos, galley, text_colour);
             }
         }
         SlotItem::Saved(name) => chip_name(painter, face, name, text_colour),
         SlotItem::Demo(demo) => chip_name(painter, face, &demo.title, text_colour),
     }
     response
+}
+
+/// Room left and right of a slot's text, together.
+const SLOT_TEXT_PAD: f32 = 8.0;
+
+/// Font sizes a slot's text tries, largest first.
+const SLOT_TEXT_SIZES: [f32; 6] = [13.0, 12.0, 11.0, 10.0, 9.0, 8.0];
+
+/// Rows a chip's name may take.
+const CHIP_TEXT_ROWS: usize = 3;
+
+/// Font sizes a chip's name tries, largest first.
+const CHIP_TEXT_SIZES: [f32; 6] = [9.5, 9.0, 8.5, 8.0, 7.5, 7.0];
+
+/// `text` laid out centred for a slot face with `width` of room: at the
+/// largest of [`SLOT_TEXT_SIZES`] where no word (or hyphenated part of
+/// one) is wider than the room and
+/// it takes at most two lines. Returns the galley and whether it fits (at
+/// the smallest size otherwise).
+fn slot_label(ctx: &egui::Context, text: &str, width: f32) -> (Arc<egui::Galley>, bool) {
+    fit_label(ctx, text, width, f32::INFINITY, &SLOT_TEXT_SIZES, 2)
+}
+
+/// [`slot_label`] with a height limit, the sizes to try and the most rows
+/// allowed.
+fn fit_label(
+    ctx: &egui::Context,
+    text: &str,
+    width: f32,
+    height: f32,
+    sizes: &[f32],
+    max_rows: usize,
+) -> (Arc<egui::Galley>, bool) {
+    let layout = |size: f32, wrap: f32| {
+        let mut job =
+            egui::text::LayoutJob::simple(text.to_owned(), heavy(size), Color32::PLACEHOLDER, wrap);
+        job.halign = egui::Align::Center;
+        ctx.fonts_mut(|f| f.layout_job(job))
+    };
+    let mut last = None;
+    for &size in sizes {
+        // egui breaks rows at spaces and after hyphens.
+        let words_fit = text
+            .split_whitespace()
+            .flat_map(|w| w.split_inclusive('-'))
+            .all(|w| layout_word(ctx, w, size) <= width);
+        let galley = layout(size, width);
+        let fits = words_fit && galley.rows.len() <= max_rows && galley.size().y <= height;
+        if fits {
+            return (galley, true);
+        }
+        last = Some(galley);
+    }
+    (last.expect("at least one size"), false)
+}
+
+fn layout_word(ctx: &egui::Context, word: &str, size: f32) -> f32 {
+    ctx.fonts_mut(|f| f.layout_no_wrap(word.to_owned(), heavy(size), Color32::PLACEHOLDER))
+        .size()
+        .x
 }
 
 fn kind_has_glyph(kind: &GateKind) -> bool {
@@ -500,9 +557,17 @@ fn chip_name(painter: &egui::Painter, face: egui::Rect, name: &str, colour: Colo
         face.min + egui::vec2(3.0, 15.0),
         face.max - egui::vec2(3.0, 3.0),
     );
-    let galley = painter.layout(name.to_string(), heavy(9.5), colour, area.width() - 2.0);
+    let (galley, _) = fit_label(
+        painter.ctx(),
+        name,
+        area.width() - 2.0,
+        area.height(),
+        &CHIP_TEXT_SIZES,
+        CHIP_TEXT_ROWS,
+    );
+    // Centred rows are laid out about x = 0: centre the rect.
     let pos = egui::pos2(
-        area.center().x - galley.size().x * 0.5,
+        area.center().x - galley.rect.center().x,
         (area.center().y - galley.size().y * 0.5).max(area.min.y),
     );
     painter.with_clip_rect(area).galley(pos, galley, colour);
@@ -513,12 +578,9 @@ fn cell_kind(
     register: &mut MessageWriter<RegisterDefinitions>,
     ws: &WorkspaceDocument,
 ) -> GateKind {
-    let mut definitions: HashMap<_, _> = ws.definitions.clone();
-    definitions.insert(ws.root.id, Arc::new(ws.root.clone()));
-    register.write(RegisterDefinitions { definitions });
-    GateKind::SubCircuit {
-        definition: ws.root.id,
-    }
+    let (registration, kind) = RegisterDefinitions::chip(ws);
+    register.write(registration);
+    kind
 }
 
 /// The kind and label a slot places (registering a chip's definition).
@@ -1216,7 +1278,30 @@ pub fn toast_system(
     Ok(())
 }
 
-/// `Esc` drops the armed part, the wire tool and the Library drawer; `W`
+/// `Esc`, in order: if a part is armed or being dragged from the parts
+/// bar, the wire tool is on, or the Library drawer is open, drop all of
+/// those; otherwise clear the selection (close the inspector). So one `Esc`
+/// cancels the tool in hand and a second deselects.
+pub fn escape(state: &mut EditorState, selected: &mut SelectedGate) {
+    let armed = state.selected_gate_type.is_some()
+        || state.dragging_part.is_some()
+        || state.connection_mode
+        || state.connection_source.is_some()
+        || state.library_open;
+    if armed {
+        state.selected_gate_type = None;
+        state.selected_gate_label = None;
+        state.dragging_part = None;
+        state.connection_mode = false;
+        state.clear_connection();
+        state.library_open = false;
+    } else {
+        selected.0 = None;
+    }
+}
+
+/// `Esc` drops the armed part, the wire tool and the Library drawer, or
+/// with none of those clears the selection (see [`escape`]); `W`
 /// toggles the wire tool; `F` fits the view. Ignored while a text field
 /// has the keyboard. (`1`–`9` are handled by the parts bar, `T` by the
 /// theme, `Delete` by the inspector.)
@@ -1226,6 +1311,7 @@ pub fn editor_keys_system(
     mut state: ResMut<EditorState>,
     mut fit: MessageWriter<FitView>,
     game_state: Res<State<GameState>>,
+    mut selected: Option<ResMut<SelectedGate>>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -1238,11 +1324,11 @@ pub fn editor_keys_system(
         return Ok(());
     }
     if keys.just_pressed(KeyCode::Escape) {
-        state.selected_gate_type = None;
-        state.dragging_part = None;
-        state.connection_mode = false;
-        state.clear_connection();
-        state.library_open = false;
+        let mut next = selected.as_deref().copied().unwrap_or_default();
+        escape(&mut state, &mut next);
+        if let Some(selected) = selected.as_mut() {
+            selected.set_if_neq(next);
+        }
     }
     if keys.just_pressed(KeyCode::KeyW) {
         state.connection_mode = !state.connection_mode;
@@ -1261,6 +1347,119 @@ mod tests {
 
     fn close(a: Vec2, b: Vec2) -> bool {
         (a - b).length() < 1e-3
+    }
+
+    /// A context with the Workshop fonts installed.
+    fn fonts_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::ui_style::workshop_fonts());
+        for _ in 0..2 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        }
+        assert!(crate::ui_style::workshop_fonts_ready(&ctx));
+        ctx
+    }
+
+    /// Slots without a glyph show the inspector's name for the kind
+    /// (`kind_title`), whole words, at a readable size, in both layouts.
+    #[test]
+    fn slot_text_is_the_inspector_name_and_fits() {
+        let ctx = fonts_ctx();
+        for screen in [Vec2::new(1920.0, 1080.0), Vec2::new(1280.0, 720.0)] {
+            let side = crate::ui_style::HudLayout::new(screen).slot;
+            for tab in PartTab::ALL {
+                for kind in tab_kinds(tab, 8) {
+                    if kind_has_glyph(&kind) {
+                        continue;
+                    }
+                    let title = kind_title(&kind);
+                    let (galley, fits) = slot_label(&ctx, title, side - SLOT_TEXT_PAD);
+                    assert!(fits, "{title} does not fit a {side} slot");
+                    assert_eq!(galley.text(), title);
+                    let size = galley.job.sections[0].format.font_id.size;
+                    assert!(size >= 8.0, "{title}: {size}");
+                    if side >= 64.0 {
+                        assert!(size >= 10.0, "{title}: {size} in a {side} slot");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every demo and gallery name fits its Chips slot (whole words, at
+    /// most three rows) in the full layout; in the compact one no word is
+    /// cut either (a very long name may lose its last row; the tooltip
+    /// has it whole).
+    #[test]
+    fn chip_names_fit_their_slots() {
+        let ctx = fonts_ctx();
+        let catalog = demos::catalog().unwrap();
+        for screen in [Vec2::new(1920.0, 1080.0), Vec2::new(1280.0, 720.0)] {
+            let layout = crate::ui_style::HudLayout::new(screen);
+            let side = layout.slot;
+            // As `chip_name` lays it out: 3 a side less 2, below the key.
+            let room = side - 6.0 - 2.0;
+            let (height, rows) = if layout.compact {
+                (f32::INFINITY, usize::MAX)
+            } else {
+                (side - 18.0, CHIP_TEXT_ROWS)
+            };
+            for demo in catalog.demos.iter().chain(&catalog.gallery) {
+                let (_, fits) = fit_label(&ctx, &demo.title, room, height, &CHIP_TEXT_SIZES, rows);
+                assert!(fits, "{} does not fit a {side} slot", demo.title);
+            }
+        }
+    }
+
+    #[test]
+    fn chips_tab_lists_saved_workspaces_then_demos_then_the_gallery() {
+        let catalog = demos::catalog().unwrap();
+        let state = EditorState {
+            saved_workspaces: Some(vec!["mine".into()]),
+            ..Default::default()
+        };
+        let items = slot_items(PartTab::Chips, &state);
+        assert_eq!(items.len(), 1 + catalog.demos.len() + catalog.gallery.len());
+        assert!(matches!(&items[0], SlotItem::Saved(n) if n == "mine"));
+        let ids: Vec<&str> = items[1..]
+            .iter()
+            .map(|i| match i {
+                SlotItem::Demo(d) => d.id.as_str(),
+                _ => panic!("only demos and gallery items after the saved ones"),
+            })
+            .collect();
+        let want: Vec<&str> = catalog
+            .demos
+            .iter()
+            .chain(&catalog.gallery)
+            .map(|d| d.id.as_str())
+            .collect();
+        assert_eq!(ids, want);
+        assert!(ids.contains(&"cpu_fibonacci"));
+    }
+
+    #[test]
+    fn escape_cancels_the_armed_tool_first_then_deselects() {
+        let gate = World::new().spawn_empty().id();
+        let mut selected = SelectedGate(Some(gate));
+        let mut state = EditorState {
+            library_open: true,
+            ..Default::default()
+        };
+        state.arm(GateKind::Not { w: 1 }, None);
+        escape(&mut state, &mut selected);
+        assert!(state.selected_gate_type.is_none() && !state.library_open);
+        assert_eq!(selected.0, Some(gate), "the first Esc only drops the tool");
+        escape(&mut state, &mut selected);
+        assert_eq!(selected.0, None, "the second Esc deselects");
+
+        selected.0 = Some(gate);
+        state.connection_mode = true;
+        escape(&mut state, &mut selected);
+        assert!(!state.connection_mode);
+        assert_eq!(selected.0, Some(gate));
+        escape(&mut state, &mut selected);
+        assert_eq!(selected.0, None);
     }
 
     #[test]

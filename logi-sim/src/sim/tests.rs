@@ -382,6 +382,68 @@ fn register_and_ram_survive_an_unrelated_edit() {
 }
 
 #[test]
+fn reset_returns_to_power_on_and_keeps_inputs() {
+    let build = || {
+        let mut d = Design::new("top");
+        let r = d.root;
+        let mut b = d.builder(r);
+        let one = b.one();
+        let (reg, q) = b.state_placeholder(NodeKind::Register { w: 8 });
+        let n = b.inc(q);
+        b.connect(one, (reg, 0));
+        b.connect(n, (reg, 1));
+        let addr = b.split(q, 0, 4);
+        let ram = b.ram(addr, one, q, &[7, 8, 9]);
+        let rom = b.rom(addr, 8, &[5, 6]);
+        let clk = b.clock(3, 1, 0);
+        let x = b.input("x", 4);
+        let dx = b.delay(x);
+        b.output("q", q);
+        b.output("ram", ram);
+        b.output("rom", rom);
+        b.output("clk", clk);
+        b.output("x", x);
+        b.output("dx", dx);
+        d
+    };
+    let d = build();
+    let fresh = |x: u64| {
+        // Power-on with `x` already driven at the tick-0 settle, the way
+        // the engine loads a program.
+        let mut s = sim_of(&d);
+        s.set("x", x);
+        let snap = s.export_state();
+        s.import_state(&snap);
+        s
+    };
+    let outs = |s: &Sim| {
+        ["q", "ram", "rom", "clk", "x", "dx"]
+            .map(|n| s.get(n))
+            .to_vec()
+    };
+    let mut s = fresh(0);
+    s.run(1);
+    s.set("x", 3);
+    s.run(12);
+    assert_eq!(s.get("q"), 13);
+    s.reset();
+    assert_eq!(s.tick_count(), 0);
+    assert_eq!(s.get("q"), 0);
+    assert_eq!(s.get("x"), 3, "the input keeps its value");
+    assert_eq!(s.get("dx"), 0, "the delay is back to its initial value");
+    let m = s.program().mems.iter().position(|m| m.writable).unwrap() as u32;
+    assert_eq!(&s.mem(m)[..4], &[7, 8, 9, 0], "RAM init restored");
+    // From here it runs exactly like a power-on with the input set at tick 0.
+    let mut f = fresh(3);
+    assert_eq!(outs(&s), outs(&f));
+    for _ in 0..20 {
+        s.tick();
+        f.tick();
+        assert_eq!(outs(&s), outs(&f));
+    }
+}
+
+#[test]
 fn unmatched_state_resets() {
     let d1 = stateful(false);
     let mut s1 = sim_of(&d1);

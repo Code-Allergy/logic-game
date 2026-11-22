@@ -7,12 +7,12 @@
       "name": "half_adder",
       "title": "Half adder",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-200, 50]},
-        {"name": "B", "type": "Input", "at": [-200, -50]},
-        {"name": "xor", "use": "gates/xor", "at": [0, 50]},
-        {"name": "and", "use": "gates/and", "at": [0, -50]},
-        {"name": "Sum", "type": "Output", "at": [200, 50]},
-        {"name": "Carry", "type": "Output", "at": [200, -50]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "xor", "use": "gates/xor", "at": [140, 40]},
+        {"name": "and", "use": "gates/and", "at": [140, -40]},
+        {"name": "Sum", "type": "Output", "at": [280, 40]},
+        {"name": "Carry", "type": "Output", "at": [280, -40]}
       ],
       "wires": [["A", "xor.A", "and.A"], ["B", "xor.B", "and.B"], ["xor", "Sum"], ["and", "Carry"]]
     }
