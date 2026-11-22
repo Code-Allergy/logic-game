@@ -51,7 +51,8 @@ use super::shapes::{Shape, corner_radius, round_corners};
 use super::view::CircuitView;
 use super::{
     CircuitLibrary, DisplayConfig, GateIdentity, GateKind, GateLabel, GateType, GateValues,
-    LogicDisplay, Selected, SelectedGate, SimDiagnostics, WireEndpoints, WireState, format_value,
+    LogicDisplay, MultiSelection, Selected, SelectedGate, SimDiagnostics, WireEndpoints, WireState,
+    format_value,
 };
 use crate::theme::Theme;
 
@@ -951,37 +952,53 @@ pub fn lift_front_wires_system(
 }
 
 /// Draw a halo behind the selected gate (the one whose properties are
-/// open). Runs only when the selection changes.
+/// open) and every other part of a [`MultiSelection`]. Runs only when the
+/// selection changes.
+#[allow(clippy::too_many_arguments)]
 pub fn update_selection_halo_system(
     mut commands: Commands,
     selected: Option<Res<SelectedGate>>,
+    multi: Option<Res<MultiSelection>>,
     mut art: ResMut<CanvasArt>,
     mut meshes: ResMut<Assets<Mesh>>,
     gates: Query<&GateType>,
     halos: Query<Entity, With<SelectionHalo>>,
-    mut shown: Local<Option<Entity>>,
+    mut shown: Local<Vec<Entity>>,
 ) {
     let Some(selected) = selected else { return };
-    if !selected.is_changed() || *shown == selected.0 {
+    let multi_changed = multi.as_ref().is_some_and(|m| m.is_changed());
+    if !selected.is_changed() && !multi_changed {
+        return;
+    }
+    let mut now = multi
+        .as_deref()
+        .map_or_else(|| selected.0.into_iter().collect(), |m| m.all(selected.0));
+    if let Some(primary) = selected.0
+        && !now.contains(&primary)
+    {
+        now.push(primary);
+    }
+    now.sort();
+    if *shown == now {
         return;
     }
     for halo in &halos {
         commands.entity(halo).despawn();
     }
-    *shown = selected.0;
-    if let Some(entity) = selected.0
-        && let Ok(ty) = gates.get(entity)
-    {
-        let piece = plate(
-            &mut art,
-            &mut meshes,
-            ty.kind.size(),
-            HALO_MARGIN,
-            Paint::Halo,
-            -0.7,
-        );
-        commands.spawn((piece, SelectionHalo, ChildOf(entity)));
+    for &entity in &now {
+        if let Ok(ty) = gates.get(entity) {
+            let piece = plate(
+                &mut art,
+                &mut meshes,
+                ty.kind.size(),
+                HALO_MARGIN,
+                Paint::Halo,
+                -0.7,
+            );
+            commands.spawn((piece, SelectionHalo, ChildOf(entity)));
+        }
     }
+    *shown = now;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -179,17 +179,33 @@ pub fn chunky_button(
     label: impl Into<WidgetText>,
     primary: bool,
 ) -> Response {
-    let galley = label.into().into_galley(
-        ui,
-        Some(egui::TextWrapMode::Extend),
-        f32::INFINITY,
-        TextStyle::Button,
-    );
-    let width = (galley.size().x + 28.0).max(40.0);
+    let galley = button_galley(ui, label);
+    let width = chunky_width(&galley);
     chunky_button_with(ui, palette, width, primary, |painter, face, colour| {
         painter.galley(face.center() - galley.size() * 0.5, galley, colour);
     })
 }
+
+fn button_galley(ui: &Ui, label: impl Into<WidgetText>) -> std::sync::Arc<egui::Galley> {
+    label.into().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        TextStyle::Button,
+    )
+}
+
+fn chunky_width(galley: &egui::Galley) -> f32 {
+    (galley.size().x + 28.0).max(40.0)
+}
+
+/// How wide [`chunky_button`] makes a button labelled `label`.
+pub fn chunky_button_width(ui: &Ui, label: impl Into<WidgetText>) -> f32 {
+    chunky_width(&button_galley(ui, label))
+}
+
+/// Width of a [`chunky_icon_button`].
+pub const ICON_BUTTON_WIDTH: f32 = 40.0;
 
 /// Icons the HUD paints itself (the bundled fonts lack these glyphs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +215,9 @@ pub enum HudIcon {
     Moon,
     /// A folded map (the demo map).
     Map,
+    /// A hooked arrow back (undo) or forward (redo).
+    Undo,
+    Redo,
 }
 
 /// A square chunky button with a painted icon.
@@ -209,9 +228,15 @@ pub fn chunky_icon_button(
     primary: bool,
 ) -> Response {
     let fill = palette;
-    chunky_button_with(ui, palette, 40.0, primary, |painter, face, colour| {
-        paint_icon(painter, face.center(), icon, colour, fill);
-    })
+    chunky_button_with(
+        ui,
+        palette,
+        ICON_BUTTON_WIDTH,
+        primary,
+        |painter, face, colour| {
+            paint_icon(painter, face.center(), icon, colour, fill);
+        },
+    )
 }
 
 /// Paint `icon` centred at `c` in `colour`.
@@ -264,6 +289,24 @@ pub fn paint_icon(
             painter.add(egui::Shape::closed_line(outline, stroke(2.0, colour)));
             painter.line_segment([p(-3.0, -9.0), p(-3.0, 6.0)], stroke(2.0, colour));
             painter.line_segment([p(3.0, -6.0), p(3.0, 9.0)], stroke(2.0, colour));
+        }
+        HudIcon::Undo | HudIcon::Redo => {
+            // Undo: an arrowhead pointing left at the top, the shaft
+            // hooking round to the right and back; redo is its mirror.
+            let sx = if icon == HudIcon::Undo { 1.0 } else { -1.0 };
+            let p = |x: f32, y: f32| c + EVec2::new(sx * x, y);
+            let mut shaft = vec![p(-5.0, -4.0), p(2.0, -4.0)];
+            shaft.extend((1..=12).map(|i| {
+                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 12.0;
+                p(2.0 + 5.0 * a.cos(), 1.0 + 5.0 * a.sin())
+            }));
+            shaft.push(p(-4.0, 6.0));
+            painter.add(egui::Shape::line(shaft, stroke(2.5, colour)));
+            painter.add(egui::Shape::convex_polygon(
+                vec![p(-10.0, -4.0), p(-4.0, -9.0), p(-4.0, 1.0)],
+                colour,
+                Stroke::NONE,
+            ));
         }
     }
 }
@@ -452,6 +495,30 @@ pub const PART_SLOTS: usize = 10;
 pub const SLOT_GAP: f32 = 8.0;
 pub const TOOL_GAP: f32 = 14.0;
 
+/// The transport card's width (top row) in the full and compact layouts.
+/// Its contents are fixed except the tick, which
+/// [`crate::sim::systems::tick_label`] keeps to a fixed number of
+/// characters.
+pub const TRANSPORT_WIDTH: f32 = 730.0;
+pub const TRANSPORT_WIDTH_COMPACT: f32 = 628.0;
+/// The most the build status card (top right) takes.
+pub const STATUS_WIDTH: f32 = 200.0;
+/// The least room the file card (top left) gets: the badge, a readable
+/// title and its buttons, with both back buttons of a nested view.
+pub const FILE_MIN_WIDTH: f32 = 396.0;
+/// The Undo and Redo buttons with the space before each: what the file
+/// card needs on top of [`FILE_MIN_WIDTH`] to hold them.
+pub const UNDO_BUTTONS_WIDTH: f32 = 2.0 * (ICON_BUTTON_WIDTH + 8.0);
+/// The Undo and Redo buttons' own card, when the file card has no room
+/// for them: two icon buttons (40 x 34 with a 3 px edge) 8 px apart, 8
+/// px padding and the 2.5 px outline.
+pub const UNDO_CARD: Vec2 = Vec2::new(
+    2.0 * ICON_BUTTON_WIDTH + 8.0 + 2.0 * (8.0 + 2.5),
+    34.0 + BUTTON_EDGE + 2.0 * (8.0 + 2.5),
+);
+/// The exact-rate popover under the transport card.
+pub const TRANSPORT_MORE_SIZE: Vec2 = Vec2::new(280.0, 170.0);
+
 /// Where the floating HUD cards sit for a window size (logical pixels,
 /// y down): the canvas fills the window and the cards float over it,
 /// anchored to its edges. Below 1600 x 900 the layout is compact
@@ -474,6 +541,8 @@ pub struct HudLayout {
     pub slot: f32,
     pub parts: Vec2,
     pub signals: Vec2,
+    /// The transport card (fixed size).
+    pub transport: Vec2,
 }
 
 impl HudLayout {
@@ -523,7 +592,67 @@ impl HudLayout {
             slot,
             parts,
             signals,
+            transport: Vec2::new(
+                if compact {
+                    TRANSPORT_WIDTH_COMPACT
+                } else {
+                    TRANSPORT_WIDTH
+                },
+                TOP_CARD_HEIGHT,
+            ),
         }
+    }
+
+    /// The transport card: centred, unless the file card or the build
+    /// status would not get their room beside it.
+    pub fn transport_rect(&self) -> Rect {
+        let w = self.transport.x;
+        let lo = self.margin + FILE_MIN_WIDTH + self.gap;
+        let hi = self.screen.x - self.margin - STATUS_WIDTH - self.gap - w;
+        let x = ((self.screen.x - w) * 0.5).min(hi).max(lo);
+        Rect::new(x, self.margin, x + w, self.margin + self.transport.y)
+    }
+
+    /// The room for the file card, top left: up to the transport card.
+    /// The card is as wide as its contents, at most this.
+    pub fn file_rect(&self) -> Rect {
+        Rect::new(
+            self.margin,
+            self.margin,
+            self.transport_rect().min.x - self.gap,
+            self.margin + TOP_CARD_HEIGHT,
+        )
+    }
+
+    /// The room for the build status card, top right: from the transport
+    /// card to the edge.
+    pub fn status_rect(&self) -> Rect {
+        Rect::new(
+            self.transport_rect().max.x + self.gap,
+            self.margin,
+            self.screen.x - self.margin,
+            self.margin + TOP_CARD_HEIGHT,
+        )
+    }
+
+    /// The build error details: beside the inspector column (which may
+    /// be open below the status card), clear of the library drawer, down
+    /// to the bottom row at most.
+    pub fn build_details_rect(&self) -> Rect {
+        let right = self.inspector_rect().min.x - self.gap;
+        let left = (right - self.inspector_width).max(self.margin + self.library_width + self.gap);
+        Rect::new(left, self.top_band(), right, self.bottom_band() - self.gap)
+    }
+
+    /// The exact-rate popover: under the transport card, between the
+    /// library drawer and the build error details.
+    pub fn transport_more_rect(&self) -> Rect {
+        let w = TRANSPORT_MORE_SIZE.x;
+        let lo = self.margin + self.library_width + self.gap;
+        let hi = self.build_details_rect().min.x - self.gap - w;
+        let x = self.transport_rect().min.x.min(hi).max(lo);
+        let min = Vec2::new(x, self.top_band());
+        Rect::from_corners(min, min + TRANSPORT_MORE_SIZE)
     }
 
     /// Below the top row of cards.
@@ -575,6 +704,31 @@ impl HudLayout {
         )
     }
 
+    /// Whether the Undo and Redo buttons fit in the file card: its room
+    /// holds them and still [`FILE_MIN_WIDTH`]. Else they get a card of
+    /// their own ([`Self::undo_rect`]).
+    pub fn undo_in_file_card(&self) -> bool {
+        self.file_rect().width() >= FILE_MIN_WIDTH + UNDO_BUTTONS_WIDTH
+    }
+
+    /// The Undo and Redo card: left edge, below the file card (shown
+    /// when [`Self::undo_in_file_card`] is false).
+    pub fn undo_rect(&self) -> Rect {
+        let min = Vec2::new(self.margin, self.top_band());
+        Rect::from_corners(min, min + UNDO_CARD)
+    }
+
+    /// The left column below the top row, for the library drawer or the
+    /// challenge card: [`Self::library_rect`], starting below the Undo
+    /// and Redo card when `undo_card` (that card is shown).
+    pub fn left_column_rect(&self, undo_card: bool) -> Rect {
+        let mut rect = self.library_rect();
+        if undo_card {
+            rect.min.y = self.undo_rect().max.y + self.gap;
+        }
+        rect
+    }
+
     /// The library drawer: left edge, below the file card, down to just
     /// above the minimap stack.
     pub fn library_rect(&self) -> Rect {
@@ -623,6 +777,50 @@ pub struct WorkshopUiPlugin;
 impl Plugin for WorkshopUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(EguiPrimaryContextPass, apply_workshop_ui_system);
+    }
+}
+
+/// Laying out HUD cards in a headless egui context, to measure them.
+#[cfg(test)]
+pub(crate) mod test_ui {
+    use super::*;
+
+    /// A context with the Workshop fonts and `theme`'s style.
+    pub fn ctx(theme: &Theme) -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(workshop_fonts());
+        for _ in 0..2 {
+            let _ = ctx.run_ui(screen(), |_| {});
+        }
+        assert!(workshop_fonts_ready(&ctx));
+        ctx.all_styles_mut(|s| *s = workshop_style(theme));
+        ctx
+    }
+
+    fn screen() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(4000.0, 2000.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// The rectangle a card drawn by `card` takes in an area at the
+    /// origin (after egui's sizing pass).
+    pub fn measure(ctx: &egui::Context, mut card: impl FnMut(&mut Ui)) -> egui::Rect {
+        let mut rect = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            let _ = ctx.run_ui(screen(), |ui| {
+                rect = egui::Area::new(egui::Id::new("measured"))
+                    .fixed_pos(egui::Pos2::ZERO)
+                    .show(ui.ctx(), |ui| card(ui))
+                    .response
+                    .rect;
+            });
+        }
+        rect
     }
 }
 
@@ -723,35 +921,84 @@ mod tests {
         !a.intersect(b).is_empty()
     }
 
-    #[test]
-    fn hud_cards_fit_and_do_not_overlap_from_720p_to_1440p() {
-        for (w, h) in [
+    /// The named sizes (common laptop and desktop windows) and a sweep
+    /// between 1280 x 720 and 2560 x 1440.
+    fn hud_test_sizes() -> Vec<(f32, f32)> {
+        let mut sizes = vec![
             (1280.0, 720.0),
             (1366.0, 768.0),
+            (1440.0, 900.0),
+            (1536.0, 864.0),
             (1600.0, 900.0),
+            (1600.0, 1000.0),
             (1920.0, 1080.0),
             (2560.0, 1440.0),
-        ] {
+        ];
+        for w in (1280..=2560).step_by(16) {
+            for h in [720, 768, 800, 864, 900, 1000, 1080, 1200, 1440] {
+                sizes.push((w as f32, h as f32));
+            }
+        }
+        sizes
+    }
+
+    #[test]
+    fn hud_cards_fit_and_do_not_overlap_from_720p_to_1440p() {
+        for (w, h) in hud_test_sizes() {
             let screen = Vec2::new(w, h);
             let l = HudLayout::new(screen);
             let window = Rect::from_corners(Vec2::ZERO, screen);
+            let top = [
+                ("file", l.file_rect()),
+                ("transport", l.transport_rect()),
+                ("status", l.status_rect()),
+            ];
             let bottom = [
                 ("minimap", l.minimap_rect()),
                 ("zoom", l.zoom_rect()),
                 ("parts", l.parts_rect()),
                 ("signals", l.signals_rect()),
             ];
-            for (name, r) in bottom {
+            // With the Undo and Redo buttons in a card of their own, the
+            // left column (library drawer or challenge card) starts below.
+            let undo_card = !l.undo_in_file_card();
+            let side = [
+                ("inspector", l.inspector_rect()),
+                ("library or challenge", l.left_column_rect(undo_card)),
+                ("build details", l.build_details_rect()),
+                ("exact rate", l.transport_more_rect()),
+            ];
+            let undo = undo_card.then(|| ("undo", l.undo_rect()));
+            let all: Vec<_> = top
+                .iter()
+                .chain(&bottom)
+                .chain(&side)
+                .chain(undo.as_ref())
+                .collect();
+            for (name, r) in &all {
                 assert!(
                     window.contains(r.min) && window.contains(r.max),
                     "{name} at {w}x{h}"
                 );
             }
-            for (i, (a, ra)) in bottom.iter().enumerate() {
-                for (b, rb) in &bottom[i + 1..] {
+            for (i, (a, ra)) in all.iter().enumerate() {
+                for (b, rb) in &all[i + 1..] {
                     assert!(!overlaps(*ra, *rb), "{a} overlaps {b} at {w}x{h}");
                 }
             }
+            assert!(
+                l.file_rect().width() >= FILE_MIN_WIDTH,
+                "file card room at {w}x{h}"
+            );
+            assert!(
+                l.status_rect().width() >= STATUS_WIDTH,
+                "status room at {w}x{h}"
+            );
+            let details = l.build_details_rect();
+            assert!(
+                details.width() >= 250.0 && details.height() >= 200.0,
+                "build details at {w}x{h}: {details:?}"
+            );
             let free = l.free_area();
             assert!(
                 free.width() > 0.45 * w && free.height() > 0.5 * h,
@@ -763,10 +1010,12 @@ mod tests {
             }
             let inspector = l.inspector_rect();
             assert!(inspector.height() > 300.0, "inspector at {w}x{h}");
-            assert!(!overlaps(inspector, l.signals_rect()));
-            let library = l.library_rect();
-            assert!(library.height() > 250.0 && !overlaps(library, l.minimap_rect()));
-            assert!(!overlaps(library, l.zoom_rect()));
+            let library = l.left_column_rect(undo_card);
+            assert!(library.height() > 250.0, "library at {w}x{h}");
+            assert_eq!(
+                l.undo_in_file_card(),
+                l.file_rect().width() >= FILE_MIN_WIDTH + UNDO_BUTTONS_WIDTH
+            );
             assert_eq!(l.compact, w < 1600.0 || h < 900.0);
         }
         // The full-size layout keeps the mockup's sizes.
@@ -774,5 +1023,7 @@ mod tests {
         assert_eq!((l.margin, l.inspector_width, l.slot), (24.0, 320.0, 64.0));
         assert!(l.zoom_beside_minimap);
         assert!(l.signals.x > 500.0);
+        assert!(l.undo_in_file_card(), "room for Undo and Redo at 1080p");
+        assert!(!HudLayout::new(Vec2::new(1280.0, 720.0)).undo_in_file_card());
     }
 }

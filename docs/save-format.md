@@ -23,10 +23,16 @@ version 6 file or as a copy of a demo (see [Round trips](#round-trips)).
 
 ## Layout
 
-A workspace named `<name>` is a folder `workspaces/<name>/` (characters
-`/ \ : * ? " < > |` in the name are replaced by `_`) containing one file,
-`manifest.json`. The file is pretty-printed JSON, written atomically (to
-`manifest.json.tmp`, then renamed).
+A workspace named `<name>` is a folder `workspaces/<name>/` in the
+player's data folder (see "Saving" in the README) containing
+`manifest.json`. The folder name is the name made safe: characters
+`/ \ : * ? " < > |` and control characters become `_`, a leading dot
+becomes `_` (so `..` cannot leave the folder), trailing dots and spaces
+are dropped, Windows device names (`CON`, `NUL`, `COM1`, ...) get a `_`
+prefix, and it is at most 80 characters. Names that differ only in case
+are the same workspace. The file is pretty-printed JSON, written
+atomically (to `manifest.json.tmp`, flushed to disk, then renamed); the
+previous file is kept as `manifest.json.bak`.
 
 ## `manifest.json`
 
@@ -63,13 +69,43 @@ A subcircuit definition is a circuit like any other. Its ports are its
 `Input` and `Output` nodes, ordered by `label` (then `id`); that order gives
 the instance's pin numbers. `Display` nodes are not ports.
 
-`circuits` is the definition table. A definition is identified only by its
+`circuits` is the definition table. A definition is identified by its
 `id`, which is stable: every instance refers to it by id, it is stored
 once however many instances there are, and saving and loading keep it.
 Placing a saved workspace as a cell uses that workspace's root `id` as the
 definition id. When the editor changes a definition's ports, the pin
 numbers in wires to its instances are renumbered before the file is
-written, so a saved wire always names the port it was connected to.
+written, so a saved wire always names the port it was connected to
+(ports are followed by node id, else by label and width; wires to a port
+that is gone are removed, and the editor says so).
+
+### Versions of a definition
+
+A circuit may carry an optional integer `revision` (absent means 0): an
+edit counter of its content. The editor bumps it each time it changes a
+definition (editing inside it, making a chip inside it), and a saved
+root gets the revision it was loaded with plus one when its content
+changed since. Two copies of a definition with the same `id` are compared
+by content (nodes and wires in any order, the name; not `revision`), and
+when they differ, by `revision`:
+
+| Offered copy | Meaning |
+|---|---|
+| same content | the same definition, whatever the revisions |
+| higher `revision` | a newer version |
+| same `revision` | both were edited since they parted (diverged) |
+| lower `revision` | an older version |
+
+The library of the open workspace never replaces a definition with
+different content without the player's say: placing a chip from a saved
+workspace whose copy is newer or diverged asks whether to refresh every
+instance or keep the workspace's version; an older saved copy is ignored
+(with a note). Loading a workspace takes its definitions as they are
+(nothing from the circuit open before remains).
+
+Make chip (select parts, then `Ctrl+G` or the selection card) adds a new
+definition with `revision` 1 to the workspace; it is saved in `circuits`
+like any other.
 
 ## Node
 
@@ -166,11 +202,15 @@ Loading fails with a message shown in the editor when:
 
 - `manifest.json` has a `version` other than 5 or 6 (including the pre-v2
   bundle format, version 4, and anything without a version), or `format` is
-  not `"gatequest-workspace"`. Old workspaces are **not migrated**.
+  not `"gatequest-workspace"`. Old workspaces are **not migrated**; a file
+  from a newer version says so (update the game), and is never overwritten
+  by a save.
 - The folder has no `manifest.json` but a legacy single-file save
   `workspaces/<name>.json` exists (format version 1).
 - The root circuit is missing, two circuits share an id, a `SubCircuit`
-  refers to a definition that is not in the file, or a port is unlabelled.
+  refers to a definition that is not in the file, or a port is unlabelled
+  (the editor names unlabelled ports `in0`, `out0`, `display0`, ... when it
+  saves, so only hand-made files hit this).
 - A definition contains itself, directly or through other definitions
   (`subcircuit "A" (…) contains itself`).
 
@@ -438,7 +478,78 @@ edits show up after a restart without a rebuild; if those files do not
 load, the embedded copies are used and a warning is logged. To add a demo,
 write its file, add it to the manifest and to the `embed!` list, and run
 `cargo run --example demo_fmt`; the tests check that the folder, the
-embedded list and the manifest agree.
+embedded list and the manifest agree (challenge starters included).
+
+### Challenges
+
+The demo manifest may list build-it challenges under `"challenges"`
+(optional: a manifest without them still loads). Each is a task on the
+road: a brief, a starter workspace with the ports already placed and
+labelled, the parts the player may use, and a test the editor's **Check**
+runs on the player's circuit.
+
+```json
+"challenges": [
+  {
+    "id": "xor_from_nand",
+    "level": 1,
+    "title": "XOR from NAND",
+    "brief": "Build XOR using only NAND gates: …",
+    "allowed": ["Nand"],
+    "test": {"table": {"inputs": ["A", "B"], "outputs": ["Y"],
+                       "rows": [[0, 0, 0], [0, 1, 1], [1, 0, 1], [1, 1, 0]]}}
+  },
+  {
+    "id": "adder8",
+    "level": 3,
+    "title": "Build an 8-bit adder",
+    "brief": "…",
+    "forbidden": ["Add", "ripple_adder/adder8"],
+    "test": {"formula": {"expect": {"Sum": "A + B + Cin", "Cout": "(A + B + Cin) >> 8"},
+                         "samples": 300, "seed": 95}}
+  },
+  …
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | The challenge's id (its own namespace; progress records it). Its starter is the version 6 file `challenge_<id>.json` beside the demos, whose ids derive from the key `challenges/<id>`. |
+| `level` | The stop it belongs to. |
+| `title`, `brief` | Shown on the road and in the editor's challenge card. |
+| `allowed` | Optional. The only primitive `type`s the circuit may use besides `Input`, `Output` and `Display`. |
+| `forbidden` | Optional. Primitive `type`s, and `"demo/circuit"` definitions (a demo placed as a chip that would be the answer), it must not use. |
+| `uses` | As for demos: the `"demo/circuit"` references in the starter file (usually none). |
+| `test` | One of `table`, `formula` or `sequence`, below. |
+
+The rules apply to the whole circuit: chips (subcircuits, demos, saved
+workspaces) may be used, and what is inside them is checked too.
+
+- **`table`**: `inputs` and `outputs` name starter ports; each row holds
+  the input values, then the expected outputs. For combinational
+  circuits.
+- **`formula`**: `expect` gives each output as an expression over the
+  inputs (`+ - * / % & | ^ ~ ! << >> == != < <= > >= && || ?:`, with C
+  precedence; the value is cut to the output's width). Without `samples`
+  every input combination is tried (at most 16 input bits); with
+  `samples`, all-zero, all-ones and that many random combinations from
+  `seed` (a fixed sequence, so every run checks the same cases).
+- **`sequence`**: `steps`, each `{"set": {…}, "ticks": n, "expect": {…}}`
+  (`ticks` defaults to 1). From power-on with every input 0, a step sets
+  its inputs (they hold until set again), runs `n` ticks and compares the
+  outputs it names. For sequential circuits; a new input is seen by the
+  logic at the next tick and by state the tick after.
+
+Values are numbers or strings in hex, binary or decimal, as in a version
+6 file. A check builds a separate simulation of the workspace
+(`sim::netlist::design_of`, compiled for `logi_sim::sim::Sim`), so it is
+instant and does not disturb the running circuit. It reports the first
+failure: a part the rules refuse, a missing or resized port, a circuit
+that does not build (a loop of gates with no state in it), or the first
+case whose outputs differ, with its inputs, the expected outputs and the
+outputs it got. Loading refuses a challenge whose test names a port the
+starter does not have, a row of the wrong length, an expression that
+does not parse, or an unknown part.
 
 ## Gallery
 

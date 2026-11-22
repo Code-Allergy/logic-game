@@ -1,0 +1,18 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "main",
+      "title": "2-to-1 multiplexer",
+      "nodes": [
+        {"name": "A", "type": "Input", "at": [0, 80]},
+        {"name": "B", "type": "Input", "at": [0, 0]},
+        {"name": "Sel", "type": "Input", "at": [0, -80]},
+        {"name": "Y", "type": "Output", "at": [480, 0]}
+      ],
+      "wires": []
+    }
+  ]
+}

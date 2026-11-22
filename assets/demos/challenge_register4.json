@@ -1,0 +1,17 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "main",
+      "title": "4-bit register",
+      "nodes": [
+        {"name": "D", "type": "Input", "w": 4, "at": [0, 40]},
+        {"name": "Load", "type": "Input", "at": [0, -40]},
+        {"name": "Q", "type": "Output", "w": 4, "at": [480, 0]}
+      ],
+      "wires": []
+    }
+  ]
+}

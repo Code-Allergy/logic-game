@@ -1,0 +1,19 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "main",
+      "title": "2-to-4 decoder",
+      "nodes": [
+        {"name": "S", "type": "Input", "w": 2, "at": [0, 0]},
+        {"name": "Y0", "type": "Output", "at": [480, 120]},
+        {"name": "Y1", "type": "Output", "at": [480, 40]},
+        {"name": "Y2", "type": "Output", "at": [480, -40]},
+        {"name": "Y3", "type": "Output", "at": [480, -120]}
+      ],
+      "wires": []
+    }
+  ]
+}

@@ -615,3 +615,92 @@ fn a_click_on_a_pin_is_a_click_on_its_part() {
     assert!(wire_ends(&mut app).is_empty());
     assert_eq!(toast(&app), None);
 }
+
+/// `Shift`+left is the multi-selection gesture (#105): the canvas pointer
+/// leaves it alone, so it neither selects, toggles nor moves a part.
+#[test]
+fn shift_left_presses_are_left_to_the_multi_selection() {
+    let mut app = pointer_app();
+    app.init_resource::<ButtonInput<KeyCode>>();
+    let a = place(&mut app, GateKind::Input { w: 1 }, "A", Vec2::ZERO);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ShiftLeft);
+    click(&mut app, Vec2::ZERO);
+    assert_eq!(drive(&app, a), 0, "not toggled");
+    assert_eq!(selected(&app), None, "not selected by the pointer");
+    press(&mut app, MouseButton::Left, Vec2::ZERO);
+    move_to(&mut app, Vec2::new(60.0, 0.0));
+    release(&mut app, MouseButton::Left, Vec2::new(60.0, 0.0));
+    assert_eq!(position(&app, a), Vec2::ZERO, "not moved");
+    // Without Shift it is a click again.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::ShiftLeft);
+    click(&mut app, Vec2::ZERO);
+    assert_eq!((drive(&app, a), selected(&app)), (1, Some(a)));
+}
+
+/// A right drag on a part of a group moves the whole group (#105) with the
+/// new pointer path (#100): the others follow the dragged part's snapped
+/// steps.
+#[test]
+fn a_right_drag_on_a_group_moves_the_group() {
+    let mut app = pointer_app();
+    app.init_resource::<crate::sim::MultiSelection>()
+        .add_systems(
+            Update,
+            crate::sim::multi_select::move_group_system.after(canvas_pointer_system),
+        );
+    let and = place(&mut app, GateKind::And { w: 1 }, "And", Vec2::ZERO);
+    let or = place(&mut app, GateKind::Or { w: 1 }, "Or", Vec2::new(200.0, 0.0));
+    let lone = place(&mut app, GateKind::Not { w: 1 }, "N", Vec2::new(0.0, 200.0));
+    {
+        let mut multi = app.world_mut().resource_mut::<crate::sim::MultiSelection>();
+        multi.insert(and);
+        multi.insert(or);
+    }
+    app.world_mut().resource_mut::<SelectedGate>().0 = Some(or);
+    press(&mut app, MouseButton::Right, Vec2::ZERO);
+    move_to(&mut app, Vec2::new(30.0, -20.0));
+    move_to(&mut app, Vec2::new(60.0, -40.0));
+    release(&mut app, MouseButton::Right, Vec2::new(60.0, -40.0));
+    assert_eq!(position(&app, and), Vec2::new(60.0, -40.0));
+    assert_eq!(position(&app, or), Vec2::new(260.0, -40.0));
+    assert_eq!(position(&app, lone), Vec2::new(0.0, 200.0));
+}
+
+/// `Shift`+press on a pin is the selection gesture (#105), not a wire
+/// drag (#106): no wire, no toast; a plain press on the same pin drags a
+/// wire.
+#[test]
+fn shift_on_a_pin_selects_instead_of_dragging_a_wire() {
+    let mut app = wire_app();
+    let a = place(
+        &mut app,
+        GateKind::Input { w: 1 },
+        "A",
+        Vec2::new(-200.0, 0.0),
+    );
+    let y = place(
+        &mut app,
+        GateKind::Output { w: 1 },
+        "Y",
+        Vec2::new(200.0, 40.0),
+    );
+    let (from, to) = (pin(&app, a, true, 0), pin(&app, y, false, 0));
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ShiftLeft);
+    drag_wire(&mut app, from, to);
+    assert!(wire_ends(&mut app).is_empty());
+    assert_eq!(toast(&app), None);
+    assert!(app.world().resource::<PinPointer>().drag.is_none());
+    assert_eq!(position(&app, a), Vec2::new(-200.0, 0.0));
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::ShiftLeft);
+    drag_wire(&mut app, from, to);
+    let (ua, uy) = (uuid(&app, a), uuid(&app, y));
+    assert_eq!(wire_ends(&mut app), vec![(ua, 0, uy, 0)]);
+}

@@ -254,13 +254,11 @@ pub(super) fn simplify(
 
     // Compact the instruction list.
     let mut w = 0;
-    for k in 0..em.instrs.len() {
-        if keep[k] {
-            em.instrs[w] = em.instrs[k];
-            em.imms[w] = em.imms[k];
-            em.ops[w] = em.ops[k];
-            w += 1;
-        }
+    for k in (0..em.instrs.len()).filter(|&k| keep[k]) {
+        em.instrs[w] = em.instrs[k];
+        em.imms[w] = em.imms[k];
+        em.ops[w] = em.ops[k];
+        w += 1;
     }
     em.instrs.truncate(w);
     em.imms.truncate(w);

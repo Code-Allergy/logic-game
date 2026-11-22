@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -486,25 +487,43 @@ mod threaded {
         assert_eq!(e.frame().mems[0].as_ref().unwrap()[3], 3);
     }
 
+    /// The worker paces a rate by its clock, and resending the same rate
+    /// (as the old app did every frame) does not reset the pacing. The
+    /// clock is driven by hand: on the wall clock this raced the other
+    /// tests for the CPU and needed a wide tolerance.
     #[test]
-    fn paced_rate_on_a_real_clock() {
+    fn paced_rate_on_the_worker_clock() {
         let (d, ..) = counter_design(false);
-        let e = loaded(&d);
-        e.set_rate(Rate::Hz(200.0));
-        let start = Instant::now();
-        std::thread::sleep(Duration::from_millis(500));
-        // Resend the same rate a lot, as the old app did every frame.
-        for _ in 0..200 {
-            e.set_rate(Rate::Hz(200.0));
-        }
+        let now = Arc::new(AtomicU64::new(0));
+        let read = Arc::clone(&now);
+        let clock = Arc::new(move || Duration::from_nanos(read.load(Ordering::SeqCst)));
+        let e = Engine::spawn_with_clock(Options::debug(), clock);
+        e.load(Arc::new(d), 1);
+        assert!(matches!(
+            e.wait_event(Duration::from_secs(5)),
+            Some(EngineEvent::Loaded { revision: 1, .. })
+        ));
+        // Binary fractions, so the due tick counts are exact.
+        e.set_rate(Rate::Hz(256.0));
         e.sync();
-        let secs = start.elapsed().as_secs_f64();
-        let ticks = e.tick_count() as f64;
-        let expected = secs * 200.0;
-        assert!(
-            (ticks - expected).abs() <= expected * 0.15 + 3.0,
-            "{ticks} ticks in {secs:.3} s at 200 Hz"
-        );
+        assert_eq!(e.tick_count(), 0, "no time has passed");
+        let frame = Duration::from_nanos(7_812_500); // 1/128 s
+        for i in 1..=50u64 {
+            now.fetch_add(frame.as_nanos() as u64, Ordering::SeqCst);
+            for _ in 0..4 {
+                e.set_rate(Rate::Hz(256.0));
+            }
+            e.sync();
+            assert_eq!(
+                e.tick_count(),
+                2 * i,
+                "after {i} frames of 1/128 s at 256 Hz"
+            );
+        }
+        // Without time passing, waiting adds no ticks.
+        std::thread::sleep(Duration::from_millis(20));
+        e.sync();
+        assert_eq!(e.tick_count(), 100);
     }
 
     #[test]
