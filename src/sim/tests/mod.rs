@@ -851,6 +851,21 @@ fn read_back(app: &mut App) -> WorkspaceDocument {
         .unwrap()
 }
 
+/// The save system is added by the view plugin, which no headless test
+/// builds: run it here, so that its parameters are checked (two that
+/// conflict panic when a system first runs).
+#[test]
+fn the_save_system_runs() {
+    let mut app = app();
+    load(&mut app, demo("full_adder"));
+    app.world_mut()
+        .run_system_once(crate::sim::systems::workspace_io_system)
+        .unwrap();
+    app.world_mut()
+        .run_system_once(crate::sim::systems::save_on_exit_system)
+        .unwrap();
+}
+
 #[test]
 fn stored_tests_survive_the_editor_and_the_file() {
     let dir = temp_dir();

@@ -1,10 +1,11 @@
 # MCP server
 
-Status: design agreed (#104). Milestones 1 (#122), 2 (#123) and 3 (#124)
+Status: design agreed (#104). Milestones 1 to 4 (#122, #123, #124, #125)
 are implemented: the batch editor with chips and gate-level expansion,
 the views, stored tests, experiment scripts, Verilog import, the
-`workspace`, `view`, `edit`, `test`, `run` and `import_rtl` tools and the
-`gatequest-mcp` program. Each section says which milestone it belongs to;
+`gatequest-mcp` program, and the game itself as a host (`--mcp`) with
+edits as undo steps, the `transport` and the `app state` readout. Stage 2
+(screenshots, UI driving, #126) is designed and not built. Each section says which milestone it belongs to;
 "Running it" and "Where milestone 1 stands" are at the end.
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server lets an
@@ -46,10 +47,11 @@ The server is part of the `gate_quest` package, behind the cargo feature
 `mcp` (never built for wasm). The MCP library (`rmcp`) and its async
 runtime stay behind that feature.
 
-| Host | Transport | Started by | Milestone |
-|---|---|---|---|
-| `gatequest-mcp` (no window) | stdio | the MCP client | 1 |
-| The game, `gate_quest --mcp` | HTTP on 127.0.0.1 | the developer | 4 |
+| Host | Transport | The workspace is | Started by | Milestone |
+|---|---|---|---|---|
+| `gatequest-mcp` | stdio | a document the server holds | the MCP client | 1 |
+| `gatequest-mcp --app` | stdio | open in the game's simulation layer, no window | the MCP client | 4 |
+| The game, `gate_quest --mcp` | HTTP on 127.0.0.1 | the one open in the editor | the developer | 4 |
 
 There is no second process and no private protocol between a server and
 the game: MCP over HTTP is the inter-process protocol. A client that can
@@ -67,9 +69,12 @@ visuals, and they run the same in both hosts.
 UI readout, and (stage 2) screenshots and input. They exist only where
 an app runs.
 
-A host implements one small trait: give me the workspace as a document,
-take this document as the new workspace, and (app hosts) run this closure
-on the `World`.
+The tools are written once, on a `Session` (`mcp/session.rs`). Without
+an app the session holds its workspace itself. With one it has an
+`AppLink`: read the open workspace as a document, commit a document as
+its new content, replace it, save it, drive the transport, read the
+state. Every tool call starts by reading the app's workspace, so the
+session always works on what the editor shows now.
 
 ### How an edit reaches the editor
 
@@ -91,12 +96,25 @@ Writing back by difference is what undo does: parts that did not change
 keep their entities and their simulator state. The revision bump makes
 the whole batch one undo step.
 
-In the game the server runs on its own thread. A call that needs the
-workspace crosses a channel to one exclusive system, which runs between
-frames, so a tool call never interleaves with the player's edits. While
-a gesture is in progress (`UndoHistory::hold`) the call waits. Long
-document work (compiling, testing) happens on the server thread on a copy
-of the document, not in the frame.
+In the game the server runs on its own thread (`mcp/http.rs`). A call
+that needs the workspace crosses a channel to one exclusive system in
+`First` (`mcp/app.rs`), so it runs between frames and never interleaves
+with the editor's systems. While a gesture is in progress (a mouse button
+is down, or a text field holds an edit, `UndoHistory::hold`) requests
+wait; a call gives up after 30 seconds. The document work of a call
+(applying the batch, compiling, testing, simulating) happens on the
+server thread on a copy; only the read and the commit are in a frame.
+
+A commit names the state it was computed from. If the player edited the
+circuit in between, it is refused, nothing changes, and the assistant
+tries again on the new circuit.
+
+What the session reads is the root circuit, the chips it reaches, and
+the chips that came through the server (an edit, an opened workspace),
+so a chip made through the server is there for the next call before it
+is placed anywhere. (The editor saves only the chips
+the root reaches, as it always has: place a chip before saving and
+quitting. `gatequest-mcp` without `--app` saves every chip.)
 
 ### Simulation
 
@@ -140,8 +158,8 @@ Seven tools in the first stage. Each takes its bulk argument inline or as
 | `test` | document | 2 | Run stored tests of one chip or the whole workspace |
 | `run` | document | 2 | Run an experiment script on a private simulation |
 | `import_rtl` | document | 3 | Verilog or Yosys JSON into chips |
-| `transport` | app | 4 | Drive the visible simulation |
-| `app` | app | stage 2 | UI readout (4), screenshots, actions, input |
+| `transport` | app | 4 | Drive the simulation the editor shows |
+| `app` | app | 4, stage 2 | `state`: what the editor shows, as text. Stage 2: screenshots, actions, input |
 
 Resources: `docs/save-format.md`, `docs/sim-v2-design.md`,
 `docs/rtl-import.md`, this file, and the demos and gallery items as
@@ -416,6 +434,42 @@ The intended loop for a large design: write the reference in Verilog,
 import it as `x_ref`, build `x` from gates and smaller chips, store an
 `equivalent` test of `x` against `x_ref`, move up a level.
 
+### `transport` and `app` (milestone 4)
+
+These work only where an app runs (the game with `--mcp`, or
+`gatequest-mcp --app`); elsewhere they say so.
+
+`transport {action, ticks, hz, inputs}` drives the simulation the editor
+shows. Actions: `status` (the default), `run`, `pause`, `step` (`ticks`,
+default 1; it pauses first), `reset` (tick 0, inputs kept). `hz` sets the
+tick rate (a number, or `"max"`) and `inputs` drives root inputs by label
+(`{"En": 1}`), with any action; inputs are set before a step. The answer
+is the state afterwards: `paused, tick 9, rate 10 Hz`.
+
+`app {what: "state"}` returns what the editor shows:
+
+```
+screen: Simulating
+workspace: "counter" (unsaved changes)
+view: the root circuit
+transport: paused, tick 9, rate 10 Hz
+build: ok
+undo: 2 step(s), redo: 0 step(s)
+selected: "r" (Register)
+signals: in En=1, out Q=7
+message: Saved "counter".
+```
+
+`signals` are the root's inputs as driven and its outputs and readouts
+as simulated (the Signals card). Tests and experiments belong in `test`
+and `run`, which have simulations of their own and leave this one alone.
+
+In an app, `workspace` goes through the editor: `open`, `new` and
+`open_demo` replace the open circuit as the Library does (unsaved work is
+refused unless `discard`), and `save` is the editor's save, with its
+rules and its message. A demo the player opened read-only cannot be
+edited; `open_demo` makes the editable copy.
+
 ## Auto-layout
 
 Parts added without `at` are placed by `sim::layout` (layered, by logic
@@ -441,25 +495,34 @@ function instead. It is advice; nothing is refused.
 
 Routing is the editor's job and happens only in the game host.
 
-## Safety (milestone 4 for the game host)
+## Safety
 
 - No server exists unless asked for: the `gatequest-mcp` program, or the
-  game started with `--mcp`.
-- The game host binds 127.0.0.1 on a free port with a random token per
-  run, and writes both to `<data dir>/mcp.json` for clients to read.
+  game started with `--mcp` (and built with the `mcp` feature).
+- The game binds 127.0.0.1 on a free port. Every request must carry
+  `Authorization: Bearer <token>`, a random token made for that run;
+  without it the answer is 401. The address and the token are written to
+  `mcp.json` in the game's data folder (beside `workspaces/`) and the
+  address is printed at start:
+
+  ```json
+  {"url": "http://127.0.0.1:41873/mcp", "token": "…", "pid": 12345}
+  ```
+
 - Once on, the server may open, edit and save any workspace of the data
-  folder. Saves go through `WorkspaceStore` (atomic, previous save kept
-  as `.bak`). Demos stay read-only until copied.
-- `file` arguments are read as given; output files (`trace`, exports)
-  are written under the workspace folder unless an absolute path is
-  given.
+  folder, and read and write the files its tools are given paths of
+  (request and script files, memory images, traces, Verilog). It runs
+  `yosys` when asked to import Verilog. It runs nothing else.
+- Saves go through `WorkspaceStore` (atomic, the previous save kept as
+  `.bak`); in the game, through the editor's own save. Demos stay
+  read-only until copied.
+- An edit in the game is one undo step: `Ctrl+Z` takes back what the
+  assistant did.
 
 ## Stage 2 (designed, not scheduled)
 
-**`app` tool.** `state` returns what the HUD shows as data: open cards,
-selection, inspector fields, transport, feedback messages, the view path
-(milestone 4, since it is cheap and lets tests assert on the UI).
-`screenshot` renders the window or a windowless frame (centre on a part,
+**`app` tool.** `state` is built (above). Still to come: `screenshot`
+renders the window or a windowless frame (centre on a part,
 size, day or night) as the `screenshot` example does; it needs a GPU or
 software rasteriser, which CI does not have today. `action` runs named
 editor actions (select, open chip, switch tab, fit, undo, open a demo or
@@ -481,18 +544,33 @@ op is the server's hook into the same expansion.
 3. **Scale.** `import_rtl` with Yosys; `make_chip`, `copy_of` and
    `expand`; wires that follow a chip's ports; the layout advisory's
    groups; the `mcp` benchmark suite on a 10,000-part circuit in `perf/`.
-4. **The game as host.** `--mcp`, the exclusive system, edits by
-   difference as undo steps, `transport`, `app state`.
+4. **The game as host.** `--mcp` over HTTP with a token, the link and
+   its exclusive system, edits by difference as undo steps, stale edits
+   refused, `transport`, `app state`, and `gatequest-mcp --app` for the
+   same without a window.
 
 ## Running it
 
 ```sh
-cargo run -p gate_quest --features mcp --bin gatequest-mcp
+cargo run -p gate_quest --features mcp --bin gatequest-mcp            # documents only
+cargo run -p gate_quest --features mcp --bin gatequest-mcp -- --app   # with a simulation to drive
+cargo run -p gate_quest --features mcp -- --mcp                       # the game: watch it work
 ```
 
-It speaks MCP on standard input and output and works in the player's
-workspace folder; set `GATEQUEST_DATA_DIR` to a scratch folder to keep
-it away from real workspaces. For Claude Code, in `.mcp.json`:
+`gatequest-mcp` speaks MCP on standard input and output and works in the
+player's workspace folder; set `GATEQUEST_DATA_DIR` to a scratch folder
+to keep it away from real workspaces. The game with `--mcp` opens in the
+editor, prints its address and writes it with the token to `mcp.json`;
+a client connects with MCP's Streamable HTTP transport and the header
+`Authorization: Bearer <token>`:
+
+```sh
+claude mcp add --transport http gatequest "$(jq -r .url mcp.json)" \
+  --header "Authorization: Bearer $(jq -r .token mcp.json)"
+```
+
+(The token changes with every run of the game.) For `gatequest-mcp` and
+Claude Code, in `.mcp.json`:
 
 ```json
 {
@@ -510,19 +588,27 @@ The code is in `src/mcp/`: `batch.rs` (the edit function), `view.rs`,
 `chips.rs` (gate-level chips), `import.rs` (Verilog and netlists),
 `testing.rs` (stored tests), `rig.rs` (a private simulation with signals
 by name), `run.rs` (experiment scripts), `memfile.rs` (memory files),
-`session.rs` (the tools as plain functions on one open workspace) and
-`server.rs` (the same over `rmcp`). Only `server.rs` and the program
-need the `mcp` feature.
+`session.rs` (the tools as plain functions on one open workspace, its
+own or an app's), `app.rs` (the app side of the link), `server.rs` (the
+tools over `rmcp`) and `http.rs` (the game's HTTP endpoint). Only
+`server.rs`, `http.rs` and the programs need the `mcp` feature.
 
-## Where milestone 1 stands
+## Where it stands
 
-Done: everything listed under milestones 1, 2 and 3 below. Known gaps, to
+Done: everything listed under milestones 1 to 4 below. Known gaps, to
 close in later milestones:
 
 - A combinational loop is reported with the simulator's node ids, not
   with part names.
 - A `Split` adapter made by an earlier request is not reused by a later
   one that needs the same bits; a second one is made.
+- In the game, a chip that is not placed anywhere is lost when the
+  workspace is saved and reopened (the editor saves what the root
+  reaches).
+- While the game's window is hidden or minimised its frames may stop,
+  and calls wait for them.
+- `app state` reads the editor's resources; it does not read the cards'
+  layout or the inspector's fields.
 - `record` has no "when this signal changes"; `when` takes an
   expression over the current values only.
 - Stored tests are not shown in the editor.
@@ -538,7 +624,13 @@ close in later milestones:
 
 ## Testing the server
 
-Unit tests of `apply` and `view` on documents (no feature needed, so the
-default CI runs them). With the `mcp` feature, an in-process client
-drives a full workflow over the real protocol: make a half adder, build a
-full adder of two, view it, save it, open it again.
+Unit tests of the document tools (`src/mcp/tests.rs` and
+`src/mcp/tests/`; no feature needed, so the default CI runs them): the
+batch editor, chips and expansion (every word-level kind against its
+gates, by simulation), stored tests, experiment scripts, imports, and
+the app host against a headless app (an edit is one undo step, untouched
+parts keep their entities and the simulation its state, requests wait
+for a gesture, a stale edit is refused). With the `mcp` feature, an
+in-process client drives a workflow over the real protocol, and a
+by-hand HTTP client reaches a headless app through the token check. The
+Verilog test runs only where Yosys is installed.

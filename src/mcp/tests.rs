@@ -1,5 +1,6 @@
 //! Tests of the batch editor and the views.
 
+mod app;
 mod chips;
 mod sim;
 
@@ -652,6 +653,130 @@ mod protocol {
             .join("\n")
     }
 
+    /// One HTTP request to the local server, by hand: the status, the
+    /// session id it gave, and the body.
+    fn post(
+        url: &str,
+        token: Option<&str>,
+        session: Option<&str>,
+        body: &str,
+    ) -> (u16, Option<String>, String) {
+        use std::io::{Read, Write};
+        let address = url.trim_start_matches("http://").trim_end_matches("/mcp");
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        let mut request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n\
+             Accept: application/json, text/event-stream\r\nConnection: close\r\n\
+             Content-Length: {}\r\n",
+            body.len()
+        );
+        if let Some(token) = token {
+            request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        if let Some(session) = session {
+            request.push_str(&format!("Mcp-Session-Id: {session}\r\n"));
+        }
+        request.push_str("\r\n");
+        request.push_str(body);
+        stream.write_all(request.as_bytes()).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+            .unwrap();
+        // Read until the answer to a request is there (an event stream
+        // may stay open), or the server closes.
+        let mut text = String::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => text.push_str(&String::from_utf8_lossy(&buffer[..n])),
+            }
+            let (head, rest) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+            if rest.contains("\"jsonrpc\"") && rest.trim_end().ends_with('}')
+                || head.starts_with("HTTP/1.1 4")
+                || head.starts_with("HTTP/1.1 202")
+            {
+                break;
+            }
+        }
+        let (head, rest) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let session = head.lines().find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("mcp-session-id:")
+                .map(|_| l[15..].trim().to_string())
+        });
+        (status, session, rest.to_string())
+    }
+
+    /// The whole stack of the running game: HTTP with a token, the
+    /// protocol, the session, the link, and an app whose frames go by.
+    #[test]
+    fn the_game_is_reached_over_http_with_its_token() {
+        use bevy::prelude::*;
+
+        use crate::mcp::app::{McpAppPlugin, link};
+        use crate::sim::{SimRuntime, SimulationRuntimePlugin};
+
+        let dir = scratch("http");
+        let (link, inbox) = link();
+        let mut app = App::new();
+        app.add_plugins(SimulationRuntimePlugin {
+            runtime: SimRuntime::Threadless,
+        })
+        .add_plugins(McpAppPlugin::new(inbox));
+        let session = Session::with_app(WorkspaceStore::in_dir(&dir), Box::new(link));
+        let endpoint = crate::mcp::http::serve(Server::new(session), Some(dir.clone())).unwrap();
+        let written = std::fs::read_to_string(endpoint.file.as_ref().unwrap()).unwrap();
+        assert!(
+            written.contains(&endpoint.url) && written.contains(&endpoint.token),
+            "{written}"
+        );
+
+        let (url, token) = (endpoint.url.clone(), endpoint.token.clone());
+        let said = std::thread::scope(|scope| {
+            let client = scope.spawn(move || {
+                let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+                // No token, or a wrong one: nothing is served.
+                assert_eq!(post(&url, None, None, initialize).0, 401);
+                assert_eq!(post(&url, Some("wrong"), None, initialize).0, 401);
+                let (status, session, body) = post(&url, Some(&token), None, initialize);
+                assert_eq!(status, 200, "{body}");
+                assert!(body.contains("protocolVersion"), "{body}");
+                let session = session.as_deref();
+                post(&url, Some(&token), session, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+                let call = |id: u32, name: &str, arguments: Value| {
+                    let body = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                                      "params": {"name": name, "arguments": arguments}});
+                    post(&url, Some(&token), session, &body.to_string()).2
+                };
+                let edit = call(2, "edit", json!({"ops": [{"add": [
+                    {"name": "A", "type": "Input"}, {"name": "n", "type": "Not"}, {"name": "Y", "type": "Output"}]},
+                    {"wire": [["A", "n"], ["n", "Y"]]}]}));
+                let state = call(3, "app", json!({}));
+                let step = call(4, "transport", json!({"action": "step", "ticks": 3}));
+                (edit, state, step)
+            });
+            while !client.is_finished() {
+                app.update();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            client.join().unwrap()
+        });
+        let (edit, state, step) = said;
+        assert!(edit.contains("+3 parts +2 wires"), "{edit}");
+        assert!(
+            state.contains("undo: 1 step(s)") && state.contains("in A=0"),
+            "{state}"
+        );
+        assert!(step.contains("paused, tick"), "{step}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_client_builds_views_saves_and_reopens() {
         let dir = scratch("protocol");
@@ -681,7 +806,16 @@ mod protocol {
             tools.sort();
             assert_eq!(
                 tools,
-                ["edit", "import_rtl", "run", "test", "view", "workspace"]
+                [
+                    "app",
+                    "edit",
+                    "import_rtl",
+                    "run",
+                    "test",
+                    "transport",
+                    "view",
+                    "workspace"
+                ]
             );
 
             let call = |name: &'static str, args: Value| {

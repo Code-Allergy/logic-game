@@ -79,6 +79,21 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
+    /// The circuit `root` with `definitions`, as it should be after a
+    /// restore (the MCP server's edits, `crate::mcp::app`).
+    pub(crate) fn of(
+        mut root: CircuitDocument,
+        definitions: HashMap<Uuid, Arc<CircuitDocument>>,
+        revision: u64,
+    ) -> Self {
+        root.name = String::new();
+        Self {
+            root,
+            definitions,
+            revision,
+        }
+    }
+
     pub(crate) fn same_circuit(&self, other: &Snapshot) -> bool {
         self.root == other.root
             && self.definitions.len() == other.definitions.len()

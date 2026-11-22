@@ -80,5 +80,40 @@ fn main() {
         app = app.add_systems(bevy_egui::EguiPrimaryContextPass, update_ui_pointer_state);
     }
 
+    #[cfg(feature = "mcp")]
+    if env::args().any(|arg| arg == "--mcp") {
+        serve_mcp(app);
+    }
+
     app.run();
+}
+
+/// `--mcp`: serve the MCP tools on the open workspace, over HTTP on this
+/// machine (`docs/mcp-server.md`), and start in the editor.
+#[cfg(feature = "mcp")]
+fn serve_mcp(app: &mut App) {
+    use gate_quest::editor::workspace::{WorkspaceStore, player_data_dir};
+    use gate_quest::mcp::app::{McpAppPlugin, link};
+    use gate_quest::mcp::http::serve;
+    use gate_quest::mcp::server::Server;
+    use gate_quest::mcp::session::Session;
+
+    let (link, inbox) = link();
+    let store = WorkspaceStore::player().unwrap_or_else(|| WorkspaceStore::in_dir("./workspaces"));
+    let server = Server::new(Session::with_app(store, Box::new(link)));
+    match serve(server, player_data_dir()) {
+        Ok(endpoint) => {
+            println!(
+                "MCP server: {} (token in {})",
+                endpoint.url,
+                match &endpoint.file {
+                    Some(file) => file.display().to_string(),
+                    None => "no file: it could not be written".to_string(),
+                }
+            );
+            app.add_plugins(McpAppPlugin::new(inbox))
+                .insert_state(GameState::Simulating);
+        }
+        Err(e) => eprintln!("MCP server: not started: {e}"),
+    }
 }

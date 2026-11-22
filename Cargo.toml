@@ -26,7 +26,7 @@ dev = ["bevy/dynamic_linking", "inspector"]
 inspector = ["dep:bevy-inspector-egui", "bevy/reflect_auto_register"]
 # The MCP server: an AI assistant builds and inspects circuits
 # (docs/mcp-server.md). Native only.
-mcp = ["dep:rmcp", "dep:tokio"]
+mcp = ["dep:rmcp", "dep:tokio", "dep:axum"]
 
 [dependencies]
 logi-sim = { path = "logi-sim" }
@@ -67,8 +67,23 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 
 # The MCP server (feature `mcp`).
 # (`client` is for the tests, which drive the server through the protocol.)
-rmcp = { version = "3.11", optional = true, features = ["server", "client", "macros", "transport-io"] }
-tokio = { version = "1", optional = true, features = ["rt", "macros", "io-std", "io-util"] }
+rmcp = { version = "3.11", optional = true, features = [
+    "server",
+    "client",
+    "macros",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+tokio = { version = "1", optional = true, features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "io-std",
+    "io-util",
+    "net",
+] }
+# The HTTP endpoint of the running game (`--mcp`).
+axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "tokio"] }
 
 [build-dependencies]
 embed-resource = "3"

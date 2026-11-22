@@ -1649,7 +1649,11 @@ pub fn save_on_exit_system(
 #[allow(clippy::too_many_arguments)]
 pub fn workspace_io_system(
     mut save_events: MessageReader<SaveWorkspaceEvent>,
-    mut circuit: ParamSet<(CircuitReader, ResMut<ActiveCircuit>)>,
+    mut circuit: ParamSet<(
+        CircuitReader,
+        ResMut<ActiveCircuit>,
+        Option<ResMut<super::WorkspaceTests>>,
+    )>,
     mut members: Query<&mut CircuitMember, Allow<bevy::ecs::entity_disabling::Disabled>>,
     mut revision: ResMut<WorkspaceRevision>,
     mut feedback: ResMut<AuthoringFeedback>,
@@ -1681,6 +1685,13 @@ pub fn workspace_io_system(
                 let active = active.bypass_change_detection();
                 active.uuid = saved.root;
                 active.name = saved.name.clone();
+                // The root's stored tests follow it to its new id (the
+                // reader holds them too, hence the set).
+                if let Some(mut tests) = circuit.p2()
+                    && let Some(root_tests) = tests.0.remove(&old_root)
+                {
+                    tests.0.insert(saved.root, root_tests);
+                }
                 for mut member in &mut members {
                     if member.circuit_uuid == old_root {
                         member.circuit_uuid = saved.root;

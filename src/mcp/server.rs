@@ -92,6 +92,25 @@ pub struct ImportArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TransportArgs {
+    /// One of: status (default), run, pause, step, reset, rate, set.
+    pub action: Option<String>,
+    /// For step: how many ticks (default 1).
+    pub ticks: Option<u64>,
+    /// The tick rate in Hz, or "max" (with any action).
+    pub hz: Option<Value>,
+    /// Root inputs to drive, by label: {"En": 1} (with any action; they
+    /// are set before a step).
+    pub inputs: Option<Map<String, Value>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AppArgs {
+    /// What to read: state (default).
+    pub what: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TestArgs {
     /// Run the tests of this circuit only (a chip's name, or "main").
     /// Left out: every circuit of the workspace.
@@ -223,6 +242,38 @@ impl Server {
     fn test(&self, Parameters(args): Parameters<TestArgs>) -> Result<String, String> {
         self.session()
             .test_tool(args.circuit.as_deref(), args.name.as_deref())
+    }
+
+    #[tool(
+        description = "Drive the simulation the game's editor shows (only when the server runs \
+                       in the game): run, pause, step, reset, set the tick rate, drive inputs. \
+                       For tests and experiments use `run`, which has its own simulation."
+    )]
+    fn transport(&self, Parameters(args): Parameters<TransportArgs>) -> Result<String, String> {
+        let mut command = Map::new();
+        if let Some(action) = args.action {
+            command.insert("action".into(), action.into());
+        }
+        if let Some(ticks) = args.ticks {
+            command.insert("ticks".into(), ticks.into());
+        }
+        if let Some(hz) = args.hz {
+            command.insert("hz".into(), hz);
+        }
+        if let Some(inputs) = args.inputs {
+            command.insert("inputs".into(), Value::Object(inputs));
+        }
+        self.session().transport_tool(command)
+    }
+
+    #[tool(
+        description = "Read what the game's editor shows, as text (only when the server runs in \
+                       the game): the open workspace, the view, the transport, the build, undo \
+                       steps, the selection, input and output values, messages."
+    )]
+    fn app(&self, Parameters(args): Parameters<AppArgs>) -> Result<String, String> {
+        self.session()
+            .app_tool(args.what.as_deref().unwrap_or("state"))
     }
 
     #[tool(

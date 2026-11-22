@@ -12,6 +12,7 @@ cargo test -p gate_quest --lib     # app integration tests (headless)
 cargo test -p logi-sim             # simulator tests
 trunk serve                        # web build (wasm32-unknown-unknown)
 cargo run -p gate_quest --features mcp --bin gatequest-mcp   # MCP server (stdio)
+cargo run -p gate_quest --features mcp -- --mcp              # the game, serving MCP over local HTTP
 ```
 
 The Nix flake (`nix develop`, or direnv with `.envrc`) provides the
@@ -26,7 +27,7 @@ development, enable:
 | --- | --- |
 | `dev` | `bevy/dynamic_linking` (much faster incremental links) plus `inspector`. Native only. |
 | `inspector` | The egui world inspector window. |
-| `mcp` | The MCP server: an AI assistant builds and inspects circuits (`docs/mcp-server.md`). Adds the `gatequest-mcp` program. Native only. |
+| `mcp` | The MCP server: an AI assistant builds and inspects circuits (`docs/mcp-server.md`). Adds the `gatequest-mcp` program and the game's `--mcp` flag. Native only. |
 
 For example `cargo run -p gate_quest --features dev`, or
 `--features inspector` for the inspector without dynamic linking.

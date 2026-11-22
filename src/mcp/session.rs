@@ -21,6 +21,44 @@ use crate::sim::{CircuitDocument, WorkspaceDocument};
 /// Largest request file read, in bytes.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// The workspace open in a running app, as a document.
+#[derive(Debug, Clone)]
+pub struct AppWorkspace {
+    pub name: String,
+    /// The root circuit and every definition of the app's library.
+    pub workspace: WorkspaceDocument,
+    pub unsaved: bool,
+    /// A built-in demo: it cannot be edited until it is copied.
+    pub read_only: bool,
+    /// Changes whenever the circuit is edited: a commit names the stamp
+    /// it was computed from, and is refused if the circuit moved on.
+    pub stamp: u64,
+}
+
+/// A running app (the game, or the same app with no window) whose open
+/// workspace the session works on: `docs/mcp-server.md`, "How an edit
+/// reaches the editor". Every call blocks until the app has answered.
+pub trait AppLink: Send {
+    /// The open workspace as it is now.
+    fn read(&mut self) -> Result<AppWorkspace, String>;
+    /// Make the open workspace `workspace` (one undo step), if it is
+    /// still at `stamp`.
+    fn commit(&mut self, workspace: WorkspaceDocument, stamp: u64) -> Result<(), String>;
+    /// Replace the open workspace.
+    fn open(
+        &mut self,
+        name: String,
+        workspace: WorkspaceDocument,
+        unsaved: bool,
+    ) -> Result<(), String>;
+    /// Save through the editor (`None`: under its own name).
+    fn save(&mut self, name: Option<String>) -> Result<String, String>;
+    /// Drive the simulation the editor shows.
+    fn transport(&mut self, command: Map<String, Value>) -> Result<String, String>;
+    /// What the editor shows, as text.
+    fn state(&mut self) -> Result<String, String>;
+}
+
 struct Open {
     /// The name it is saved under (or will be).
     name: String,
@@ -50,7 +88,16 @@ pub struct Session {
     /// workspace as it was at one of them.
     generation: u64,
     sims: Vec<SimSession>,
+    /// The app whose open workspace this session works on, if any; else
+    /// the session holds its workspace itself.
+    link: Option<Box<dyn AppLink>>,
+    /// Of the workspace last read from the app.
+    stamp: u64,
+    read_only: bool,
 }
+
+const NO_APP: &str = "this server runs without the game; this tool works on the simulation and \
+                      the editor of a running game (start it with --mcp)";
 
 fn externals() -> Externals<'static> {
     catalog().map(|c| c.externals()).unwrap_or_default()
@@ -63,6 +110,96 @@ impl Session {
             open: None,
             generation: 0,
             sims: Vec::new(),
+            link: None,
+            stamp: 0,
+            read_only: false,
+        }
+    }
+
+    /// A session on the workspace open in a running app.
+    pub fn with_app(store: WorkspaceStore, link: Box<dyn AppLink>) -> Self {
+        Self {
+            link: Some(link),
+            ..Self::new(store)
+        }
+    }
+
+    /// With an app: take its open workspace as ours, as it is now.
+    fn sync(&mut self) -> Result<(), String> {
+        let Some(link) = &mut self.link else {
+            return Ok(());
+        };
+        let app = link.read()?;
+        let same = self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.name == app.name && o.workspace == app.workspace);
+        if !same {
+            self.generation += 1;
+        }
+        self.stamp = app.stamp;
+        self.read_only = app.read_only;
+        self.open = Some(Open {
+            name: app.name,
+            workspace: app.workspace,
+            unsaved: app.unsaved,
+        });
+        Ok(())
+    }
+
+    /// Make `workspace` the open workspace's content: in the app as one
+    /// undo step, or here.
+    fn commit(&mut self, workspace: WorkspaceDocument) -> Result<(), String> {
+        if let Some(link) = &mut self.link {
+            if self.read_only {
+                return Err(
+                    "this is a read-only demo; open an editable copy with workspace \
+                     {\"action\": \"open_demo\"}"
+                        .into(),
+                );
+            }
+            link.commit(workspace.clone(), self.stamp)?;
+        }
+        let open = self.open.as_mut().ok_or("no workspace is open")?;
+        open.workspace = workspace;
+        open.unsaved = true;
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// Replace the open workspace: in the app, or here.
+    fn replace(
+        &mut self,
+        name: String,
+        workspace: WorkspaceDocument,
+        unsaved: bool,
+    ) -> Result<(), String> {
+        if let Some(link) = &mut self.link {
+            link.open(name.clone(), workspace.clone(), unsaved)?;
+        }
+        self.generation += 1;
+        self.open = Some(Open {
+            name,
+            workspace,
+            unsaved,
+        });
+        Ok(())
+    }
+
+    /// The `transport` tool: the simulation the editor shows.
+    pub fn transport_tool(&mut self, command: Map<String, Value>) -> Result<String, String> {
+        self.link.as_mut().ok_or(NO_APP)?.transport(command)
+    }
+
+    /// The `app` tool: `state`, what the editor shows as text.
+    pub fn app_tool(&mut self, what: &str) -> Result<String, String> {
+        let link = self.link.as_mut().ok_or(NO_APP)?;
+        match what {
+            "state" => link.state(),
+            other => Err(format!(
+                "unknown \"{other}\" (the app tool has: state; screenshots and input are not \
+                 built yet)"
+            )),
         }
     }
 
@@ -95,6 +232,7 @@ impl Session {
         name: Option<&str>,
         discard: bool,
     ) -> Result<String, String> {
+        self.sync()?;
         let named = || {
             name.map(str::trim)
                 .filter(|n| !n.is_empty())
@@ -128,12 +266,7 @@ impl Session {
                 self.may_replace(discard)?;
                 let workspace = self.store.read(name).map_err(|e| e.to_string())?;
                 let out = format!("opened \"{name}\"\n{}", view::status(&workspace));
-                self.generation += 1;
-                self.open = Some(Open {
-                    name: name.to_string(),
-                    workspace,
-                    unsaved: false,
-                });
+                self.replace(name.to_string(), workspace, false)?;
                 Ok(out)
             }
             "demos" => {
@@ -157,12 +290,7 @@ impl Session {
                     "opened a copy of \"{id}\" as \"{name}\" (not saved yet)\n{}",
                     view::status(&workspace)
                 );
-                self.generation += 1;
-                self.open = Some(Open {
-                    name,
-                    workspace,
-                    unsaved: true,
-                });
+                self.replace(name, workspace, true)?;
                 Ok(out)
             }
             "new" => {
@@ -173,13 +301,19 @@ impl Session {
                         "a workspace named \"{name}\" is already saved; open it, or pick another name"
                     ));
                 }
-                self.generation += 1;
-                self.open = Some(Open {
-                    name: name.to_string(),
-                    workspace: WorkspaceDocument::new(CircuitDocument::new(name)),
-                    unsaved: true,
-                });
+                self.replace(
+                    name.to_string(),
+                    WorkspaceDocument::new(CircuitDocument::new(name)),
+                    true,
+                )?;
                 Ok(format!("new workspace \"{name}\" (not saved yet)\n"))
+            }
+            "save" if self.link.is_some() => {
+                // The editor saves: its rules, its messages.
+                let requested = name.map(str::trim).filter(|n| !n.is_empty());
+                let link = self.link.as_mut().expect("checked above");
+                let said = link.save(requested.map(str::to_string))?;
+                Ok(format!("{said}\n"))
             }
             "save" => {
                 let open = self.open.as_mut().ok_or("no workspace is open")?;
@@ -226,12 +360,13 @@ impl Session {
     /// The `view` tool: `outline` (the default), `diagnostics`, `stats`,
     /// `groups`.
     pub fn view_tool(
-        &self,
+        &mut self,
         circuit: Option<&str>,
         what: Option<&str>,
         filter: Option<&str>,
         limit: Option<usize>,
     ) -> Result<String, String> {
+        self.sync()?;
         let ws = &self.opened()?.workspace;
         let doc = match batch::find_circuit(ws, circuit)? {
             Some(place @ (Place::Root | Place::Definition(_))) => batch::circuit_at(ws, place),
@@ -296,19 +431,15 @@ impl Session {
                 Value::Object(request)
             }
         };
-        let open = self
-            .open
-            .as_mut()
-            .ok_or("no workspace is open; call workspace with action \"open\" or \"new\" first")?;
+        self.sync()?;
+        let open = self.opened()?;
         let (workspace, report) =
             batch::apply(&open.workspace, &request, &externals()).map_err(|e| e.0)?;
         if dry_run {
             return Ok(format!("dry run, nothing changed\n{report}"));
         }
         if workspace != open.workspace {
-            open.workspace = workspace;
-            open.unsaved = true;
-            self.generation += 1;
+            self.commit(workspace)?;
         }
         Ok(report.to_string())
     }
@@ -327,6 +458,7 @@ impl Session {
         replace: bool,
         discard: bool,
     ) -> Result<String, String> {
+        self.sync()?;
         let into = into.unwrap_or(if self.open.is_some() { "open" } else { "new" });
         if !matches!(into, "new" | "open") {
             return Err(format!("\"into\" is \"new\" or \"open\", not \"{into}\""));
@@ -347,14 +479,9 @@ impl Session {
                 file.display(),
                 view::status(&workspace)
             ));
-            self.generation += 1;
-            self.open = Some(Open {
-                name,
-                workspace,
-                unsaved: true,
-            });
+            self.replace(name, workspace, true)?;
         } else {
-            let open = self.open.as_mut().expect("checked above");
+            let open = self.open.as_ref().expect("checked above");
             let mut workspace = open.workspace.clone();
             let done = super::import::add_as_chips(&mut workspace, &imported.workspace, replace)?;
             out.push_str(&format!(
@@ -367,9 +494,7 @@ impl Session {
                 out.push('\n');
             }
             out.push_str(&view::diagnostics(&workspace));
-            open.workspace = workspace;
-            open.unsaved = true;
-            self.generation += 1;
+            self.commit(workspace)?;
         }
         for warning in imported.warnings {
             out.push_str(&format!("warning: {warning}\n"));
@@ -380,7 +505,12 @@ impl Session {
     /// The `test` tool: run the stored tests of one circuit, or of every
     /// circuit of the workspace; with `name`, only tests of that name.
     /// `Err` holds the report when a test failed.
-    pub fn test_tool(&self, circuit: Option<&str>, name: Option<&str>) -> Result<String, String> {
+    pub fn test_tool(
+        &mut self,
+        circuit: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<String, String> {
+        self.sync()?;
         let report = testing::run_suite(&self.opened()?.workspace, circuit, name)?;
         if report.failed() > 0 {
             Err(report.text())
@@ -428,6 +558,7 @@ impl Session {
         script.shift_remove("circuit");
         script.shift_remove("session");
 
+        self.sync()?;
         let generation = self.generation;
         let ws = &self
             .open

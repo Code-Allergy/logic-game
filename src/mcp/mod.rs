@@ -9,16 +9,23 @@
 //! - [`run`] – experiment scripts on a rig: stimulus, expectations,
 //!   recordings, comparison with a trace, snapshots.
 //! - [`memfile`] – memory contents from files (ROM images).
+//! - [`app`] – the app side: the open workspace of a running app served
+//!   to a session, edits written back as undo steps, the transport.
 //! - [`session`] – the tools as plain functions on one open workspace.
 //! - [`server`] – the tools over the Model Context Protocol (feature
 //!   `mcp`; the `gatequest-mcp` program serves them on stdio).
+//! - [`http`] – the same over HTTP on this machine, with a token: how the
+//!   running game (`--mcp`) is reached.
 //!
 //! Everything but [`server`] works on documents only, with no `World`
 //! and no protocol, and is always built so that the ordinary tests cover
 //! it.
 
+pub mod app;
 pub mod batch;
 pub mod chips;
+#[cfg(feature = "mcp")]
+pub mod http;
 pub mod import;
 pub mod memfile;
 pub mod rig;
