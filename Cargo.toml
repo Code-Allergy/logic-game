@@ -56,7 +56,7 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 
 [build-dependencies]
-embed-resource = "1"
+embed-resource = "3"
 
 
 # Blake3 pure on windows, for cross compilation
