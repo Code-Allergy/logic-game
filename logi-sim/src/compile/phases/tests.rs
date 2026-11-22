@@ -145,6 +145,28 @@ fn a_clock_used_as_data_specializes_exactly() {
     check("clock as data", &d, 100);
 }
 
+/// Ops with literal fields (`Sext`, `Shr`, `Concat`: a width or a shift,
+/// not a slot) on a clock fold to constants in each variant; re-emitting
+/// them must not read their literals as slots (a sign extension of a
+/// 32-bit zero extension of a clock used to panic at compile time).
+#[test]
+fn literal_field_ops_on_a_clock_specialize() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let clk = b.clock(2, 1, 0);
+    let wide = b.zext(clk, 32);
+    let signed = b.sext(wide, 64);
+    let hi = b.split(signed, 4, 8);
+    let both = b.merge(&[clk, x]);
+    let shifted = b.split(both, 1, 8);
+    b.output("signed", signed);
+    b.output("hi", hi);
+    b.output("shifted", shifted);
+    check("literal fields", &d, 40);
+}
+
 /// A gate-built D flip-flop (master/slave NAND latches) on a clock, used
 /// as a 4-bit register: function matching, lifting and the cleanup run
 /// first, then the phases.

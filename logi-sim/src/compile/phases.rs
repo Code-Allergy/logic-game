@@ -388,7 +388,16 @@ impl Spec {
                     let ops = if val[s as usize] == Val::Own {
                         own[w as usize]
                     } else {
-                        [opnd(&val, orig.a), opnd(&val, orig.b), opnd(&val, orig.c)]
+                        // Only slot fields: a literal field (a width or a
+                        // shift of `Sext`, `Shr`, `Concat`) is kept as is.
+                        let pick = |is: bool, s: u32| {
+                            if is {
+                                opnd(&val, s)
+                            } else {
+                                Opnd::Slot(ZERO_SLOT)
+                            }
+                        };
+                        [pick(sa, orig.a), pick(sb, orig.b), pick(sc, orig.c)]
                     };
                     let mut ins = orig;
                     if sa {
