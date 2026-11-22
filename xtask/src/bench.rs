@@ -156,8 +156,18 @@ pub fn run_in(dir: &Path, plan: &Plan, label: &str) -> Result<Value, String> {
         let _ = std::fs::remove_dir_all(&suite_home);
         eprintln!("perf: running suite {} ({})", suite.name, suite.about);
         let mut c = util::cargo(dir);
-        c.args(["bench", "-p", suite.package, "--bench", suite.bench, "--"])
-            .env("CRITERION_HOME", &suite_home);
+        define_profile(dir, &mut c);
+        c.args([
+            "bench",
+            "--profile",
+            "profiling",
+            "-p",
+            suite.package,
+            "--bench",
+            suite.bench,
+            "--",
+        ])
+        .env("CRITERION_HOME", &suite_home);
         if let Some(f) = &plan.filter {
             c.arg(f);
         }
@@ -188,6 +198,26 @@ pub fn run_in(dir: &Path, plan: &Plan, label: &str) -> Result<Value, String> {
         "benchmarks": Value::Object(benchmarks),
         "metrics": metrics.unwrap_or(Value::Null),
     }))
+}
+
+/// A revision from before the `profiling` profile existed gets it from
+/// cargo's config environment (all but its logi-sim override), so both
+/// sides of a comparison build the same way.
+fn define_profile(dir: &Path, c: &mut std::process::Command) {
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
+    if manifest.contains("[profile.profiling]") {
+        return;
+    }
+    eprintln!(
+        "perf: {} has no `profiling` profile; defining it",
+        dir.display()
+    );
+    c.env("CARGO_PROFILE_PROFILING_INHERITS", "release")
+        .env("CARGO_PROFILE_PROFILING_OPT_LEVEL", "3")
+        .env("CARGO_PROFILE_PROFILING_LTO", "false")
+        .env("CARGO_PROFILE_PROFILING_CODEGEN_UNITS", "16")
+        .env("CARGO_PROFILE_PROFILING_DEBUG", "line-tables-only")
+        .env("CARGO_PROFILE_PROFILING_STRIP", "false");
 }
 
 /// The deterministic metrics of the checkout at `dir` (`perf-metrics`),

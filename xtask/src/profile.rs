@@ -1,5 +1,6 @@
 //! `perf flamegraph` and `perf stat`: Linux `perf` on one target, built
-//! with the `flamegraph` profile (optimized, with symbols).
+//! with the `profiling` profile (optimized, no LTO, line tables; the same one
+//! `perf bench` uses, so the two share one build).
 //!
 //! Targets:
 //! - `example:<name>`: an example of the game (e.g. `example:cpu_bench`,
@@ -29,7 +30,11 @@ struct Target {
     args: Vec<String>,
 }
 
-/// Build `spec` with the `flamegraph` profile and find its executable.
+/// The cargo profile targets are built with (see the workspace
+/// `Cargo.toml`).
+const PROFILE: &str = "profiling";
+
+/// Build `spec` with [`PROFILE`] and find its executable.
 fn build(spec: &str, passthrough: &[String]) -> Result<Target, String> {
     let root = util::repo_root();
     let (kind, name) = spec
@@ -39,7 +44,7 @@ fn build(spec: &str, passthrough: &[String]) -> Result<Target, String> {
     cargo.args([
         "build",
         "--profile",
-        "flamegraph",
+        PROFILE,
         "--message-format=json-render-diagnostics",
     ]);
     let (artifact, mut args, slug) = match kind {
@@ -70,7 +75,7 @@ fn build(spec: &str, passthrough: &[String]) -> Result<Target, String> {
         _ => return Err(format!("target kind {kind:?}: use example, bench or bin")),
     };
     args.extend(passthrough.iter().cloned());
-    eprintln!("perf: building {spec} (profile flamegraph)");
+    eprintln!("perf: building {spec} (profile {PROFILE})");
     let out = util::output(cargo.stdout(Stdio::piped()))?;
     let artifact = artifact.replace('-', "_");
     let exe = out

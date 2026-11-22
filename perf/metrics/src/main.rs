@@ -3,7 +3,7 @@
 //!
 //! ```sh
 //! cargo run -p perf-metrics                 # every metric, JSON on stdout
-//! cargo run -p perf-metrics -- ticks cpu16 100000   # just run ticks (perf stat)
+//! cargo run -p perf-metrics -- ticks cpu16 100000   # just run ticks (perf stat, profiling)
 //! ```
 //!
 //! Every metric is a count that does not depend on the machine, the load
@@ -31,7 +31,7 @@ use std::time::Duration;
 use logi_sim::compile::{Options, Program, compile};
 use logi_sim::engine::{EngineCore, Probe, ProbeFrame};
 use logi_sim::netlist::Design;
-use logi_sim::sim::Sim;
+use logi_sim::sim::{Sim, SimOptions};
 use logi_sim::testkit::{GenConfig, fixtures, generate};
 use serde_json::{Map, Value, json};
 
@@ -76,16 +76,30 @@ fn allocations(f: impl FnOnce()) -> u64 {
 /// The fixed designs measured. Changing this list changes the metric
 /// names: bless the baseline afterwards.
 fn cases() -> Vec<(&'static str, Design)> {
-    vec![
-        ("cpu16", perf::design("cpu16")),
-        ("cpu16_rtl", perf::design("cpu16_rtl")),
-        ("testkit_cpu", fixtures::cpu(&fixtures::LOOP_PROGRAM)),
-        ("dag32_10k", generate(&GenConfig::dag(1, 10_000, 32)).design),
-        (
-            "gates1_100k",
-            generate(&GenConfig::gates(2, 100_000, 1)).design,
-        ),
-    ]
+    CASES.iter().map(|&c| (c, case(c))).collect()
+}
+
+/// The gated cases (see [`case`]).
+const CASES: [&str; 5] = [
+    "cpu16",
+    "cpu16_rtl",
+    "testkit_cpu",
+    "dag32_10k",
+    "gates1_100k",
+];
+
+/// The design of case `name`: a gated case, or one of the larger
+/// profiling-only designs `gates1_1m` and `dag32_1m` (for `ticks`).
+fn case(name: &str) -> Design {
+    match name {
+        "cpu16" | "cpu16_rtl" => perf::design(name),
+        "testkit_cpu" => fixtures::cpu(&fixtures::LOOP_PROGRAM),
+        "dag32_10k" => generate(&GenConfig::dag(1, 10_000, 32)).design,
+        "gates1_100k" => generate(&GenConfig::gates(2, 100_000, 1)).design,
+        "gates1_1m" => generate(&GenConfig::gates(2, 1_000_000, 1)).design,
+        "dag32_1m" => generate(&GenConfig::dag(1, 1_000_000, 32)).design,
+        other => panic!("no case {other:?}"),
+    }
 }
 
 /// The options each case is compiled with: the gallery CPUs both ways,
@@ -196,15 +210,20 @@ fn all_metrics() -> Value {
     json!({ "schema": 1, "metrics": Value::Object(m.0) })
 }
 
-/// Run `n` ticks of `case` with the default options and nothing else
-/// (`perf stat` subtracts two such runs to get instructions per tick).
-fn run_ticks(case: &str, n: u64) {
-    let (_, d) = cases()
-        .into_iter()
-        .find(|(c, _)| *c == case)
-        .unwrap_or_else(|| panic!("no case {case}"));
-    let p = Arc::new(compile(&d, &Options::default()).unwrap());
-    let mut sim = Sim::new(p);
+/// Run `n` ticks of `case` and nothing else: the target for `perf stat`
+/// (two runs of different lengths cancel start-up out) and for profiling
+/// the tick loop (`cargo xtask perf flamegraph bin:perf-metrics -- ticks
+/// cpu16 2000000`). `options` is `default` or `editor`; `threads` lays the
+/// program out for and runs it on that many threads.
+fn run_ticks(name: &str, n: u64, options: &str, threads: usize) {
+    let d = case(name);
+    let opts = match options {
+        "default" => Options::default(),
+        "editor" => Options::debug(),
+        other => panic!("options {other:?}: default or editor"),
+    };
+    let p = Arc::new(compile(&d, &opts.for_threads(threads)).unwrap());
+    let mut sim = Sim::with_options(p, SimOptions::threaded(threads));
     let mut lfsr = 0x9E37_79B9_7F4A_7C15u64;
     for _ in 0..n {
         tick(&mut sim, &mut lfsr);
@@ -217,15 +236,21 @@ fn main() {
     match args.first().map(String::as_str) {
         None => println!("{}", serde_json::to_string_pretty(&all_metrics()).unwrap()),
         Some("cases") => {
-            for (case, _) in cases() {
+            for case in CASES {
                 println!("{case}");
             }
         }
-        Some("ticks") if args.len() == 3 => {
-            run_ticks(&args[1], args[2].parse().expect("a tick count"));
+        Some("ticks") if (3..=5).contains(&args.len()) => {
+            run_ticks(
+                &args[1],
+                args[2].parse().expect("a tick count"),
+                args.get(3).map_or("default", String::as_str),
+                args.get(4)
+                    .map_or(1, |t| t.parse().expect("a thread count")),
+            );
         }
         _ => {
-            eprintln!("usage: perf-metrics [cases | ticks <case> <n>]");
+            eprintln!("usage: perf-metrics [cases | ticks <case> <n> [default|editor] [threads]]");
             std::process::exit(2);
         }
     }
