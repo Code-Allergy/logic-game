@@ -174,6 +174,18 @@ impl EngineCore {
         self.pending_steps = self.pending_steps.saturating_add(n);
     }
 
+    /// Return the running program to power-on (see [`Sim::reset`]): tick
+    /// 0, state at its initial values, inputs kept. Queued steps are
+    /// dropped; the rate is unchanged. No-op before the first load.
+    pub fn reset(&mut self) {
+        if let Some(sim) = &mut self.sim {
+            sim.reset();
+            self.pending_steps = 0;
+            self.anchor = None;
+            self.dirty = true;
+        }
+    }
+
     /// Set a root input by its port node. Remembered across edits; ignored
     /// by programs without that port.
     pub fn set_input(&mut self, node: NodeId, value: u64) {
@@ -420,6 +432,7 @@ mod threaded {
         SetInput(NodeId, u64),
         SetRate(Rate),
         Step(u64),
+        Reset,
         SetProbes(Vec<Probe>),
         Load(Arc<Design>, u64),
         Compiled(u64, Result<Arc<Program>, Vec<CompileError>>),
@@ -501,6 +514,10 @@ mod threaded {
         pub fn step(&self, n: u64) {
             let _ = self.tx.send(Msg::Step(n));
         }
+        /// See [`EngineCore::reset`].
+        pub fn reset(&self) {
+            let _ = self.tx.send(Msg::Reset);
+        }
         pub fn set_probes(&self, probes: Vec<Probe>) {
             let _ = self.tx.send(Msg::SetProbes(probes));
         }
@@ -576,6 +593,7 @@ mod threaded {
                 Msg::SetInput(n, v) => core.set_input(n, v),
                 Msg::SetRate(r) => core.set_rate(r),
                 Msg::Step(n) => core.step(n),
+                Msg::Reset => core.reset(),
                 Msg::SetProbes(p) => core.set_probes(p),
                 Msg::Load(d, rev) => {
                     let _ = compile_tx.send((d, rev));

@@ -457,38 +457,7 @@ impl GateKind {
         ]
     }
 
-    /// Sprite colour for this kind.
-    pub fn color(&self) -> Color {
-        use GateKind as G;
-        match self {
-            G::And { .. } => Color::srgb(0.0, 0.6, 0.3),
-            G::Or { .. } => Color::srgb(0.8, 0.8, 0.0),
-            G::Not { .. } => Color::srgb(0.0, 0.1, 0.5),
-            G::Nand { .. } => Color::srgb(0.6, 0.2, 0.0),
-            G::Nor { .. } => Color::srgb(0.5, 0.5, 0.0),
-            G::Xor { .. } => Color::srgb(0.0, 0.5, 0.8),
-            G::Xnor { .. } => Color::srgb(0.2, 0.3, 0.8),
-            G::Mux { .. } => Color::srgb(0.6, 0.0, 0.6),
-            G::Switch { .. } => Color::srgb(0.3, 0.3, 0.6),
-            G::Clock { .. } => Color::srgb(0.5, 0.1, 0.3),
-            G::Input { .. } => Color::srgb(0.1, 0.1, 0.1),
-            G::Output { .. } => Color::srgb(0.15, 0.15, 0.15),
-            G::Display { .. } => Color::srgb(0.04, 0.09, 0.12),
-            G::Const { .. } => Color::srgb(0.3, 0.3, 0.3),
-            G::Split { .. } | G::Merge { .. } | G::Extend { .. } => Color::srgb(0.35, 0.35, 0.0),
-            G::Add { .. } | G::Eq { .. } | G::LtU { .. } => Color::srgb(0.1, 0.45, 0.65),
-            G::ReduceOr { .. } | G::ReduceAnd { .. } | G::ReduceXor { .. } => {
-                Color::srgb(0.75, 0.45, 0.0)
-            }
-            G::Delay { .. } | G::Register { .. } | G::DLatch { .. } | G::SrLatch => {
-                Color::srgb(0.45, 0.2, 0.55)
-            }
-            G::Ram { .. } | G::Rom { .. } => Color::srgb(0.25, 0.15, 0.45),
-            G::SubCircuit { .. } => Color::srgb(0.1, 0.5, 0.3),
-        }
-    }
-
-    /// Sprite size for this kind.
+    /// Tile size for this kind.
     pub fn size(&self) -> Vec2 {
         match self {
             GateKind::Display { w } => {

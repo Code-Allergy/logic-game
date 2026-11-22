@@ -119,7 +119,8 @@ pub fn save_workspace(name: &str, workspace: &WorkspaceDocument) -> Result<(), W
 
 /// Names of the workspaces in `dir`: folders with a manifest, and legacy
 /// single-file workspaces (listed so that opening one explains why it is
-/// refused).
+/// refused). Hidden entries (a leading dot, such as the demo map's
+/// progress file) are not workspaces.
 pub fn list_workspaces_in(dir: &Path) -> io::Result<Vec<String>> {
     let mut names = HashSet::new();
     if !dir.exists() {
@@ -127,6 +128,13 @@ pub fn list_workspaces_in(dir: &Path) -> io::Result<Vec<String>> {
     }
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.'))
+        {
+            continue;
+        }
         let name = if path.is_dir() {
             path.join(WORKSPACE_MANIFEST_FILE)
                 .exists()
