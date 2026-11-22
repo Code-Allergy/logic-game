@@ -143,6 +143,42 @@ impl Shape {
     }
 }
 
+/// Segments for a whole circle `radius_px` screen pixels across the
+/// middle (a radius): enough that its edge strays at most a fifth of a
+/// pixel from the true circle, and never fewer than 48.
+pub fn circle_segments(radius_px: f32) -> usize {
+    const TOLERANCE: f32 = 0.2;
+    let r = radius_px.max(TOLERANCE * 2.0);
+    let step = (1.0 - TOLERANCE / r).clamp(-1.0, 1.0).acos();
+    ((TAU / (2.0 * step)).ceil() as usize).clamp(48, 256)
+}
+
+impl Shape {
+    /// A ring (annulus) between `inner` and `outer` radii around
+    /// `centre`: one strip of `segments` quads whose inner and outer
+    /// vertices pair up at the same angles, so both edges are true
+    /// polygons (no bumps where pieces overlap).
+    pub fn annulus(centre: Vec2, inner: f32, outer: f32, segments: usize) -> Shape {
+        let n = segments.max(3);
+        let inner = inner.clamp(0.0, outer);
+        let mut shape = Shape {
+            positions: Vec::with_capacity(n * 2),
+            indices: Vec::with_capacity(n * 6),
+        };
+        for i in 0..n {
+            let dir = Vec2::from_angle(i as f32 / n as f32 * TAU);
+            shape.positions.push(centre + dir * outer);
+            shape.positions.push(centre + dir * inner);
+        }
+        for i in 0..n as u32 {
+            let j = (i + 1) % n as u32;
+            let (o0, i0, o1, i1) = (2 * i, 2 * i + 1, 2 * j, 2 * j + 1);
+            shape.indices.extend([o0, o1, i1, o0, i1, i0]);
+        }
+        shape
+    }
+}
+
 /// Radius of the rounded corner at vertex `i` of `points` (an interior
 /// vertex): `radius`, but at most half of either neighbouring segment;
 /// zero where the path runs straight on.
@@ -269,7 +305,19 @@ pub fn quad_bezier(p0: Vec2, control: Vec2, p1: Vec2, segments: usize) -> Vec<Ve
 impl Shape {
     /// A `Mesh2d` mesh: positions at z = 0, normals facing the camera, and
     /// UVs across the bounding box.
-    pub fn into_mesh(self) -> Mesh {
+    ///
+    /// A shape with no triangles becomes one degenerate triangle at the
+    /// origin (it draws nothing): the renderer's mesh allocator skips a
+    /// mesh with no vertices but still tries to upload it, logging "Use-after-free:
+    /// attempted to copy element data for an unallocated key" twice
+    /// (vertices and indices) each time such a mesh is added or changed.
+    pub fn into_mesh(mut self) -> Mesh {
+        if self.positions.is_empty() || self.indices.is_empty() {
+            self = Shape {
+                positions: vec![Vec2::ZERO; 3],
+                indices: vec![0, 1, 2],
+            };
+        }
         let (lo, hi) = self.bounds().unwrap_or((Vec2::ZERO, Vec2::ONE));
         let span = (hi - lo).max(Vec2::splat(1e-6));
         let uvs: Vec<[f32; 2]> = self
@@ -336,6 +384,51 @@ mod tests {
         let pill = Shape::pill(Vec2::new(40.0, 24.0));
         let (lo, hi) = pill.bounds().unwrap();
         assert!(close(hi.x - lo.x, 40.0, 1e-4) && close(hi.y - lo.y, 24.0, 1e-4));
+    }
+
+    /// A ring's vertices all sit exactly on its two radii, paired by
+    /// angle, and its area is the annulus's: no teeth on either edge.
+    #[test]
+    fn annulus_edges_are_true_polygons() {
+        let centre = Vec2::new(30.0, -10.0);
+        let (inner, outer) = (7.0, 13.5);
+        let n = circle_segments(outer * 10.0);
+        let ring = Shape::annulus(centre, inner, outer, n);
+        assert_eq!(ring.positions.len(), 2 * n);
+        assert_eq!(ring.triangle_count(), 2 * n);
+        for pair in ring.positions.chunks(2) {
+            assert!(close(pair[0].distance(centre), outer, 1e-3));
+            assert!(close(pair[1].distance(centre), inner, 1e-3));
+            let (a, b) = (pair[0] - centre, pair[1] - centre);
+            assert!(a.normalize().abs_diff_eq(b.normalize(), 1e-5), "paired");
+        }
+        let exact = PI * (outer * outer - inner * inner);
+        assert!(close(ring.area(), exact, exact * 0.01), "{}", ring.area());
+        // Every triangle is wound the same way (no folded quads).
+        let signs: Vec<bool> = ring
+            .indices
+            .chunks(3)
+            .map(|t| {
+                let [a, b, c] = [0, 1, 2].map(|k| ring.positions[t[k] as usize]);
+                (b - a).perp_dot(c - a) > 0.0
+            })
+            .collect();
+        assert!(signs.iter().all(|&s| s == signs[0]));
+    }
+
+    #[test]
+    fn circles_get_more_segments_as_they_grow_on_screen() {
+        assert_eq!(circle_segments(5.0), 48);
+        assert_eq!(circle_segments(0.0), 48);
+        let mut last = 0;
+        for r in [10.0, 50.0, 135.0, 400.0, 5000.0] {
+            let n = circle_segments(r);
+            assert!(n >= last && (48..=256).contains(&n), "{r}: {n}");
+            // The sagitta of one segment stays within the tolerance.
+            let sag = r * (1.0 - (PI / n as f32).cos());
+            assert!(n == 256 || sag <= 0.2 + 1e-4, "{r}: {sag}");
+            last = n;
+        }
     }
 
     #[test]
@@ -428,5 +521,24 @@ mod tests {
         assert_eq!(mesh.count_vertices(), count);
         assert!(mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_some());
         assert!(mesh.attribute(Mesh::ATTRIBUTE_NORMAL).is_some());
+    }
+
+    /// The renderer cannot upload a mesh with no vertices (it logs a
+    /// "Use-after-free" error per upload), so an empty shape (a hidden
+    /// drag mark, a drag with no veils) still makes a mesh with vertices
+    /// and indices: one degenerate triangle.
+    #[test]
+    fn an_empty_shape_still_makes_a_mesh_with_vertices() {
+        for shape in [
+            Shape::default(),
+            Shape {
+                positions: vec![Vec2::ONE; 4],
+                indices: Vec::new(),
+            },
+        ] {
+            let mesh = shape.into_mesh();
+            assert_eq!(mesh.count_vertices(), 3);
+            assert_eq!(mesh.indices().map(|i| i.len()), Some(3));
+        }
     }
 }

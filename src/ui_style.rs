@@ -826,6 +826,14 @@ pub fn egui_rect(r: Rect) -> egui::Rect {
     egui::Rect::from_min_max(egui::pos2(r.min.x, r.min.y), egui::pos2(r.max.x, r.max.y))
 }
 
+/// A window position (logical pixels, y down: the cursor, a world point
+/// on screen) in egui points, which the UI scale (egui's `zoom_factor`)
+/// makes larger than a logical pixel.
+pub fn window_to_egui(pos: Vec2, zoom_factor: f32) -> egui::Pos2 {
+    let z = if zoom_factor > 0.0 { zoom_factor } else { 1.0 };
+    egui::pos2(pos.x / z, pos.y / z)
+}
+
 /// The egui half of the theme: fonts and style.
 /// Expects bevy_egui's plugin and [`crate::theme::ThemePlugin`].
 pub struct WorkshopUiPlugin;
@@ -896,6 +904,24 @@ pub(crate) mod test_ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window position lands on the same physical spot in egui points
+    /// at any UI scale: points times the zoom factor give it back.
+    #[test]
+    fn window_positions_become_egui_points_at_any_ui_scale() {
+        let cursor = Vec2::new(920.0, 460.0);
+        for zoom in [1.0, 1.15, 1.3] {
+            let p = window_to_egui(cursor, zoom);
+            assert!((p.x * zoom - cursor.x).abs() < 1e-3, "{zoom}");
+            assert!((p.y * zoom - cursor.y).abs() < 1e-3, "{zoom}");
+        }
+        assert_eq!(window_to_egui(cursor, 1.0), egui::pos2(920.0, 460.0));
+        assert_eq!(
+            window_to_egui(cursor, 1.15).round(),
+            egui::pos2(800.0, 400.0)
+        );
+        assert_eq!(window_to_egui(cursor, 0.0), egui::pos2(920.0, 460.0));
+    }
 
     #[test]
     fn fonts_put_nunito_and_jetbrains_first() {

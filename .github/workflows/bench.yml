@@ -1,9 +1,20 @@
 name: Benchmarks
 
+# Benchmarks build all of Bevy with LTO and take a long time, so they run only
+# on main and by hand (Actions tab → Benchmarks → Run workflow).
 on:
   push:
-    branches: ["*"]
-  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Override `-C target-cpu=native` from .cargo/config.toml: the cached target/
+  # may come from a runner with a different CPU (SIGILL in build scripts).
+  RUSTFLAGS: ""
 
 jobs:
   benchmark:
@@ -18,8 +29,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-cargo-bench-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          restore-keys: ubuntu-latest-cargo-bench-
+          key: ubuntu-latest-cargo-bench-${{ hashFiles('**/Cargo.toml') }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable

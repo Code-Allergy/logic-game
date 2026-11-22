@@ -5,7 +5,12 @@
 //! ```sh
 //! cargo run --release --example cpu_bench               # 2 000 000 ticks each
 //! cargo run --release --example cpu_bench -- 500000     # N ticks each
+//! cargo run --release --example cpu_bench -- 500000 cpu16_rtl  # one CPU
 //! ```
+//!
+//! Naming one CPU runs only that one (no comparison); this is the target
+//! for profiling a CPU's tick loop with `cargo xtask perf flamegraph
+//! example:cpu_bench -- 500000 cpu16` (see `docs/performance.md`).
 //!
 //! For each CPU it prints the size of the design (primitive nodes after
 //! flattening) and of the compiled `Program` (instructions, packed lanes,
@@ -23,22 +28,8 @@ use gate_quest::sim::demos::DemoCatalog;
 use gate_quest::sim::netlist::design_of;
 use gate_quest::sim::{Demo, WorkspaceDocument};
 use logi_sim::compile::{Options, Program, compile};
-use logi_sim::netlist::{DefId, Design, NodeKind};
+use logi_sim::netlist::Design;
 use logi_sim::sim::{Sim, SimOptions};
-
-/// Primitive nodes of `def` with every instance expanded (ports not
-/// counted).
-fn flat_nodes(design: &Design, def: DefId) -> usize {
-    design.defs[def]
-        .nodes
-        .values()
-        .map(|n| match n.kind {
-            NodeKind::Instance(child) => flat_nodes(design, child),
-            NodeKind::Input { .. } | NodeKind::Output { .. } => 0,
-            _ => 1,
-        })
-        .sum()
-}
 
 fn program(design: &Design, options: &Options) -> Arc<Program> {
     Arc::new(compile(design, options).expect("compiles"))
@@ -96,7 +87,7 @@ fn bench(demo: &Demo, n: u64, instructions: u64) -> Row {
     println!("{} ({})", demo.title, demo.id);
     println!(
         "  design:   {} primitive nodes after flattening",
-        flat_nodes(&design, design.root)
+        design.flat_primitives(design.root)
     );
     println!("  compiled: {}", describe(&fast));
     println!("  editor:   {} (debug options)", describe(&debug));
@@ -137,7 +128,7 @@ fn blocks(demo: &Demo) {
         println!(
             "    {:<14} {:>9} {:>14}",
             name,
-            flat_nodes(&design, design.root),
+            design.flat_primitives(design.root),
             p.work()
         );
     }
@@ -147,6 +138,7 @@ fn main() {
     let n: u64 = std::env::args()
         .nth(1)
         .map_or(2_000_000, |a| a.parse().expect("N ticks"));
+    let only = std::env::args().nth(2);
     let catalog = DemoCatalog::embedded().expect("the demos load");
     let gates = catalog.get("cpu16").expect("cpu16");
     let words = catalog.get("cpu16_rtl").expect("cpu16_rtl");
@@ -159,6 +151,15 @@ fn main() {
     println!(
         "{n} ticks per measurement, one thread; the program runs {instructions} instructions\n"
     );
+    if let Some(id) = only {
+        let demo = match id.as_str() {
+            "cpu16" => gates,
+            "cpu16_rtl" => words,
+            other => panic!("no CPU {other:?}: cpu16 or cpu16_rtl"),
+        };
+        bench(demo, n, instructions);
+        return;
+    }
     let g = bench(gates, n, instructions);
     blocks(gates);
     println!();

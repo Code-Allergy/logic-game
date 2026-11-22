@@ -56,7 +56,7 @@ use std::collections::BinaryHeap;
 
 use bevy::math::{Rect, Vec2};
 
-use super::art::{EDGE, PinLayout};
+use super::art::{BIT_CASING, BUS_CASING, EDGE, PinLayout};
 use super::{CircuitDocument, CircuitLibrary, GateKind};
 
 /// The routing grid (the editor grid).
@@ -81,6 +81,22 @@ pub const IN_BOX: u32 = 4000;
 pub const MIN_GAP: f32 = 4.0;
 /// Cost of entering a node in a tile's clearance.
 pub const NEAR_BOX: u32 = 40;
+/// Room left between the casings of two wires side by side.
+pub const WIRE_GAP: f32 = 3.0;
+/// Cost of a step of wire running beside another net's wire closer than
+/// [`wire_clearance`] (only off-grid pin rows can be that close to
+/// another row): about two bends, so a wire takes another track where
+/// there is one.
+pub const PARALLEL: u32 = 150;
+
+/// The least distance between the centre lines of two parallel wires of
+/// different nets (`bus` for each) for their casings to keep
+/// [`WIRE_GAP`] between them.
+pub fn wire_clearance(a_bus: bool, b_bus: bool) -> f32 {
+    let casing = |bus: bool| if bus { BUS_CASING } else { BIT_CASING };
+    (casing(a_bus) + casing(b_bus)) * 0.5 + WIRE_GAP
+}
+
 /// Cost of using the approach to another net's pin.
 const APPROACH: u32 = 60;
 /// Rounds of rip-up and reroute for sinks that fell back.
@@ -108,6 +124,16 @@ pub struct NetSpec {
 pub struct RouteProblem {
     pub boxes: Vec<Rect>,
     pub nets: Vec<NetSpec>,
+    /// Per net, whether it is a bus (drawn wider, so it needs more room
+    /// beside another wire); nets past the end are 1-bit.
+    pub buses: Vec<bool>,
+}
+
+impl RouteProblem {
+    /// Whether net `net` is a bus.
+    pub fn is_bus(&self, net: usize) -> bool {
+        self.buses.get(net).copied().unwrap_or(false)
+    }
 }
 
 /// The wire of one sink.
@@ -335,6 +361,11 @@ struct Grid {
     /// Off-grid rows: the nets with a pin on them (empty for grid rows).
     row_nets: Vec<Vec<u32>>,
     row_on_grid: Vec<bool>,
+    /// Per row, the other rows closer than the widest clearance, with
+    /// their distance.
+    near: Vec<Vec<(usize, f32)>>,
+    /// Per net, whether it is a bus.
+    bus: Vec<bool>,
     /// 0 free, 1 in a tile's clearance, 2 in a tile (or nearer than
     /// [`MIN_GAP`]).
     zone: Vec<u8>,
@@ -451,12 +482,25 @@ impl Grid {
             row_nets.push(net.into_iter().collect());
         }
         let nodes = cols * ys.len();
+        let widest = wire_clearance(true, true);
+        let near = (0..ys.len())
+            .map(|r| {
+                let lo = ys.partition_point(|&y| y <= ys[r] - widest);
+                let hi = ys.partition_point(|&y| y < ys[r] + widest);
+                (lo..hi)
+                    .filter(|&o| o != r)
+                    .map(|o| (o, (ys[o] - ys[r]).abs()))
+                    .collect()
+            })
+            .collect();
         let mut grid = Grid {
             x0,
             cols,
             ys,
             row_nets,
             row_on_grid,
+            near,
+            bus: (0..problem.nets.len()).map(|i| problem.is_bus(i)).collect(),
             zone: vec![0; nodes],
             term: vec![NONE; nodes],
             approach: vec![NONE; nodes],
@@ -568,6 +612,41 @@ impl Grid {
         }
     }
 
+    /// The other nets whose wire runs from `n`'s row neighbour to `m`'s
+    /// (direction `d`, horizontal) on a row too close to `net`'s: a step
+    /// of their wire, or of a pin stub or its approach (known before any
+    /// routing), nearer than [`wire_clearance`].
+    fn beside(&self, n: usize, m: usize, d: usize, net: u32) -> u32 {
+        let rows = self.rows();
+        let r = n % rows;
+        let mut count = 0;
+        let bus = |net: u32| self.bus.get(net as usize).copied().unwrap_or(false);
+        let me = bus(net);
+        for &(o, dy) in &self.near[r] {
+            let (n2, m2) = (n - r + o, m - r + o);
+            let too_close = |other: u32| dy < wire_clearance(me, bus(other)) - 1e-3;
+            if self
+                .others(n2, net)
+                .any(|occ| occ.dirs & bit(d) != 0 && too_close(occ.net))
+            {
+                count += 1;
+                continue;
+            }
+            // A pin stub, or the step that leads into it (the approach,
+            // which its net takes unless it comes in from the side).
+            let pin = |a: usize, b: usize| {
+                let t = self.term[a];
+                (t != NONE && t != net && (self.term[b] == t || self.approach[b] == t)).then_some(t)
+            };
+            if let Some(other) = pin(n2, m2).or_else(|| pin(m2, n2))
+                && too_close(other)
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Whether net `net` may step from `n` in direction `d` onto `m`
     /// (`target` may be a terminal); the extra cost of the step, or `None`.
     /// `strict` makes boxes forbidden instead of costly.
@@ -605,6 +684,9 @@ impl Grid {
         }
         if m != target && self.approach[m] != NONE && self.approach[m] != net {
             extra += APPROACH;
+        }
+        if horizontal(d) {
+            extra += self.beside(n, m, d, net) * PARALLEL;
         }
         if m != target {
             match (self.zone[m], boxes) {
@@ -1369,6 +1451,7 @@ pub fn document_nets(doc: &CircuitDocument, library: &CircuitLibrary) -> Documen
                 .map(|n| gate_box(&n.kind, Vec2::new(n.x, n.y)))
                 .collect(),
             nets: Vec::new(),
+            buses: Vec::new(),
         },
         ..DocumentNets::default()
     };
@@ -1388,6 +1471,7 @@ pub fn document_nets(doc: &CircuitDocument, library: &CircuitLibrary) -> Documen
                 .and_then(|(_, outs)| outs.get(usize::from(pin)).copied())
                 .unwrap_or(1),
         );
+        out.problem.buses.push(out.widths.last() > Some(&1));
         out.nets.push((
             (d, pin),
             sinks
@@ -1440,6 +1524,102 @@ pub fn tile_crossings(problem: &RouteProblem, routing: &Routing) -> Vec<(usize, 
                         out.push((i, s, bi));
                     }
                 }
+            }
+        }
+    }
+    out
+}
+
+/// Two wires of different nets side by side: see [`close_parallels`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CloseRun {
+    pub nets: (usize, usize),
+    /// Distance between the centre lines.
+    pub distance: f32,
+    /// Length along which they run side by side.
+    pub length: f32,
+    /// Whether both nets have a pin near the run (within two grid steps
+    /// of it) and those pins are closer together than the clearance: a
+    /// crowded side of a tile, where wires leading into neighbouring
+    /// pins cannot keep the gap.
+    pub crowded: bool,
+}
+
+/// Wires of different nets running side by side closer than
+/// [`wire_clearance`] (so their casings touch or nearly do), for each
+/// pair of parallel segments that overlap along their length. Two pin
+/// stubs (pin to access node, which no routing can move) beside each
+/// other are not counted; fallback paths are skipped.
+pub fn close_parallels(problem: &RouteProblem, routing: &Routing) -> Vec<CloseRun> {
+    // (net, vertical, line, lo, hi, stub)
+    let mut runs: Vec<(usize, bool, f32, f32, f32, bool)> = Vec::new();
+    for (i, (spec, net)) in problem.nets.iter().zip(&routing.nets).enumerate() {
+        for (s, path) in net.sinks.iter().enumerate() {
+            if !path.routed || path.points.len() < 2 {
+                continue;
+            }
+            let searched = searched_segments(problem, spec, s, path);
+            let mut stubs = Vec::new();
+            if path.parent.is_none() {
+                stubs.push((spec.driver, access_for(&problem.boxes, spec.driver, true)));
+            }
+            stubs.push((
+                access_for(&problem.boxes, spec.sinks[s], false),
+                spec.sinks[s],
+            ));
+            for ((a, b), stub) in searched
+                .into_iter()
+                .map(|seg| (seg, false))
+                .chain(stubs.into_iter().map(|seg| (seg, true)))
+            {
+                if a.distance(b) < 1e-3 {
+                    continue;
+                }
+                let vertical = (a.x - b.x).abs() < 1e-3;
+                let run = if vertical {
+                    (i, true, a.x, a.y.min(b.y), a.y.max(b.y), stub)
+                } else {
+                    (i, false, a.y, a.x.min(b.x), a.x.max(b.x), stub)
+                };
+                runs.push(run);
+            }
+        }
+    }
+    runs.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
+    let widest = wire_clearance(true, true);
+    let mut out = Vec::new();
+    for (k, a) in runs.iter().enumerate() {
+        for b in &runs[k + 1..] {
+            if b.1 != a.1 || b.2 - a.2 >= widest {
+                break;
+            }
+            let distance = b.2 - a.2;
+            let overlap = a.4.min(b.4) - a.3.max(b.3);
+            if a.0 == b.0 || (a.5 && b.5) || distance < 1e-3 || overlap <= 1e-3 {
+                continue;
+            }
+            if distance < wire_clearance(problem.is_bus(a.0), problem.is_bus(b.0)) - 1e-3 {
+                let clearance = wire_clearance(problem.is_bus(a.0), problem.is_bus(b.0));
+                let (lo, hi) = (a.3.max(b.3) - 2.0 * GRID, a.4.min(b.4) + 2.0 * GRID);
+                let near = |net: usize| {
+                    let spec = &problem.nets[net];
+                    std::iter::once(spec.driver)
+                        .chain(spec.sinks.iter().copied())
+                        .filter(move |p| {
+                            let along = if a.1 { p.y } else { p.x };
+                            along >= lo - 1e-3 && along <= hi + 1e-3
+                        })
+                };
+                let across = |p: Vec2| if a.1 { p.x } else { p.y };
+                let crowded = near(a.0).any(|pa| {
+                    near(b.0).any(|pb| (across(pa) - across(pb)).abs() < clearance - 1e-3)
+                });
+                out.push(CloseRun {
+                    nets: (a.0.min(b.0), a.0.max(b.0)),
+                    distance,
+                    length: overlap,
+                    crowded,
+                });
             }
         }
     }
@@ -1674,6 +1854,7 @@ mod tests {
                     sinks: vec![in_pin(o, 0, 1), in_pin(h, 1, 2)],
                 },
             ],
+            ..RouteProblem::default()
         }
     }
 
@@ -1704,6 +1885,7 @@ mod tests {
                 driver: out_pin(a),
                 sinks: vec![in_pin(b, 0, 1)],
             }],
+            ..RouteProblem::default()
         };
         let r = route_all(&p);
         assert_eq!(r.nets[0].sinks[0].points, vec![out_pin(a), in_pin(b, 0, 1)]);
@@ -1794,6 +1976,7 @@ mod tests {
                 driver: out_pin(a),
                 sinks: vec![in_pin(b, 0, 1)],
             }],
+            ..RouteProblem::default()
         };
         let r = route_all(&p);
         check_invariants(&p, &r).unwrap();
@@ -1817,6 +2000,7 @@ mod tests {
                 driver: out_pin(a),
                 sinks: vec![in_pin(a, 0, 1)],
             }],
+            ..RouteProblem::default()
         };
         let r = route_all(&p);
         check_invariants(&p, &r).unwrap();
@@ -1840,6 +2024,7 @@ mod tests {
                     sinks: vec![in_pin(dsts[i], 0, 1)],
                 })
                 .collect(),
+            ..RouteProblem::default()
         };
         let r = route_all(&p);
         check_invariants(&p, &r).unwrap();
@@ -1911,6 +2096,7 @@ mod tests {
                     sinks: vec![in_pin(c, 1, 2)],
                 },
             ],
+            ..RouteProblem::default()
         };
         let r = route_all(&p);
         for (spec, net) in p.nets.iter().zip(&r.nets) {

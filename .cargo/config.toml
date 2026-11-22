@@ -8,3 +8,6 @@ rustflags = ["-C", "target-cpu=native"]
 # `cargo dev`: run the game with the `dev` feature (dynamic linking and the
 # world inspector).
 dev = "run -p gate_quest --features dev"
+# `cargo xtask perf ...`: benchmarks, comparisons, the regression gate and
+# profiling (docs/performance.md).
+xtask = "run -q -p xtask --"

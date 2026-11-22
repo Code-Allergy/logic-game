@@ -18,7 +18,9 @@
 //! The first argument is a demo or gallery id, or the path of a version 6
 //! file. `--definition NAME` opens the definition of that name (a circuit
 //! of the file) instead of the root circuit. `--fit` frames the circuit in
-//! the canvas (`--zoom` scales that framing).
+//! the canvas (`--zoom` scales that framing); without `--fit`, `--zoom`
+//! is the world units per pixel (0.25 is 400%) and `--at X,Y` (or `--at
+//! LABEL`) centres the view on a world point (or a part).
 //!
 //! `--size WxH` sets the window size (default 1600x1000); `--select LABEL`
 //! selects the first part with that label, so the inspector shows it;
@@ -99,6 +101,7 @@ struct Shot {
     night: bool,
     ticks: u64,
     zoom: Option<f32>,
+    at: Option<String>,
     select: Option<String>,
     library: bool,
     set: Vec<(String, u64)>,
@@ -196,7 +199,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let id = args.next().unwrap_or_else(|| "counter".into());
     let out = PathBuf::from(args.next().unwrap_or_else(|| "screenshot.png".into()));
-    let (mut night, mut ticks, mut zoom) = (false, 12, None);
+    let (mut night, mut ticks, mut zoom, mut at) = (false, 12, None, None);
     let (mut size, mut select, mut library) = ((1600, 1000), None, false);
     let mut set = Vec::new();
     let mut tab = None;
@@ -240,6 +243,7 @@ fn main() {
             }
             "--ticks" => ticks = args.next().and_then(|t| t.parse().ok()).unwrap_or(ticks),
             "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
+            "--at" => at = args.next(),
             "--definition" => definition = args.next(),
             "--fit" => fit = true,
             "--ui-scale" => {
@@ -320,6 +324,7 @@ fn main() {
             night,
             ticks,
             zoom,
+            at,
             select,
             library,
             set,
@@ -574,6 +579,20 @@ fn drive(
                 camera.translation.y = centre.y + 40.0 * scale;
             } else if let Some(zoom) = shot.zoom {
                 ortho.scale = zoom;
+            }
+            if let Some(spec) = &shot.at {
+                let point = spec
+                    .split_once(',')
+                    .and_then(|(x, y)| Some(Vec2::new(x.parse().ok()?, y.parse().ok()?)));
+                let at = point.unwrap_or_else(|| {
+                    let (entity, _) = labels
+                        .iter()
+                        .find(|(_, l)| &l.value == spec)
+                        .unwrap_or_else(|| panic!("--at wants X,Y or a label, got {spec}"));
+                    gates.get(entity).expect("a part").translation.truncate()
+                });
+                camera.translation.x = at.x;
+                camera.translation.y = at.y;
             }
         }
         50 if shot.check => {

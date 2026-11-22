@@ -131,6 +131,40 @@ impl SimOptions {
     }
 }
 
+/// Work done by a [`Sim`] since it was created or [`Sim::reset_counters`]
+/// (feature `counters`, off by default; without it nothing is counted and
+/// the runtime is unchanged). Every count is deterministic: the same
+/// program and the same calls give the same counts on every machine, which
+/// makes them suitable for regression gates (`cargo xtask perf check`).
+#[cfg(feature = "counters")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counters {
+    /// Calls to [`Sim::tick`].
+    pub ticks: u64,
+    /// Settles (one per tick, plus construction, [`Sim::reset`] and
+    /// [`Sim::import_state`]).
+    pub settles: u64,
+    /// Blocks dispatched.
+    pub blocks: u64,
+    /// Scalar instructions executed.
+    pub instrs: u64,
+    /// Packed words executed (each up to 64 lanes).
+    pub packed_words: u64,
+    /// Commits processed (state copies, RAM writes and clears, taken or
+    /// not).
+    pub commits: u64,
+    /// Memory writes and clears actually taken.
+    pub mem_writes: u64,
+}
+
+#[cfg(feature = "counters")]
+impl Counters {
+    /// Executed operations: instructions, packed words and commits.
+    pub fn ops(&self) -> u64 {
+        self.instrs + self.packed_words + self.commits
+    }
+}
+
 pub struct Sim {
     program: Arc<Program>,
     code: Arc<code::Code>,
@@ -148,6 +182,11 @@ pub struct Sim {
     tick: u64,
     /// Root input values, applied to their slots at the start of each settle.
     inputs: Vec<u64>,
+    #[cfg(feature = "counters")]
+    counters: Counters,
+    /// What one settle executes (`blocks`, `instrs`, `packed_words`).
+    #[cfg(feature = "counters")]
+    per_settle: Counters,
 }
 
 impl Sim {
@@ -200,7 +239,19 @@ impl Sim {
             tick: 0,
             inputs: vec![0; program.ports.inputs.len()],
             program,
+            #[cfg(feature = "counters")]
+            counters: Counters::default(),
+            #[cfg(feature = "counters")]
+            per_settle: Counters::default(),
         };
+        #[cfg(feature = "counters")]
+        for b in &sim.code.blocks {
+            sim.per_settle.blocks += 1;
+            match b.form {
+                code::Form::Packed { .. } => sim.per_settle.packed_words += u64::from(b.len),
+                _ => sim.per_settle.instrs += u64::from(b.len),
+            }
+        }
         for &(s, v) in &sim.program.consts {
             sim.slots[s as usize] = v;
         }
@@ -302,7 +353,23 @@ impl Sim {
         self.tick
     }
 
+    /// Work done so far (feature `counters`).
+    #[cfg(feature = "counters")]
+    pub fn counters(&self) -> &Counters {
+        &self.counters
+    }
+
+    /// Zero the [`Counters`] (feature `counters`).
+    #[cfg(feature = "counters")]
+    pub fn reset_counters(&mut self) {
+        self.counters = Counters::default();
+    }
+
     pub fn tick(&mut self) {
+        #[cfg(feature = "counters")]
+        {
+            self.counters.ticks += 1;
+        }
         self.commit();
         self.tick += 1;
         self.settle();
@@ -316,6 +383,10 @@ impl Sim {
 
     fn commit(&mut self) {
         let p = &*self.program;
+        #[cfg(feature = "counters")]
+        {
+            self.counters.commits += p.commits.len() as u64;
+        }
         for c in &p.commits {
             match *c {
                 Commit::Copy { state, next } => {
@@ -336,12 +407,20 @@ impl Sim {
                         let a = *self.slots.get_unchecked(addr as usize) as usize & (m.len() - 1);
                         *m.get_unchecked_mut(a) = *self.slots.get_unchecked(data as usize);
                         *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
+                        #[cfg(feature = "counters")]
+                        {
+                            self.counters.mem_writes += 1;
+                        }
                     }
                 },
                 Commit::MemClear { mem, en } => unsafe {
                     if *self.slots.get_unchecked(en as usize) != 0 {
                         self.mems.get_unchecked_mut(mem as usize).fill(0);
                         *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
+                        #[cfg(feature = "counters")]
+                        {
+                            self.counters.mem_writes += 1;
+                        }
                     }
                 },
                 Commit::RamWriteMasked {
@@ -357,6 +436,10 @@ impl Sim {
                         let word = m.get_unchecked_mut(a);
                         *word = (*word & !bits) | (*self.slots.get_unchecked(data as usize) & bits);
                         *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
+                        #[cfg(feature = "counters")]
+                        {
+                            self.counters.mem_writes += 1;
+                        }
                     }
                 },
             }
@@ -364,6 +447,15 @@ impl Sim {
     }
 
     fn settle(&mut self) {
+        #[cfg(feature = "counters")]
+        {
+            let c = &mut self.counters;
+            let per = &self.per_settle;
+            c.settles += 1;
+            c.blocks += per.blocks;
+            c.instrs += per.instrs;
+            c.packed_words += per.packed_words;
+        }
         let p = &*self.program;
         for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
             self.slots[port.slot as usize] = v;

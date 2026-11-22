@@ -1,0 +1,29 @@
+[package]
+name = "perf"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Benchmarks of the app side (documents, routing, undo, challenges, chips, frames) and the gallery CPUs. See docs/performance.md."
+
+# Nothing here is a dependency of the game: this crate only depends on it.
+[dependencies]
+gate_quest = { path = ".." }
+logi-sim = { path = "../logi-sim" }
+bevy = { version = "0.20.1", default-features = false }
+uuid = "1"
+
+[dev-dependencies]
+criterion = "0.8"
+serde_json = "1.0"
+
+[[bench]]
+name = "gallery"
+harness = false
+
+[[bench]]
+name = "app"
+harness = false
+
+[[bench]]
+name = "frame"
+harness = false
