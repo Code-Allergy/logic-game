@@ -8,7 +8,6 @@ use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
 use gate_quest::configure_camera_scaling;
 use gate_quest::editor::EditorPlugin;
-use gate_quest::selection::SelectionPlugin;
 use gate_quest::settings_overlay::{
     SettingsMenuOpen, settings_menu_button_system, show_settings_menu,
 };
@@ -26,7 +25,6 @@ use gate_quest::{pan_camera, zoom_camera};
 fn main() {
     let disable_egui = env::var_os("GATEQUEST_DISABLE_EGUI").is_some();
     let disable_editor = env::var_os("GATEQUEST_DISABLE_EDITOR").is_some();
-    let disable_selection = env::var_os("GATEQUEST_DISABLE_SELECTION").is_some();
 
     let mut app = App::new();
 
@@ -64,9 +62,6 @@ fn main() {
 
     if !disable_editor {
         app = app.add_plugins(EditorPlugin);
-    }
-    if !disable_selection {
-        app = app.add_plugins(SelectionPlugin);
     }
 
     app = app

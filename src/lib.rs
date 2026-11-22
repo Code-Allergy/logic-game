@@ -10,7 +10,6 @@ use bevy_egui::EguiContexts;
 pub mod camera;
 pub mod editor;
 pub mod fonts;
-pub mod selection;
 pub mod settings;
 pub mod settings_overlay;
 pub mod sim;
