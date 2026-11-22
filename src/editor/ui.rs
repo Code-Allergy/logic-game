@@ -1,393 +1,189 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, egui::{self, LayerId, Ui, UiBuilder}};
 
 use crate::{
     GameState,
-    sim::{GameCircuit, GameNode, GameNodeKind, WireKind},
+    sim::{
+        ActiveCircuit, CircuitLibrary, CreateGate, CreateWire, GateIdentity, GateKind, GateLabel,
+        GateType, RegisterDefinitions, WorkspaceDocument,
+    },
 };
 
-use super::{
-    CreateConnectionEvent, CreateGateEvent, EditorState, LoadWorkspaceEvent,
-    OpenSubcircuitEvent, SaveWorkspaceEvent, CloseSubcircuitViewEvent, SubcircuitNavigationFrame,
-};
-use crate::editor::workspace::load_saved_workspace_names;
-use crate::editor::workspace::read_workspace_from_disk;
+use super::{CloseSubcircuitViewEvent, EditorState, LoadWorkspaceEvent, SaveWorkspaceEvent};
+use crate::editor::workspace::{load_saved_workspace_names, read_workspace};
 
+fn gate_name(label: &GateLabel, ty: &GateType) -> String {
+    if label.value.trim().is_empty() {
+        ty.kind.display_name().to_string()
+    } else {
+        format!("{} ({})", label.value, ty.kind.display_name())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn editor_ui_system(
     mut contexts: EguiContexts,
     mut editor_state: ResMut<EditorState>,
-    mut create_gate_events: MessageWriter<CreateGateEvent>,
-    mut create_connection_events: MessageWriter<CreateConnectionEvent>,
+    mut create_gate_events: MessageWriter<CreateGate>,
+    mut create_wire_events: MessageWriter<CreateWire>,
+    mut register_definitions: MessageWriter<RegisterDefinitions>,
     mut load_workspace_events: MessageWriter<LoadWorkspaceEvent>,
     mut save_workspace_events: MessageWriter<SaveWorkspaceEvent>,
-    mut open_subcircuit_events: MessageReader<OpenSubcircuitEvent>,
-    mut close_subcircuit_view_events: MessageReader<CloseSubcircuitViewEvent>,
+    mut close_subcircuit_events: MessageWriter<CloseSubcircuitViewEvent>,
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     button_input: Res<ButtonInput<MouseButton>>,
     game_state: Res<State<GameState>>,
-    game_circuit: ResMut<GameCircuit>,
+    active: Res<ActiveCircuit>,
+    library: Res<CircuitLibrary>,
+    gates: Query<(&GateIdentity, &GateType, &GateLabel)>,
 ) -> Result<(), BevyError> {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
     }
 
     let ctx = contexts.ctx_mut()?;
-    let Ok(window) = q_window.single() else {
-        return Ok(());
-    };
-    let Ok((camera, camera_transform)) = q_camera.single() else {
-        return Ok(());
-    };
+    let Ok(window) = q_window.single() else { return Ok(()) };
+    let Ok((camera, camera_transform)) = q_camera.single() else { return Ok(()) };
 
-    // Build a root ui for panel.show(ui, ..) API used in this bevy_egui version.
     let mut root_ui = Ui::new(
         ctx.clone(),
         egui::Id::new("editor_root"),
-        UiBuilder::new()
-            .layer_id(LayerId::background())
-            .max_rect(ctx.viewport_rect()),
+        UiBuilder::new().layer_id(LayerId::background()).max_rect(ctx.viewport_rect()),
     );
 
-    let catalog = editor_state.workspace_catalog.clone();
-    let nodes: Vec<GameNode> = game_circuit.nodes.values().cloned().collect();
-    let source_node = editor_state
-        .connection_source
-        .and_then(|uuid| nodes.iter().find(|node| node.id == uuid).cloned());
-    let sink_node = editor_state
-        .connection_sink
-        .and_then(|uuid| nodes.iter().find(|node| node.id == uuid).cloned());
-
-    let select_gate_type = |editor_state: &mut EditorState, kind: GameNodeKind| {
-        editor_state.selected_gate_type = Some(kind);
-        editor_state.selected_gate_label = None;
-        editor_state.connection_mode = false;
-        editor_state.connection_source = None;
+    // Drop stale wire-builder picks (deleted gates).
+    if editor_state.connection_source.is_some_and(|e| !gates.contains(e)) {
+        editor_state.clear_connection();
+    }
+    if editor_state.connection_sink.is_some_and(|e| !gates.contains(e)) {
         editor_state.connection_sink = None;
-    };
+    }
+    if editor_state.current_workspace.is_none() {
+        editor_state.current_workspace = Some(active.name.clone());
+        editor_state.workspace_file_name = active.name.clone();
+    }
+    if editor_state.saved_workspaces.is_none() {
+        editor_state.saved_workspaces = Some(load_saved_workspace_names().unwrap_or_default());
+    }
 
-    let mut pending_load: Option<(String, GameCircuit)> = None;
+    let mut select_kind: Option<(GateKind, Option<String>)> = None;
+    let mut place_catalog: Option<usize> = None;
+    let mut open_catalog: Option<usize> = None;
+    let mut load_saved: Option<String> = None;
     let mut close_requested = false;
 
-    let pop_subcircuit_view = |editor_state: &mut EditorState,
-                               game_circuit: &GameCircuit|
-     -> Option<(String, GameCircuit)> {
-        let Some(frame) = editor_state.subcircuit_navigation_stack.pop() else {
-            warn!("CloseSubcircuitViewEvent ignored: already at root workspace");
-            return None;
-        };
-
-        let mut restored_parent = frame.parent_circuit;
-        if let Some(node) = restored_parent
-            .nodes
-            .get_mut(&frame.parent_subcircuit_node_id)
-        {
-            if let GameNodeKind::SubCircuit { circuit } = &mut node.kind {
-                *circuit = Box::new(game_circuit.clone());
-            } else {
-                warn!("Cannot persist subcircuit edits: parent node kind changed");
-            }
-        }
-
-        editor_state.current_workspace = frame.parent_workspace;
-        editor_state.workspace_file_name = frame.parent_workspace_file_name;
-        editor_state.workspace_breadcrumb = frame.parent_breadcrumb;
-        let restore_name = editor_state
-            .current_workspace
-            .clone()
-            .unwrap_or_else(|| restored_parent.name.clone());
-        Some((restore_name, restored_parent))
-    };
-
-    for _ in close_subcircuit_view_events.read() {
-        if pending_load.is_some() {
-            continue;
-        }
-        pending_load = pop_subcircuit_view(&mut editor_state, &game_circuit);
-    }
-
-    for ev in open_subcircuit_events.read() {
-        if pending_load.is_some() {
-            continue;
-        }
-
-        let Some(node) = game_circuit.nodes.get(&ev.node_id).cloned() else {
-            warn!("OpenSubcircuitEvent referenced missing node {}", ev.node_id);
-            continue;
-        };
-
-        if let GameNodeKind::SubCircuit { circuit } = &node.kind {
-            let child = circuit.as_ref().clone();
-            let parent_workspace = editor_state.current_workspace.clone();
-            let parent_workspace_file_name = editor_state.workspace_file_name.clone();
-            let child_name = if child.name.trim().is_empty() {
-                node.label.clone().unwrap_or_else(|| {
-                    format!("{}-{}", node.kind.display_name(), &node.id.to_string()[..8])
-                })
-            } else {
-                child.name.clone()
-            };
-
-            let current_workspace_breadcrumb = editor_state.workspace_breadcrumb.clone();
-            editor_state
-                .subcircuit_navigation_stack
-                .push(SubcircuitNavigationFrame {
-                    parent_subcircuit_node_id: node.id,
-                    parent_circuit: game_circuit.clone(),
-                    parent_workspace,
-                    parent_workspace_file_name,
-                    parent_breadcrumb: current_workspace_breadcrumb,
-                });
-            editor_state.current_workspace = Some(child_name.clone());
-            editor_state.workspace_file_name = child_name.clone();
-            editor_state.workspace_breadcrumb = if editor_state.workspace_breadcrumb.is_empty() {
-                child_name.clone()
-            } else {
-                format!("{} / {}", editor_state.workspace_breadcrumb, child_name)
-            };
-            pending_load = Some((child_name, child));
-        } else {
-            warn!(
-                "OpenSubcircuitEvent ignored for non-subcircuit node {}",
-                node.id
-            );
-        }
-    }
-
-    if let Some((name, circuit)) = pending_load {
-        load_workspace_events.write(LoadWorkspaceEvent { name, circuit });
-        return Ok(());
-    }
-
-    // Ensure stale node selections do not persist after topology changes.
-    if editor_state.connection_source.is_some() && source_node.is_none() {
-        editor_state.connection_source = None;
-        editor_state.connection_source_pin = 0;
-    }
-    if editor_state.connection_sink.is_some() && sink_node.is_none() {
-        editor_state.connection_sink = None;
-        editor_state.connection_sink_pin = 0;
-    }
-
-    let mut selected_place_gate = None::<(GameNodeKind, Option<String>)>;
-    let mut open_workspace = None::<(String, GameCircuit)>;
-    let mut open_saved_workspace = None::<(String, GameCircuit)>;
-
-    egui::Panel::left("editor_panel")
-        .resizable(true)
-        .show_inside(&mut root_ui, |ui| {
+    egui::Panel::left("editor_panel").resizable(true).show_inside(&mut root_ui, |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
             ui.heading("Component Editor");
             ui.separator();
 
-            if editor_state.current_workspace.is_none() {
-                editor_state.current_workspace = Some(game_circuit.name.clone());
-                editor_state.workspace_file_name = game_circuit.name.clone();
-            }
-
-            if editor_state.workspace_breadcrumb.is_empty() {
-                editor_state.workspace_breadcrumb = editor_state
-                    .current_workspace
-                    .clone()
-                    .unwrap_or_else(|| "workspace".to_string());
-            }
-
             if let Some(active_workspace) = &editor_state.current_workspace {
                 ui.label(format!("Active workspace: {active_workspace}"));
-                ui.label(format!("View: {}", editor_state.workspace_breadcrumb));
-            } else {
-                ui.label("Active workspace: (unsaved)");
-                if !editor_state.workspace_breadcrumb.is_empty() {
-                    ui.label(format!("View: {}", editor_state.workspace_breadcrumb));
-                }
             }
-
-            if !editor_state.subcircuit_navigation_stack.is_empty() {
-                if ui.button("← Back to parent circuit").clicked() {
-                    close_requested = true;
-                }
+            ui.label(format!("View: {}", editor_state.workspace_breadcrumb));
+            if !editor_state.subcircuit_navigation_stack.is_empty()
+                && ui.button("← Back to parent circuit").clicked()
+            {
+                close_requested = true;
             }
 
             ui.horizontal(|ui| {
                 ui.label("Workspace name");
                 ui.text_edit_singleline(&mut editor_state.workspace_file_name);
             });
-
-            if ui.button("Save Workspace").clicked()
-                && !editor_state.workspace_file_name.trim().is_empty()
-            {
+            if ui.button("Save Workspace").clicked() && !editor_state.workspace_file_name.trim().is_empty() {
                 let name = editor_state.workspace_file_name.trim().to_string();
                 editor_state.current_workspace = Some(name.clone());
                 save_workspace_events.write(SaveWorkspaceEvent { name });
             }
+            if let Some(status) = &editor_state.status {
+                ui.colored_label(egui::Color32::from_rgb(255, 200, 90), status);
+            }
 
             ui.separator();
-            if ui
-                .button(if editor_state.connection_mode {
-                    "✓ Connection Mode"
-                } else {
-                    "Connection Mode"
-                })
-                .clicked()
-            {
+            let label = if editor_state.connection_mode { "✓ Connection Mode" } else { "Connection Mode" };
+            if ui.button(label).clicked() {
                 editor_state.connection_mode = !editor_state.connection_mode;
-                if editor_state.connection_mode {
-                    editor_state.selected_gate_type = None;
-                    editor_state.connection_source = None;
-                    editor_state.connection_sink = None;
-                    editor_state.connection_source_pin = 0;
-                    editor_state.connection_sink_pin = 0;
-                } else {
-                    editor_state.connection_source = None;
-                    editor_state.connection_sink = None;
-                    editor_state.connection_source_pin = 0;
-                    editor_state.connection_sink_pin = 0;
-                    editor_state.connection_wire_kind = WireKind::default();
-                }
+                editor_state.selected_gate_type = None;
+                editor_state.clear_connection();
             }
 
             ui.separator();
             ui.heading("Add Components");
-
             ui.horizontal(|ui| {
-                for kind in [GameNodeKind::And, GameNodeKind::Or, GameNodeKind::Not] {
-                    if ui.button(kind.display_name()).clicked() {
-                        select_gate_type(&mut editor_state, kind);
-                    }
-                }
+                ui.label("Width (bits)");
+                ui.add(egui::DragValue::new(&mut editor_state.palette_width).range(1..=64));
             });
-            ui.horizontal(|ui| {
-                for kind in [
-                    GameNodeKind::Xor,
-                    GameNodeKind::Xnor,
-                    GameNodeKind::Nand,
-                    GameNodeKind::Nor,
-                ] {
-                    if ui.button(kind.display_name()).clicked() {
-                        select_gate_type(&mut editor_state, kind);
+            for (group, kinds) in GateKind::palette(editor_state.palette_width) {
+                ui.label(group);
+                ui.horizontal_wrapped(|ui| {
+                    for kind in kinds {
+                        let selected = editor_state.selected_gate_type.as_ref() == Some(&kind);
+                        if ui.selectable_label(selected, kind.display_name()).clicked() {
+                            select_kind = Some((kind, None));
+                        }
                     }
-                }
-            });
-            ui.horizontal(|ui| {
-                for kind in [GameNodeKind::Input, GameNodeKind::Output] {
-                    if ui.button(kind.display_name()).clicked() {
-                        select_gate_type(&mut editor_state, kind);
-                    }
-                }
-                if ui.button("CLOCK").clicked() {
-                    select_gate_type(
-                        &mut editor_state,
-                        GameNodeKind::Clock {
-                            period_ticks: 10,
-                            duty_ticks: 5,
-                        },
-                    );
-                }
-            });
-            ui.horizontal(|ui| {
-                for kind in [GameNodeKind::Input8, GameNodeKind::Input64] {
-                    if ui.button(kind.display_name()).clicked() {
-                        select_gate_type(&mut editor_state, kind);
-                    }
-                }
-                for kind in [GameNodeKind::Output8, GameNodeKind::Output64] {
-                    if ui.button(kind.display_name()).clicked() {
-                        select_gate_type(&mut editor_state, kind);
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                for kind in [GameNodeKind::Expand8, GameNodeKind::Expand64] {
-                    if ui.button(kind.display_name()).clicked() {
-                        select_gate_type(&mut editor_state, kind);
-                    }
-                }
-                for kind in [GameNodeKind::ReduceOr8, GameNodeKind::ReduceOr64] {
-                    if ui.button(kind.display_name()).clicked() {
-                        select_gate_type(&mut editor_state, kind);
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                for kind in [GameNodeKind::Buffer, GameNodeKind::Mux, GameNodeKind::Demux] {
-                    if ui.button(kind.display_name()).clicked() {
-                        select_gate_type(&mut editor_state, kind);
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                for kind in [GameNodeKind::TriStateBuffer, GameNodeKind::Counter8] {
-                    if ui.button(kind.display_name()).clicked() {
-                        select_gate_type(&mut editor_state, kind);
-                    }
-                }
-            });
+                });
+            }
 
             ui.separator();
             ui.heading("Subcircuits");
             ui.label("Place as cell:");
-            for (name, circuit) in &catalog {
+            for (i, (name, _)) in editor_state.workspace_catalog.iter().enumerate() {
                 if ui.button(format!("Place: {name}")).clicked() {
-                    selected_place_gate = Some((
-                        GameNodeKind::SubCircuit {
-                            circuit: Box::new(circuit.clone()),
-                        },
-                        Some(name.clone()),
-                    ));
-                    editor_state.connection_mode = false;
-                    editor_state.connection_source = None;
-                    editor_state.connection_sink = None;
+                    place_catalog = Some(i);
                 }
             }
 
             ui.separator();
             ui.heading("Open Workspace");
-            for (name, circuit) in &catalog {
+            for (i, (name, _)) in editor_state.workspace_catalog.iter().enumerate() {
                 if ui.button(format!("Open {name}")).clicked() {
-                    open_workspace = Some((name.clone(), circuit.clone()));
+                    open_catalog = Some(i);
                 }
             }
 
-            match load_saved_workspace_names() {
-                Ok(saved) if !saved.is_empty() => {
-                    ui.separator();
-                    ui.label("Saved workspace files:");
-                    for name in saved {
-                        if ui.button(format!("Load {name}")).clicked() {
-                            if let Ok(circuit) = read_workspace_from_disk(&name) {
-                                open_saved_workspace = Some((name.clone(), circuit));
-                            }
-                        }
-                    }
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Saved workspace files:");
+                if ui.small_button("Refresh").clicked() {
+                    editor_state.saved_workspaces = None;
                 }
-                Ok(_) => {
+            });
+            match editor_state.saved_workspaces.as_deref() {
+                Some([]) | None => {
                     ui.label("No saved workspace files yet.");
                 }
-                Err(err) => {
-                    ui.label(format!("Workspace files unavailable: {err}"));
+                Some(saved) => {
+                    for name in saved {
+                        if ui.button(format!("Load {name}")).clicked() {
+                            load_saved = Some(name.clone());
+                        }
+                    }
                 }
             }
 
             ui.separator();
             if editor_state.connection_mode {
-                match (source_node.as_ref(), sink_node.as_ref()) {
-                    (Some(source), Some(sink)) => {
-                        ui.label(format!("Connection source: {}", friendly_node_name(source)));
-                        ui.label(format!("Connection sink: {}", friendly_node_name(sink)));
-                        if let Some(source_name) = source_node.as_ref().map(friendly_node_name) {
-                            if let Some(sink_name) = sink_node.as_ref().map(friendly_node_name) {
-                                ui.label(format!("Source: {source_name}"));
-                                ui.label(format!("Sink: {sink_name}"));
-                            }
-                        }
-                        ui.label("Pick gates in the world, then confirm in Wire Builder.");
+                let source = editor_state.connection_source.and_then(|e| gates.get(e).ok());
+                let sink = editor_state.connection_sink.and_then(|e| gates.get(e).ok());
+                match (source, sink) {
+                    (Some((_, st, sl)), Some((_, kt, kl))) => {
+                        ui.label(format!("Source: {}", gate_name(sl, st)));
+                        ui.label(format!("Sink: {}", gate_name(kl, kt)));
+                        ui.label("Choose pins in the Wire Builder.");
                     }
-                    (Some(source), None) => {
-                        ui.label(format!("Connection source: {}", friendly_node_name(source)));
-                        ui.label("Select sink gate in world.");
+                    (Some((_, st, sl)), None) => {
+                        ui.label(format!("Source: {}", gate_name(sl, st)));
+                        ui.label("Select the sink gate in the world.");
                     }
                     _ => {
-                        ui.label("Select source gate first.");
+                        ui.label("Select the source gate first.");
                     }
                 }
             } else {
@@ -397,196 +193,179 @@ pub fn editor_ui_system(
             ui.separator();
             ui.label("Tips:");
             ui.label("• Right-click: drag gates");
-            ui.label("• Left-click: select/toggle inputs");
+            ui.label("• Left-click: select (properties window: toggle inputs, edit, delete)");
+            ui.label("• Delete key: delete the selected gate");
             ui.label("• Connection Mode: click source then sink, choose pins, then connect");
         });
+    });
 
-    if close_requested && pending_load.is_none() {
-        pending_load = pop_subcircuit_view(&mut editor_state, &game_circuit);
-    }
-
-    if let Some((name, circuit)) = pending_load {
-        load_workspace_events.write(LoadWorkspaceEvent { name, circuit });
+    if close_requested {
+        close_subcircuit_events.write(CloseSubcircuitViewEvent);
         return Ok(());
     }
 
-    if let Some((kind, label)) = selected_place_gate {
+    if let Some((kind, label)) = select_kind {
         editor_state.selected_gate_type = Some(kind);
         editor_state.selected_gate_label = label;
+        editor_state.connection_mode = false;
+        editor_state.clear_connection();
     }
 
-    if let Some((name, circuit)) = open_workspace {
+    if let Some(i) = place_catalog {
+        let (name, ws) = &editor_state.workspace_catalog[i];
+        let mut definitions: HashMap<_, _> = ws.definitions.clone();
+        definitions.insert(ws.root.id, Arc::new(ws.root.clone()));
+        register_definitions.write(RegisterDefinitions { definitions });
+        let kind = GateKind::SubCircuit { definition: ws.root.id };
+        let label = Some(name.clone());
+        editor_state.selected_gate_type = Some(kind);
+        editor_state.selected_gate_label = label;
+        editor_state.connection_mode = false;
+        editor_state.clear_connection();
+    }
+
+    let mut open = |editor_state: &mut EditorState, name: String, ws: Arc<WorkspaceDocument>| {
         editor_state.current_workspace = Some(name.clone());
         editor_state.workspace_file_name = name.clone();
         editor_state.workspace_breadcrumb = name.clone();
         editor_state.subcircuit_navigation_stack.clear();
-        load_workspace_events.write(LoadWorkspaceEvent { name, circuit });
+        editor_state.selected_gate_type = None;
+        editor_state.clear_connection();
+        load_workspace_events.write(LoadWorkspaceEvent { name, workspace: ws });
+    };
+
+    if let Some(i) = open_catalog {
+        let (name, ws) = editor_state.workspace_catalog[i].clone();
+        editor_state.status = None;
+        open(&mut editor_state, name, ws);
     }
 
-    if let Some((name, circuit)) = open_saved_workspace {
-        editor_state.current_workspace = Some(name.clone());
-        editor_state.workspace_file_name = name.clone();
-        editor_state.workspace_breadcrumb = name.clone();
-        editor_state.subcircuit_navigation_stack.clear();
-        load_workspace_events.write(LoadWorkspaceEvent { name, circuit });
+    if let Some(name) = load_saved {
+        // Reads the disk once, on the click.
+        match read_workspace(&name) {
+            Ok(ws) => {
+                editor_state.status = None;
+                open(&mut editor_state, name, Arc::new(ws));
+            }
+            Err(err) => {
+                warn!("Cannot load workspace {name}: {err}");
+                editor_state.status = Some(err.to_string());
+            }
+        }
     }
 
     if editor_state.connection_mode {
-        let source_name = source_node.as_ref().map(friendly_node_name);
-        let sink_name = sink_node.as_ref().map(friendly_node_name);
-        let source_pin_count = source_node
-            .as_ref()
-            .map_or(0, |node| node.kind.output_count());
-        let sink_pin_count = sink_node
-            .as_ref()
-            .map_or(0, |node| node.kind.input_count());
-        let source_pin_width = source_node
-            .as_ref()
-            .and_then(|node| node.kind.output_pin_width(editor_state.connection_source_pin))
-            .unwrap_or(0);
-        let sink_pin_width = sink_node
-            .as_ref()
-            .and_then(|node| node.kind.input_pin_width(editor_state.connection_sink_pin))
-            .unwrap_or(0);
-        let connection_width = editor_state.connection_wire_kind.bit_width();
-
-        egui::Window::new("Wire Builder")
-            .resizable(false)
-            .show(&mut root_ui, |ui| {
-                ui.label("Build a wire between gates");
-                if let Some(source_name) = source_name {
-                    ui.label(format!("Source: {source_name}"));
-                    draw_pin_selector(
+        let source = editor_state.connection_source.and_then(|e| gates.get(e).ok());
+        let sink = editor_state.connection_sink.and_then(|e| gates.get(e).ok());
+        egui::Window::new("Wire Builder").resizable(false).show(&root_ui, |ui| {
+            ui.label("Build a wire between gates");
+            let mut source_width = None;
+            match source {
+                Some((_, ty, label)) => {
+                    ui.label(format!("Source: {}", gate_name(label, ty)));
+                    let (_, outs) = library.pins(&ty.kind).unwrap_or_default();
+                    let (_, names) = library.pin_names(&ty.kind);
+                    source_width = draw_pin_selector(
                         ui,
                         "Source output pin",
                         &mut editor_state.connection_source_pin,
-                        source_pin_count,
+                        &outs,
+                        &names,
                     );
-                } else {
+                }
+                None => {
                     ui.label("Source: not selected");
                 }
-
-                if let Some(sink_name) = sink_name {
-                    ui.separator();
-                    ui.label(format!("Sink: {sink_name}"));
-                    draw_pin_selector(
+            }
+            ui.separator();
+            let mut sink_width = None;
+            match sink {
+                Some((_, ty, label)) => {
+                    ui.label(format!("Sink: {}", gate_name(label, ty)));
+                    let (ins, _) = library.pins(&ty.kind).unwrap_or_default();
+                    let (names, _) = library.pin_names(&ty.kind);
+                    sink_width = draw_pin_selector(
                         ui,
                         "Sink input pin",
                         &mut editor_state.connection_sink_pin,
-                        sink_pin_count,
+                        &ins,
+                        &names,
                     );
-                } else {
+                }
+                None => {
                     ui.label("Sink: not selected");
                 }
-
-                ui.separator();
-                ui.label("Wire type");
-                egui::ComboBox::from_label("Wire type")
-                    .selected_text(editor_state.connection_wire_kind.display_name())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut editor_state.connection_wire_kind,
-                            WireKind::Scalar,
-                            "Scalar (1-bit)",
-                        );
-                        ui.selectable_value(
-                            &mut editor_state.connection_wire_kind,
-                            WireKind::Vector { bits: 8 },
-                            "Vector (8-bit)",
-                        );
-                        ui.selectable_value(
-                            &mut editor_state.connection_wire_kind,
-                            WireKind::Vector { bits: 64 },
-                            "Vector (64-bit)",
-                        );
-                    });
-
-                let selected = editor_state.connection_source.is_some()
-                    && editor_state.connection_sink.is_some()
-                    && source_pin_count > 0
-                    && sink_pin_count > 0;
-                if ui
-                    .add_enabled(selected, egui::Button::new("Create Wire"))
-                    .clicked()
-                {
-                    let event = CreateConnectionEvent {
-                        source_node: editor_state.connection_source.unwrap(),
-                        source_pin: editor_state.connection_source_pin,
-                        sink_node: editor_state.connection_sink.unwrap(),
-                        sink_pin: editor_state.connection_sink_pin,
-                        wire_kind: editor_state.connection_wire_kind.clone(),
-                    };
-                    create_connection_events.write(event);
-                    editor_state.connection_source = None;
-                    editor_state.connection_sink = None;
-                }
-
-                if ui.button("Clear Selection").clicked() {
-                    editor_state.connection_source = None;
-                    editor_state.connection_sink = None;
-                    editor_state.connection_source_pin = 0;
-                    editor_state.connection_sink_pin = 0;
-                }
-                if !editor_state.connection_wire_kind.is_supported_by_sim() {
-                    ui.label(
-                        "Selected wire type is not yet supported by runtime; it will be stored as metadata.",
-                    );
-                }
-
-                if !editor_state
-                    .connection_wire_kind
-                    .fits_between(source_pin_width, sink_pin_width)
-                {
-                    ui.label(format!(
-                        "This wire ({connection_width}-bit) is wider than the selected pins."
-                    ));
-                }
-            });
+            }
+            let widths_match = source_width.is_some() && source_width == sink_width;
+            if source_width.is_some() && sink_width.is_some() && !widths_match {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 200, 90),
+                    format!(
+                        "Pin widths differ ({} vs {} bits); use Split/Merge/Extend.",
+                        source_width.unwrap_or(0),
+                        sink_width.unwrap_or(0)
+                    ),
+                );
+            }
+            if ui.add_enabled(widths_match, egui::Button::new("Create Wire")).clicked()
+                && let (Some((src, ..)), Some((snk, ..))) = (source, sink)
+            {
+                create_wire_events.write(CreateWire {
+                    source_gate: src.uuid,
+                    source_pin: editor_state.connection_source_pin,
+                    sink_gate: snk.uuid,
+                    sink_pin: editor_state.connection_sink_pin,
+                });
+                editor_state.clear_connection();
+            }
+            if ui.button("Clear Selection").clicked() {
+                editor_state.clear_connection();
+            }
+        });
     }
 
     // World placement on left-click.
     if let Some(kind) = editor_state.selected_gate_type.clone()
         && button_input.just_pressed(MouseButton::Left)
+        && !ctx.is_pointer_over_egui()
         && let Some(screen_pos) = window.cursor_position()
         && let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos)
     {
         let d = -ray.origin.z / ray.direction.z;
         let world_pos = (ray.origin + ray.direction * d).truncate();
-        if !ctx.is_pointer_over_egui() {
-            create_gate_events.write(CreateGateEvent {
-                kind,
-                label: editor_state.selected_gate_label.clone(),
-                position: world_pos,
-            });
-        }
+        create_gate_events.write(CreateGate {
+            kind,
+            label: editor_state.selected_gate_label.clone(),
+            position: world_pos,
+        });
     }
 
     Ok(())
 }
 
-fn friendly_node_name(node: &GameNode) -> String {
-    node.label.clone().unwrap_or_else(|| {
-        format!(
-            "{}-{}",
-            node.kind.display_name(),
-            &node.id.to_string()[..8.min(node.id.to_string().len())]
-        )
-    })
-}
-
-fn draw_pin_selector(ui: &mut egui::Ui, label: &str, selected_pin: &mut u8, pin_count: usize) {
-    if pin_count == 0 {
+/// Pin picker; returns the selected pin's width.
+fn draw_pin_selector(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected_pin: &mut u8,
+    widths: &[u8],
+    names: &[String],
+) -> Option<u8> {
+    if widths.is_empty() {
         ui.label(format!("{label}: (unavailable)"));
         *selected_pin = 0;
-        return;
+        return None;
     }
-    let clamped = (*selected_pin as usize).min(pin_count.saturating_sub(1));
+    let clamped = usize::from(*selected_pin).min(widths.len() - 1);
     *selected_pin = clamped as u8;
-    egui::ComboBox::from_label(label)
-        .selected_text(format!("pin {clamped}"))
-        .show_ui(ui, |ui| {
-            for pin in 0..pin_count {
-                ui.selectable_value(selected_pin, pin as u8, format!("pin {pin}"));
-            }
-        });
+    let describe = |pin: usize| {
+        let name = names.get(pin).map_or("", String::as_str);
+        format!("pin {pin} {name} ({} bit)", widths[pin])
+    };
+    egui::ComboBox::from_label(label).selected_text(describe(clamped)).show_ui(ui, |ui| {
+        for pin in 0..widths.len() {
+            ui.selectable_value(selected_pin, pin as u8, describe(pin));
+        }
+    });
+    widths.get(usize::from(*selected_pin)).copied()
 }

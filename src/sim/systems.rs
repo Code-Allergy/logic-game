@@ -1,379 +1,84 @@
-//! Bevy systems for the simulation editor view.
+//! Bevy systems for the simulation editor view: visuals, picking, egui
+//! panels, and workspace save.
 //!
-//! All systems in this file operate exclusively on the game-side model
-//! ([`GameCircuit`], [`GameNode`], [`GameWire`]) and the [`SimBridge`]
-//! translation layer. They never import `logi-sim` types directly.
+//! Visuals read the authoring components and the probe projections
+//! ([`GateValues`], [`WireState`]); edits are sent as authoring messages.
 
+use bevy::ecs::system::SystemParam;
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
-    editor::{LoadWorkspaceEvent, OpenSubcircuitEvent, SaveWorkspaceEvent},
-    temp::GateComponentSelectionEvent,
-    editor::workspace::save_workspace_to_disk,
-    UiPointerState,
+    MainCamera, UiPointerState, editor::OpenSubcircuitEvent,
+    editor::workspace::save_workspace, temp::GateComponentSelectionEvent,
 };
 
 use super::{
-    ActiveCircuit, AuthoringTopologyChanged, CircuitLayer, CircuitMember, ClockConfig,
-    ClockConfigChanged, ConnectionLine, DisplayConfig, DisplayConfigChanged, EntityLayerChanged,
-    GateAuthoringBundle, GateLabelChanged, GateMoved,
-    GateComponent, GateIdentity, GateLabel, GatePinState, GateType, GameCircuit, GameNode,
-    GameNodeKind, GateKindTag, LogicDisplay, PersistentGateData, SubCircuitInstance,
-    WireAuthoringBundle, WireCollection, WireEndpoints, WireIdentity, WireProperties, WireState,
-    WorkspaceRevision,
-    configuration_components, node_kind_from_components,
-    gate_display_name,
-    WireKind,
-    Selected, SelectedGate, SimBridge, SimCache, SimulationConfig, ThreadlessStepper,
-    TickRateMeter, calculate_connection_geometry, get_gate_sprite, spatial_grid::SpatialGrid,
+    AuthoringFeedback, CircuitLibrary, CircuitReader, DeleteGate, DeleteWire, DisplayConfig,
+    DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind, GateLabel, GateLabelChanged,
+    GateType, GateValues, InputDrive, LogicDisplay, SaveWorkspaceEvent, Selected, SelectedGate,
+    SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter,
+    WireEndpoints, WireState, WorkspaceRevision, calculate_connection_geometry, format_value,
+    get_gate_sprite, spatial_grid::SpatialGrid,
 };
 
 #[derive(Component)]
 pub struct SimBackground;
 
-const UNLIMITED_THREADLESS_BATCH: u64 = 4_096;
-const MAX_THREADLESS_TICKS_PER_FRAME: u64 = 4_096;
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Bridge flush (PreUpdate)
+// Visual attachment (reacting to authoring changes)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drain pending `AddNode`/`AddWire` responses, rebuild the cache reverse index
-/// when the circuit changes, and apply all queued [`SimEvent`]s to [`SimCache`].
-pub fn bridge_flush_system(
-    mut bridge: ResMut<SimBridge>,
-    mut cache: ResMut<SimCache>,
-    mut sim_config: ResMut<SimulationConfig>,
-    game_circuit: Res<GameCircuit>,
+/// Give new or re-kinded gates their sprite and value text.
+pub fn attach_gate_visuals_system(
+    mut commands: Commands,
+    gates: Query<(Entity, &GateType, Option<&Children>), Changed<GateType>>,
+    texts: Query<(), With<LogicDisplay>>,
 ) {
-    bridge.flush_pending();
-
-    // Rebuild the wire→pin reverse index whenever the circuit is mutated.
-    // `is_changed()` is true on the first frame (Added implies Changed), so the
-    // index is always populated before any events arrive.
-    if game_circuit.is_changed() {
-        cache.rebuild_index(&game_circuit, &bridge);
-    }
-    // Write through without change detection, then flag a change only when a
-    // value actually differs. Passing `&mut sim_config` directly marked the
-    // config changed every frame, which resent `SetTickRate` every frame.
-    let runner_before = sim_config.current_runner;
-    cache.sync_with_bridge(&bridge, sim_config.bypass_change_detection());
-    if sim_config.current_runner != runner_before {
-        sim_config.set_changed();
-    }
-}
-
-/// Apply validated authoring commands to focused ECS components. Configuration
-/// changes emit a topology notification consumed by the bridge rebuild path.
-#[allow(clippy::too_many_arguments)]
-pub fn apply_authoring_messages_system(
-    mut labels: MessageReader<GateLabelChanged>,
-    mut clocks: MessageReader<ClockConfigChanged>,
-    mut displays: MessageReader<DisplayConfigChanged>,
-    mut moves: MessageReader<GateMoved>,
-    mut layers: MessageReader<EntityLayerChanged>,
-    mut topology: MessageWriter<AuthoringTopologyChanged>,
-    mut revision: ResMut<WorkspaceRevision>,
-    mut gate_labels: Query<(&GateIdentity, &mut GateLabel, &GateType, &mut Name)>,
-    mut clock_configs: Query<(&GateIdentity, &mut ClockConfig)>,
-    mut display_configs: Query<(&GateIdentity, &mut DisplayConfig)>,
-    mut gate_transforms: Query<(&GateIdentity, &mut Transform)>,
-    mut gate_layers: Query<(&GateIdentity, &mut CircuitLayer)>,
-    mut wire_layers: Query<(&WireIdentity, &mut CircuitLayer), Without<GateIdentity>>,
-) {
-    for command in labels.read() {
-        if command.label.trim().is_empty() { continue; }
-        for (identity, mut label, gate_type, mut name) in &mut gate_labels {
-            if identity.uuid != command.gate_uuid { continue; }
-            label.value = command.label.trim().to_owned();
-            name.set(format!("{} {}", gate_type.kind.display_name(), label.value));
-            revision.mark_dirty();
-        }
-    }
-    for command in clocks.read() {
-        if command.period_ticks == 0 || command.duty_ticks == 0 || command.duty_ticks > command.period_ticks { continue; }
-        for (identity, mut config) in &mut clock_configs {
-            if identity.uuid != command.gate_uuid { continue; }
-            config.period_ticks = command.period_ticks;
-            config.duty_ticks = command.duty_ticks;
-            revision.mark_dirty();
-            topology.write(AuthoringTopologyChanged);
-        }
-    }
-    for command in displays.read() {
-        if !(1..=64).contains(&command.bits) { continue; }
-        for (identity, mut config) in &mut display_configs {
-            if identity.uuid != command.gate_uuid { continue; }
-            config.bits = command.bits;
-            config.radix = command.radix;
-            config.leading_zeroes = command.leading_zeroes;
-            revision.mark_dirty();
-            topology.write(AuthoringTopologyChanged);
-        }
-    }
-    for command in moves.read() {
-        for (identity, mut transform) in &mut gate_transforms {
-            if identity.uuid != command.gate_uuid { continue; }
-            transform.translation.x = command.position.x;
-            transform.translation.y = command.position.y;
-            revision.mark_dirty();
-        }
-    }
-    for command in layers.read() {
-        for (identity, mut layer) in &mut gate_layers {
-            if identity.uuid == command.entity_uuid {
-                layer.layer_uuid = command.layer_uuid;
-                layer.order = command.order;
-                revision.mark_dirty();
+    for (entity, ty, children) in &gates {
+        for child in children.into_iter().flat_map(|c| c.iter()) {
+            if texts.contains(child) {
+                commands.entity(child).despawn();
             }
         }
-        for (identity, mut layer) in &mut wire_layers {
-            if identity.uuid == command.entity_uuid {
-                layer.layer_uuid = command.layer_uuid;
-                layer.order = command.order;
-                revision.mark_dirty();
-            }
+        commands.entity(entity).try_insert(get_gate_sprite(&ty.kind));
+        if matches!(ty.kind, GateKind::Output { .. } | GateKind::Display { .. }) {
+            commands.spawn((
+                Text2d::new(""),
+                TextFont::from_font_size(22.0),
+                TextColor(Color::srgb(0.3, 1.0, 0.5)),
+                Transform::from_xyz(0.0, 0.0, 1.0),
+                LogicDisplay,
+                ChildOf(entity),
+            ));
         }
     }
 }
 
-/// Recompile the simulator from the ECS-derived snapshot after a validated
-/// topology/configuration command.
-pub fn rebuild_bridge_after_authoring_change_system(
-    mut changes: MessageReader<AuthoringTopologyChanged>,
-    snapshot: Res<GameCircuit>,
-    mut bridge: ResMut<SimBridge>,
-    mut cache: ResMut<SimCache>,
+/// Give new wires a line sprite; [`update_connections_system`] places it.
+pub fn attach_wire_visuals_system(
+    mut commands: Commands,
+    wires: Query<Entity, Added<WireEndpoints>>,
 ) {
-    if changes.read().next().is_none() { return; }
-    bridge.load_circuit(&snapshot);
-    cache.clear();
-    cache.rebuild_index(&snapshot, &bridge);
-}
-
-/// Capture direct inspector/plugin edits that bypass command messages.
-pub fn track_authoring_component_changes_system(
-    mut revision: ResMut<WorkspaceRevision>,
-    transforms: Query<Ref<Transform>, (With<GateIdentity>, Changed<Transform>)>,
-    labels: Query<Ref<GateLabel>, Changed<GateLabel>>,
-    clocks: Query<Ref<ClockConfig>, Changed<ClockConfig>>,
-    displays: Query<Ref<DisplayConfig>, Changed<DisplayConfig>>,
-    layers: Query<Ref<CircuitLayer>, Changed<CircuitLayer>>,
-    mut topology: MessageWriter<AuthoringTopologyChanged>,
-) {
-    let moved = transforms.iter().any(|value| !value.is_added());
-    let relabeled = labels.iter().any(|value| !value.is_added());
-    let clock_changed = clocks.iter().any(|value| !value.is_added());
-    let display_changed = displays.iter().any(|value| !value.is_added());
-    let layer_changed = layers.iter().any(|value| !value.is_added());
-    if moved || relabeled || clock_changed || display_changed || layer_changed {
-        revision.mark_dirty();
-    }
-    if clock_changed || display_changed {
-        topology.write(AuthoringTopologyChanged);
-    }
-}
-
-/// Copy the simulation snapshot from [`SimCache`] into ECS components so game
-/// rendering systems can consume plain component data only.
-pub fn sync_sim_cache_system(
-    cache: Res<SimCache>,
-    mut gate_query: Query<(&GateIdentity, &mut GatePinState, Option<&mut GateComponent>), Without<ConnectionLine>>,
-    mut wire_query: Query<(&mut ConnectionLine, &mut WireState), Without<GateComponent>>,
-) {
-    for (identity, mut state, legacy) in gate_query.iter_mut() {
-        let input_bits = cache.node_input_bits(identity.uuid);
-        let output_bits = cache.node_output_bits(identity.uuid);
-        if state.input_bits != input_bits || state.output_bits != output_bits {
-            state.input_bits = input_bits;
-            state.output_bits = output_bits;
-        }
-        if let Some(mut legacy) = legacy {
-            legacy.input_bits = input_bits;
-            legacy.output_bits = output_bits;
-        }
-    }
-
-    for (mut line, mut state) in wire_query.iter_mut() {
-        let bits = cache.wire_bits(line.id);
-        let value = bits != 0;
-        if line.value != value {
-            line.value = value;
-        }
-        state.value = bits;
-    }
-}
-
-/// Persist inspector/editor changes from the ECS gate record into the saved
-/// circuit model and project its presentation fields onto standard Bevy data.
-pub fn sync_gate_components_to_model_system(
-    mut gates: Query<
-        (&GateType, &GateLabel, &mut Name),
-        Or<(Changed<GateType>, Changed<GateLabel>)>,
-    >,
-) {
-    for (gate_type, label, mut name) in gates.iter_mut() {
-        name.set(format!("{} {}", gate_type.kind.display_name(), label.value));
-    }
-}
-
-/// Rebuild the portable bridge/serialization snapshot from the authoring ECS.
-/// The snapshot is derived data; editor systems must not treat it as authority.
-#[allow(clippy::type_complexity)]
-pub fn rebuild_circuit_snapshot_from_ecs_system(
-    active: Res<ActiveCircuit>,
-    revision: Res<WorkspaceRevision>,
-    mut last_revision: Local<Option<u64>>,
-    mut snapshot: ResMut<GameCircuit>,
-    gates: Query<(
-        &GateIdentity,
-        &GateLabel,
-        &GateType,
-        &Transform,
-        &PersistentGateData,
-        &CircuitMember,
-        &CircuitLayer,
-        Option<&ClockConfig>,
-        Option<&DisplayConfig>,
-        Option<&SubCircuitInstance>,
-    )>,
-    wires: Query<(&WireIdentity, &WireEndpoints, &WireProperties, &CircuitMember, &CircuitLayer)>,
-) {
-    if *last_revision == Some(revision.current) && !active.is_changed() {
-        return;
-    }
-    let mut nodes = HashMap::new();
-    for (identity, label, gate_type, transform, persistent, member, layer, clock, display, subcircuit) in &gates {
-        if member.circuit_uuid != active.uuid { continue; }
-        let mut custom_properties = persistent.custom_properties.clone();
-        custom_properties.insert("gatequest.layer_uuid".to_owned(), layer.layer_uuid.to_string());
-        custom_properties.insert("gatequest.layer_order".to_owned(), layer.order.to_string());
-        let node = GameNode {
-            id: identity.uuid,
-            kind: node_kind_from_components(gate_type, clock, display, subcircuit),
-            position: transform.translation.truncate(),
-            label: (!label.value.trim().is_empty()).then(|| label.value.clone()),
-            custom_properties,
-        };
-        nodes.insert(node.id, node);
-    }
-
-    let mut game_wires = HashMap::new();
-    for (identity, endpoints, properties, member, layer) in &wires {
-        if member.circuit_uuid != active.uuid { continue; }
-        let wire = super::GameWire {
-            id: identity.uuid,
-            source_node: endpoints.source_gate,
-            source_pin: endpoints.source_pin,
-            sink_node: endpoints.sink_gate,
-            sink_pin: endpoints.sink_pin,
-            kind: properties.kind.clone(),
-            layer_uuid: layer.layer_uuid,
-            layer_order: layer.order,
-        };
-        game_wires.insert(wire.id, wire);
-    }
-
-    snapshot.id = active.uuid;
-    snapshot.name.clone_from(&active.name);
-    snapshot.nodes = nodes;
-    snapshot.wires = game_wires;
-    *last_revision = Some(revision.current);
-}
-
-/// Drive threadless simulation mode by stepping the bridge directly from Bevy's
-/// main loop. This keeps wasm and other single-thread targets responsive while
-/// preserving the same externally-visible bridge APIs.
-pub fn drive_threadless_simulation(
-    bridge: ResMut<SimBridge>,
-    time: Res<Time>,
-    mut stepper: ResMut<ThreadlessStepper>,
-    sim_config: Res<SimulationConfig>,
-) {
-    if !bridge.is_running() {
-        return;
-    }
-
-    if sim_config.unlimited_tick_rate {
-        bridge.step_many(UNLIMITED_THREADLESS_BATCH);
-        return;
-    }
-
-    let tick_rate = sim_config.tick_rate.max(0.1);
-    stepper.pending_ticks += time.delta_secs_f64() * tick_rate;
-    let mut due_ticks = stepper.pending_ticks.floor() as u64;
-    if due_ticks > MAX_THREADLESS_TICKS_PER_FRAME {
-        due_ticks = MAX_THREADLESS_TICKS_PER_FRAME;
-    }
-    if due_ticks > 0 {
-        bridge.step_many(due_ticks);
-        stepper.pending_ticks -= due_ticks as f64;
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Initialization
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Spawn Bevy sprite entities for every node in the current [`GameCircuit`].
-pub fn draw_gates_system(game_circuit: Res<GameCircuit>, mut commands: Commands) {
-    for node in game_circuit.nodes.values() {
-        let sprite = get_gate_sprite(&node.kind);
-        let mut entity = commands.spawn((
-            sprite,
-            Name::new(gate_display_name(node.id, &node.label, &node.kind)),
-            Transform::from_xyz(node.position.x, node.position.y, 0.0),
+    for entity in &wires {
+        commands.entity(entity).try_insert((
+            Sprite { color: Color::WHITE, custom_size: Some(Vec2::new(1.0, 2.0)), ..default() },
+            Transform::from_xyz(0.0, 0.0, crate::temp::CONNECTION_Z_LEVEL),
             Visibility::Visible,
-            GateComponent::new(node),
-            GateAuthoringBundle::new(node, game_circuit.id),
         ));
-        let (clock, display, subcircuit) = configuration_components(node);
-        if let Some(config) = clock { entity.insert(config); }
-        if let Some(config) = display { entity.insert(config); }
-        if let Some(config) = subcircuit { entity.insert(config); }
-
-        let logic_bits = match node.kind {
-            GameNodeKind::Display { bits } => bits,
-            GameNodeKind::Output => 1,
-            GameNodeKind::Output8 => 8,
-            GameNodeKind::Output64 => 64,
-            _ => 0,
-        };
-
-        if logic_bits > 0 {
-            let digits = usize::from(logic_bits).div_ceil(4);
-            entity.with_children(|parent| {
-                parent.spawn((
-                    Text2d::new(format!("0x{:0digits$X}", 0)),
-                    TextFont::from_font_size(22.0),
-                    TextColor(Color::srgb(0.3, 1.0, 0.5)),
-                    Transform::from_xyz(0.0, 0.0, 1.0),
-                    LogicDisplay {
-                        node_id: node.id,
-                        bits: logic_bits,
-                    },
-                ));
-            });
-        }
     }
 }
 
-/// Draw a fallback background behind all simulation entities so the circuit is
-/// visible even if the scene is otherwise misconfigured at startup.
+/// Draw a background behind all simulation entities.
 pub fn draw_sim_background_system(mut commands: Commands, query: Query<Entity, With<SimBackground>>) {
     if !query.is_empty() {
         return;
     }
     commands.spawn((
         SimBackground,
-        Sprite {
-            color: Color::srgba(0.050, 0.229, 0.793, 1.000),
-            ..Default::default()
-        },
+        Sprite { color: Color::srgba(0.050, 0.229, 0.793, 1.000), ..Default::default() },
         Transform {
             translation: Vec3::new(0.0, 0.0, -1000.0),
             scale: Vec3::new(8000.0, 6000.0, 1.0),
@@ -383,249 +88,127 @@ pub fn draw_sim_background_system(mut commands: Commands, query: Query<Entity, W
     ));
 }
 
-/// Format multi-bit display inputs as a fixed-width hexadecimal value.
-pub fn update_logic_displays_system(
-    mut displays: Query<(&mut Text2d, &LogicDisplay, &ChildOf)>,
-    gate_inputs: Query<&GatePinState>,
+/// Fit the camera to the circuit after a workspace load.
+pub fn fit_camera_to_circuit_system(
+    active: Res<crate::sim::ActiveCircuit>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut cameras: Query<(&mut Projection, &mut Transform), With<MainCamera>>,
+    gates: Query<&Transform, (With<GateIdentity>, Without<MainCamera>)>,
 ) {
-    for (mut text, display, child_of) in displays.iter_mut() {
-        let Ok(inputs) = gate_inputs.get(child_of.parent()) else {
-            continue;
-        };
-        let mut value = 0_u64;
-        for bit in 0..display.bits.min(64) {
-            if (inputs.input_bits >> bit) & 1 != 0 {
-                value |= 1_u64 << bit;
-            }
-        }
-        let digits = usize::from(display.bits).div_ceil(4);
-        text.0 = format!("0x{value:0digits$X}");
-    }
-}
-
-/// Spawn line-sprite entities for every wire in the current [`GameCircuit`].
-pub fn draw_connections_system(
-    game_circuit: Res<GameCircuit>,
-    gate_query: Query<(&Transform, &GateComponent)>,
-    mut commands: Commands,
-) {
-    let wire_root = commands
-        .spawn((
-            Name::new("Wires"),
-            WireCollection,
-            Transform::default(),
-            Visibility::Visible,
-        ))
-        .id();
-    let positions: std::collections::HashMap<_, _> = gate_query
-        .iter()
-        .map(|(t, gc)| (gc.id, t.translation))
-        .collect();
-
-    for wire in game_circuit.wires.values() {
-        let (Some(&from), Some(&to)) = (
-            positions.get(&wire.source_node),
-            positions.get(&wire.sink_node),
-        ) else {
-            continue;
-        };
-        let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
-        let (color, thickness) = match wire.kind {
-            WireKind::Scalar => (Color::WHITE, 2.0),
-            WireKind::Vector { .. } => (Color::srgb(0.25, 0.7, 1.0), 4.0),
-        };
-        commands.spawn((
-            ChildOf(wire_root),
-            Sprite {
-                color,
-                custom_size: Some(Vec2::new(dist, thickness)),
-                ..Default::default()
-            },
-            Transform {
-                translation: mid,
-                rotation: rot,
-                scale: Vec3::ONE,
-            },
-            Visibility::Visible,
-            Name::new(format!("Wire {}", wire.id)),
-            ConnectionLine {
-                id: wire.id,
-                source_node: wire.source_node,
-                source_pin: wire.source_pin,
-                sink_node: wire.sink_node,
-                sink_pin: wire.sink_pin,
-                bit_width: u8::try_from(wire.kind.bit_width()).unwrap_or(u8::MAX),
-                value: false,
-                wire_kind: wire.kind.clone(),
-            },
-            WireAuthoringBundle::new(wire, game_circuit.id),
-        ));
-    }
-}
-
-/// Rebuild the spatial grid from current gate positions.
-pub fn rebuild_spatial_grid_system(
-    mut grid: ResMut<SpatialGrid>,
-    query: Query<(Entity, &Transform, &GateComponent)>,
-) {
-    grid.clear();
-    for (entity, transform, _) in query.iter() {
-        grid.insert(entity, transform.translation.truncate());
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-frame update systems
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Update worker tickrate when `SimulationConfig` changes.
-/// Only sends `SetTickRate` when the effective rate differs from the last one
-/// sent, so unrelated config changes (e.g. the runner type) do not resend it.
-pub fn update_tickrate_system(
-    sim_config: Res<SimulationConfig>,
-    bridge: Res<SimBridge>,
-    mut last_sent: Local<Option<Option<f64>>>,
-) {
-    if !sim_config.is_changed() {
+    if !active.is_changed() {
         return;
     }
-    let rate = if sim_config.unlimited_tick_rate {
-        None
-    } else {
-        Some(sim_config.tick_rate.max(0.1))
+    let (Ok((mut projection, mut transform)), Ok(window)) = (cameras.single_mut(), windows.single())
+    else {
+        return;
     };
-    if *last_sent != Some(rate) {
-        bridge.set_tick_rate(rate);
-        *last_sent = Some(rate);
+    let mut min = Vec2::splat(f32::INFINITY);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+    for t in &gates {
+        min = min.min(t.translation.truncate());
+        max = max.max(t.translation.truncate());
     }
+    if !min.x.is_finite() {
+        return;
+    }
+    let center = (min + max) * 0.5;
+    let size = (max - min).max(Vec2::ONE);
+    let scale = ((size.x / window.width().max(1.0)).max(size.y / window.height().max(1.0)) * 1.3)
+        .clamp(0.1, 10.0);
+    if let Projection::Orthographic(ortho) = projection.as_mut() {
+        ortho.scale = scale;
+        ortho.near = -10_000.0;
+        ortho.far = 10_000.0;
+    }
+    transform.translation = Vec3::new(center.x, center.y, 1000.0);
 }
 
-/// Recolour Input/Output gate sprites based on cached wire state.
-pub fn update_input_colours_system(
-    mut query: Query<(&mut Sprite, &GateType, &GatePinState)>,
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-frame visual updates
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Show output and display values as text.
+pub fn update_logic_displays_system(
+    mut displays: Query<(&mut Text2d, &ChildOf), With<LogicDisplay>>,
+    gates: Query<(&GateType, &GateValues, Option<&DisplayConfig>)>,
 ) {
-    for (mut sprite, gate_type, state) in query.iter_mut() {
-        match gate_type.kind {
-            GateKindTag::Input => {
-                // Input nodes have one output pin (pin 0).
-                let on = (state.output_bits & 1) != 0;
-                sprite.color = if on {
-                    Color::srgb(0.0, 1.0, 0.0)
-                } else {
-                    Color::srgb(0.8, 0.0, 0.0)
-                };
-            }
-            GateKindTag::Input8 => {
-                let mut on = true;
-                for pin in 0..8 {
-                    on &= ((state.output_bits >> pin) & 1) != 0;
-                }
-                sprite.color = if on {
-                    Color::srgb(0.0, 1.0, 0.0)
-                } else {
-                    Color::srgb(0.8, 0.0, 0.0)
-                };
-            }
-            GateKindTag::Input64 => {
-                let mut on = true;
-                for pin in 0..64 {
-                    on &= ((state.output_bits >> pin) & 1) != 0;
-                }
-                sprite.color = if on {
-                    Color::srgb(0.0, 1.0, 0.0)
-                } else {
-                    Color::srgb(0.8, 0.0, 0.0)
-                };
-            }
-            GateKindTag::Output => {
-                // Output nodes have one input pin (pin 0).
-                let on = (state.input_bits & 1) != 0;
-                sprite.color = if on {
-                    Color::srgb(1.0, 1.0, 1.0)
-                } else {
-                    Color::srgb(0.1, 0.1, 0.1)
-                };
-            }
-            GateKindTag::Output8 => {
-                let mut on = false;
-                for pin in 0..8 {
-                    on |= ((state.input_bits >> pin) & 1) != 0;
-                }
-                sprite.color = if on {
-                    Color::srgb(1.0, 1.0, 1.0)
-                } else {
-                    Color::srgb(0.1, 0.1, 0.1)
-                };
-            }
-            GateKindTag::Output64 => {
-                let mut on = false;
-                for pin in 0..64 {
-                    on |= ((state.input_bits >> pin) & 1) != 0;
-                }
-                sprite.color = if on {
-                    Color::srgb(1.0, 1.0, 1.0)
-                } else {
-                    Color::srgb(0.1, 0.1, 0.1)
-                };
-            }
-            _ => {}
+    for (mut text, child_of) in &mut displays {
+        let Ok((ty, values, config)) = gates.get(child_of.parent()) else { continue };
+        let value = values.inputs.first().copied().unwrap_or(0);
+        let formatted = format_value(value, ty.kind.width().unwrap_or(1), &config.copied().unwrap_or_default());
+        if text.0 != formatted {
+            text.0 = formatted;
         }
     }
 }
 
-/// Update connection-line transform when gates move and change color from cached wire state.
-pub fn update_connections_system(
-    game_circuit: Res<GameCircuit>,
-    gate_query: Query<(&Transform, &GateComponent)>,
-    mut line_query: Query<
-        (&mut Transform, &mut Sprite, &ConnectionLine),
-        Without<GateComponent>,
-    >,
-) {
-    type GatePositions = HashMap<uuid::Uuid, Vec3>;
-    let positions: GatePositions = gate_query
-        .iter()
-        .map(|(t, gc)| (gc.id, t.translation))
-        .collect();
+/// Recolour input and output gates from their values.
+pub fn update_input_colours_system(mut query: Query<(&mut Sprite, &GateType, &GateValues)>) {
+    for (mut sprite, ty, values) in &mut query {
+        let color = match ty.kind {
+            GateKind::Input { .. } => {
+                if values.outputs.first().copied().unwrap_or(0) != 0 {
+                    Color::srgb(0.0, 1.0, 0.0)
+                } else {
+                    Color::srgb(0.8, 0.0, 0.0)
+                }
+            }
+            GateKind::Output { .. } => {
+                if values.inputs.first().copied().unwrap_or(0) != 0 {
+                    Color::srgb(1.0, 1.0, 1.0)
+                } else {
+                    Color::srgb(0.1, 0.1, 0.1)
+                }
+            }
+            _ => continue,
+        };
+        if sprite.color != color {
+            sprite.color = color;
+        }
+    }
+}
 
-    for (mut transform, mut sprite, line) in line_query.iter_mut() {
-        let (Some(&from), Some(&to)) = (
-            positions.get(&line.source_node),
-            positions.get(&line.sink_node),
-        ) else {
+/// Place wire sprites between their gates and colour them by value.
+pub fn update_connections_system(
+    gates: Query<(&GateIdentity, &Transform), Without<WireEndpoints>>,
+    mut lines: Query<(&mut Transform, &mut Sprite, &WireEndpoints, &WireState), Without<GateIdentity>>,
+) {
+    let positions: HashMap<Uuid, Vec3> =
+        gates.iter().map(|(id, t)| (id.uuid, t.translation)).collect();
+    for (mut transform, mut sprite, ep, state) in &mut lines {
+        let (Some(&from), Some(&to)) = (positions.get(&ep.source_gate), positions.get(&ep.sink_gate))
+        else {
             continue;
         };
         let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
-        transform.translation = mid;
+        transform.translation = mid.with_z(crate::temp::CONNECTION_Z_LEVEL);
         transform.rotation = rot;
-        let (base_color, thickness) = match line.wire_kind {
-            WireKind::Scalar => (Color::WHITE, 2.0),
-            WireKind::Vector { .. } => (Color::srgb(0.25, 0.7, 1.0), 4.0),
-        };
+        let thickness = if state.width > 1 { 4.0 } else { 2.0 };
         sprite.custom_size = Some(Vec2::new(dist, thickness));
-
-        let on = line.value;
-        let line_is_supported = game_circuit
-            .wires
-            .get(&line.id)
-            .is_some_and(|wire| wire.kind.is_supported_by_sim());
-
-        sprite.color = if on {
-            Color::srgb(0.0, 1.0, 0.0)
-        } else if line_is_supported {
-            base_color
-        } else {
+        sprite.color = if !state.connected {
             Color::srgba(0.8, 0.6, 0.2, 1.0)
+        } else if state.value != 0 {
+            Color::srgb(0.0, 1.0, 0.0)
+        } else if state.width > 1 {
+            Color::srgb(0.25, 0.7, 1.0)
+        } else {
+            Color::WHITE
         };
     }
 }
 
-/// Update the spatial grid when gate transforms change.
+type MovedGate = (With<GateIdentity>, Changed<Transform>);
+
+/// Keep the spatial grid in step with gate positions.
 pub fn update_spatial_grid_system(
     mut grid: ResMut<SpatialGrid>,
-    query: Query<(Entity, &Transform), (With<GateComponent>, Changed<Transform>)>,
+    moved: Query<(Entity, &Transform), MovedGate>,
+    mut removed: RemovedComponents<GateIdentity>,
 ) {
-    for (entity, transform) in query.iter() {
+    for entity in removed.read() {
+        grid.remove(entity);
+    }
+    for (entity, transform) in &moved {
         grid.update(entity, transform.translation.truncate());
     }
 }
@@ -634,161 +217,104 @@ pub fn update_spatial_grid_system(
 // User interaction
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Toggle an Input gate's value on left-click.
+fn cursor_world_pos(
+    window: &Window,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+) -> Option<Vec2> {
+    let screen_pos = window.cursor_position()?;
+    let ray = camera.viewport_to_world(camera_transform, screen_pos).ok()?;
+    let distance = -ray.origin.z / ray.direction.z;
+    Some((ray.origin + ray.direction * distance).truncate())
+}
+
+fn hit(transform: &Transform, kind: &GateKind, world: Vec2) -> bool {
+    let half = kind.size() * 0.5;
+    let local = transform.to_matrix().inverse().transform_point3(world.extend(0.0)).truncate();
+    local.x.abs() <= half.x && local.y.abs() <= half.y
+}
+
+/// Left-click selects a gate.
 pub fn update_inputs_on_left_click(
     q_window: Query<&Window, With<PrimaryWindow>>,
-    editor_state: Option<Res<crate::editor::EditorState>>,
     ui_pointer: Res<UiPointerState>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-    query: Query<(Entity, &Transform, &GateComponent)>,
+    query: Query<(Entity, &Transform, &GateType)>,
     mut select_writer: MessageWriter<GateComponentSelectionEvent>,
 ) {
-    let is_connection_mode = editor_state
-        .as_ref()
-        .is_some_and(|state| state.connection_mode);
-
-    if ui_pointer.over_egui {
+    if ui_pointer.over_egui || !mouse_button_input.just_pressed(MouseButton::Left) {
         return;
     }
-    let Ok((camera, camera_transform)) = q_camera.single() else {
+    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single()) else {
         return;
     };
-    let Ok(window) = q_window.single() else {
-        return;
-    };
-
-    if mouse_button_input.just_pressed(MouseButton::Left) {
-        let Some(screen_pos) = window.cursor_position() else {
-            return;
-        };
-        let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) else {
-            return;
-        };
-        let distance = -ray.origin.z / ray.direction.z;
-        let world_pos = ray.origin + ray.direction * distance;
-
-        for (entity, transform, gate) in query.iter() {
-            let half = Vec2::splat(25.0);
-            let local = transform
-                .to_matrix()
-                .inverse()
-                .transform_point3(world_pos)
-                .truncate();
-                if local.x >= -half.x && local.x <= half.x && local.y >= -half.y && local.y <= half.y {
-                    select_writer.write(GateComponentSelectionEvent {
-                        entity,
-                        component: gate.clone(),
-                    });
-
-                if !is_connection_mode {
-                    return;
-                }
-                break;
-            }
-        }
+    let Some(world) = cursor_world_pos(window, camera, camera_transform) else { return };
+    if let Some((entity, ..)) = query.iter().find(|(_, t, ty)| hit(t, &ty.kind, world)) {
+        select_writer.write(GateComponentSelectionEvent { entity });
     }
 }
 
-/// Update [`SelectedGate`] resource when a selection event fires.
+/// Update [`SelectedGate`] when a selection event fires.
 pub fn update_selected_gate(
     mut event_reader: MessageReader<GateComponentSelectionEvent>,
     mut selected_gate: ResMut<SelectedGate>,
 ) {
     for event in event_reader.read() {
-        let entry = (event.entity, event.component.id);
-        if selected_gate.0 != Some(entry) {
-            selected_gate.0 = Some(entry);
-            info!("Selected gate: {:?}", event.component.id);
-        }
+        selected_gate.0 = Some(event.entity);
     }
 }
 
 /// Right-click to select and drag gates.
+#[allow(clippy::too_many_arguments)]
 pub fn gate_selection_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     grid: Res<SpatialGrid>,
     ui_pointer: Res<UiPointerState>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
-    query: Query<(Entity, &Transform), With<GateComponent>>,
+    query: Query<(&Transform, &GateType), With<GateIdentity>>,
     mut commands: Commands,
     selected_query: Query<Entity, With<Selected>>,
 ) {
-    if ui_pointer.over_egui {
+    if ui_pointer.over_egui || !mouse_button_input.just_pressed(MouseButton::Right) {
         return;
     }
-    if !mouse_button_input.just_pressed(MouseButton::Right) {
-        return;
-    }
-    for e in selected_query.iter() {
+    for e in &selected_query {
         commands.entity(e).remove::<Selected>();
     }
-
-    let Ok(window) = q_window.single() else {
+    let (Ok(window), Ok((camera, global_transform))) = (q_window.single(), q_camera.single()) else {
         return;
     };
-    let Ok((camera, global_transform)) = q_camera.single() else {
-        return;
-    };
-    let Some(screen_pos) = window.cursor_position() else {
-        return;
-    };
-    let Ok(ray) = camera.viewport_to_world(global_transform, screen_pos) else {
-        return;
-    };
-    let distance = -ray.origin.z / ray.direction.z;
-    let world_pos = ray.origin + ray.direction * distance;
-
-    let nearby = grid.query_near(world_pos.truncate(), 50.0);
-    for entity in nearby {
-        if let Ok((ent, transform)) = query.get(entity) {
-            let half = Vec2::splat(25.0);
-            let local = transform
-                .to_matrix()
-                .inverse()
-                .transform_point3(world_pos)
-                .truncate();
-            if local.x >= -half.x && local.x <= half.x && local.y >= -half.y && local.y <= half.y {
-                let offset = transform.translation.truncate() - world_pos.truncate();
-                commands.entity(ent).insert(Selected { offset });
-                break;
-            }
+    let Some(world) = cursor_world_pos(window, camera, global_transform) else { return };
+    for entity in grid.query_near(world, 100.0) {
+        if let Ok((transform, ty)) = query.get(entity)
+            && hit(transform, &ty.kind, world)
+        {
+            let offset = transform.translation.truncate() - world;
+            commands.entity(entity).insert(Selected { offset });
+            break;
         }
     }
 }
 
-/// Move selected gate while right mouse button is held.
+/// Move the selected gate while the right mouse button is held.
 pub fn drag_selected_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     ui_pointer: Res<UiPointerState>,
-    mut query: Query<(&mut Transform, &Selected, &GateComponent)>,
+    mut query: Query<(&mut Transform, &Selected), With<GateIdentity>>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
 ) {
-    if ui_pointer.over_egui {
+    if ui_pointer.over_egui || !mouse_button_input.pressed(MouseButton::Right) {
         return;
     }
-    if !mouse_button_input.pressed(MouseButton::Right) {
-        return;
-    }
-    let Ok((camera, camera_transform)) = q_camera.single() else {
+    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single()) else {
         return;
     };
-    let Ok(window) = q_window.single() else {
-        return;
-    };
-    let Some(screen_pos) = window.cursor_position() else {
-        return;
-    };
-    let Ok(ray) = camera.viewport_to_world(camera_transform, screen_pos) else {
-        return;
-    };
-    let distance = -ray.origin.z / ray.direction.z;
-    let world_pos = (ray.origin + ray.direction * distance).truncate();
-
-    for (mut transform, selected, _gate) in query.iter_mut() {
-        let new_pos = world_pos + selected.offset;
+    let Some(world) = cursor_world_pos(window, camera, camera_transform) else { return };
+    for (mut transform, selected) in &mut query {
+        let new_pos = world + selected.offset;
         transform.translation.x = new_pos.x;
         transform.translation.y = new_pos.y;
     }
@@ -798,12 +324,14 @@ pub fn drag_selected_system(
 // Egui panels
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
     mut tick_rate_meter: ResMut<TickRateMeter>,
     mut contexts: EguiContexts,
     mut bridge: ResMut<SimBridge>,
-    cache: Res<SimCache>,
+    diagnostics: Res<SimDiagnostics>,
+    feedback: Res<AuthoringFeedback>,
     time: Res<Time>,
     game_state: Res<State<crate::GameState>>,
 ) -> Result<(), BevyError> {
@@ -816,555 +344,359 @@ pub fn simulation_config_ui_system(
 
     egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (Hz)");
-
-        if ui
-            .checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate")
-            .changed()
-        {
+        if ui.checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate").changed() {
             tick_rate_meter.reset(tick_count);
         }
-
-        if sim_config.unlimited_tick_rate {
-            ui.label(match tick_rate_meter.average_hz {
-                Some(rate) => format!("Average tick rate: {}", format_si_hz(rate)),
-                None => "Average tick rate: measuring…".to_owned(),
-            });
-        }
-
+        ui.label(match tick_rate_meter.average_hz {
+            Some(rate) => format!("Average tick rate: {}", format_si_hz(rate)),
+            None => "Average tick rate: measuring…".to_owned(),
+        });
         ui.add_enabled(
             !sim_config.unlimited_tick_rate,
-            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=10_000_000.0).text("Tick Rate"),
+            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=10_000_000.0)
+                .logarithmic(true)
+                .text("Tick Rate"),
         );
 
         ui.separator();
-
-        let mut selected_runner = sim_config.current_runner;
-        egui::ComboBox::from_label("Active Runner")
-            .selected_text(selected_runner.to_string())
-            .show_ui(ui, |ui| {
-                for &runner_type in logi_sim::engine::RunnerType::ALL {
-                    ui.selectable_value(&mut selected_runner, runner_type, runner_type.to_string());
-                }
-            });
-
-        if selected_runner != sim_config.current_runner {
-            sim_config.current_runner = selected_runner;
-            bridge.set_runner_type(selected_runner);
-        }
-
-        ui.separator();
         ui.label(format!("Sim ticks: {tick_count}"));
-        ui.label(format!("Running: {}", cache.is_running()));
+        ui.label(format!("Running: {}", bridge.is_running()));
         ui.horizontal(|ui| {
-            if ui
-                .button(if cache.is_running() { "Pause" } else { "Play" })
-                .clicked()
-            {
-                if cache.is_running() {
-                    bridge.pause();
-                } else {
-                    bridge.resume();
-                }
+            let running = bridge.is_running();
+            if ui.button(if running { "Pause" } else { "Play" }).clicked() {
+                bridge.set_running(!running);
             }
             if ui.button("Step").clicked() {
-                bridge.step();
+                bridge.step(1);
             }
         });
+        match diagnostics.running_revision {
+            Some(rev) => ui.label(format!("Circuit revision: {rev}")),
+            None => ui.label("Circuit: compiling…"),
+        };
+        if let Some(error) = &diagnostics.compile_error {
+            ui.separator();
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 120, 90),
+                format!("Edit {} not applied; the previous circuit keeps running:", error.revision),
+            );
+            for message in &error.messages {
+                ui.colored_label(egui::Color32::from_rgb(255, 120, 90), message);
+            }
+        }
+        if let Some(message) = &feedback.message {
+            ui.separator();
+            ui.colored_label(egui::Color32::from_rgb(255, 200, 90), message);
+        }
     });
     Ok(())
 }
 
 pub(crate) fn format_si_hz(rate: f64) -> String {
-    const UNITS: [(&str, f64); 4] = [
-        ("GHz", 1_000_000_000.0),
-        ("MHz", 1_000_000.0),
-        ("kHz", 1_000.0),
-        ("Hz", 1.0),
-    ];
-    let (unit, scale) = UNITS
-        .into_iter()
-        .find(|(_, scale)| rate >= *scale)
-        .unwrap_or(("Hz", 1.0));
+    const UNITS: [(&str, f64); 4] =
+        [("GHz", 1_000_000_000.0), ("MHz", 1_000_000.0), ("kHz", 1_000.0), ("Hz", 1.0)];
+    let (unit, scale) = UNITS.into_iter().find(|(_, scale)| rate >= *scale).unwrap_or(("Hz", 1.0));
     format!("{:.1} {unit}", rate / scale)
 }
 
+/// Message writers used by the gate properties window.
+#[derive(SystemParam)]
+pub struct GateEditWriters<'w> {
+    labels: MessageWriter<'w, GateLabelChanged>,
+    kinds: MessageWriter<'w, SetGateKind>,
+    inputs: MessageWriter<'w, SetInputValue>,
+    displays: MessageWriter<'w, DisplayConfigChanged>,
+    delete_gate: MessageWriter<'w, DeleteGate>,
+    delete_wire: MessageWriter<'w, DeleteWire>,
+    open: MessageWriter<'w, OpenSubcircuitEvent>,
+}
+
+type SelectedGateQuery = (
+    &'static GateIdentity,
+    &'static GateType,
+    &'static GateLabel,
+    &'static GateValues,
+    Option<&'static InputDrive>,
+    Option<&'static DisplayConfig>,
+);
+
+fn width_drag(ui: &mut egui::Ui, label: &str, value: &mut u8, range: std::ops::RangeInclusive<u8>) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(value).range(range));
+    });
+}
+
+/// Edit the parameters of a kind. Returns the edited kind.
+fn edit_kind_params(ui: &mut egui::Ui, kind: &GateKind) -> GateKind {
+    let mut k = kind.clone();
+    match &mut k {
+        GateKind::Clock { period, duty, phase } => {
+            ui.horizontal(|ui| {
+                ui.label("Period");
+                ui.add(egui::DragValue::new(period).range(1..=u32::MAX));
+            });
+            let max = *period;
+            ui.horizontal(|ui| {
+                ui.label("Duty");
+                ui.add(egui::DragValue::new(duty).range(0..=max));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Phase");
+                ui.add(egui::DragValue::new(phase));
+            });
+        }
+        GateKind::Merge { widths } => {
+            let mut parts = widths.len() as u8;
+            let mut part_w = widths.first().copied().unwrap_or(1);
+            width_drag(ui, "Parts", &mut parts, 1..=64);
+            width_drag(ui, "Part width", &mut part_w, 1..=64);
+            let uniform = widths.iter().all(|&w| w == part_w);
+            if (usize::from(parts) != widths.len() || !uniform)
+                && u32::from(parts) * u32::from(part_w) <= 64
+            {
+                *widths = vec![part_w; usize::from(parts)];
+            }
+            ui.label(format!("Output: {} bits", widths.iter().map(|&w| u32::from(w)).sum::<u32>()));
+        }
+        GateKind::SrLatch | GateKind::SubCircuit { .. } => {}
+        _ => {
+            if let Some(mut w) = k.width() {
+                width_drag(ui, "Width", &mut w, 1..=64);
+                if Some(w) != k.width() {
+                    k = k.with_width(w);
+                }
+            }
+            match &mut k {
+                GateKind::Const { w, value } => {
+                    ui.horizontal(|ui| {
+                        ui.label("Value");
+                        ui.add(egui::DragValue::new(value).hexadecimal(1, false, true));
+                    });
+                    *value &= logi_sim::netlist::mask(*w);
+                }
+                GateKind::Split { w, lo, len } => {
+                    let w = *w;
+                    width_drag(ui, "Low bit", lo, 0..=w - 1);
+                    let max_len = w - *lo;
+                    width_drag(ui, "Length", len, 1..=max_len);
+                }
+                GateKind::Extend { from, to, signed } => {
+                    let to = *to;
+                    width_drag(ui, "From width", from, 1..=to);
+                    ui.checkbox(signed, "Sign extend");
+                }
+                GateKind::Ram { addr_bits, .. } | GateKind::Rom { addr_bits, .. } => {
+                    width_drag(ui, "Address bits", addr_bits, 1..=logi_sim::netlist::MAX_ADDR_BITS);
+                }
+                _ => {}
+            }
+        }
+    }
+    k
+}
+
+/// The properties window of the selected gate: values, parameters, input
+/// drive, wires, delete.
+#[allow(clippy::too_many_arguments)]
 pub fn ui_for_selected_gate(
     mut contexts: EguiContexts,
     mut sel: ResMut<SelectedGate>,
-    game_circuit: Res<GameCircuit>,
-    bridge: Res<SimBridge>,
-    sim_gate_query: Query<&GateComponent>,
-    mut label_changes: MessageWriter<GateLabelChanged>,
-    mut clock_changes: MessageWriter<ClockConfigChanged>,
-    mut display_changes: MessageWriter<DisplayConfigChanged>,
-    mut open_subcircuit_events: MessageWriter<OpenSubcircuitEvent>,
+    library: Res<CircuitLibrary>,
+    keys: Res<ButtonInput<KeyCode>>,
+    gates: Query<SelectedGateQuery>,
+    names: Query<(&GateIdentity, &GateLabel, &GateType)>,
+    wires: Query<(Entity, &WireEndpoints, &WireState)>,
+    mut writers: GateEditWriters,
     game_state: Res<State<crate::GameState>>,
 ) -> Result<(), BevyError> {
     if game_state.get() != &crate::GameState::Simulating {
         return Ok(());
     }
-
+    let Some(entity) = sel.0 else { return Ok(()) };
+    let Ok((identity, ty, label, values, drive, display)) = gates.get(entity) else {
+        sel.0 = None;
+        return Ok(());
+    };
     let ctx = contexts.ctx_mut()?;
-    let selected_gate = sel.0.and_then(|(entity, _)| sim_gate_query.get(entity).ok());
 
-    if let Some((_, node_id)) = sel.0 {
-        let Some(mut edited_node) = game_circuit.nodes.get(&node_id).cloned() else {
-            sel.0 = None;
-            return Ok(());
-        };
+    if !ctx.egui_wants_keyboard_input()
+        && (keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace))
+    {
+        writers.delete_gate.write(DeleteGate { entity });
+        sel.0 = None;
+        return Ok(());
+    }
 
-        let mut needs_save = false;
-        let mut needs_sim_reload = false;
-    let mut input_toggles = Vec::<(u8, bool)>::new();
-        let mut open_subcircuit = false;
+    let gate_name = |uuid: Uuid| {
+        names
+            .iter()
+            .find(|(id, ..)| id.uuid == uuid)
+            .map(|(_, l, t)| if l.value.is_empty() { t.kind.display_name().to_string() } else { l.value.clone() })
+            .unwrap_or_else(|| "?".into())
+    };
+    let (in_names, out_names) = library.pin_names(&ty.kind);
+    let mut close = false;
 
-        egui::Window::new("Gate Properties")
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.label(format!("UUID: {}", edited_node.id));
-                ui.label(format!("Kind: {}", edited_node.kind.display_name()));
+    egui::Window::new("Gate Properties").collapsible(false).show(ctx, |ui| {
+        ui.label(format!("Kind: {}", ty.kind.display_name()));
+        ui.label(format!("UUID: {}", identity.uuid));
 
-                match edited_node.kind {
-                    GameNodeKind::Input => {
-                        let current_val = selected_gate
-                            .as_ref()
-                            .map_or(false, |outputs| (outputs.output_bits & 1) != 0);
-                        let mut value = current_val;
-                        if ui.checkbox(&mut value, "Driven Value").changed() {
-                            input_toggles.push((0, value));
-                        }
-                    }
-                    GameNodeKind::Input8 => {
-                        for bit in 0..8_u8 {
-                            let mut value = selected_gate.as_ref().map_or(false, |outputs| {
-                                ((outputs.output_bits >> bit) & 1) != 0
-                            });
-                            if ui.checkbox(&mut value, format!("Bit {bit}")).changed() {
-                                input_toggles.push((bit, value));
+        let mut label_text = label.value.clone();
+        if ui.text_edit_singleline(&mut label_text).changed() {
+            writers.labels.write(GateLabelChanged { gate_uuid: identity.uuid, label: label_text });
+        }
+
+        if let (Some(drive), GateKind::Input { w }) = (drive, &ty.kind) {
+            ui.separator();
+            let mut value = drive.value;
+            if *w == 1 {
+                let mut on = value != 0;
+                if ui.checkbox(&mut on, "Driven value").changed() {
+                    value = u64::from(on);
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("Driven value");
+                    ui.add(egui::DragValue::new(&mut value).hexadecimal(1, false, true));
+                });
+                if *w <= 16 {
+                    ui.horizontal_wrapped(|ui| {
+                        for bit in (0..*w).rev() {
+                            let mut on = (value >> bit) & 1 != 0;
+                            if ui.checkbox(&mut on, format!("{bit}")).changed() {
+                                value ^= 1 << bit;
                             }
                         }
-                    }
-                    GameNodeKind::Input64 => {
-                        for bit in 0..64_u8 {
-                            let mut value = selected_gate.as_ref().map_or(false, |outputs| {
-                                ((outputs.output_bits >> bit) & 1) != 0
-                            });
-                            if ui.checkbox(&mut value, format!("Bit {bit}")).changed() {
-                                input_toggles.push((bit, value));
-                            }
-                        }
-                    }
-                    _ => {}
+                    });
                 }
-
-                let mut label_text = edited_node.label.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut label_text).changed() {
-                    let trimmed = label_text.trim();
-                    edited_node.label = if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    };
-                    needs_save = true;
-                }
-
-                match &mut edited_node.kind {
-                    GameNodeKind::Clock {
-                        period_ticks,
-                        duty_ticks,
-                    } => {
-                        let mut period = *period_ticks;
-                        let mut duty = *duty_ticks;
-
-                        ui.horizontal(|ui| {
-                            ui.label("Clock period (ticks)");
-                            if ui
-                                .add(egui::DragValue::new(&mut period).range(1_u32..=u32::MAX))
-                                .changed()
-                            {
-                                needs_save = true;
-                                needs_sim_reload = true;
-                            }
-                        });
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut duty)
-                                    .range(1_u32..=period.max(1_u32)),
-                            )
-                            .changed()
-                        {
-                            needs_save = true;
-                            needs_sim_reload = true;
-                        }
-                        if period == 0 {
-                            period = 1;
-                            needs_save = true;
-                            needs_sim_reload = true;
-                        }
-
-                        if *period_ticks != period {
-                            needs_save = true;
-                            needs_sim_reload = true;
-                        }
-
-                        if duty == 0 || duty > period {
-                            duty = period;
-                            needs_save = true;
-                            needs_sim_reload = true;
-                        }
-
-                        *period_ticks = period;
-                        *duty_ticks = duty;
-                    }
-                    GameNodeKind::Display { bits } => {
-                        let mut display_bits = *bits;
-                        ui.label("Display width (hex digits / 4 bits)");
-                        if ui
-                            .add(egui::DragValue::new(&mut display_bits).range(1_u8..=64_u8))
-                            .changed()
-                        {
-                            let next_bits = display_bits.max(1);
-                            if *bits != next_bits {
-                                *bits = next_bits;
-                                needs_save = true;
-                                needs_sim_reload = true;
-                            }
-                        }
-                    }
-                    GameNodeKind::SubCircuit { circuit } => {
-                        ui.separator();
-                        ui.label(format!("Subcircuit: {}", circuit.name));
-                        ui.label("Pin mapping is positional: in/output index maps to pin number.");
-                        let input_pins = subcircuit_interface_pins(circuit, true);
-                        let output_pins = subcircuit_interface_pins(circuit, false);
-
-                        ui.separator();
-                        ui.label(format!("Inputs: {}", input_pins.len()));
-                        for (index, name) in input_pins.iter().enumerate() {
-                            ui.label(format!("  in {index}: {name}"));
-                        }
-                        ui.separator();
-                        ui.label(format!("Outputs: {}", output_pins.len()));
-                        for (index, name) in output_pins
-                            .iter()
-                            .enumerate()
-                        {
-                            ui.label(format!("  out {index}: {name}"));
-                        }
-                        if ui.button("Open in new view").clicked() {
-                            open_subcircuit = true;
-                        }
-                    }
-                    _ => {}
-                }
-
-                if ui.button("Close").clicked() {
-                    sel.0 = None;
-                }
-            });
-
-        if needs_save {
-            if let Some(label) = edited_node.label.clone() {
-                label_changes.write(GateLabelChanged { gate_uuid: edited_node.id, label });
             }
-            match edited_node.kind {
-                GameNodeKind::Clock { period_ticks, duty_ticks } => {
-                    clock_changes.write(ClockConfigChanged {
-                        gate_uuid: edited_node.id,
-                        period_ticks,
-                        duty_ticks,
-                    });
-                }
-                GameNodeKind::Display { bits } => {
-                    display_changes.write(DisplayConfigChanged {
-                        gate_uuid: edited_node.id,
-                        bits,
-                        radix: super::DisplayRadix::Hexadecimal,
-                        leading_zeroes: true,
-                    });
-                }
-                _ => {}
+            if value != drive.value {
+                writers.inputs.write(SetInputValue { entity, value });
             }
         }
 
-        for (pin, value) in input_toggles {
-            bridge.set_input(edited_node.id, pin, value);
+        ui.separator();
+        ui.label("Pins");
+        for (i, v) in values.inputs.iter().enumerate() {
+            let name = in_names.get(i).map_or("?", String::as_str);
+            ui.label(format!("  in {i} ({name}) = {v:#x}"));
+        }
+        for (i, v) in values.outputs.iter().enumerate() {
+            let name = out_names.get(i).map_or("?", String::as_str);
+            ui.label(format!("  out {i} ({name}) = {v:#x}"));
         }
 
-        if open_subcircuit {
-            open_subcircuit_events.write(OpenSubcircuitEvent {
-                node_id: edited_node.id,
+        ui.separator();
+        let edited = edit_kind_params(ui, &ty.kind);
+        if edited != ty.kind {
+            writers.kinds.write(SetGateKind { entity, kind: edited });
+        }
+
+        if let Some(config) = display {
+            let mut radix = config.radix;
+            egui::ComboBox::from_label("Radix")
+                .selected_text(format!("{radix:?}"))
+                .show_ui(ui, |ui| {
+                    for r in [DisplayRadix::Hexadecimal, DisplayRadix::Decimal, DisplayRadix::Binary] {
+                        ui.selectable_value(&mut radix, r, format!("{r:?}"));
+                    }
+                });
+            let mut leading = config.leading_zeroes;
+            ui.checkbox(&mut leading, "Leading zeroes");
+            if radix != config.radix || leading != config.leading_zeroes {
+                writers.displays.write(DisplayConfigChanged {
+                    gate_uuid: identity.uuid,
+                    radix,
+                    leading_zeroes: leading,
+                });
+            }
+        }
+
+        if let GateKind::SubCircuit { definition } = ty.kind {
+            ui.separator();
+            let name = library.get(definition).map_or("(missing definition)", |d| d.name.as_str());
+            ui.label(format!("Subcircuit: {name}"));
+            if ui.button("Open in new view").clicked() {
+                writers.open.write(OpenSubcircuitEvent { entity });
+            }
+        }
+
+        ui.separator();
+        ui.label("Wires");
+        for (wire, ep, state) in &wires {
+            let text = if ep.sink_gate == identity.uuid {
+                format!("in {} <- {} out {}", ep.sink_pin, gate_name(ep.source_gate), ep.source_pin)
+            } else if ep.source_gate == identity.uuid {
+                format!("out {} -> {} in {}", ep.source_pin, gate_name(ep.sink_gate), ep.sink_pin)
+            } else {
+                continue;
+            };
+            ui.horizontal(|ui| {
+                let text = if state.connected { text } else { format!("{text} (not simulated)") };
+                ui.label(text);
+                if ui.small_button("Delete").clicked() {
+                    writers.delete_wire.write(DeleteWire { entity: wire });
+                }
             });
         }
-    } else {
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Delete gate").clicked() {
+                writers.delete_gate.write(DeleteGate { entity });
+                close = true;
+            }
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+    });
+    if close {
         sel.0 = None;
     }
     Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Save / Load
+// Save
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn save_on_exit_system(
-    mut exit_events: MessageReader<AppExit>,
-    game_circuit: Res<GameCircuit>,
-) {
-    if exit_events.read().next().is_some() {
-        let name = if game_circuit.name.trim().is_empty() {
-            "simulation"
-        } else {
-            game_circuit.name.as_str()
-        };
-        if let Err(err) = save_workspace_to_disk(name, &game_circuit) {
-            eprintln!("Failed to save simulation: {err}");
-        } else {
-            info!("Saved simulation workspace: {name}");
-        }
-    }
-}
-
-pub fn workspace_io_system(
-    mut commands: Commands,
-    mut game_circuit: ResMut<GameCircuit>,
-    mut active_circuit: ResMut<ActiveCircuit>,
-    mut revision: ResMut<WorkspaceRevision>,
-    mut bridge: ResMut<SimBridge>,
-    mut cache: ResMut<SimCache>,
-    mut grid: ResMut<SpatialGrid>,
-    mut load_events: MessageReader<LoadWorkspaceEvent>,
-    mut save_events: MessageReader<SaveWorkspaceEvent>,
-    gate_entities: Query<Entity, With<GateComponent>>,
-    connection_entities: Query<(Entity, Option<&ChildOf>), With<ConnectionLine>>,
-    wire_roots: Query<Entity, With<WireCollection>>,
-    background_entities: Query<Entity, With<SimBackground>>,
-) {
-    let mut has_event = false;
-    for ev in save_events.read() {
-        has_event = true;
-        if let Err(err) = save_workspace_to_disk(&ev.name, &game_circuit) {
-            eprintln!("Failed to save workspace {}: {err}", ev.name);
-        } else {
-            revision.mark_saved();
-        }
-    }
-
-    let mut load_circuit: Option<GameCircuit> = None;
-    for ev in load_events.read() {
-        has_event = true;
-        load_circuit = Some(ev.circuit.clone());
-    }
-    if !has_event {
+pub fn save_on_exit_system(mut exit_events: MessageReader<AppExit>, reader: CircuitReader) {
+    if exit_events.read().next().is_none() {
         return;
     }
-
-    // Load requests replace the active circuit and rebuild simulation visuals.
-    if let Some(next_circuit) = load_circuit {
-        *active_circuit = ActiveCircuit::from_circuit(&next_circuit);
-        *game_circuit = next_circuit;
-        revision.current = 0;
-        revision.saved = 0;
-
-        // Clear simulation cache and replace the running graph.
-        cache.clear();
-        grid.clear();
-        bridge.load_circuit(&game_circuit);
-        apply_power_on_reset(&mut bridge, &game_circuit);
-        cache.rebuild_index(&game_circuit, &bridge);
-
-        // Wipe all old gate/connection visuals so we can rebuild cleanly.
-        let mut entities_to_despawn: Vec<Entity> = gate_entities
-            .iter()
-            .chain(
-                connection_entities
-                    .iter()
-                    .filter_map(|(entity, parent)| parent.is_none().then_some(entity)),
-            )
-            .chain(wire_roots.iter())
-            .chain(background_entities.iter())
-            .collect();
-        entities_to_despawn.sort_unstable_by_key(|entity| entity.index());
-        entities_to_despawn.dedup();
-        for entity in entities_to_despawn {
-            commands.entity(entity).despawn();
-        }
-
-        // Spawn fresh visuals for the new circuit.
-        let mut positions: HashMap<Uuid, Vec3> = HashMap::new();
-        for node in game_circuit.nodes.values() {
-            positions.insert(
-                node.id,
-                Vec3::new(node.position.x, node.position.y, 0.0),
-            );
-
-            let sprite = get_gate_sprite(&node.kind);
-            let mut entity = commands.spawn((
-                sprite,
-                Name::new(gate_display_name(node.id, &node.label, &node.kind)),
-                Transform::from_xyz(node.position.x, node.position.y, 0.0),
-                Visibility::Visible,
-                GateComponent::new(node),
-                GateAuthoringBundle::new(node, game_circuit.id),
-            ));
-            let (clock, display, subcircuit) = configuration_components(node);
-            if let Some(config) = clock { entity.insert(config); }
-            if let Some(config) = display { entity.insert(config); }
-            if let Some(config) = subcircuit { entity.insert(config); }
-            let logic_bits = match node.kind {
-                GameNodeKind::Display { bits } => bits,
-                GameNodeKind::Output => 1,
-                GameNodeKind::Output8 => 8,
-                GameNodeKind::Output64 => 64,
-                _ => 0,
-            };
-            if logic_bits > 0 {
-                let digits = usize::from(logic_bits).div_ceil(4);
-                entity.with_children(|parent| {
-                    parent.spawn((
-                        Text2d::new(format!("0x{:0digits$X}", 0)),
-                        TextFont::from_font_size(22.0),
-                        TextColor(Color::srgb(0.3, 1.0, 0.5)),
-                        Transform::from_xyz(0.0, 0.0, 1.0),
-                        LogicDisplay {
-                            node_id: node.id,
-                            bits: logic_bits,
-                        },
-                    ));
-                });
-            }
-            let entity = entity.id();
-            grid.insert(entity, node.position);
-        }
-
-        let wire_root = commands
-            .spawn((
-                Name::new("Wires"),
-                WireCollection,
-                Transform::default(),
-                Visibility::Visible,
-            ))
-            .id();
-        for wire in game_circuit.wires.values() {
-            let (Some(&from), Some(&to)) = (
-                positions.get(&wire.source_node),
-                positions.get(&wire.sink_node),
-            ) else {
-                continue;
-            };
-            let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
-            let (color, thickness) = match wire.kind {
-                WireKind::Scalar => (Color::WHITE, 2.0),
-                WireKind::Vector { .. } => (Color::srgb(0.25, 0.7, 1.0), 4.0),
-            };
-            commands.spawn((
-                ChildOf(wire_root),
-                Sprite {
-                    color,
-                    custom_size: Some(Vec2::new(dist, thickness)),
-                    ..Default::default()
-                },
-                Transform {
-                    translation: mid,
-                    rotation: rot,
-                    scale: Vec3::ONE,
-                },
-                Visibility::Visible,
-                ConnectionLine {
-                    id: wire.id,
-                    source_node: wire.source_node,
-                    source_pin: wire.source_pin,
-                    sink_node: wire.sink_node,
-                    sink_pin: wire.sink_pin,
-                    bit_width: u8::try_from(wire.kind.bit_width()).unwrap_or(u8::MAX),
-                    value: false,
-                    wire_kind: wire.kind.clone(),
-                },
-                WireAuthoringBundle::new(wire, game_circuit.id),
-                Name::new(format!("Wire {}", wire.id)),
-            ));
-        }
-
-        // Re-create the background behind the circuit.
-        commands.spawn((
-            SimBackground,
-            Sprite {
-                color: Color::srgba(0.050, 0.229, 0.793, 1.000),
-                ..Default::default()
-            },
-            Transform {
-                translation: Vec3::new(0.0, 0.0, -1000.0),
-                scale: Vec3::new(8000.0, 6000.0, 1.0),
-                ..Default::default()
-            },
-            Visibility::Visible,
-        ));
-    }
-}
-
-fn subcircuit_interface_pins(circuit: &GameCircuit, input: bool) -> Vec<String> {
-    let pins: Vec<&GameNode> = subcircuit_interface_nodes(circuit, input);
-    let mut names: Vec<String> = Vec::with_capacity(pins.len());
-    for pin in pins {
-        names.push(interface_node_label(pin));
-    }
-    names
-}
-
-fn subcircuit_interface_nodes<'a>(circuit: &'a GameCircuit, input: bool) -> Vec<&'a GameNode> {
-    let mut pins: Vec<&GameNode> = circuit
-        .nodes
-        .values()
-        .filter(|node| {
-            if input {
-                matches!(
-                    node.kind,
-                    GameNodeKind::Input | GameNodeKind::Input8 | GameNodeKind::Input64
-                )
-            } else {
-                matches!(
-                    node.kind,
-                    GameNodeKind::Output | GameNodeKind::Output8 | GameNodeKind::Output64
-                )
-            }
-        })
-        .collect();
-
-    pins.sort_by(|a, b| {
-        let a_label = a.label.as_deref().unwrap_or("");
-        let b_label = b.label.as_deref().unwrap_or("");
-        a_label.cmp(b_label).then_with(|| a.id.cmp(&b.id))
-    });
-    pins
-}
-
-fn interface_node_label(node: &GameNode) -> String {
-    node.label
-        .clone()
-        .unwrap_or_else(|| format!("{}-{}", node.kind.display_name(), &node.id.to_string()[..8]))
-}
-
-fn apply_power_on_reset(bridge: &mut SimBridge, game_circuit: &GameCircuit) {
-    let Some(reset_node) = game_circuit.nodes.values().find(|node| {
-        matches!(node.kind, GameNodeKind::Input | GameNodeKind::Input8 | GameNodeKind::Input64)
-            && node.label.as_deref() == Some("Reset")
-    }) else {
-        return;
+    let name = if reader.active.name.trim().is_empty() {
+        "simulation".to_string()
+    } else {
+        reader.active.name.clone()
     };
-    let reset_bits = reset_node.kind.output_count().min(usize::from(u8::MAX));
+    match save_workspace(&name, &reader.workspace()) {
+        Ok(()) => info!("Saved simulation workspace: {name}"),
+        Err(err) => error!("Failed to save simulation: {err}"),
+    }
+}
 
-    bridge.pause();
-    for pin in 0..reset_bits {
-        bridge.set_input(reset_node.id, pin as u8, true);
+/// Write the open circuit to disk on [`SaveWorkspaceEvent`].
+pub fn workspace_io_system(
+    mut save_events: MessageReader<SaveWorkspaceEvent>,
+    reader: CircuitReader,
+    mut revision: ResMut<WorkspaceRevision>,
+    mut feedback: ResMut<AuthoringFeedback>,
+    editor_state: Option<ResMut<crate::editor::EditorState>>,
+) {
+    let mut saved = false;
+    for ev in save_events.read() {
+        match save_workspace(&ev.name, &reader.workspace()) {
+            Ok(()) => {
+                revision.mark_saved();
+                feedback.message = Some(format!("Saved workspace \"{}\"", ev.name));
+                saved = true;
+            }
+            Err(err) => feedback.message = Some(format!("Failed to save \"{}\": {err}", ev.name)),
+        }
     }
-    let settled_at = bridge.tick_count().saturating_add(64);
-    for _ in 0..64 {
-        bridge.step();
+    if saved && let Some(mut editor_state) = editor_state {
+        editor_state.saved_workspaces = None;
     }
-    while bridge.tick_count() < settled_at {
-        std::hint::spin_loop();
-    }
-    for pin in 0..reset_bits {
-        bridge.set_input(reset_node.id, pin as u8, false);
-    }
-    bridge.resume();
 }
