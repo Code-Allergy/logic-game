@@ -2,6 +2,7 @@
 
 mod app;
 mod chips;
+mod expand;
 mod sim;
 
 use std::sync::Arc;

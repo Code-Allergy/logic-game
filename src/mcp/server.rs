@@ -57,7 +57,8 @@ pub struct EditArgs {
     /// Operations, applied in order. Each is an object with one field:
     /// {"add": [node entries]}, {"wire": [[source, sink, ...], ...]},
     /// {"unwire": [sink references]}, {"remove": [part references]},
-    /// {"set": {"part": reference, ...parameters}}, {"layout": true}.
+    /// {"set": {"part": reference, ...parameters}}, {"layout": true},
+    /// {"expand": true | [refs] | {"parts": true | [refs], "deep": true}}.
     /// A node entry is {"name": n, "type": kind, ...parameters} or
     /// {"name": n, "use": chip}, with "count" for an array. A reference
     /// is name[index].pin:bits, e.g. "fa[0..7].Cout" or "a:0..4".

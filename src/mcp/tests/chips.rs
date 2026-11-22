@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::{adder8, edit, empty, refused};
 use crate::mcp::{chips, testing, view};
-use crate::sim::{CircuitLibrary, GateKind};
+use crate::sim::{CircuitDocument, CircuitLibrary, GateKind, WorkspaceDocument};
 
 /// One part of `kind` between ports named after its pins, as chip `name`.
 fn wrapper(name: &str, entry: Value) -> Value {
@@ -50,6 +50,27 @@ fn every_word_level_kind_expands_to_gates_that_do_the_same() {
         json!({"type": "Delay", "w": 4}),
         json!({"type": "Register", "w": 4}),
         json!({"type": "DLatch", "w": 4}),
+        // Wide parts, built from chunks, and the edge cases of the
+        // chunking: 1-bit rests, a rest of several bits, one bit.
+        json!({"type": "Add", "w": 64}),
+        json!({"type": "Add", "w": 9}),
+        json!({"type": "Add", "w": 20}),
+        json!({"type": "Register", "w": 32}),
+        json!({"type": "Not", "w": 17}),
+        json!({"type": "Mux", "w": 16}),
+        json!({"type": "Mux", "w": 9}),
+        json!({"type": "Switch", "w": 12}),
+        json!({"type": "LtU", "w": 16}),
+        json!({"type": "LtU", "w": 9}),
+        json!({"type": "LtU", "w": 13}),
+        json!({"type": "LtU", "w": 1}),
+        json!({"type": "Eq", "w": 16}),
+        json!({"type": "Eq", "w": 9}),
+        json!({"type": "Eq", "w": 1}),
+        json!({"type": "ReduceXor", "w": 16}),
+        json!({"type": "ReduceOr", "w": 9}),
+        json!({"type": "ReduceAnd", "w": 64}),
+        json!({"type": "ReduceXor", "w": 2}),
     ];
     let mut edits = Vec::new();
     for (i, kind) in kinds.iter().enumerate() {
@@ -66,35 +87,119 @@ fn every_word_level_kind_expands_to_gates_that_do_the_same() {
     assert_eq!(suite.failed(), 0, "{}", suite.text());
     assert_eq!(suite.results.len(), kinds.len());
 
-    // The gate chips hold 1-bit gates and wiring only.
-    for def in ws
-        .definitions
-        .values()
-        .filter(|d| d.name.ends_with("_gates"))
-    {
-        for n in &def.nodes {
-            let one_bit = n.kind.is_port()
-                || matches!(n.kind, GateKind::Split { .. } | GateKind::Merge { .. })
-                || n.kind.width() == Some(1);
-            assert!(one_bit, "{}: {:?}", def.name, n.kind);
+    // The gate chips hold 1-bit gates, wiring and chips only.
+    for def in ws.definitions.values() {
+        if !def.name.starts_with("word") && !def.name.starts_with("gates") {
+            check_generated(&ws, def);
         }
     }
-    let adder = ws
-        .definitions
-        .values()
-        .find(|d| d.name == "Add_6_gates")
-        .unwrap();
-    let text = view::outline(&ws, adder, None, 200);
+
+    let chip = |name: &str| {
+        ws.definitions
+            .values()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("no chip {name}"))
+    };
+    let text = view::outline(&ws, chip("Add_6_gates"), None, 200);
     assert!(
         text.contains("ports: in a[6] b[6] cin | out cout sum[6]"),
         "{text}"
     );
-    // Six full adders of five gates.
+    // Six full adder cells, carries chained.
     assert!(
-        text.starts_with("circuit \"Add_6_gates\" (chip): 35 parts"),
+        text.starts_with("circuit \"Add_6_gates\" (chip): 11 parts"),
         "{text}"
     );
-    assert!(text.contains("g0  Xor w=1  a<-a:0  b<-b:0"), "{text}");
+    assert!(text.contains("chips: full_adder_cell x6"), "{text}");
+    assert!(
+        text.contains("fa[1]  full_adder_cell  a<-a:1  b<-b:1  cin<-fa[0].cout"),
+        "{text}"
+    );
+    let cell = view::outline(&ws, chip("full_adder_cell"), None, 200);
+    assert!(
+        cell.starts_with("circuit \"full_adder_cell\" (chip): 10 parts, 12 wires"),
+        "{cell}"
+    );
+    // A 64-bit adder is eight 8-bit ones.
+    let wide = view::outline(&ws, chip("Add_64_gates"), None, 200);
+    assert!(wide.contains("chips: Add_8_gates x8"), "{wide}");
+    assert!(
+        wide.contains("byte[7]  Add_8_gates  a<-a:56..64  b<-b:56..64  cin<-byte[6].cout"),
+        "{wide}"
+    );
+}
+
+/// Every part of a generated chip is a port, a 1-bit gate or constant,
+/// wiring or a chip; every part but the generated adapters has a label;
+/// and the circuit is small enough to read.
+fn check_generated(ws: &WorkspaceDocument, def: &CircuitDocument) {
+    let mut parts = 0;
+    for n in &def.nodes {
+        let adapter = matches!(n.kind, GateKind::Split { .. } | GateKind::Merge { .. });
+        let allowed = n.kind.is_port()
+            || adapter
+            || matches!(n.kind, GateKind::SubCircuit { .. })
+            || (n.kind.width() == Some(1) && !chips::expandable(&n.kind));
+        assert!(allowed, "{}: {:?}", def.name, n.kind);
+        if !(adapter && n.label.is_none()) {
+            parts += 1;
+            assert!(n.label.is_some(), "{}: {:?} has no label", def.name, n.kind);
+        }
+    }
+    assert!(
+        parts <= MAX_GENERATED_PARTS,
+        "{} has {parts} parts:\n{}",
+        def.name,
+        view::outline(ws, def, None, 200)
+    );
+}
+
+/// The most parts (not counting generated adapters) a generated circuit
+/// may have.
+const MAX_GENERATED_PARTS: usize = 70;
+
+#[test]
+fn every_gate_chip_is_small_and_made_of_one_bit_gates() {
+    let widths = [2u8, 3, 7, 8, 9, 15, 16, 17, 31, 33, 57, 63, 64];
+    let types = [
+        "Not",
+        "And",
+        "Or",
+        "Xor",
+        "Nand",
+        "Nor",
+        "Xnor",
+        "Mux",
+        "Switch",
+        "Delay",
+        "Register",
+        "DLatch",
+        "Add",
+        "Eq",
+        "LtU",
+        "ReduceOr",
+        "ReduceAnd",
+        "ReduceXor",
+    ];
+    let mut add = Vec::new();
+    for ty in types {
+        for w in widths {
+            add.push(json!({"name": format!("{ty}_{w}"), "type": ty, "w": w}));
+        }
+    }
+    let (ws, report) = edit(&empty(), json!({"ops": [{"add": add}, {"expand": true}]}));
+    assert_eq!(
+        report.circuits[0].expanded,
+        types.len() * widths.len(),
+        "{report}"
+    );
+    assert!(report.build.is_ok(), "{report}");
+    for def in ws.definitions.values() {
+        check_generated(&ws, def);
+    }
+    // The same request gives the same workspace.
+    let (again, _) = edit(&empty(), json!({"ops": [{"add": add}, {"expand": true}]}));
+    assert_eq!(again, ws);
 }
 
 #[test]
@@ -107,13 +212,16 @@ fn expand_names_its_chip_once_and_refuses_what_has_no_gates() {
             {"expand": true}
         ]}),
     );
-    // The three adders share one chip; the 1-bit Not and the Rom stay.
+    // The three adders share one chip, of a cell; the 1-bit Not and the
+    // Rom stay.
     assert_eq!(report.circuits[0].expanded, 3, "{report}");
     assert!(
-        report.to_string().contains("(3 expanded to gates)"),
+        report
+            .to_string()
+            .contains("(3 expanded to gates, 2 chips made)"),
         "{report}"
     );
-    assert_eq!(ws.definitions.len(), 1);
+    assert_eq!(ws.definitions.len(), 2);
     assert_eq!(
         chips::gate_chip_name(&GateKind::Add { w: 8 }),
         "Add_8_gates"
