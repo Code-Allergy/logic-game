@@ -5,7 +5,10 @@
 //! circuits; word-level and gate-level cells become primitives, keeping
 //! their widths. Where a cell pin takes bits that are not one whole output
 //! pin (a slice, a concatenation, constants), `Split`, `Merge` and `Const`
-//! nodes are added. Every circuit is then laid out with
+//! nodes are added. Cells with no primitive of their own (multipliers,
+//! shifts, comparisons, flip-flops with resets, memories) are built from
+//! several in the submodules: `build` (helpers that fold constants),
+//! `arith` and `state`. Every circuit is then laid out with
 //! [`super::layout::layout`].
 //!
 //! The result is a save format version 6 file ([`SourceFile`], with a
@@ -27,27 +30,74 @@ use super::source::{
 use super::{CircuitLibrary, GateKind, WorkspaceDocument};
 use crate::editor::workspace::workspace_key;
 
+mod arith;
+mod build;
+mod state;
+
 /// Cell types the importer maps (for the error message).
 pub const SUPPORTED_CELLS: &[&str] = &[
     "$not",
     "$pos",
+    "$neg",
     "$and",
     "$or",
     "$xor",
     "$xnor",
     "$mux",
+    "$pmux",
+    "$bmux",
+    "$demux",
+    "$bwmux",
     "$add",
     "$sub",
+    "$mul",
+    "$div",
+    "$mod",
+    "$alu",
+    "$shl",
+    "$shr",
+    "$sshl",
+    "$sshr",
+    "$shift",
+    "$shiftx",
     "$eq",
     "$ne",
+    "$eqx",
+    "$nex",
+    "$bweqx",
+    "$lt",
+    "$le",
+    "$gt",
+    "$ge",
     "$reduce_and",
     "$reduce_or",
     "$reduce_xor",
     "$reduce_xnor",
     "$reduce_bool",
     "$logic_not",
+    "$logic_and",
+    "$logic_or",
+    "$slice",
+    "$concat",
+    "$lut",
+    "$ff",
     "$dff",
     "$dffe",
+    "$adff",
+    "$adffe",
+    "$sdff",
+    "$sdffe",
+    "$sdffce",
+    "$dffsr",
+    "$dffsre",
+    "$aldff",
+    "$aldffe",
+    "$dlatch",
+    "$adlatch",
+    "$dlatchsr",
+    "$sr",
+    "$mem",
+    "$mem_v2",
     "$_BUF_",
     "$_NOT_",
     "$_AND_",
@@ -58,14 +108,32 @@ pub const SUPPORTED_CELLS: &[&str] = &[
     "$_XNOR_",
     "$_ANDNOT_",
     "$_ORNOT_",
+    "$_AOI3_",
+    "$_OAI3_",
+    "$_AOI4_",
+    "$_OAI4_",
     "$_MUX_",
     "$_NMUX_",
+    "$_FF_",
     "$_DFF_P_",
     "$_DFF_N_",
     "$_DFFE_PP_",
     "$_DFFE_PN_",
     "$_DFFE_NP_",
     "$_DFFE_NN_",
+    "$_DFF_[NP][NP][01]_",
+    "$_DFFE_[NP][NP][01][NP]_",
+    "$_SDFF_[NP][NP][01]_",
+    "$_SDFFE_[NP][NP][01][NP]_",
+    "$_SDFFCE_[NP][NP][01][NP]_",
+    "$_DFFSR_[NP][NP][NP]_",
+    "$_DFFSRE_[NP][NP][NP][NP]_",
+    "$_ALDFF_[NP][NP]_",
+    "$_ALDFFE_[NP][NP][NP]_",
+    "$_DLATCH_[NP]_",
+    "$_DLATCH_[NP][NP][01]_",
+    "$_DLATCHSR_[NP][NP][NP]_",
+    "$_SR_[NP][NP]_",
 ];
 
 /// An import error: what is wrong and where.
@@ -185,6 +253,25 @@ fn is_blackbox(module: &Value) -> bool {
             .is_some_and(|v| int_value(v).is_some_and(|v| v != 0))
     };
     attr("blackbox") || attr("whitebox")
+}
+
+/// How many nets of `module` have an `init` attribute with a 1 bit.
+fn initial_values(module: &Value) -> Option<usize> {
+    let count = module
+        .get("netnames")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter(|n| {
+            n.get("attributes")
+                .and_then(|a| a.get("init"))
+                .is_some_and(|v| match v {
+                    Value::String(s) => s.contains('1'),
+                    other => int_value(other).is_some_and(|v| v != 0),
+                })
+        })
+        .count();
+    (count > 0).then_some(count)
 }
 
 fn find_top(modules: &Map<String, Value>, wanted: Option<&str>) -> Result<String, RtlError> {
@@ -362,6 +449,9 @@ struct Cell {
     inputs: Vec<(String, u8, Option<Vec<Bit>>)>,
     /// Output pins: name, width, and the bits they drive.
     outputs: Vec<(String, u8, Vec<Bit>)>,
+    /// Added by the importer to build a cell out of primitives; removed
+    /// again if nothing reads its outputs.
+    helper: bool,
 }
 
 impl Cell {
@@ -383,6 +473,7 @@ impl Cell {
                 .zip(out_names)
                 .map(|(&w, n)| (n, w, Vec::new()))
                 .collect(),
+            helper: false,
         }
     }
 
@@ -423,7 +514,10 @@ fn ports(module: &Value, xs: &mut usize) -> Result<Vec<(String, bool, Vec<Bit>)>
                 Some("input") => true,
                 Some("output") => false,
                 Some("inout") => {
-                    return err(format!("{what}: inout ports are not supported"));
+                    return err(format!(
+                        "{what}: inout ports are not supported (the simulator has no \
+                         tri-state wires; split the port into an input and an output)"
+                    ));
                 }
                 _ => return err(format!("{what}: missing \"direction\"")),
             };
@@ -445,6 +539,11 @@ struct ModuleBuilder<'a> {
     circuit_names: &'a HashMap<&'a str, String>,
     xs: usize,
     clocks: usize,
+    /// Flip-flops and latches with an asynchronous reset, set or load.
+    asyncs: usize,
+    /// Memories built from registers (read and write at different
+    /// addresses).
+    register_files: Vec<String>,
 }
 
 impl ModuleBuilder<'_> {
@@ -631,7 +730,7 @@ impl ModuleBuilder<'_> {
                 self.cells
                     .push(add.input(0, a).input(1, b).output(0, y).output(1, cout));
             }
-            "$eq" | "$ne" => {
+            "$eq" | "$ne" | "$eqx" | "$nex" => {
                 let y = conn("Y")?;
                 let (a, b) = (conn("A")?, conn("B")?);
                 let n = a.len().max(b.len());
@@ -644,7 +743,7 @@ impl ModuleBuilder<'_> {
                         .input(1, fit(&b, n, signed))
                         .output(0, eq.clone()),
                 );
-                self.result_bit(&name, eq, &y, ty == "$ne");
+                self.result_bit(&name, eq, &y, matches!(ty, "$ne" | "$nex"));
             }
             "$reduce_and" | "$reduce_or" | "$reduce_xor" | "$reduce_xnor" | "$reduce_bool"
             | "$logic_not" => {
@@ -709,7 +808,19 @@ impl ModuleBuilder<'_> {
                         .output(0, q),
                 );
             }
+            t if arith::handles(t) || state::handles(t) => {
+                let c = build::CellIn::new(t, params, conns);
+                if arith::handles(t) {
+                    self.map_arith(&c, name, label)?;
+                } else {
+                    self.map_state(&c, name, label)?;
+                }
+                self.xs += c.xs.get();
+            }
             t if t.starts_with('$') => {
+                if let Some(why) = arith::refusal(t).or_else(|| state::refusal(t)) {
+                    return err(format!("cell type {t} is not supported: {why}"));
+                }
                 return err(format!(
                     "cell type {t} is not supported (supported: {}; run `proc; opt` and, \
                      for other cells, `techmap` first)",
@@ -739,6 +850,7 @@ impl ModuleBuilder<'_> {
                     body: Body::Use(self.circuit_names[key.as_str()].clone()),
                     inputs: Vec::new(),
                     outputs: Vec::new(),
+                    helper: false,
                 };
                 for (port, input, bits) in ports {
                     let w = bits.len();
@@ -814,6 +926,19 @@ enum Run {
         value: u64,
         len: u8,
     },
+    /// One bit of an output pin, repeated (a sign extension).
+    Rep {
+        node: usize,
+        pin: usize,
+        bit: u8,
+        len: u8,
+    },
+    /// A whole output pin, sign-extended to `len` bits.
+    Sext {
+        node: usize,
+        pin: usize,
+        len: u8,
+    },
 }
 
 fn import_module(
@@ -858,6 +983,8 @@ fn import_module(
         circuit_names,
         xs,
         clocks: 0,
+        asyncs: 0,
+        register_files: Vec::new(),
     };
     for (port, input, bits) in &ports {
         let pin = ident(port);
@@ -880,6 +1007,7 @@ fn import_module(
         b.map_cell(cell_name, cell)
             .map_err(|e| RtlError(format!("cell \"{}\": {}", strip(cell_name), e.0)))?;
     }
+    b.prune_helpers();
 
     // Drivers of every net.
     let mut drivers: HashMap<u64, (usize, usize, u8)> = HashMap::new();
@@ -926,6 +1054,8 @@ fn import_module(
     let mut names = std::mem::take(&mut b.names);
     let mut edges: Vec<(usize, usize, usize, usize)> = Vec::new();
     let mut splits: BTreeMap<(usize, usize, u8, u8), usize> = BTreeMap::new();
+    let mut reps: BTreeMap<(usize, usize, u8, u8), usize> = BTreeMap::new();
+    let mut sexts: BTreeMap<(usize, usize, u8), usize> = BTreeMap::new();
     for c in 0..b.cells.len() {
         for p in 0..b.cells[c].inputs.len() {
             let Some(bits) = b.cells[c].inputs[p].2.clone() else {
@@ -939,6 +1069,34 @@ fn import_module(
                         if *node == n && *pin == q && *lo + *len == i =>
                     {
                         *len += 1;
+                    }
+                    (
+                        Some(Run::Rep {
+                            node,
+                            pin,
+                            bit,
+                            len,
+                        }),
+                        Src::Pin(n, q, i),
+                    ) if *node == n && *pin == q && *bit == i => {
+                        *len += 1;
+                    }
+                    (Some(Run::Pin { node, pin, lo, len }), Src::Pin(n, q, i))
+                        if *node == n && *pin == q && *lo + *len == i + 1 =>
+                    {
+                        // The last bit again: it starts a repeated run.
+                        let (node, pin) = (*node, *pin);
+                        if *len == 1 {
+                            runs.pop();
+                        } else {
+                            *len -= 1;
+                        }
+                        runs.push(Run::Rep {
+                            node,
+                            pin,
+                            bit: i,
+                            len: 2,
+                        });
                     }
                     (Some(Run::Const { value, len }), Src::Const(v)) => {
                         *value |= u64::from(v) << *len;
@@ -956,11 +1114,61 @@ fn import_module(
                     }),
                 }
             }
+            // A whole pin and then its top bit repeated: one sign extension.
+            let mut i = 0;
+            while i + 1 < runs.len() {
+                if let (
+                    Run::Pin {
+                        node,
+                        pin,
+                        lo: 0,
+                        len,
+                    },
+                    Run::Rep {
+                        node: n,
+                        pin: q,
+                        bit,
+                        len: r,
+                    },
+                ) = (&runs[i], &runs[i + 1])
+                    && (node, pin) == (n, q)
+                    && *bit == *len
+                    && *len + 1 == nodes[*node].outputs[*pin].1
+                {
+                    runs[i] = Run::Sext {
+                        node: *node,
+                        pin: *pin,
+                        len: *len + *r,
+                    };
+                    runs.remove(i + 1);
+                }
+                i += 1;
+            }
             let sink = nodes[c].name.clone();
             let sink_pin = nodes[c].inputs[p].0.clone();
             let mut sources: Vec<(usize, usize, u8)> = Vec::new();
             for run in &runs {
                 match *run {
+                    Run::Sext { node, pin, len } => {
+                        let x = match sexts.get(&(node, pin, len)) {
+                            Some(&x) => x,
+                            None => {
+                                let full = nodes[node].outputs[pin].1;
+                                let name = names.fresh(&format!("{}_x{}", nodes[node].name, len));
+                                let kind = GateKind::Extend {
+                                    from: full,
+                                    to: len,
+                                    signed: true,
+                                };
+                                nodes.push(Cell::prim(name, None, kind));
+                                let x = nodes.len() - 1;
+                                edges.push((node, pin, x, 0));
+                                sexts.insert((node, pin, len), x);
+                                x
+                            }
+                        };
+                        sources.push((x, 0, len));
+                    }
                     Run::Pin { node, pin, lo, len } => {
                         let full = nodes[node].outputs[pin].1;
                         if lo == 0 && len == full {
@@ -986,6 +1194,55 @@ fn import_module(
                         let name = names.fresh(&format!("{sink}_{sink_pin}_k"));
                         nodes.push(Cell::prim(name, None, GateKind::Const { w: len, value }));
                         sources.push((nodes.len() - 1, 0, len));
+                    }
+                    Run::Rep {
+                        node,
+                        pin,
+                        bit,
+                        len,
+                    } => {
+                        let r = match reps.get(&(node, pin, bit, len)) {
+                            Some(&r) => r,
+                            None => {
+                                let full = nodes[node].outputs[pin].1;
+                                let (from, from_pin) = if full == 1 {
+                                    (node, pin)
+                                } else {
+                                    let s = match splits.get(&(node, pin, bit, 1)) {
+                                        Some(&s) => s,
+                                        None => {
+                                            let base =
+                                                format!("{}_{}_{}", nodes[node].name, bit, bit + 1);
+                                            let name = names.fresh(&base);
+                                            let kind = GateKind::Split {
+                                                w: full,
+                                                lo: bit,
+                                                len: 1,
+                                            };
+                                            nodes.push(Cell::prim(name, None, kind));
+                                            let s = nodes.len() - 1;
+                                            edges.push((node, pin, s, 0));
+                                            splits.insert((node, pin, bit, 1), s);
+                                            s
+                                        }
+                                    };
+                                    (s, 0)
+                                };
+                                let base = format!("{}_{}_x{}", nodes[node].name, bit, len);
+                                let name = names.fresh(&base);
+                                let kind = GateKind::Extend {
+                                    from: 1,
+                                    to: len,
+                                    signed: true,
+                                };
+                                nodes.push(Cell::prim(name, None, kind));
+                                let r = nodes.len() - 1;
+                                edges.push((from, from_pin, r, 0));
+                                reps.insert((node, pin, bit, len), r);
+                                r
+                            }
+                        };
+                        sources.push((r, 0, len));
                     }
                 }
             }
@@ -1016,6 +1273,25 @@ fn import_module(
         warnings.push(format!(
             "{place}: {} flip-flop(s) are clocked by the global tick (their clock pin is ignored)",
             b.clocks
+        ));
+    }
+    if b.asyncs > 0 {
+        warnings.push(format!(
+            "{place}: {} flip-flop(s) or latch(es) have an asynchronous reset, set or load: \
+             it shows on the output at once and is stored at the next tick",
+            b.asyncs
+        ));
+    }
+    for memory in &b.register_files {
+        warnings.push(format!(
+            "{place}: memory {memory} reads and writes at different addresses, so it is \
+             built from registers"
+        ));
+    }
+    if let Some(inits) = initial_values(module) {
+        warnings.push(format!(
+            "{place}: {inits} initial value(s) (`init` attributes) are ignored: state \
+             powers up at 0"
         ));
     }
 

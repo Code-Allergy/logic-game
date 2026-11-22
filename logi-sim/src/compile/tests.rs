@@ -714,6 +714,32 @@ fn constant_folding_and_identities() {
     assert!(count(&d, &Options::unoptimized()) >= 8);
 }
 
+/// Immediates are not slots: a concatenation whose shift is past the slot
+/// count (a small design with a constant in the high bits) compiles, with
+/// every pass on its own and with all of them.
+#[test]
+fn immediates_past_the_slot_count_are_not_read_as_slots() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let k = b.zero(3);
+    let y = b.merge(&[x, k, x]);
+    b.output("y", y);
+    let s = b.split(x, 5, 3);
+    let z = b.merge(&[k, s]);
+    b.output("z", z);
+    for (name, opts) in pass_variants() {
+        let p = compile(&d, &opts).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let mut s = sim(p);
+        s.set("x", 0xA7);
+        s.tick();
+        assert_eq!(s.get("y"), 0xA7 << 11 | 0xA7, "{name}");
+        assert_eq!(s.get("z"), 0b101 << 3, "{name}");
+    }
+    differential(&d, 7, 10);
+}
+
 #[test]
 fn cse_merges_identical_and_commuted_instructions() {
     let mut d = Design::new("top");

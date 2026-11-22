@@ -15,12 +15,12 @@ use crate::sim::source::{self, Externals};
 /// Verilog it stands for is `examples/rtl/top.v`).
 const FIXTURE: &str = include_str!("../../../examples/rtl/top.json");
 
-fn import(text: &str) -> Import {
+pub(super) fn import(text: &str) -> Import {
     import_yosys_json(text, &ImportOptions::default()).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Load an import and check it compiled with every wire connected.
-fn open_import(import: &Import) -> App {
+pub(super) fn open_import(import: &Import) -> App {
     let mut app = app();
     load(&mut app, import.workspace.clone());
     let error = &app.world().resource::<SimDiagnostics>().compile_error;
@@ -170,7 +170,7 @@ fn fixture_counter_counts_while_enabled() {
 
 /// Check every circuit: centres on the grid, no two boxes overlap, inputs
 /// in the first column and outputs in the last.
-fn assert_readable_layout(ws: &WorkspaceDocument) {
+pub(super) fn assert_readable_layout(ws: &WorkspaceDocument) {
     for c in circuits(ws) {
         let boxes: Vec<(Vec2, Vec2)> = c
             .nodes
@@ -278,7 +278,7 @@ fn layout_circuit_places_every_demo() {
 
 /// A one-module netlist. Ports are `(name, direction, bits)`; cells are
 /// `(type, parameters, connections)`.
-fn netlist(ports: &[(&str, &str, Value)], cells: &[(&str, Value, Value)]) -> String {
+pub(super) fn netlist(ports: &[(&str, &str, Value)], cells: &[(&str, Value, Value)]) -> String {
     let ports: serde_json::Map<String, Value> = ports
         .iter()
         .map(|(n, d, b)| (n.to_string(), json!({"direction": d, "bits": b})))
@@ -297,7 +297,7 @@ fn netlist(ports: &[(&str, &str, Value)], cells: &[(&str, Value, Value)]) -> Str
 }
 
 /// Bits `start .. start + n`.
-fn bits(start: u64, n: u64) -> Value {
+pub(super) fn bits(start: u64, n: u64) -> Value {
     json!((start..start + n).collect::<Vec<_>>())
 }
 
@@ -540,13 +540,24 @@ fn unsupported_input_is_refused_with_a_message() {
         }
     };
     let none = ImportOptions::default();
-    let mul = binop("$mul", 4, 4, 8, false);
-    let message = refused(&mul, &none);
+    let pow = binop("$pow", 4, 4, 8, false);
+    let message = refused(&pow, &none);
     for part in [
         "module \"m\"",
         "cell \"$auto$0\"",
-        "$mul is not supported",
+        "$pow is not supported",
+        "a multiplication",
+    ] {
+        assert!(message.contains(part), "{part:?} in {message:?}");
+    }
+    // A cell type with no specific advice lists the supported cells.
+    let print = binop("$print", 4, 4, 8, false);
+    let message = refused(&print, &none);
+    for part in [
+        "cell \"$auto$0\"",
+        "$print is not supported",
         "$add",
+        "$mul",
     ] {
         assert!(message.contains(part), "{part:?} in {message:?}");
     }

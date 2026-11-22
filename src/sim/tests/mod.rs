@@ -7,6 +7,7 @@ pub mod geometry_tests;
 mod instance_views;
 mod routing;
 mod rtl;
+mod rtl_cells;
 mod visuals;
 
 use std::path::PathBuf;
