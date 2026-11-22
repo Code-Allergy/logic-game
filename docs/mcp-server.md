@@ -1,7 +1,9 @@
 # MCP server
 
-Status: design agreed (#104); milestone 1 in progress. Each section says
-which milestone it belongs to.
+Status: design agreed (#104). Milestone 1 (#122) is implemented: the
+batch editor, the views, the `workspace`, `view` and `edit` tools and the
+`gatequest-mcp` program. Each section says which milestone it belongs to;
+"Running it" and "Where milestone 1 stands" are at the end.
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server lets an
 AI assistant build circuits, test them and look at the result, at the
@@ -128,7 +130,7 @@ Seven tools in the first stage. Each takes its bulk argument inline or as
 | Tool | Tier | Milestone | Does |
 |---|---|---|---|
 | `workspace` | document | 1 | `list`, `open`, `new`, `save`, `status` |
-| `view` | document | 1 | Text views of a circuit: outline, one part, diagnostics, stats, version 6 source |
+| `view` | document | 1 | Text views of a circuit: outline, diagnostics, stats |
 | `edit` | document | 1 | Apply a batch of operations atomically |
 | `test` | document | 2 | Run stored tests of one chip or the whole workspace |
 | `run` | document | 2 | Run an experiment script on a private simulation |
@@ -142,17 +144,30 @@ examples (`demo://<id>`).
 
 ### `view`
 
-`view {circuit, what}`. The default, `outline`, is one line per part:
-label or id, kind and parameters, and for each input pin what drives it.
-Arrays are folded into one line when their elements are wired alike.
-Then the ports, the chips used with counts, and the build status. Large
-circuits are cut at a line limit with a count of what was left out;
-`filter` narrows by label prefix or kind.
+`view {circuit, what, filter, limit}`. The default, `outline`, starts
+with the circuit's size, its ports in pin order and the chips it uses
+with counts. Then one line per part: how to refer to it, its kind and
+parameters, and for each input pin what drives it:
 
-`diagnostics` gives build errors with the parts involved (a
-combinational loop lists its path), unconnected inputs, width mismatches
-and the layout advisory. `stats` gives part counts by kind, flattened
-size, state bits and logic depth.
+```
+circuit "main" (root): 13 parts + 17 generated adapters, 50 wires
+ports: in A[8] B[8] Cin | out Cout Sum[8]
+chips: full_adder x8
+parts:
+  A  Input w=8
+  fa[1]  full_adder  A<-A:1  B<-B:1  Cin<-fa[0].Cout
+  Sum  Output w=8  in<-{fa[0].Sum, fa[1].Sum, …}
+```
+
+Generated `Split`/`Merge` adapters are not listed; a pin fed through
+them reads as the bits it gets (`A:1`, `{lo, hi}` with the low bits
+first), which is how the wiring was written. Parts are cut at `limit`
+lines (200) with a count of what was left out; `filter` keeps the parts
+whose name or kind starts with it.
+
+`diagnostics` gives the build result, the inputs nothing drives and the
+layout advisory. `stats` gives part counts by kind and the flattened
+size.
 
 ### `edit`
 
@@ -180,7 +195,12 @@ demos are examples of the syntax and one parser serves both. Differences:
 
 - `at` is optional. Parts without it are placed by the auto-layout
   (below). `step` defaults to a column.
-- `name` becomes the label.
+- `name` becomes the label (so `label` is not given), and every part
+  gets one, not only ports and chips.
+- A port cannot be an array (its label is a pin name); give one port a
+  width instead.
+- `use` names a chip of the workspace, or `"demo/circuit"` from the
+  demos and gallery, which then joins the workspace.
 
 | Op | Meaning |
 |---|---|
@@ -188,7 +208,7 @@ demos are examples of the syntax and one parser serves both. Differences:
 | `wire` | Wire entries: one source, then sinks; arrays and bit fields deal out as in version 6, with `Split`/`Merge` adapters generated. An input bit that is already driven is an error. |
 | `unwire` | Sink references; removes what drives them. |
 | `remove` | Parts by reference, with their wires. |
-| `set` | `{"part": ref, …parameters, "label": …}`: change parameters or the label of parts. Wires to pins that no longer exist or changed width are reported and removed. |
+| `set` | `{"part": ref, …parameters, "label": …, "at": …, "use": …}`, or an array of these: change parameters, the label, the position or (for a chip) the definition. Each entry is checked when it is applied: wires to pins that no longer exist or whose width no longer matches the other end are removed and reported. To change the width of a whole path, remove and add. |
 | `layout` | Lay out the circuit again, or only the parts named. |
 | `make_chip` (3) | `{"parts": [refs], "name": …}`: the editor's "make chip" (`sim/chip.rs`). |
 | `expand` (3) | `{"part": ref}` or `{"circuit": name, "as": name}`: a gate-level copy of a word-level part or chip (`logi_sim::testkit::bitblast`, made hierarchical), as an editable chip. |
@@ -345,6 +365,48 @@ op is the server's hook into the same expansion.
    10,000-part workspace in `perf/`.
 4. **The game as host.** `--mcp`, the exclusive system, edits by
    difference as undo steps, `transport`, `app state`.
+
+## Running it
+
+```sh
+cargo run -p gate_quest --features mcp --bin gatequest-mcp
+```
+
+It speaks MCP on standard input and output and works in the player's
+workspace folder; set `GATEQUEST_DATA_DIR` to a scratch folder to keep
+it away from real workspaces. For Claude Code, in `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "gatequest": {
+      "command": "cargo",
+      "args": ["run", "-q", "-p", "gate_quest", "--features", "mcp", "--bin", "gatequest-mcp"],
+      "env": {"GATEQUEST_DATA_DIR": "/tmp/gatequest-mcp"}
+    }
+  }
+}
+```
+
+The code is in `src/mcp/`: `batch.rs` (the edit function), `view.rs`,
+`session.rs` (the tools as plain functions on one open workspace) and
+`server.rs` (the same over `rmcp`). Only `server.rs` and the program
+need the `mcp` feature.
+
+## Where milestone 1 stands
+
+Done: everything listed under milestone 1 below. Known gaps, to close
+in later milestones:
+
+- A combinational loop is reported with the simulator's node ids, not
+  with part names.
+- A `Split` adapter made by an earlier request is not reused by a later
+  one that needs the same bits; a second one is made.
+- A circuit of the open workspace cannot be deleted or renamed, and
+  resources (the format documents, the demos as examples) are not
+  served yet.
+- New parts in a placed circuit are laid out as one block below it;
+  they are not fitted near the parts they connect to.
 
 ## Testing the server
 

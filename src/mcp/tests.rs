@@ -288,6 +288,23 @@ fn remove_takes_the_wires_and_set_changes_parameters() {
     // Each set is checked on its own, so wires drop on the way...
     assert!(wide.root.wires.len() < 3, "{report}");
     // ...which is why a width change of a whole path is remove and add.
+    // A whole array is renamed with its indices; one element on its own.
+    let (arrays, _) = edit(
+        &ws,
+        json!({"ops": [
+            {"add": [{"name": "n", "type": "Not", "count": 3}]},
+            {"set": [{"part": "n", "label": "inv"}, {"part": "inv[2]", "label": "last"}]}
+        ]}),
+    );
+    let labels: Vec<&str> = arrays
+        .root
+        .nodes
+        .iter()
+        .filter_map(|n| n.label.as_deref())
+        .collect();
+    for label in ["inv[0]", "inv[1]", "last"] {
+        assert!(labels.contains(&label), "{labels:?}");
+    }
     let e = refused(&ws, json!({"ops": [{"set": {"part": "g", "type": "Or"}}]}));
     assert!(e.contains("type cannot be set"), "{e}");
 
@@ -518,4 +535,189 @@ fn diagnostics_report_loops_open_inputs_and_size() {
         text.contains("advice: \"test\" has 163 parts in one circuit"),
         "{text}"
     );
+}
+
+/// A scratch folder for one test's workspaces.
+fn scratch(test: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "gatequest-mcp-{test}-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+    dir
+}
+
+fn half_adder_request() -> Value {
+    json!({"edits": [
+        {"circuit": "half_adder", "ops": [
+            {"add": [{"name": "A", "type": "Input"}, {"name": "B", "type": "Input"},
+                     {"name": "x", "type": "Xor"}, {"name": "c", "type": "And"},
+                     {"name": "Sum", "type": "Output"}, {"name": "Carry", "type": "Output"}]},
+            {"wire": [["A", "x.a", "c.a"], ["B", "x.b", "c.b"], ["x", "Sum"], ["c", "Carry"]]}
+        ]},
+        {"ops": [
+            {"add": [{"name": "P", "type": "Input"}, {"name": "Q", "type": "Input"},
+                     {"name": "ha", "use": "half_adder"}, {"name": "S", "type": "Output"}]},
+            {"wire": [["P", "ha.A"], ["Q", "ha.B"], ["ha.Sum", "S"]]}
+        ]}
+    ]})
+}
+
+#[test]
+fn a_session_makes_edits_saves_and_reopens() {
+    use super::session::Session;
+    use crate::editor::workspace::WorkspaceStore;
+
+    let dir = scratch("session");
+    let mut s = Session::new(WorkspaceStore::in_dir(&dir));
+    let e = s.view_tool(None, None, None, None).unwrap_err();
+    assert!(e.contains("no workspace is open"), "{e}");
+    assert!(
+        s.workspace_tool("list", None, false)
+            .unwrap()
+            .contains("(none)")
+    );
+    s.workspace_tool("new", Some("adders"), false).unwrap();
+
+    let Value::Object(request) = half_adder_request() else {
+        unreachable!()
+    };
+    let dry = s.edit_tool(request.clone(), None, true).unwrap();
+    assert!(dry.starts_with("dry run, nothing changed"), "{dry}");
+    assert!(s.workspace().unwrap().root.nodes.is_empty());
+    let report = s.edit_tool(request, None, false).unwrap();
+    assert!(report.contains("build: ok (9 parts flattened)"), "{report}");
+
+    // Unsaved work is not dropped by accident.
+    let e = s.workspace_tool("new", Some("other"), false).unwrap_err();
+    assert!(e.contains("unsaved changes"), "{e}");
+    let saved = s.workspace_tool("save", None, false).unwrap();
+    assert!(saved.starts_with("saved \"adders\""), "{saved}");
+    let before = s.workspace().unwrap().clone();
+
+    // A request from a file, as a generated circuit would come.
+    let file = dir.join("more.json");
+    std::fs::write(
+        &file,
+        r#"{"ops": [{"add": [{"name": "inv", "type": "Not", "count": 3}]}]}"#,
+    )
+    .unwrap();
+    let report = s.edit_tool(Default::default(), Some(&file), false).unwrap();
+    assert!(report.contains("+3 parts"), "{report}");
+    let status = s.workspace_tool("status", None, false).unwrap();
+    assert!(
+        status.starts_with("workspace \"adders\" (unsaved changes)"),
+        "{status}"
+    );
+
+    // Reopened, it is what was saved.
+    let opened = s.workspace_tool("open", Some("adders"), true).unwrap();
+    assert!(
+        opened.contains("chip half_adder: 6 parts, 6 wires, placed 1 time(s)"),
+        "{opened}"
+    );
+    assert_eq!(s.workspace().unwrap(), &before);
+    let outline = s.view_tool(Some("half_adder"), None, None, None).unwrap();
+    assert!(outline.contains("Sum  Output w=1  in<-x"), "{outline}");
+    let e = s.view_tool(Some("nope"), None, None, None).unwrap_err();
+    assert_eq!(e, "no circuit \"nope\" (circuits: main, half_adder)");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The same workflow through the protocol: a client and the server joined
+/// by an in-memory pipe.
+#[cfg(feature = "mcp")]
+mod protocol {
+    use rmcp::ServiceExt;
+    use rmcp::model::{CallToolRequestParams, CallToolResult};
+    use serde_json::{Value, json};
+
+    use super::{half_adder_request, scratch};
+    use crate::editor::workspace::WorkspaceStore;
+    use crate::mcp::server::Server;
+    use crate::mcp::session::Session;
+
+    fn text(result: &CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_client_builds_views_saves_and_reopens() {
+        let dir = scratch("protocol");
+        let store = WorkspaceStore::in_dir(&dir);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (server_end, client_end) = tokio::io::duplex(1 << 16);
+            let server = tokio::spawn(async move {
+                let service = Server::new(Session::new(store))
+                    .serve(server_end)
+                    .await
+                    .unwrap();
+                service.waiting().await.unwrap();
+            });
+            let client = ().serve(client_end).await.unwrap();
+
+            let mut tools: Vec<String> = client
+                .list_all_tools()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|t| t.name.to_string())
+                .collect();
+            tools.sort();
+            assert_eq!(tools, ["edit", "view", "workspace"]);
+
+            let call = |name: &'static str, args: Value| {
+                let Value::Object(args) = args else {
+                    unreachable!()
+                };
+                let client = &client;
+                async move {
+                    let result = client
+                        .call_tool(CallToolRequestParams::new(name).with_arguments(args))
+                        .await
+                        .unwrap();
+                    (result.is_error == Some(true), text(&result))
+                }
+            };
+
+            let (failed, said) = call("view", json!({})).await;
+            assert!(failed && said.contains("no workspace is open"), "{said}");
+            let (failed, said) =
+                call("workspace", json!({"action": "new", "name": "adders"})).await;
+            assert!(!failed, "{said}");
+            let (failed, said) = call("edit", half_adder_request()).await;
+            assert!(
+                !failed && said.contains("build: ok (9 parts flattened)"),
+                "{said}"
+            );
+            let (failed, said) = call("edit", json!({"ops": [{"wire": [["P", "ha.Nope"]]}]})).await;
+            assert!(
+                failed && said.contains("\"ha\" has no input pin \"Nope\""),
+                "{said}"
+            );
+            let (_, said) = call("view", json!({"circuit": "half_adder"})).await;
+            assert!(said.contains("c  And w=1  a<-A  b<-B"), "{said}");
+            let (failed, said) = call("workspace", json!({"action": "save"})).await;
+            assert!(!failed, "{said}");
+            let (failed, said) =
+                call("workspace", json!({"action": "open", "name": "adders"})).await;
+            assert!(!failed && said.contains("chip half_adder"), "{said}");
+            let (_, said) = call("view", json!({"what": "stats"})).await;
+            assert!(said.contains("flattened: 9 parts"), "{said}");
+
+            client.cancel().await.unwrap();
+            server.await.unwrap();
+        });
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

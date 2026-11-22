@@ -888,7 +888,11 @@ impl Group<'_> {
         };
         let names = self.names();
         let ids = names.parts(&part)?;
-        let is_array = ids.len() > 1 || part.ends_with(']') && !part.starts_with('#');
+        // A whole array keeps its indices under a new label; one element
+        // of it (`fa[3]`) takes the label as it is.
+        let whole = source::parse_ref(&part)?;
+        let is_array =
+            whole.index.is_none() && names.table.get(whole.node).is_some_and(|e| e.is_array);
         let label = match params.shift_remove("label") {
             None => None,
             Some(Value::String(l)) if source::valid_name(&l) => Some(l),

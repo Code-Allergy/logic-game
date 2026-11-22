@@ -4,12 +4,18 @@
 //! - [`batch`] – the batch editor: one pure function that applies a list
 //!   of operations to a workspace document.
 //! - [`view`] – text views of a circuit.
+//! - [`session`] – the tools as plain functions on one open workspace.
+//! - [`server`] – the tools over the Model Context Protocol (feature
+//!   `mcp`; the `gatequest-mcp` program serves them on stdio).
 //!
-//! Both work on documents only, with no `World`, and are always built so
-//! that the ordinary tests cover them. The server itself (`session`,
-//! `server`, the `gatequest-mcp` program) is behind the `mcp` feature.
+//! Everything but [`server`] works on documents only, with no `World`
+//! and no protocol, and is always built so that the ordinary tests cover
+//! it.
 
 pub mod batch;
+#[cfg(feature = "mcp")]
+pub mod server;
+pub mod session;
 pub mod view;
 
 #[cfg(test)]
