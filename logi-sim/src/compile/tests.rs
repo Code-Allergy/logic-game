@@ -122,12 +122,21 @@ pub(crate) fn check_program_invariants(p: &Program) {
     for &(s, _) in &p.consts {
         assert_eq!(written_rank[s as usize], u32::MAX, "const slot written");
     }
-    // Lane words are packed destinations; lane slots resolve.
+    // Lane words are packed destinations; views are bit fields of slots
+    // that hold a value; lane and view slots resolve.
     let dsts: std::collections::HashSet<u32> = p.packs.iter().map(|x| x.dst).collect();
     assert!(p.lane_words.iter().all(|w| dsts.contains(w)));
+    for v in &p.views {
+        assert!(v.slot < p.slot_count && v.width >= 1 && v.shift + v.width <= 64);
+    }
     for map in &p.debug.net_slots {
         for (_, &s) in map {
-            assert!(p.locate(s).is_some(), "debug slot {s} out of range");
+            assert!(p.resolve(s).is_some(), "debug slot {s} out of range");
+        }
+    }
+    for k in &p.state_keys {
+        if let StateLoc::Slot(s) = k.loc {
+            assert!(p.resolve(s).is_some(), "state slot {s} out of range");
         }
     }
 }
@@ -1007,4 +1016,255 @@ fn compile_observed_reports_every_pass_in_order() {
         (p.instrs, p.blocks, p.slot_count),
         (q.instrs, q.blocks, q.slot_count)
     );
+}
+
+// ── Word lifting (issue #117) ─────────────────────────────────────────────
+
+/// Options with lifting switched off.
+fn unlifted(o: Options) -> Options {
+    Options { lift: false, ..o }
+}
+
+/// Compile with and without lifting, run both on the same random inputs
+/// and compare outputs, every state element (by key) and every authored
+/// net, every tick. Also carries state from the lifted program into the
+/// unlifted one and back halfway through.
+fn lifted_matches_unlifted(d: &Design, options: &Options, seed: u64, ticks: u64) {
+    let p_on = compile(d, options).unwrap();
+    let p_off = compile(d, &unlifted(options.clone())).unwrap();
+    check_program_invariants(&p_on);
+    let (p_on, p_off) = (Arc::new(p_on), Arc::new(p_off));
+    let mut on = Sim::new(Arc::clone(&p_on));
+    let mut off = Sim::new(Arc::clone(&p_off));
+    let mut rng = crate::testkit::rng::Rng::new(seed);
+    let widths: Vec<u8> = p_on.ports.inputs.iter().map(|p| p.width).collect();
+    for t in 0..=ticks {
+        if t > 0 {
+            for (port, &w) in widths.iter().enumerate() {
+                let v = rng.next_u64() & crate::netlist::mask(w);
+                on.set_input(port, v);
+                off.set_input(port, v);
+            }
+            on.tick();
+            off.tick();
+        }
+        if t == ticks / 2 {
+            // Carry state across both ways; nothing may change.
+            let (a, b) = (on.export_state(), off.export_state());
+            assert_eq!(a.words, b.words, "tick {t}: state words");
+            on.import_state(&b);
+            off.import_state(&a);
+        }
+        for port in 0..p_on.ports.outputs.len() {
+            assert_eq!(on.output(port), off.output(port), "tick {t}: output {port}");
+        }
+        assert_eq!(
+            on.export_state().words,
+            off.export_state().words,
+            "tick {t}: state"
+        );
+        for inst in 0..p_off.debug.instances.len() {
+            let path = p_off.debug.path(inst as u32);
+            for (net, _) in &p_off.debug.net_slots[inst] {
+                let want = off.read_net(&path, net);
+                let got = on.read_net(&path, net);
+                if options.debug {
+                    assert_eq!(got, want, "tick {t}: net {path:?}/{net:?}");
+                } else if let (Some(g), Some(w)) = (got, want) {
+                    assert_eq!(g, w, "tick {t}: net {path:?}/{net:?}");
+                }
+            }
+        }
+    }
+}
+
+/// Bit-blasted random word designs: lifting turns them back into words,
+/// matches the reference interpreter (every net, under the editor's
+/// options too) and the unlifted program.
+#[test]
+fn lifted_bitblasted_designs_match_the_reference() {
+    let (mut before, mut after) = (0usize, 0usize);
+    for seed in 0..30 {
+        for max_width in [4, 16, 64] {
+            let cfg = GenConfig {
+                seed,
+                child_defs: 0,
+                max_depth: 1,
+                max_width,
+                state_percent: 25,
+                ..Default::default()
+            };
+            let d = crate::testkit::bitblast::bitblast(&generate(&cfg).design);
+            for options in [
+                Options::default(),
+                Options::debug(),
+                Options {
+                    pack: PackMode::All,
+                    ..Options::default()
+                },
+            ] {
+                if let Err(e) = crate::testkit::diff::check_design(&d, seed, 12, &options) {
+                    panic!("seed {seed} width {max_width} {options:?}: {e}");
+                }
+            }
+            lifted_matches_unlifted(&d, &Options::debug(), seed, 12);
+            lifted_matches_unlifted(&d, &Options::default(), seed, 12);
+            before += compile(&d, &unlifted(Options::default()))
+                .unwrap()
+                .instrs
+                .len();
+            after += compile_ok(&d).instrs.len();
+        }
+    }
+    // Random designs are mostly carry chains and mixed widths; the gain is
+    // modest, but it must be a gain.
+    assert!(after < before, "lifting: {before} -> {after} instructions");
+}
+
+/// Bit-blasted fixtures (counters, register files, a CPU) match the
+/// reference with lifting, every net observable.
+#[test]
+fn lifted_bitblasted_fixtures_match_the_reference() {
+    use crate::testkit::bitblast::bitblast;
+    use fixtures::*;
+    for d in [
+        counter_bitblasted(16),
+        mux_tree_bitblasted(3, 16),
+        bitblast(&counter(16)),
+        bitblast(&register_file(3, 16)),
+        bitblast(&fifo(3, 8)),
+        bitblast(&cpu(&MULTIPLY_PROGRAM)),
+    ] {
+        for options in [Options::default(), Options::debug()] {
+            if let Err(e) = crate::testkit::diff::check_design(&d, 3, 60, &options) {
+                panic!("{}: {e}", d.root_def().name);
+            }
+            lifted_matches_unlifted(&d, &options, 5, 60);
+        }
+    }
+}
+
+/// A bit-blasted 16-bit register file lifts to word ops: each register's
+/// 16 one-bit elements become one state word (a view per bit for the
+/// state keys), and a 16-bit counter becomes a handful of instructions
+/// apart from its carry chain.
+#[test]
+fn lifting_turns_bit_slices_into_words() {
+    use crate::testkit::bitblast::bitblast;
+    let d = bitblast(&fixtures::register_file(3, 16));
+    let on = compile_ok(&d);
+    let off = compile(&d, &unlifted(Options::default())).unwrap();
+    assert!(
+        on.commits.len() * 8 <= off.commits.len(),
+        "commits {} -> {}",
+        off.commits.len(),
+        on.commits.len()
+    );
+    assert!(
+        on.instrs.len() * 4 <= off.instrs.len(),
+        "instructions {} -> {}",
+        off.instrs.len(),
+        on.instrs.len()
+    );
+    assert_eq!(on.state_keys.len(), off.state_keys.len());
+    assert!(!on.views.is_empty());
+    // Every state key resolves to one bit of a state word.
+    for k in &on.state_keys {
+        let StateLoc::Slot(s) = k.loc else { continue };
+        let (_, _, m) = on.resolve(s).unwrap();
+        assert_eq!(m, crate::netlist::mask(k.width));
+    }
+}
+
+/// Lifting off reproduces the unlifted program exactly.
+#[test]
+fn lifting_off_changes_nothing() {
+    let d = fixtures::counter_bitblasted(8);
+    let p = compile(&d, &unlifted(Options::debug())).unwrap();
+    assert!(p.views.is_empty());
+}
+
+/// `w`-bit registers built like the game's `register/register8`: per bit a
+/// gate-level 2-to-1 mux (keep or load) into a master-slave flip-flop of
+/// two gated D latches, each an SR latch of two NORs and a `Delay`. The
+/// outputs are merged into buses; `regs` registers share `d`, `load` is
+/// per register, and a mux of gates reads register 0 or 1.
+fn gate_register_file(regs: usize, w: u8) -> Design {
+    let mut d = Design::new(format!("gate_regs{regs}x{w}"));
+    let r = d.root;
+    let mut b = d.builder(r);
+    let data = b.input("d", w);
+    let clk = b.input("clk", 1);
+    let sel = b.input("sel", 1);
+    let n_clk = b.not(clk);
+    let latch = |b: &mut crate::netlist::Builder<'_>, d: NetId, e: NetId| {
+        let not_d = b.not(d);
+        let s = b.and(d, e);
+        let r = b.and(not_d, e);
+        let (delay, state) = b.state_placeholder(NodeKind::Delay { w: 1 });
+        let nor_s = b.nor(s, state);
+        let nor_r = b.nor(r, nor_s);
+        b.connect(nor_r, (delay, 0));
+        state
+    };
+    let mux = |b: &mut crate::netlist::Builder<'_>, s: NetId, x: NetId, y: NetId| {
+        let ns = b.not(s);
+        let pa = b.and(x, ns);
+        let pb = b.and(y, s);
+        b.or(pa, pb)
+    };
+    let mut words = Vec::new();
+    for k in 0..regs {
+        let load = b.input(format!("load{k}"), 1);
+        let mut qs = Vec::new();
+        let mut placeholders = Vec::new();
+        for i in 0..w {
+            // The slave's output feeds back into the mux: a placeholder.
+            let (fb, q) = b.state_placeholder(NodeKind::Delay { w: 1 });
+            placeholders.push(fb);
+            let di = b.bit(data, i);
+            let keep = mux(&mut b, load, q, di);
+            let m = latch(&mut b, keep, n_clk);
+            let s = latch(&mut b, m, clk);
+            // q is a one-tick copy of the slave (a Delay stands in for the
+            // wire so the feedback is not a combinational loop).
+            b.connect(s, (fb, 0));
+            qs.push(q);
+        }
+        let word = b.merge(&qs);
+        b.output(format!("q{k}"), word);
+        words.push(word);
+    }
+    // A 16-bit mux of gates over registers 0 and 1, bit by bit.
+    let mut ys = Vec::new();
+    for i in 0..w {
+        let x = b.bit(words[0], i);
+        let y = b.bit(words[1], i);
+        ys.push(mux(&mut b, sel, x, y));
+    }
+    let y = b.merge(&ys);
+    b.output("y", y);
+    d
+}
+
+#[test]
+fn gate_level_registers_lift_to_state_words() {
+    let d = gate_register_file(3, 16);
+    for options in [Options::default(), Options::debug()] {
+        if let Err(e) = crate::testkit::diff::check_design(&d, 9, 80, &options) {
+            panic!("{e}");
+        }
+        lifted_matches_unlifted(&d, &options, 9, 80);
+    }
+    let on = compile_ok(&d);
+    let off = compile(&d, &unlifted(Options::default())).unwrap();
+    eprintln!(
+        "gate registers: {} -> {} instructions, {} -> {} commits",
+        off.instrs.len(),
+        on.instrs.len(),
+        off.commits.len(),
+        on.commits.len()
+    );
+    assert!(on.commits.len() * 8 <= off.commits.len());
+    assert!(on.instrs.len() * 8 <= off.instrs.len());
 }

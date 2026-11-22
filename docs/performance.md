@@ -56,7 +56,7 @@ integer additions per settle.)
 | sim | `sim/gates1/{10000,…}` | the same, 1-bit gates |
 | sim | `sim/sequential/{cpu,cpu_bitblasted,datapath32,…}` | the testkit CPU and a sequential datapath, word-level and bit-blasted |
 | sim | `sim/compile/gates1/{100000,1000000}` | a full compile |
-| sim | `sim/compile_pass/<design>/<pass>` | one compiler pass (validate, elaborate, loop_check, lower, simplify, levelize, pack, renumber), via `compile_observed` |
+| sim | `sim/compile_pass/<design>/<pass>` | one compiler pass (validate, elaborate, loop_check, lower, simplify, lift, levelize, pack, renumber), via `compile_observed` |
 | sim | `sim/threads/<design>/{1t,2t,4t}` | one tick on 1, 2 and 4 threads |
 | engine | `engine/batch/{sim_run_1000,core_step_1000}` | 1000 ticks directly and through `EngineCore` (chunking, clock reads) |
 | engine | `engine/publish/{0,16,all}` | one probe frame |

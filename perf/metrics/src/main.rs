@@ -218,18 +218,7 @@ fn all_metrics() -> Value {
 /// program out for and runs it on that many threads.
 fn run_ticks(name: &str, n: u64, options: &str, threads: usize) {
     let d = case(name);
-    let opts = match options {
-        "default" => Options::default(),
-        "editor" => Options::debug(),
-        // As the throughput benchmarks: simplify off (every node is an
-        // instruction), default layout and packing.
-        "raw" => Options {
-            slot_order: Default::default(),
-            pack: Default::default(),
-            ..Options::unoptimized()
-        },
-        other => panic!("options {other:?}: default, editor or raw"),
-    };
+    let opts = named_options(options);
     let p = Arc::new(compile(&d, &opts.for_threads(threads)).unwrap());
     let mut sim = Sim::with_options(p, SimOptions::threaded(threads));
     let mut lfsr = 0x9E37_79B9_7F4A_7C15u64;
@@ -237,6 +226,127 @@ fn run_ticks(name: &str, n: u64, options: &str, threads: usize) {
         tick(&mut sim, &mut lfsr);
     }
     std::hint::black_box(sim.output(0));
+}
+
+/// Compiler options by name (`ticks`, `breakdown`).
+fn named_options(options: &str) -> Options {
+    match options {
+        "default" => Options::default(),
+        "editor" => Options::debug(),
+        // Word lifting (issue #117) off, for comparison.
+        "default-nolift" => Options {
+            lift: false,
+            ..Options::default()
+        },
+        "editor-nolift" => Options {
+            lift: false,
+            ..Options::debug()
+        },
+        // As the throughput benchmarks: simplify off (every node is an
+        // instruction), default layout and packing.
+        "raw" => Options {
+            slot_order: Default::default(),
+            pack: Default::default(),
+            ..Options::unoptimized()
+        },
+        other => panic!("options {other:?}: default, editor, raw, default-nolift or editor-nolift"),
+    }
+}
+
+/// What the compiled program of `case` executes, by op and by the
+/// definition each instruction's result belongs to (the definition of an
+/// authored net in its slot; `(temp)` for compiler temporaries): the data
+/// for planning the next lifting stages (issue #117).
+fn breakdown(name: &str, options: &str) {
+    use std::collections::{BTreeMap, HashMap};
+    let d = case(name);
+    let p = compile(&d, &named_options(options)).unwrap();
+    // Compile time per pass (median of 11 compiles).
+    let opts = named_options(options);
+    let mut runs: Vec<Vec<(logi_sim::compile::Pass, f64)>> = Vec::new();
+    for _ in 0..11 {
+        let mut t = std::time::Instant::now();
+        let mut v = Vec::new();
+        logi_sim::compile::compile_observed(&d, &opts, |pass| {
+            v.push((pass, t.elapsed().as_secs_f64() * 1e3));
+            t = std::time::Instant::now();
+        })
+        .unwrap();
+        runs.push(v);
+    }
+    let mut line = String::from("compile ms:");
+    let mut total = Vec::new();
+    for i in 0..runs[0].len() {
+        let mut xs: Vec<f64> = runs.iter().map(|r| r[i].1).collect();
+        xs.sort_by(f64::total_cmp);
+        line += &format!(" {} {:.2}", runs[0][i].0.name(), xs[xs.len() / 2]);
+    }
+    for r in &runs {
+        total.push(r.iter().map(|x| x.1).sum::<f64>());
+    }
+    total.sort_by(f64::total_cmp);
+    println!("{line}; total {:.2}", total[total.len() / 2]);
+    let mut def_of_slot: HashMap<u32, &str> = HashMap::new();
+    for (inst, map) in p.debug.net_slots.iter().enumerate() {
+        let def = &d.defs[p.debug.instances[inst].def];
+        for (_, &s) in map {
+            // A view (a lifted net) counts for the word holding it.
+            let s = p.resolve(s).map_or(s, |(real, _, _)| real);
+            def_of_slot.entry(s).or_insert(def.name.as_str());
+        }
+    }
+    let mut by_op: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_def: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut by_def_op: BTreeMap<(&str, String), usize> = BTreeMap::new();
+    for b in &p.blocks {
+        let n = b.len as usize;
+        let op = if b.packed {
+            format!("{:?} (packed)", b.op)
+        } else {
+            format!("{:?}", b.op)
+        };
+        *by_op.entry(op.clone()).or_default() += n;
+        if b.packed {
+            continue;
+        }
+        for ins in &p.instrs[b.start as usize..(b.start + b.len) as usize] {
+            let def = def_of_slot.get(&ins.dst).copied().unwrap_or("(temp)");
+            *by_def.entry(def).or_default() += 1;
+            *by_def_op.entry((def, op.clone())).or_default() += 1;
+        }
+    }
+    println!(
+        "{name} {options}: {} instructions, {} packed words, {} commits, {} slots, {} views",
+        p.instrs.len(),
+        p.packs.len(),
+        p.commits.len(),
+        p.slot_count,
+        p.views.len()
+    );
+    let sorted = |m: BTreeMap<String, usize>| {
+        let mut v: Vec<_> = m.into_iter().collect();
+        v.sort_by_key(|a| std::cmp::Reverse(a.1));
+        v
+    };
+    println!("\nby op:");
+    for (op, n) in sorted(by_op) {
+        println!("  {n:6}  {op}");
+    }
+    println!("\nby definition:");
+    let mut defs: Vec<_> = by_def.into_iter().collect();
+    defs.sort_by_key(|a| std::cmp::Reverse(a.1));
+    for (def, n) in defs {
+        let ops: Vec<String> = {
+            let mut v: Vec<_> = by_def_op
+                .iter()
+                .filter(|((d, _), _)| *d == def)
+                .map(|((_, op), n)| (op.clone(), *n))
+                .collect();
+            v.sort_by_key(|a| std::cmp::Reverse(a.1));
+            v.into_iter().map(|(op, n)| format!("{op} {n}")).collect()
+        };
+        println!("  {n:6}  {def}: {}", ops.join(", "));
+    }
 }
 
 fn main() {
@@ -247,6 +357,9 @@ fn main() {
             for case in CASES {
                 println!("{case}");
             }
+        }
+        Some("breakdown") if (2..=3).contains(&args.len()) => {
+            breakdown(&args[1], args.get(2).map_or("default", String::as_str));
         }
         Some("ticks") if (3..=5).contains(&args.len()) => {
             run_ticks(
@@ -259,7 +372,8 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: perf-metrics [cases | ticks <case> <n> [default|editor|raw] [threads]]"
+                "usage: perf-metrics [cases | ticks <case> <n> [OPTIONS] [threads] | breakdown <case> [OPTIONS]]\n\
+                 OPTIONS: default, editor, raw, default-nolift, editor-nolift"
             );
             std::process::exit(2);
         }

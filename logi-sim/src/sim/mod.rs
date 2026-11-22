@@ -313,15 +313,25 @@ impl Sim {
         self.output(port)
     }
 
-    /// Raw slot value (see [`crate::compile::DebugMap`]). A lane slot (at or
-    /// above `slot_count`, see [`Program::locate`]) reads its bit of the
-    /// packed word. Panics if `slot` is neither.
+    /// Raw slot value (see [`crate::compile::DebugMap`]). A lane or view
+    /// slot (at or above `slot_count`, see [`Program::resolve`]) reads its
+    /// bits of the word holding it. Panics if `slot` is none of these.
     pub fn read(&self, slot: u32) -> u64 {
-        match self.program.locate(slot) {
-            Some((s, None)) => self.slots[s as usize],
-            Some((s, Some(lane))) => (self.slots[s as usize] >> lane) & 1,
+        match self.program.resolve(slot) {
+            Some((s, shift, m)) => (self.slots[s as usize] >> shift) & m,
             None => panic!("slot {slot} out of range"),
         }
+    }
+
+    /// Write `value` into `slot` (a plain, lane or view slot), leaving the
+    /// other bits of the word holding it alone.
+    fn write_slot(&mut self, slot: u32, value: u64) {
+        let (s, shift, m) = self
+            .program
+            .resolve(slot)
+            .unwrap_or_else(|| panic!("slot {slot} out of range"));
+        let w = &mut self.slots[s as usize];
+        *w = (*w & !(m << shift)) | ((value & m) << shift);
     }
 
     /// Value of an authored net, by instance path and `NetId`.
@@ -513,7 +523,7 @@ impl Sim {
         for key in &self.program.state_keys {
             match key.loc {
                 StateLoc::Slot(s) => {
-                    snap.words.insert(key.path.clone(), self.slots[s as usize]);
+                    snap.words.insert(key.path.clone(), self.read(s));
                 }
                 StateLoc::Mem(m) => {
                     let d = &self.program.mems[m as usize];
@@ -537,10 +547,11 @@ impl Sim {
         for key in &program.state_keys {
             match key.loc {
                 StateLoc::Slot(s) => {
-                    self.slots[s as usize] = snap
+                    let v = snap
                         .words
                         .get(&key.path)
                         .map_or(0, |&v| v & mask(key.width));
+                    self.write_slot(s, v);
                 }
                 StateLoc::Mem(m) => {
                     let d = &program.mems[m as usize];
@@ -708,9 +719,14 @@ fn check(p: &Program) -> Result<(), BadProgram> {
             return bad(format!("bad port {port:?}"));
         }
     }
+    for v in &p.views {
+        if !slot_ok(v.slot) || v.width == 0 || v.shift as u32 + v.width as u32 > 64 {
+            return bad(format!("bad view {v:?}"));
+        }
+    }
     for key in &p.state_keys {
         let ok = match key.loc {
-            StateLoc::Slot(s) => slot_ok(s),
+            StateLoc::Slot(s) => p.resolve(s).is_some_and(|(s, _, _)| slot_ok(s)),
             StateLoc::Mem(m) => (m as usize) < p.mems.len(),
         };
         if !ok {

@@ -1596,3 +1596,107 @@ fn screen_text_shows_the_message_and_typing() {
     let m = screen_memory(&mut app, "Text");
     assert_eq!(m[32 + 5], u64::from(b'#'));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Word lifting (logi-sim issue #117)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Run `design` compiled with and without word lifting on the same random
+/// inputs for `ticks` ticks and compare, every tick, the outputs, every
+/// state element and every authored net (all observable under the editor's
+/// options). Halfway, state is carried from each program to the other.
+/// Returns the instruction counts (lifted, unlifted).
+fn lifting_matches(
+    name: &str,
+    design: &logi_sim::netlist::Design,
+    debug: bool,
+    ticks: u64,
+) -> (usize, usize) {
+    use logi_sim::compile::{Options, compile};
+    use logi_sim::sim::Sim;
+    let on_opts = if debug {
+        Options::debug()
+    } else {
+        Options::default()
+    };
+    let off_opts = Options {
+        lift: false,
+        ..on_opts.clone()
+    };
+    let p_on = Arc::new(compile(design, &on_opts).unwrap());
+    let p_off = Arc::new(compile(design, &off_opts).unwrap());
+    let (mut on, mut off) = (Sim::new(Arc::clone(&p_on)), Sim::new(Arc::clone(&p_off)));
+    let mut x = 0x9E37_79B9_7F4A_7C15u64 ^ ticks;
+    for t in 0..=ticks {
+        if t > 0 {
+            for (port, p) in p_on.ports.inputs.iter().enumerate() {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let v = x & logi_sim::netlist::mask(p.width);
+                on.set_input(port, v);
+                off.set_input(port, v);
+            }
+            on.tick();
+            off.tick();
+        }
+        if t == ticks / 2 {
+            let (a, b) = (on.export_state(), off.export_state());
+            assert_eq!(a.words, b.words, "{name}: tick {t}: state");
+            on.import_state(&b);
+            off.import_state(&a);
+        }
+        for port in 0..p_on.ports.outputs.len() {
+            assert_eq!(
+                on.output(port),
+                off.output(port),
+                "{name}: tick {t}: output {port}"
+            );
+        }
+        assert_eq!(
+            on.export_state().words,
+            off.export_state().words,
+            "{name}: tick {t}: state"
+        );
+        for inst in 0..p_off.debug.instances.len() {
+            let path = p_off.debug.path(inst as u32);
+            for (net, _) in &p_off.debug.net_slots[inst] {
+                let (got, want) = (on.read_net(&path, net), off.read_net(&path, net));
+                if debug {
+                    assert_eq!(got, want, "{name}: tick {t}: net {path:?}/{net:?}");
+                } else if let (Some(g), Some(w)) = (got, want) {
+                    assert_eq!(g, w, "{name}: tick {t}: net {path:?}/{net:?}");
+                }
+            }
+        }
+    }
+    (p_on.instrs.len(), p_off.instrs.len())
+}
+
+/// Lifting changes nothing observable in any demo or gallery item, under
+/// the editor's options (every net a probe could show) and the defaults.
+#[test]
+fn word_lifting_preserves_every_demo_and_gallery_item() {
+    let catalog = demos();
+    for item in catalog.demos.iter().chain(&catalog.gallery) {
+        if item.id == "cpu16" {
+            continue; // below, for longer
+        }
+        let design = crate::sim::netlist::design_of(&item.workspace).unwrap();
+        for debug in [true, false] {
+            lifting_matches(&item.id, &design, debug, 150);
+        }
+    }
+}
+
+/// The gate-level CPU, lifted and not, for 3000 ticks (a few hundred
+/// instructions of its program): identical outputs, state and nets every
+/// tick. Lifting must also make it much smaller.
+#[test]
+fn word_lifting_preserves_the_gate_cpu() {
+    let design = crate::sim::netlist::design_of(&demos().get("cpu16").unwrap().workspace).unwrap();
+    for debug in [true, false] {
+        let (on, off) = lifting_matches("cpu16", &design, debug, 3000);
+        assert!(on * 3 < off, "debug {debug}: {off} -> {on} instructions");
+    }
+}
