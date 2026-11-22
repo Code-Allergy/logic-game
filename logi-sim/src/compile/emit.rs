@@ -8,6 +8,7 @@ use slotmap::SecondaryMap;
 
 use super::Options;
 use super::elaborate::Elab;
+use super::lift;
 use super::pack;
 use super::program::*;
 use super::simplify::simplify;
@@ -184,6 +185,19 @@ pub(super) fn emit(
         simplify(&mut em, &order, &mut ports, &mut debug, &probe_slots, opts);
     }
     pass_done(super::Pass::Simplify);
+
+    // ── Word lifting ───────────────────────────────────────────────────────
+    let views = if opts.lift {
+        let probe_slots: Vec<u32> = opts
+            .probes
+            .iter()
+            .filter_map(|(path, net)| debug.slot(path, *net))
+            .collect();
+        lift::lift(&mut em, &mut ports, &mut debug, &probe_slots, opts)
+    } else {
+        Vec::new()
+    };
+    pass_done(super::Pass::Lift);
 
     // ── Levelize and group into blocks ─────────────────────────────────────
     let Emitter {
@@ -383,8 +397,9 @@ pub(super) fn emit(
         packs,
         gathers,
         scatters,
+        views: Vec::new(),
     };
-    renumber(&mut p, &out_ops, &dsts, &plan.lane_of);
+    renumber(&mut p, &out_ops, &dsts, &plan.lane_of, &views);
     pass_done(super::Pass::Renumber);
     p
 }
@@ -659,7 +674,13 @@ fn locality_order(
 /// they should be numbered). Unreferenced slots disappear. A net held only
 /// in a lane (`lane_of`, indexed by old slot) gets a lane slot in the debug
 /// map.
-fn renumber(p: &mut Program, ops: &[Op], dsts: &[u32], lane_of: &[u32]) {
+fn renumber(
+    p: &mut Program,
+    ops: &[Op],
+    dsts: &[u32],
+    lane_of: &[u32],
+    views: &[(u32, lift::Seg)],
+) {
     let mut map = vec![UNASSIGNED; p.slot_count as usize];
     let mut next = 0u32;
     let mut assign = |s: u32, map: &mut Vec<u32>| {
@@ -737,20 +758,41 @@ fn renumber(p: &mut Program, ops: &[Op], dsts: &[u32], lane_of: &[u32]) {
     for w in &mut p.lane_words {
         *w = m(*w);
     }
+    // View slots follow the lane slots.
+    let view_base = next + 64 * p.lane_words.len() as u32;
+    let view_index: HashMap<u32, u32> = views
+        .iter()
+        .enumerate()
+        .map(|(i, &(fake, _))| (fake, i as u32))
+        .collect();
+    p.views = views
+        .iter()
+        .map(|&(_, seg)| View {
+            slot: m(seg.base),
+            shift: seg.off,
+            width: seg.len,
+        })
+        .collect();
+    let remap = |s: u32| -> u32 {
+        if let Some(&i) = view_index.get(&s) {
+            return view_base + i;
+        }
+        match (map[s as usize], lane_of.get(s as usize)) {
+            (UNASSIGNED, Some(&x)) if x != pack::NONE => {
+                // Lane slot: `slot_count + 64 * word + lane`.
+                next + 64 * (x >> 6) + (x & 63)
+            }
+            _ => m(s),
+        }
+    };
     for slots in &mut p.debug.net_slots {
         for (_, s) in slots.iter_mut() {
-            *s = match (map[*s as usize], lane_of.get(*s as usize)) {
-                (UNASSIGNED, Some(&x)) if x != pack::NONE => {
-                    // Lane slot: `slot_count + 64 * word + lane`.
-                    next + 64 * (x >> 6) + (x & 63)
-                }
-                _ => m(*s),
-            };
+            *s = remap(*s);
         }
     }
     for key in &mut p.state_keys {
         if let StateLoc::Slot(s) = &mut key.loc {
-            *s = m(*s);
+            *s = remap(*s);
         }
     }
     p.slot_count = next;
@@ -1011,7 +1053,7 @@ fn lower_screen(
 /// Rank of every instruction (1 + max rank of the instructions producing
 /// its slot operands; 0 if none) and a topological order. Kahn's algorithm,
 /// iterative.
-fn levelize(ops: &[Op], instrs: &[Instr], slots: usize) -> (Vec<u32>, Vec<u32>) {
+pub(super) fn levelize(ops: &[Op], instrs: &[Instr], slots: usize) -> (Vec<u32>, Vec<u32>) {
     let n = instrs.len();
     let mut producer = vec![u32::MAX; slots];
     for (k, ins) in instrs.iter().enumerate() {
