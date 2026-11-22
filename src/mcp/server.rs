@@ -149,6 +149,11 @@ pub struct RunArgs {
     pub trace: Option<String>,
     /// The most ticks this call may run (default 1,000,000).
     pub max_ticks: Option<u64>,
+    /// Compile without optimising passes, to tell a fault of the design
+    /// from one of the compiler: true (all), or some of
+    /// ["func_match", "lift", "words"]. It applies when the simulation is
+    /// made (not to a session that continues).
+    pub off: Option<Value>,
     /// Read the script (steps, signals, ...) from this JSON file.
     pub file: Option<String>,
 }
@@ -306,6 +311,9 @@ impl Server {
         }
         if let Some(max) = args.max_ticks {
             script.insert("max_ticks".into(), max.into());
+        }
+        if let Some(off) = args.off {
+            script.insert("off".into(), off);
         }
         let file = args.file.map(PathBuf::from);
         self.session().run_tool(

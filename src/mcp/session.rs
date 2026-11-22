@@ -561,6 +561,38 @@ impl Session {
             .or_else(|| take(&mut script, "session"));
         script.shift_remove("circuit");
         script.shift_remove("session");
+        // "off": compile without these optimising passes (true: all of
+        // them), to tell a fault of the design from one of the compiler.
+        let off: Option<Vec<String>> = match script.shift_remove("off") {
+            None | Some(Value::Bool(false)) => None,
+            Some(Value::Bool(true)) => Some(
+                super::compiled::PASSES
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect(),
+            ),
+            Some(Value::Array(names)) => {
+                let mut off = Vec::new();
+                for name in names {
+                    match name.as_str() {
+                        Some(n) if super::compiled::PASSES.contains(&n) => off.push(n.to_string()),
+                        _ => {
+                            return Err(format!(
+                                "\"off\" takes true, or passes of {:?}; not {name}",
+                                super::compiled::PASSES
+                            ));
+                        }
+                    }
+                }
+                Some(off)
+            }
+            Some(other) => {
+                return Err(format!(
+                    "\"off\" takes true, or passes of {:?}; not {other}",
+                    super::compiled::PASSES
+                ));
+            }
+        };
 
         self.sync()?;
         let generation = self.generation;
@@ -593,7 +625,17 @@ impl Session {
         });
         let mut state = match kept {
             Some(state) => state,
-            None => RunState::new(Rig::build(ws, place)?),
+            None => match &off {
+                Some(off) => {
+                    note.push_str(&format!("compiled with {} off\n", off.join(", ")));
+                    RunState::new(Rig::build_with(
+                        ws,
+                        place,
+                        super::compiled::options_without(off),
+                    )?)
+                }
+                None => RunState::new(Rig::build(ws, place)?),
+            },
         };
         let outcome = run::run(&mut state, &script);
         if let Some(name) = session {

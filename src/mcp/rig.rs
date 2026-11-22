@@ -235,6 +235,19 @@ impl Rig {
         Self::of(ws)
     }
 
+    /// [`Rig::build`] with compiler options.
+    pub fn build_with(
+        workspace: &WorkspaceDocument,
+        place: Place,
+        options: Options,
+    ) -> Result<Rig, String> {
+        let mut ws = workspace.clone();
+        if let Place::Definition(_) = place {
+            ws.root = circuit_at(workspace, place).clone();
+        }
+        Self::with_options(ws, options)
+    }
+
     /// Compile `ws`, its root the circuit under test.
     pub fn of(ws: WorkspaceDocument) -> Result<Rig, String> {
         Self::with_options(ws, Options::default())

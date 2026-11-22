@@ -497,6 +497,14 @@ cycle without running from reset each time. A session is dropped when
 the workspace changes (the next call says so), and at most eight are
 kept.
 
+**Without the optimiser.** `"off": true` compiles the simulation with
+function matching, word lifting and word cleanup off (or `"off":
+["lift"]` for some of them), and the result says so. A run that fails
+with the passes on and passes with them off points at the compiler, not
+at the design. It applies when the simulation is made, not to a session
+that continues. The stored test kind `unoptimized` does the comparison
+on random inputs.
+
 **Limits.** A call runs at most `max_ticks` ticks (1,000,000 unless the
 script asks for more, up to 1,000,000,000), records at most 5,000,000
 rows, and reads memory files up to 64 MB. File paths are used as given,
