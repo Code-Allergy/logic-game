@@ -57,7 +57,14 @@ pub fn bridge_flush_system(
     if game_circuit.is_changed() {
         cache.rebuild_index(&game_circuit, &bridge);
     }
-    cache.sync_with_bridge(&bridge, &mut sim_config);
+    // Write through without change detection, then flag a change only when a
+    // value actually differs. Passing `&mut sim_config` directly marked the
+    // config changed every frame, which resent `SetTickRate` every frame.
+    let runner_before = sim_config.current_runner;
+    cache.sync_with_bridge(&bridge, sim_config.bypass_change_detection());
+    if sim_config.current_runner != runner_before {
+        sim_config.set_changed();
+    }
 }
 
 /// Apply validated authoring commands to focused ECS components. Configuration
@@ -472,14 +479,24 @@ pub fn rebuild_spatial_grid_system(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Update worker tickrate when `SimulationConfig` changes.
-pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, bridge: Res<SimBridge>) {
-    if sim_config.is_changed() {
-        if sim_config.unlimited_tick_rate {
-            bridge.set_tick_rate(None);
-        } else {
-            let tick_rate = sim_config.tick_rate.max(0.1);
-            bridge.set_tick_rate(Some(tick_rate));
-        }
+/// Only sends `SetTickRate` when the effective rate differs from the last one
+/// sent, so unrelated config changes (e.g. the runner type) do not resend it.
+pub fn update_tickrate_system(
+    sim_config: Res<SimulationConfig>,
+    bridge: Res<SimBridge>,
+    mut last_sent: Local<Option<Option<f64>>>,
+) {
+    if !sim_config.is_changed() {
+        return;
+    }
+    let rate = if sim_config.unlimited_tick_rate {
+        None
+    } else {
+        Some(sim_config.tick_rate.max(0.1))
+    };
+    if *last_sent != Some(rate) {
+        bridge.set_tick_rate(rate);
+        *last_sent = Some(rate);
     }
 }
 

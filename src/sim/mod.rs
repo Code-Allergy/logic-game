@@ -241,7 +241,7 @@ pub struct SimulationConfig {
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
-            tick_rate: 10.0,
+            tick_rate: logi_sim::engine::DEFAULT_TICK_RATE,
             unlimited_tick_rate: false,
             current_runner: RunnerType::default(),
         }
