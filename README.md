@@ -69,7 +69,9 @@ inspector), `Shift`+click adds a part to the selection or takes it out,
 `Shift`+drag on empty canvas selects the parts in a box, left- or
 right-drag moves a part (a right drag on a selected group moves the
 group; on a 10-unit snap grid, half the wire grid, so pins line up; new
-parts land on it too), middle-drag pans, the wheel zooms about the
+parts land on it too), a left drag from a pin to a pin makes a wire
+(`Esc` drops it; with `Shift` the press selects instead), middle-drag
+pans, the wheel zooms about the
 cursor.
 
 `cargo run --example screenshot -- <id> out.png [--night] [--size WxH]
@@ -83,7 +85,9 @@ challenge (the first argument `-` for its starter, or a circuit file in its
 place) and `--check` presses Check. `--confirm` shows the unsaved-changes
 question. `--drag LABEL:DX,DY` drags a part through the real pointer path.
 `--multi LABEL,...` selects several parts (the selection card), `--make-chip
-NAME` makes them a chip and `--open-chip` opens it. Run it with
+NAME` makes them a chip and `--open-chip` opens it. `--wire FROM.PIN:TO.PIN`
+drags a wire (`--hold` keeps the button down for the shot) and `--hover
+LABEL.PIN` points at a pin. Run it with
 `GATEQUEST_DATA_DIR` set to a scratch folder.
 
 ## Saving

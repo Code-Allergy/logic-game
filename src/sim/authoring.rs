@@ -491,7 +491,7 @@ pub struct CreateGate {
     pub label: Option<String>,
 }
 
-#[derive(Message, Debug, Clone, Copy)]
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateWire {
     pub source_gate: Uuid,
     pub source_pin: u8,
