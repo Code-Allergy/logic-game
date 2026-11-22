@@ -13,6 +13,7 @@ use super::lift;
 use super::pack;
 use super::program::*;
 use super::simplify::simplify;
+use super::words;
 use super::{FastMap, Options};
 use crate::netlist::{NetId, NodeId, NodeKind, ScreenMode, mask};
 
@@ -348,6 +349,20 @@ pub(super) fn emit(
         Vec::new()
     };
     pass_done(super::Pass::Lift);
+
+    // ── Word-level cleanup ─────────────────────────────────────────────────
+    let views = if opts.words {
+        let probe_slots: Vec<u32> = opts
+            .probes
+            .iter()
+            .filter_map(|(path, net)| debug.slot(path, *net))
+            .chain(probe_extra.iter().copied())
+            .collect();
+        words::clean(&mut em, &mut ports, &mut debug, &probe_slots, views, opts)
+    } else {
+        views
+    };
+    pass_done(super::Pass::Words);
 
     // ── Levelize and group into blocks ─────────────────────────────────────
     let Emitter {

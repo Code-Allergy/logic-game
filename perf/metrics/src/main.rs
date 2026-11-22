@@ -251,6 +251,15 @@ fn named_options(options: &str) -> Options {
             func_match: false,
             ..Options::debug()
         },
+        // Word-level cleanup (issue #117, stage 3) off, for comparison.
+        "default-nowords" => Options {
+            words: false,
+            ..Options::default()
+        },
+        "editor-nowords" => Options {
+            words: false,
+            ..Options::debug()
+        },
         // As the throughput benchmarks: simplify off (every node is an
         // instruction), default layout and packing.
         "raw" => Options {
@@ -259,7 +268,7 @@ fn named_options(options: &str) -> Options {
             ..Options::unoptimized()
         },
         other => panic!(
-            "options {other:?}: default, editor, raw, default-nolift, editor-nolift, default-nomatch or editor-nomatch"
+            "options {other:?}: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch, default-nowords or editor-nowords"
         ),
     }
 }
@@ -411,6 +420,84 @@ fn breakdown(name: &str, options: &str) {
     }
 }
 
+/// Print the compiled program of `case` block by block: each instruction
+/// with its operands, each slot named by an authored net that lives in it
+/// (`def/net`) or by its number and width. For reading what the
+/// optimizer left (issue #117).
+fn dump(name: &str, options: &str) {
+    use std::collections::HashMap;
+    let d = case(name);
+    let p = compile(&d, &named_options(options)).unwrap();
+    let mut names: HashMap<u32, String> = HashMap::new();
+    for (inst, map) in p.debug.net_slots.iter().enumerate() {
+        let def = &d.defs[p.debug.instances[inst].def];
+        for (net, &s) in map {
+            if s < p.slot_count {
+                names.entry(s).or_insert_with(|| {
+                    let (node, pin) = def.nets[net].driver;
+                    let n = def
+                        .name_of(node)
+                        .map_or_else(|| format!("{:?}", def.nodes[node].kind), str::to_string);
+                    format!("{}/{}.{pin}#{inst}", def.name, n)
+                });
+            }
+        }
+    }
+    let consts: HashMap<u32, u64> = p.consts.iter().copied().collect();
+    let name_of = |s: u32| -> String {
+        if let Some(v) = consts.get(&s) {
+            return format!("#{v:#x}");
+        }
+        match names.get(&s) {
+            Some(n) => format!("s{s}({n})"),
+            None => format!("s{s}"),
+        }
+    };
+    for b in &p.blocks {
+        if b.packed {
+            println!("rank {} {:?} packed x{}", b.rank, b.op, b.len);
+            continue;
+        }
+        for k in b.start..b.start + b.len {
+            let ins = p.instrs[k as usize];
+            let (sa, sb, sc) = b.op.slot_operands();
+            let o = |is: bool, s: u32| if is { name_of(s) } else { format!("{s}") };
+            println!(
+                "r{} {:?} {} <- {} {} {} imm={:#x}",
+                b.rank,
+                b.op,
+                name_of(ins.dst),
+                o(sa, ins.a),
+                o(sb, ins.b),
+                o(sc, ins.c),
+                p.imms[k as usize]
+            );
+        }
+    }
+    for k in &p.state_keys {
+        if let logi_sim::compile::StateLoc::Slot(s) = k.loc {
+            let (real, shift, mask) = p.resolve(s).unwrap();
+            println!(
+                "state {} = s{real}[{shift}+{}] w{} {:?}",
+                d.defs
+                    [p.debug.instances[p.debug.instance(&k.path.instances).unwrap() as usize].def]
+                    .name,
+                mask.count_ones(),
+                k.width,
+                k.path.node
+            );
+        }
+    }
+    for c in &p.commits {
+        match *c {
+            logi_sim::compile::Commit::Copy { state, next } => {
+                println!("commit {} <- {}", name_of(state), name_of(next))
+            }
+            other => println!("commit {other:?}"),
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -423,6 +510,9 @@ fn main() {
         Some("breakdown") if (2..=3).contains(&args.len()) => {
             breakdown(&args[1], args.get(2).map_or("default", String::as_str));
         }
+        Some("dump") if (2..=3).contains(&args.len()) => {
+            dump(&args[1], args.get(2).map_or("default", String::as_str));
+        }
         Some("ticks") if (3..=5).contains(&args.len()) => {
             run_ticks(
                 &args[1],
@@ -434,8 +524,8 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: perf-metrics [cases | ticks <case> <n> [OPTIONS] [threads] | breakdown <case> [OPTIONS]]\n\
-                 OPTIONS: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch"
+                "usage: perf-metrics [cases | ticks <case> <n> [OPTIONS] [threads] | breakdown <case> [OPTIONS] | dump <case> [OPTIONS]]\n\
+                 OPTIONS: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch, default-nowords, editor-nowords"
             );
             std::process::exit(2);
         }

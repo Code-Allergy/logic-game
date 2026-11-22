@@ -79,11 +79,22 @@ primitives. Names live in a side table.
    elimination, CSE and dead-code elimination, each switchable in
    `Options`. DCE keeps root ports, state and `Options::probes`;
    `Options::debug()` turns it off so every net stays observable.
-6. **Levelize and emit** (`emit.rs`): rank every instruction, sort by
+6. **Word lifting** (`lift.rs`, `Options::lift`): bus-aligned groups of
+   1-bit gates and 1-bit state become word ops and state words; lifted
+   nets stay readable as views (`Program::views`).
+7. **Word-level cleanup** (`words.rs`, `Options::words`): the program is
+   rebuilt as a hash-consed expression graph with exact word rewrites
+   (slice and concatenation round trips, ops merged across bit ranges,
+   complemented selects, double complements) and state words that are
+   only read together (two 8-bit registers forming a 16-bit one, the
+   master and slave latches of a word of flip-flops) are merged into one
+   word. Nets and state elements that lose their slot become views; the
+   result is kept only if it is cheaper.
+8. **Levelize and emit** (`emit.rs`): rank every instruction, sort by
    `(rank, op)` into blocks, and number slots (`Options::slot_order`).
-7. **Pack** (`pack.rs`, `Options::pack`): optionally pack runs of 1-bit
+9. **Pack** (`pack.rs`, `Options::pack`): optionally pack runs of 1-bit
    instructions into the 64 lanes of a word.
-8. **Partition** (`Options::partitions`): optionally lay blocks out per
+10. **Partition** (`Options::partitions`): optionally lay blocks out per
    thread.
 
 `Program` (`program.rs`, which documents the execution model in full) holds

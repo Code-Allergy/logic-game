@@ -254,4 +254,4 @@ pub fn report(design: &Design, cache: &mut MatchCache) -> Vec<(String, bool, Str
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
