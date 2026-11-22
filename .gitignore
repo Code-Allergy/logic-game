@@ -12,3 +12,4 @@ workspaces/
 
 # Workspaces of the MCP server started from .mcp.json (docs/mcp-server.md).
 .gatequest/
+nes/roms/
