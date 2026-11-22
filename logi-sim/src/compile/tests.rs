@@ -550,10 +550,20 @@ fn ports_debug_map_and_state_keys() {
     assert_eq!(p.commits.len(), 1);
 }
 
+/// Without the word-level cleanup, which folds double complements (see
+/// `chain_of_inverters_folds_to_a_wire`).
+fn compile_no_words(d: &Design) -> Program {
+    let o = Options {
+        words: false,
+        ..Options::default()
+    };
+    compile(d, &o).unwrap_or_else(|e| panic!("compile failed: {e:?}"))
+}
+
 #[test]
 fn chain_depth_is_its_rank_count() {
     let d = chain(1000);
-    let p = compile_ok(&d);
+    let p = compile_no_words(&d);
     assert_eq!(p.instrs.len(), 1000);
     assert_eq!(p.depth(), 1000);
     check_program_invariants(&p);
@@ -604,8 +614,31 @@ fn nested(depth: usize) -> Design {
 
 #[test]
 fn long_chain_compiles_without_recursion() {
-    let p = compile_ok(&chain(100_000));
+    let p = compile_no_words(&chain(100_000));
     assert_eq!(p.depth(), 100_000);
+    // The cleanup is iterative too, and folds the chain away.
+    let p = compile_ok(&chain(100_001));
+    assert_eq!(p.instrs.len(), 1);
+}
+
+/// The word-level cleanup folds double complements (issue #117, stage 3):
+/// an even chain of inverters is a wire, an odd one one inverter, and
+/// every inverter's net still reads its value under the editor's options.
+#[test]
+fn chain_of_inverters_folds_to_a_wire() {
+    for (n, instrs) in [(1000, 0), (1001, 1)] {
+        let d = chain(n);
+        let p = compile_ok(&d);
+        assert_eq!(p.instrs.len(), instrs, "{n} inverters");
+        check_program_invariants(&p);
+        let mut x = sim(p);
+        for v in [1, 0, 1] {
+            x.set_input(0, v);
+            x.tick();
+            assert_eq!(x.output(0), v ^ (n as u64 & 1));
+        }
+        crate::testkit::diff::check_design(&d, 5, 20, &Options::debug()).unwrap();
+    }
 }
 
 #[test]

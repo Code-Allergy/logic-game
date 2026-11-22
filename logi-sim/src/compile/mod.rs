@@ -5,7 +5,7 @@
 //! definitions (see [`func`]), lower, simplify (constant
 //! folding, alias elimination, CSE, dead-code elimination; see
 //! `simplify.rs`), word lifting (bit-sliced logic back to word ops; see
-//! `lift.rs`), levelize, emit.
+//! `lift.rs`), word-level cleanup (see `words.rs`), levelize, emit.
 //!
 //! All passes are iterative; nothing recurses on circuit depth or instance
 //! nesting.
@@ -18,6 +18,7 @@ mod loops;
 mod pack;
 pub mod program;
 mod simplify;
+mod words;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -66,6 +67,10 @@ pub struct Options {
     /// Its internal nets stay readable through shadow slots
     /// ([`Program::shadows`]). See [`func`].
     pub func_match: bool,
+    /// Word-level cleanup (issue #117, stage 3): slice and concatenation
+    /// round trips, ops merged across bit ranges, and state words merged
+    /// where they are only read together. See `words.rs`.
+    pub words: bool,
     /// Nets to keep observable under dead-code elimination:
     /// `(instance path, NetId)`.
     pub probes: Vec<(Vec<NodeId>, NetId)>,
@@ -143,6 +148,7 @@ impl Default for Options {
             dce: true,
             lift: true,
             func_match: true,
+            words: true,
             probes: Vec::new(),
             slot_order: SlotOrder::default(),
             pack: PackMode::Auto,
@@ -164,6 +170,7 @@ impl Options {
             dce: false,
             lift: false,
             func_match: false,
+            words: false,
             probes: Vec::new(),
             slot_order: SlotOrder::Production,
             pack: PackMode::Off,
@@ -236,6 +243,8 @@ pub enum Pass {
     Simplify,
     /// Bus-aligned word lifting.
     Lift,
+    /// Word-level cleanup.
+    Words,
     /// Levelizing, partitioning and slot ordering.
     Levelize,
     /// Lane packing and block emission.
@@ -245,7 +254,7 @@ pub enum Pass {
 }
 
 impl Pass {
-    pub const ALL: [Pass; 10] = [
+    pub const ALL: [Pass; 11] = [
         Pass::Validate,
         Pass::Elaborate,
         Pass::LoopCheck,
@@ -253,6 +262,7 @@ impl Pass {
         Pass::Lower,
         Pass::Simplify,
         Pass::Lift,
+        Pass::Words,
         Pass::Levelize,
         Pass::Pack,
         Pass::Renumber,
@@ -268,6 +278,7 @@ impl Pass {
             Pass::Lower => "lower",
             Pass::Simplify => "simplify",
             Pass::Lift => "lift",
+            Pass::Words => "words",
             Pass::Levelize => "levelize",
             Pass::Pack => "pack",
             Pass::Renumber => "renumber",

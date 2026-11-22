@@ -42,15 +42,27 @@ fn wrap(mut d: Design, child: DefId, copies: usize) -> Design {
 /// against the reference interpreter. Halfway, state crosses over.
 /// Returns the instruction counts (matched, unmatched).
 pub(crate) fn on_off(name: &str, d: &Design, debug: bool, ticks: u64) -> (usize, usize) {
+    on_off_with(name, d, debug, ticks, |o| Options {
+        func_match: false,
+        ..o
+    })
+}
+
+/// [`on_off`] for any switch: the editor's (`debug`) or the default
+/// options against the same with `off` applied.
+pub(crate) fn on_off_with(
+    name: &str,
+    d: &Design,
+    debug: bool,
+    ticks: u64,
+    off: impl Fn(Options) -> Options,
+) -> (usize, usize) {
     let on_opts = if debug {
         Options::debug()
     } else {
         Options::default()
     };
-    let off_opts = Options {
-        func_match: false,
-        ..on_opts.clone()
-    };
+    let off_opts = off(on_opts.clone());
     for o in [&on_opts, &off_opts] {
         if let Err(e) = check_design(d, 7, ticks.min(200), o) {
             panic!("{name}: {e}");

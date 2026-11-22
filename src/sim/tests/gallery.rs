@@ -1755,3 +1755,51 @@ fn function_matching_preserves_the_gate_cpu() {
         assert!(on * 3 < off, "debug {debug}: {off} -> {on} instructions");
     }
 }
+
+/// [`lifting_matches`] for the word-level cleanup (logi-sim issue #117,
+/// stage 3): cleaned against not, every tick, outputs, state (including
+/// state words merged by the cleanup) and every net.
+fn words_cleanup_matches(
+    name: &str,
+    design: &logi_sim::netlist::Design,
+    debug: bool,
+    ticks: u64,
+) -> (usize, usize) {
+    use logi_sim::compile::Options;
+    options_match(name, design, debug, ticks, |o| Options {
+        words: false,
+        ..o
+    })
+}
+
+/// The word-level cleanup changes nothing observable in any demo or
+/// gallery item, under the editor's options and the defaults.
+#[test]
+fn word_cleanup_preserves_every_demo_and_gallery_item() {
+    let catalog = demos();
+    for item in catalog.demos.iter().chain(&catalog.gallery) {
+        if item.id == "cpu16" {
+            continue; // below, for longer
+        }
+        let design = crate::sim::netlist::design_of(&item.workspace).unwrap();
+        for debug in [true, false] {
+            let (on, off) = words_cleanup_matches(&item.id, &design, debug, 150);
+            assert!(on <= off, "{}: debug {debug}: {off} -> {on}", item.id);
+        }
+    }
+}
+
+/// The gate-level CPU, cleaned and not, for 5000 ticks: identical outputs,
+/// state and nets every tick; the cleanup removes at least a third of its
+/// instructions.
+#[test]
+fn word_cleanup_preserves_the_gate_cpu() {
+    let design = crate::sim::netlist::design_of(&demos().get("cpu16").unwrap().workspace).unwrap();
+    for debug in [true, false] {
+        let (on, off) = words_cleanup_matches("cpu16", &design, debug, 5000);
+        assert!(
+            on * 3 < off * 2,
+            "debug {debug}: {off} -> {on} instructions"
+        );
+    }
+}

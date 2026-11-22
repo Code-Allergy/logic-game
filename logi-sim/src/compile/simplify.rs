@@ -267,7 +267,7 @@ pub(super) fn simplify(
 
 /// Evaluate an instruction with constant operands. `None` for ops that are
 /// not constant even then (clocks, RAM reads).
-fn fold(
+pub(super) fn fold(
     op: Op,
     i: &Instr,
     imm: u64,
