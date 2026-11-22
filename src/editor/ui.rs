@@ -165,6 +165,7 @@ pub fn editor_ui_system(
     mut theme: ResMut<Theme>,
     mut next_state: ResMut<NextState<GameState>>,
     mut seen_active: Local<Option<(Uuid, String)>>,
+    mut undo: super::undo::UndoControls,
 ) -> Result<(), BevyError> {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -258,9 +259,12 @@ pub fn editor_ui_system(
         active.read_only,
         revision.is_dirty(),
     );
-    // Room for the text: the card stops short of the transport card.
-    let text_width =
-        ((layout.screen.x - 640.0) * 0.5 - layout.margin - layout.gap - 238.0).clamp(90.0, 300.0);
+    // Room for the text: the card stops short of the transport card. The
+    // Undo and Redo buttons go in the card when there is room, else in a
+    // card of their own below it.
+    let room = (layout.screen.x - 640.0) * 0.5 - layout.margin - layout.gap - 238.0;
+    let undo_inline = room - undo.width(8.0) >= 90.0;
+    let text_width = (room - if undo_inline { undo.width(8.0) } else { 0.0 }).clamp(90.0, 300.0);
     egui::Area::new(egui::Id::new("hud_file"))
         .anchor(Align2::LEFT_TOP, [layout.margin, layout.margin])
         .order(Order::Middle)
@@ -314,6 +318,9 @@ pub fn editor_ui_system(
                             };
                         });
                         ui.spacing_mut().item_spacing.x = 8.0;
+                        if undo_inline {
+                            undo.buttons(ui, &palette);
+                        }
                         if !views.view.is_root() {
                             if chunky_button(ui, &palette, "←", false)
                                 .on_hover_text("Back to the parent circuit")
@@ -346,6 +353,9 @@ pub fn editor_ui_system(
                     });
                 });
         });
+    if !undo_inline {
+        undo.card(ctx, &palette, &layout, editor_state.library_open);
+    }
     if let Some(mode) = theme_wanted {
         theme.set(mode);
     }
