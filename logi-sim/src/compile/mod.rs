@@ -3,13 +3,15 @@
 //! Passes: validate, elaborate (flatten with port unification by
 //! union-find), loop check (iterative Tarjan), lower, simplify (constant
 //! folding, alias elimination, CSE, dead-code elimination; see
-//! `simplify.rs`), levelize, emit.
+//! `simplify.rs`), word lifting (bit-sliced logic back to word ops; see
+//! `lift.rs`), levelize, emit.
 //!
 //! All passes are iterative; nothing recurses on circuit depth or instance
 //! nesting.
 
 mod elaborate;
 mod emit;
+mod lift;
 mod loops;
 mod pack;
 pub mod program;
@@ -43,6 +45,12 @@ pub struct Options {
     /// Dead-code elimination (ignored when `debug` is set). The live set is
     /// the root outputs, state, and `probes`.
     pub dce: bool,
+    /// Bus-aligned word lifting (issue #117): groups of 1-bit bitwise
+    /// instructions that read the same bit positions of words become word
+    /// instructions, and 1-bit state elements forming a bus become one
+    /// state word. Lifted nets stay observable through views in the debug
+    /// map ([`Program::views`]).
+    pub lift: bool,
     /// Nets to keep observable under dead-code elimination:
     /// `(instance path, NetId)`.
     pub probes: Vec<(Vec<NodeId>, NetId)>,
@@ -118,6 +126,7 @@ impl Default for Options {
             alias: true,
             cse: true,
             dce: true,
+            lift: true,
             probes: Vec::new(),
             slot_order: SlotOrder::default(),
             pack: PackMode::Auto,
@@ -137,6 +146,7 @@ impl Options {
             alias: false,
             cse: false,
             dce: false,
+            lift: false,
             probes: Vec::new(),
             slot_order: SlotOrder::Production,
             pack: PackMode::Off,
@@ -205,6 +215,8 @@ pub enum Pass {
     Lower,
     /// Constant folding, alias elimination, CSE, dead-code elimination.
     Simplify,
+    /// Bus-aligned word lifting.
+    Lift,
     /// Levelizing, partitioning and slot ordering.
     Levelize,
     /// Lane packing and block emission.
@@ -214,12 +226,13 @@ pub enum Pass {
 }
 
 impl Pass {
-    pub const ALL: [Pass; 8] = [
+    pub const ALL: [Pass; 9] = [
         Pass::Validate,
         Pass::Elaborate,
         Pass::LoopCheck,
         Pass::Lower,
         Pass::Simplify,
+        Pass::Lift,
         Pass::Levelize,
         Pass::Pack,
         Pass::Renumber,
@@ -233,6 +246,7 @@ impl Pass {
             Pass::LoopCheck => "loop_check",
             Pass::Lower => "lower",
             Pass::Simplify => "simplify",
+            Pass::Lift => "lift",
             Pass::Levelize => "levelize",
             Pass::Pack => "pack",
             Pass::Renumber => "renumber",

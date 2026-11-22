@@ -407,6 +407,15 @@ impl DebugMap {
     }
 }
 
+/// Bits `shift..shift + width` of real slot `slot` (see
+/// [`Program::views`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct View {
+    pub slot: u32,
+    pub shift: u8,
+    pub width: u8,
+}
+
 /// Where a state element's state lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateLoc {
@@ -415,6 +424,9 @@ pub enum StateLoc {
 }
 
 /// Identity of one state element, for carrying state across recompiles.
+/// A `StateLoc::Slot` may be a lane or view slot (a 1-bit state element
+/// lifted into a state word); read and write it through
+/// [`Program::resolve`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateKey {
     pub path: NodePath,
@@ -446,6 +458,11 @@ pub struct Program {
     /// Real slots of the packed words that hold lane slots: lane slot
     /// `slot_count + 64 * k + l` is bit `l` of `lane_words[k]`.
     pub lane_words: Vec<u32>,
+    /// Bit fields of real slots that hold nets (and state elements) with no
+    /// slot of their own, after word lifting (issue #117). View slot
+    /// `slot_count + 64 * lane_words.len() + k` is `views[k]`
+    /// ([`Program::resolve`]).
+    pub views: Vec<View>,
     /// With `Options::partitions` > 1: the partition of each block
     /// (parallel to `blocks`). Empty otherwise. A runtime with that many
     /// threads gives thread `t` the blocks of partition `t`.
@@ -481,5 +498,21 @@ impl Program {
         let lane = (slot - self.slot_count) as usize;
         let word = *self.lane_words.get(lane / 64)?;
         Some((word, Some((lane % 64) as u8)))
+    }
+
+    /// Real slot, shift and mask holding `slot`: a plain slot is itself
+    /// (shift 0, all bits), a lane slot one bit of its packed word, a view
+    /// slot a bit field of its word ([`Program::views`]). `None` if out of
+    /// range.
+    pub fn resolve(&self, slot: u32) -> Option<(u32, u8, u64)> {
+        let views_at = self.slot_count as u64 + 64 * self.lane_words.len() as u64;
+        if (slot as u64) >= views_at {
+            let v = self.views.get((slot as u64 - views_at) as usize)?;
+            return Some((v.slot, v.shift, crate::netlist::mask(v.width)));
+        }
+        match self.locate(slot)? {
+            (s, None) => Some((s, 0, u64::MAX)),
+            (s, Some(lane)) => Some((s, lane, 1)),
+        }
     }
 }
