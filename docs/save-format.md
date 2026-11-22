@@ -543,6 +543,8 @@ circuit with the editor's box sizes and colours, labels, generated adapters
 dashed, and wires straight from centre to centre as the editor draws them
 (`--ortho`: horizontal and vertical segments instead). It prints each
 circuit's node count and two layout checks: overlapping boxes and wires
-that pass through a box. The gallery was laid out by hand with it, and
-its tests check that no boxes overlap and every node is on the 20-unit
-grid.
+that pass through a box. The gallery and the curriculum demos were laid
+out by hand with it, and the tests check for both that no boxes overlap
+and every node is on the 20-unit grid. The only wires it still reports
+through boxes are a word input's own lines to its generated split column,
+which cross the splits of that column.

@@ -1,6 +1,7 @@
 //! The gallery (`assets/gallery/`): its files are embedded and canonical,
 //! it only builds on the curriculum and on items listed before it, every
-//! item compiles and is laid out without overlapping boxes, and each one
+//! item compiles and is laid out without overlapping boxes (the curriculum
+//! demos too), and each one
 //! behaves as its description says (checked against an oracle: arithmetic,
 //! a truth table, a reference state machine or an instruction-set
 //! interpreter).
@@ -136,11 +137,14 @@ fn gallery_builds_on_the_curriculum_and_earlier_items() {
     assert!(reuse >= 8, "{reuse} items reuse gallery items");
 }
 
-/// Every circuit of every item (generated adapters included) is laid out
-/// on the 20-unit grid with no two node boxes overlapping.
+/// Every circuit of every curriculum demo and gallery item (generated
+/// adapters included) is laid out on the 20-unit grid with no two node
+/// boxes overlapping.
 #[test]
-fn gallery_layouts_have_no_overlapping_boxes() {
-    for item in &demos().gallery {
+fn demo_and_gallery_layouts_have_no_overlapping_boxes() {
+    let catalog = demos();
+    assert!(!catalog.demos.is_empty() && !catalog.gallery.is_empty());
+    for item in catalog.demos.iter().chain(&catalog.gallery) {
         for (name, doc) in &item.circuits {
             let boxes: Vec<(Vec2, Vec2)> = doc
                 .nodes
