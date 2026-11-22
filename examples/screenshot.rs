@@ -36,6 +36,11 @@
 //! Set `GATEQUEST_DATA_DIR` to a scratch folder so that nothing touches the
 //! player's saved workspaces.
 //!
+//! `--multi LABEL,LABEL,...` selects those parts together (the selection
+//! card shows; `kind:NAME` stands for every part of that kind, e.g.
+//! `kind:And`); with `--make-chip NAME` they are then made into a chip of
+//! that name (the workspace must be editable), and `--open-chip` opens it.
+//!
 //! `--map` shows the demo map instead of a demo (the id is ignored), with
 //! the demos listed by `--opened ID,ID,...` (the last one last) as the
 //! progress, kept in memory only; `--level N` picks a stop;
@@ -64,9 +69,10 @@ use gate_quest::editor::files::{OpenRequest, PendingOpen};
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
 use gate_quest::sim::systems::canvas_cursor_system;
 use gate_quest::sim::{
-    ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel,
-    LoadWorkspaceEvent, OpenDefinitionView, SelectedGate, SetInputValue, SimBridge,
-    SimulationPlugin, WorkspaceDocument, WorkspaceRevision, demos, source,
+    ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel, GateType,
+    LoadWorkspaceEvent, MakeChip, MultiSelection, OpenDefinitionView, OpenInstanceView,
+    SelectedGate, SetInputValue, SimBridge, SimulationPlugin, WorkspaceDocument, WorkspaceRevision,
+    demos, source,
 };
 use gate_quest::temp::GateComponentSelectionEvent;
 use gate_quest::theme::{Theme, ThemeMode, ThemePlugin};
@@ -92,6 +98,9 @@ struct Shot {
     definition: Option<String>,
     fit: bool,
     editable: bool,
+    multi: Vec<String>,
+    make_chip: Option<String>,
+    open_chip: bool,
     challenge: Option<String>,
     check: bool,
     drag: Option<(String, Vec2)>,
@@ -166,6 +175,7 @@ fn main() {
     let (mut editable, mut confirm) = (false, false);
     let mut drag = None;
     let (mut challenge, mut check, mut completed) = (None, false, String::new());
+    let (mut multi, mut make_chip, mut open_chip) = (Vec::new(), None, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--night" => night = true,
@@ -200,6 +210,16 @@ fn main() {
             "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "--definition" => definition = args.next(),
             "--fit" => fit = true,
+            "--multi" => {
+                multi = args
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect();
+            }
+            "--make-chip" => make_chip = args.next(),
+            "--open-chip" => open_chip = true,
             "--challenge" => challenge = args.next(),
             "--check" => check = true,
             "--completed" => completed = args.next().unwrap_or_default(),
@@ -254,6 +274,9 @@ fn main() {
             definition,
             fit,
             editable,
+            multi,
+            make_chip,
+            open_chip,
             challenge,
             check,
             drag,
@@ -270,7 +293,17 @@ fn main() {
         .run();
 }
 
-/// The map, the open circuit and challenge, the progress (grouped: a
+/// What `--multi`, `--make-chip` and `--open-chip` use.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ChipShot<'w, 's> {
+    group: ResMut<'w, MultiSelection>,
+    ids: Query<'w, 's, (Entity, &'static GateIdentity, &'static GateType)>,
+    make: MessageWriter<'w, MakeChip>,
+    open_instance: MessageWriter<'w, OpenInstanceView>,
+}
+
+/// The map, the open circuit and challenge, the progress, the chip
+/// parameters (grouped: a
 /// system takes at most 16 parameters).
 type MoreState<'w, 's> = (
     ResMut<'w, DemoMapState>,
@@ -279,6 +312,7 @@ type MoreState<'w, 's> = (
     ResMut<'w, DemoProgress>,
     Res<'w, WorkspaceRevision>,
     Local<'s, Option<Arc<WorkspaceDocument>>>,
+    ChipShot<'w, 's>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -299,8 +333,14 @@ fn drive(
     windows: Query<&Window>,
     mut exit: MessageWriter<AppExit>,
     // Grouped: a system takes at most 16 parameters.
-    (mut map, mut active, mut open_challenge, mut progress, revision, mut loaded): MoreState,
+    (mut map, mut active, mut open_challenge, mut progress, revision, mut loaded, mut chips): MoreState,
 ) {
+    let ChipShot {
+        group,
+        ids,
+        make,
+        open_instance,
+    } = &mut chips;
     shot.frame += 1;
     if shot.map {
         match shot.frame {
@@ -397,6 +437,49 @@ fn drive(
                     .find(|(n, _)| n == name)
                     .unwrap_or_else(|| panic!("no circuit {name}"));
                 open.write(OpenDefinitionView { definition: doc.id });
+            }
+            let mut primary = None;
+            for token in &shot.multi {
+                let found: Vec<Entity> = match token.strip_prefix("kind:") {
+                    Some(kind) => ids
+                        .iter()
+                        .filter(|(_, _, t)| t.kind.display_name() == kind)
+                        .map(|(e, ..)| e)
+                        .collect(),
+                    None => labels
+                        .iter()
+                        .filter(|(_, l)| &l.value == token)
+                        .map(|(e, _)| e)
+                        .take(1)
+                        .collect(),
+                };
+                assert!(!found.is_empty(), "no part {token}");
+                for entity in found {
+                    primary = group.toggle(entity, primary);
+                }
+            }
+            if primary.is_some() {
+                selected.0 = primary;
+            }
+        }
+        34 => {
+            if let Some(name) = &shot.make_chip {
+                make.write(MakeChip {
+                    gates: group
+                        .entities()
+                        .iter()
+                        .filter_map(|e| ids.get(*e).ok())
+                        .map(|(_, id, _)| id.uuid)
+                        .collect(),
+                    name: name.clone(),
+                });
+            }
+        }
+        37 => {
+            if shot.open_chip
+                && let Some(entity) = selected.0
+            {
+                open_instance.write(OpenInstanceView { entity });
             }
         }
         40 => {

@@ -60,14 +60,17 @@ Keys (ignored while a text field has focus): `1`–`9` arm a part from the
 open tab (then click the canvas, or drag a slot onto it), `Esc` drops it
 (or the wire tool, or closes the Library; with nothing to drop it clears
 the selection), `Space` run or pause, `W` wire tool, `F` fit, `R` reset to
-tick 0, arrow keys pan, `Delete`
-deletes the selected part, `T` day or night, `Ctrl+S` (`Cmd+S` on macOS)
-saves. Mouse: left-click selects
-(on empty canvas: deselects) and flips a 1-bit input (also in a
-read-only demo; a wider input is set in the inspector), left- or
-right-drag moves a part (on a 10-unit snap grid, half the wire grid,
-so pins line up; new parts land on it too), middle-drag pans, the
-wheel zooms about the cursor.
+tick 0, arrow keys pan, `Delete` deletes the selected part (or parts),
+`Ctrl+G` makes a chip of the selected parts, `T` day or night, `Ctrl+S`
+saves, `Ctrl+Z` undoes, `Ctrl+Shift+Z` or `Ctrl+Y` redoes (`Cmd` on
+macOS). Mouse: left-click selects (on empty canvas: deselects) and flips
+a 1-bit input (also in a read-only demo; a wider input is set in the
+inspector), `Shift`+click adds a part to the selection or takes it out,
+`Shift`+drag on empty canvas selects the parts in a box, left- or
+right-drag moves a part (a right drag on a selected group moves the
+group; on a 10-unit snap grid, half the wire grid, so pins line up; new
+parts land on it too), middle-drag pans, the wheel zooms about the
+cursor.
 
 `cargo run --example screenshot -- <id> out.png [--night] [--size WxH]
 [--select LABEL] [--set LABEL=VALUE] [--tab NAME] [--library] [--editable]
@@ -78,7 +81,10 @@ file (optionally one of its definitions); `--map [--opened ID,ID,...]
 `--completed ID,...` marks challenges done. `--challenge ID` opens a
 challenge (the first argument `-` for its starter, or a circuit file in its
 place) and `--check` presses Check. `--confirm` shows the unsaved-changes
-question. Run it with `GATEQUEST_DATA_DIR` set to a scratch folder.
+question. `--drag LABEL:DX,DY` drags a part through the real pointer path.
+`--multi LABEL,...` selects several parts (the selection card), `--make-chip
+NAME` makes them a chip and `--open-chip` opens it. Run it with
+`GATEQUEST_DATA_DIR` set to a scratch folder.
 
 ## Saving
 

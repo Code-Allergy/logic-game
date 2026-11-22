@@ -875,10 +875,13 @@ pub fn editor_ui_system(
                 "1–9: pick a part from the open tab; click or drag it onto the canvas",
                 "Left-click: select a part and flip a 1-bit input (inspector: edit, \
                  delete, set wider inputs); empty canvas: deselect",
-                "Left- or right-drag: move a part · Middle-drag or arrow keys: pan · \
-                 Wheel: zoom",
+                "Shift+click: add a part to the selection or take it out · \
+                 Shift+drag on empty canvas: select the parts in a box",
+                "Left- or right-drag: move a part (right-drag: the selected group) · \
+                 Middle-drag or arrow keys: pan · Wheel: zoom",
                 "Space: run or pause",
-                "Delete: delete the selected part",
+                "Delete: delete the selected part(s)",
+                "Ctrl+G: make a chip of the selected parts",
                 "W: wire tool (click source, then sink, choose pins)",
                 "F: fit the circuit · R: reset to tick 0",
                 "Esc: drop the armed part or wire tool, else deselect",

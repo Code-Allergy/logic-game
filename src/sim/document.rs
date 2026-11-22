@@ -111,13 +111,56 @@ impl DocWire {
     }
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 /// A circuit: nodes and wires.
+///
+/// ## Identity
+///
+/// A circuit used as a subcircuit definition is identified by its `id`;
+/// every instance refers to it by id. Two copies of the same definition
+/// (the one in the open workspace, the one in a saved workspace) are told
+/// apart by their content ([`Self::content_hash`], [`Self::same_content`])
+/// and ordered by their `revision`: an edit counter that the editor bumps
+/// each time it changes the definition's content (editing inside it,
+/// re-saving the workspace it came from). A higher revision is a newer
+/// version; the same revision with different content means both copies
+/// were edited since they parted. See [`CircuitLibrary::merge`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CircuitDocument {
     pub id: Uuid,
     pub name: String,
+    /// Edit counter of this circuit's content (0 when never counted, as
+    /// in a file written before revisions existed).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub revision: u64,
     pub nodes: Vec<DocNode>,
     pub wires: Vec<DocWire>,
+}
+
+/// 64-bit FNV-1a: a small, stable hash (the same on every platform and
+/// build), for content hashes.
+#[derive(Debug, Clone, Copy)]
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+    fn bytes(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 ^= u64::from(*b);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    /// A length-prefixed field, so that adjacent fields cannot run into
+    /// each other.
+    fn field(&mut self, bytes: &[u8]) {
+        self.bytes(&(bytes.len() as u64).to_le_bytes());
+        self.bytes(bytes);
+    }
 }
 
 impl CircuitDocument {
@@ -125,9 +168,81 @@ impl CircuitDocument {
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
+            revision: 0,
             nodes: Vec::new(),
             wires: Vec::new(),
         }
+    }
+
+    /// A hash of the circuit's content: its id, name, nodes and wires, in
+    /// any order (not the `revision`). Stable across runs and platforms.
+    pub fn content_hash(&self) -> u64 {
+        let mut h = Fnv::new();
+        h.field(self.id.as_bytes());
+        h.field(self.name.as_bytes());
+        let mut nodes: Vec<&DocNode> = self.nodes.iter().collect();
+        nodes.sort_by_key(|n| n.id);
+        h.field(&(nodes.len() as u64).to_le_bytes());
+        for n in nodes {
+            h.field(n.id.as_bytes());
+            // A kind has no maps, so its JSON is canonical.
+            h.field(
+                serde_json::to_string(&n.kind)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
+            h.field(n.label.as_deref().unwrap_or("\u{0}").as_bytes());
+            h.field(&n.x.to_bits().to_le_bytes());
+            h.field(&n.y.to_bits().to_le_bytes());
+            h.field(n.layer.as_bytes());
+            h.field(&n.layer_order.to_le_bytes());
+            let mut props: Vec<(&String, &String)> = n.properties.iter().collect();
+            props.sort();
+            h.field(&(props.len() as u64).to_le_bytes());
+            for (k, v) in props {
+                h.field(k.as_bytes());
+                h.field(v.as_bytes());
+            }
+        }
+        let mut wires: Vec<&DocWire> = self.wires.iter().collect();
+        wires.sort_by_key(|w| w.id);
+        h.field(&(wires.len() as u64).to_le_bytes());
+        for w in wires {
+            h.field(w.id.as_bytes());
+            h.field(w.from.node.as_bytes());
+            h.field(&[w.from.pin]);
+            h.field(w.to.node.as_bytes());
+            h.field(&[w.to.pin]);
+            h.field(w.layer.as_bytes());
+            h.field(&w.layer_order.to_le_bytes());
+        }
+        h.0
+    }
+
+    /// Equal up to node and wire order and the `revision`: the same
+    /// definition content.
+    pub fn same_content(&self, other: &CircuitDocument) -> bool {
+        if self.id != other.id
+            || self.name != other.name
+            || self.nodes.len() != other.nodes.len()
+            || self.wires.len() != other.wires.len()
+        {
+            return false;
+        }
+        let mut an: Vec<_> = self.nodes.iter().collect();
+        let mut bn: Vec<_> = other.nodes.iter().collect();
+        an.sort_by_key(|n| n.id);
+        bn.sort_by_key(|n| n.id);
+        let mut aw: Vec<_> = self.wires.iter().collect();
+        let mut bw: Vec<_> = other.wires.iter().collect();
+        aw.sort_by_key(|w| w.id);
+        bw.sort_by_key(|w| w.id);
+        an == bn && aw == bw
+    }
+
+    /// A short form of [`Self::content_hash`] for the player (hex).
+    pub fn short_hash(&self) -> String {
+        format!("{:08x}", self.content_hash() >> 32)
     }
 
     /// Add a node and return its id.
@@ -211,8 +326,65 @@ impl WorkspaceDocument {
 // Library
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// How a definition offered to the library compares with the one it
+/// already has under the same id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Incoming {
+    /// The library has no definition with that id.
+    New,
+    /// Same content (whatever the revisions).
+    Same,
+    /// Different content and a higher revision: a newer version.
+    Newer,
+    /// Different content, same revision: both were edited since they
+    /// parted.
+    Diverged,
+    /// Different content and a lower revision: an older version.
+    Older,
+}
+
+impl Incoming {
+    pub fn of(have: Option<&CircuitDocument>, incoming: &CircuitDocument) -> Self {
+        let Some(have) = have else {
+            return Self::New;
+        };
+        if have.same_content(incoming) {
+            Self::Same
+        } else if incoming.revision > have.revision {
+            Self::Newer
+        } else if incoming.revision == have.revision {
+            Self::Diverged
+        } else {
+            Self::Older
+        }
+    }
+
+    /// Different content under the same id.
+    pub fn conflicts(self) -> bool {
+        matches!(self, Self::Newer | Self::Diverged | Self::Older)
+    }
+}
+
+/// What [`CircuitLibrary::merge`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergeReport {
+    /// Definitions added (their ids were new).
+    pub added: Vec<Uuid>,
+    /// Ids whose offered content differs from the library's, with how it
+    /// compares. These were *not* replaced.
+    pub conflicts: Vec<(Uuid, Incoming)>,
+}
+
 /// Subcircuit definitions available to the open circuit, by id. Instances
 /// reference a definition; it is stored once.
+///
+/// Identity rules (see [`CircuitDocument`]): a merge adds definitions
+/// whose ids are new and never replaces one with different content; it
+/// reports those as conflicts, for the editor to ask the player
+/// ([`super::RefreshDefinitions`]). Only [`Self::replace`] (an explicit
+/// refresh, an edit inside a definition, undo) and loading a workspace
+/// (which replaces the whole open circuit, so no instance of the earlier
+/// version is left) change a definition in place.
 #[derive(Resource, Debug, Default)]
 pub struct CircuitLibrary {
     pub definitions: HashMap<Uuid, Arc<CircuitDocument>>,
@@ -223,19 +395,43 @@ impl CircuitLibrary {
         self.definitions.get(&id)
     }
 
-    /// Insert or replace definitions. Returns whether anything changed.
-    pub fn merge(&mut self, defs: &HashMap<Uuid, Arc<CircuitDocument>>) -> bool {
-        let mut changed = false;
-        for (id, def) in defs {
-            match self.definitions.get(id) {
-                Some(existing) if Arc::ptr_eq(existing, def) || **existing == **def => {}
-                _ => {
-                    self.definitions.insert(*id, Arc::clone(def));
-                    changed = true;
+    /// Add the definitions whose ids are new. Definitions with the same id
+    /// and different content are left as they are and reported.
+    pub fn merge(&mut self, defs: &HashMap<Uuid, Arc<CircuitDocument>>) -> MergeReport {
+        let mut report = MergeReport::default();
+        let mut ids: Vec<Uuid> = defs.keys().copied().collect();
+        ids.sort();
+        for id in ids {
+            let def = &defs[&id];
+            match Incoming::of(self.get(id).map(|d| &**d), def) {
+                Incoming::New => {
+                    self.definitions.insert(id, Arc::clone(def));
+                    report.added.push(id);
                 }
+                Incoming::Same => {}
+                other => report.conflicts.push((id, other)),
             }
         }
-        changed
+        report
+    }
+
+    /// Put `def` in the library, replacing any definition with its id.
+    /// Callers that replace a definition instances use must renumber the
+    /// wires to those instances (see [`super::view::PinRemap`]).
+    pub fn replace(&mut self, def: Arc<CircuitDocument>) {
+        self.definitions.insert(def.id, def);
+    }
+
+    /// Ids of the definitions that instance `def` directly.
+    pub fn parents_of(&self, def: Uuid) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = self
+            .definitions
+            .iter()
+            .filter(|(_, d)| d.instanced_definitions().any(|i| i == def))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// Pin widths `(inputs, outputs)` of a gate kind, resolving subcircuits.

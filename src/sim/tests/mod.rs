@@ -3,6 +3,7 @@
 
 mod canvas_input;
 mod challenges;
+mod chips;
 mod demos;
 mod gallery;
 pub mod geometry_tests;

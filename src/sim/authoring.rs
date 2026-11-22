@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use super::GateKind;
 use super::document::{
-    CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, PinAddr,
+    CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, Incoming, PinAddr,
     WorkspaceDocument,
 };
 use super::view::{CircuitView, InstanceViewItem};
@@ -88,6 +88,44 @@ impl WorkspaceRevision {
     pub fn is_dirty(&self) -> bool {
         self.current != self.saved
     }
+}
+
+/// The revision and content hash of the root circuit as it was loaded, so
+/// that a saved root (placed elsewhere as a chip) carries a revision that
+/// grows when it is edited: [`CircuitReader::root_document`] gives the
+/// loaded revision while the content is unchanged, the next one after.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LoadedRoot {
+    pub revision: u64,
+    pub hash: u64,
+}
+
+/// A newer (or diverged) saved version of chips this workspace already
+/// has, found when placing a chip: the editor asks the player whether to
+/// refresh them ([`RefreshDefinitions`]) or keep the workspace's copies.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChipUpdate {
+    /// Everything that was offered (sent back with [`RefreshDefinitions`]).
+    pub definitions: HashMap<Uuid, Arc<CircuitDocument>>,
+    /// The definitions that differ: id, name, revision here, revision
+    /// offered, and how they compare.
+    pub changed: Vec<ChipChange>,
+}
+
+/// One definition of a [`ChipUpdate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChipChange {
+    pub id: Uuid,
+    pub name: String,
+    pub have: u64,
+    pub offered: u64,
+    pub how: Incoming,
+}
+
+/// Chip updates waiting for the player's answer (newest last).
+#[derive(Resource, Debug, Default)]
+pub struct PendingChipUpdates {
+    pub updates: Vec<ChipUpdate>,
 }
 
 /// The last authoring command that was refused, for the editor to show.
@@ -378,6 +416,7 @@ impl<F: QueryFilter + 'static> DocumentQueries<'_, '_, F> {
         CircuitDocument {
             id,
             name,
+            revision: 0,
             nodes,
             wires,
         }
@@ -392,6 +431,7 @@ pub type RootItems = (Without<InstanceViewItem>, Allow<Disabled>);
 #[derive(SystemParam)]
 pub struct CircuitReader<'w, 's> {
     pub active: Res<'w, ActiveCircuit>,
+    loaded: Option<Res<'w, LoadedRoot>>,
     pub library: Res<'w, CircuitLibrary>,
     pub view: Res<'w, CircuitView>,
     open: DocumentQueries<'w, 's>,
@@ -407,10 +447,21 @@ impl CircuitReader<'_, '_> {
         }
     }
 
-    /// The root circuit, also while a subcircuit view is open.
+    /// The root circuit, also while a subcircuit view is open. Its
+    /// `revision` is the loaded one while its content is unchanged, the
+    /// next one after an edit (see [`LoadedRoot`]).
     pub fn root_document(&self) -> CircuitDocument {
-        self.root
-            .document(self.active.uuid, self.active.name.clone())
+        let mut doc = self
+            .root
+            .document(self.active.uuid, self.active.name.clone());
+        if let Some(loaded) = self.loaded.as_deref() {
+            doc.revision = if doc.content_hash() == loaded.hash {
+                loaded.revision
+            } else {
+                loaded.revision + 1
+            };
+        }
+        doc
     }
 
     /// The root circuit plus every definition it instances. Edits made in an
@@ -838,39 +889,147 @@ pub fn apply_set_kind_system(
 }
 
 /// Register definitions sent by the editor (placing from the catalog or a
-/// saved workspace). Definitions are identified by id: one already in the
-/// library is kept as it is (it may have been edited), only new ids are
-/// added. Registrations that would make a definition contain itself are
-/// refused.
+/// saved workspace). Definitions are identified by id, and a merge never
+/// replaces one with different content (see [`CircuitLibrary::merge`]):
+/// new ids are added; when the offered copy of a definition the library
+/// has is newer (or both changed), a [`ChipUpdate`] asks the player
+/// whether to refresh; an older offered copy is ignored, with a note.
+/// Registrations that would make a definition contain itself are refused.
 pub fn apply_register_definitions_system(
     mut events: MessageReader<RegisterDefinitions>,
     mut library: ResMut<CircuitLibrary>,
     mut feedback: ResMut<AuthoringFeedback>,
+    mut pending: ResMut<PendingChipUpdates>,
 ) {
     for event in events.read() {
-        let new: HashMap<Uuid, Arc<CircuitDocument>> = event
-            .definitions
-            .iter()
-            .filter(|(id, _)| !library.definitions.contains_key(id))
-            .map(|(id, d)| (*id, Arc::clone(d)))
-            .collect();
-        if new.is_empty() {
-            continue;
-        }
         let mut merged = CircuitLibrary {
             definitions: library.definitions.clone(),
         };
-        merged.merge(&new);
+        let report = merged.merge(&event.definitions);
+        if !report.added.is_empty() {
+            if let Some(cycle) = merged.find_cycle() {
+                let name = merged
+                    .get(cycle)
+                    .map_or_else(String::new, |d| d.name.clone());
+                feedback.refuse(format!(
+                    "Cannot add subcircuit definitions: \"{name}\" would contain itself."
+                ));
+                continue;
+            }
+            library.merge(&event.definitions);
+        }
+        let changes: Vec<ChipChange> = report
+            .conflicts
+            .iter()
+            .map(|&(id, how)| {
+                let have = library.get(id).map_or(0, |d| d.revision);
+                let offered = &event.definitions[&id];
+                ChipChange {
+                    id,
+                    name: offered.name.clone(),
+                    have,
+                    offered: offered.revision,
+                    how,
+                }
+            })
+            .collect();
+        let (older, changed): (Vec<ChipChange>, Vec<ChipChange>) =
+            changes.into_iter().partition(|c| c.how == Incoming::Older);
+        if !older.is_empty() && changed.is_empty() {
+            let names: Vec<String> = older.iter().map(|c| format!("\"{}\"", c.name)).collect();
+            feedback.message = Some(format!(
+                "Kept this workspace's {}: it is newer than the saved one.",
+                names.join(", ")
+            ));
+        }
+        if changed.is_empty() {
+            continue;
+        }
+        let update = ChipUpdate {
+            definitions: event.definitions.clone(),
+            changed,
+        };
+        // Asked again for the same versions: one question is enough.
+        pending.updates.retain(|u| u.changed != update.changed);
+        pending.updates.push(update);
+    }
+}
+
+/// Take the offered definitions of a [`ChipUpdate`]: every definition in
+/// `definitions` replaces the library's (all instances change at once;
+/// wires to ports that are gone are dropped and reported). One undo
+/// step.
+#[derive(Message, Debug, Clone)]
+pub struct RefreshDefinitions {
+    pub definitions: HashMap<Uuid, Arc<CircuitDocument>>,
+}
+
+/// Apply [`RefreshDefinitions`]: refused in a read-only demo, while a
+/// subcircuit view is open, or when it would make a definition contain
+/// itself.
+pub fn apply_refresh_definitions_system(
+    mut commands: Commands,
+    mut events: MessageReader<RefreshDefinitions>,
+    active: Res<ActiveCircuit>,
+    view: Res<CircuitView>,
+    mut writer: super::view::DefinitionWriter,
+    mut revision: ResMut<WorkspaceRevision>,
+    mut feedback: ResMut<AuthoringFeedback>,
+) {
+    for event in events.read() {
+        if active.refuse_edit(&mut feedback) {
+            continue;
+        }
+        if !view.is_root() {
+            feedback.refuse("Go back to the root circuit to refresh chips.".into());
+            continue;
+        }
+        let mut ids: Vec<Uuid> = event
+            .definitions
+            .iter()
+            .filter(|(id, def)| {
+                writer
+                    .library
+                    .get(**id)
+                    .is_none_or(|have| !have.same_content(def))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        ids.sort();
+        let mut merged = CircuitLibrary {
+            definitions: writer.library.definitions.clone(),
+        };
+        for id in &ids {
+            merged.replace(Arc::clone(&event.definitions[id]));
+        }
         if let Some(cycle) = merged.find_cycle() {
             let name = merged
                 .get(cycle)
                 .map_or_else(String::new, |d| d.name.clone());
-            feedback.refuse(format!(
-                "Cannot add subcircuit definitions: \"{name}\" would contain itself."
-            ));
+            feedback.refuse(format!("Cannot refresh: \"{name}\" would contain itself."));
             continue;
         }
-        library.merge(&new);
+        let mut messages = Vec::new();
+        for id in &ids {
+            let def = Arc::clone(&event.definitions[id]);
+            if let Some(message) = writer.replace(def, &mut commands) {
+                messages.push(message);
+            }
+        }
+        let names: Vec<String> = ids
+            .iter()
+            .map(|id| format!("\"{}\"", event.definitions[id].name))
+            .collect();
+        let mut message = format!("Refreshed {}.", names.join(", "));
+        for m in messages {
+            message.push(' ');
+            message.push_str(&m);
+        }
+        feedback.message = Some(message);
+        revision.mark_dirty();
     }
 }
 
@@ -982,6 +1141,8 @@ pub fn load_workspace_system(
     mut library: ResMut<CircuitLibrary>,
     mut revision: ResMut<WorkspaceRevision>,
     mut view: ResMut<CircuitView>,
+    mut loaded: ResMut<LoadedRoot>,
+    mut pending: ResMut<PendingChipUpdates>,
     gates: Query<Entity, (With<GateIdentity>, Allow<Disabled>)>,
     wires: Query<Entity, (With<WireIdentity>, Allow<Disabled>)>,
 ) {
@@ -995,15 +1156,22 @@ pub fn load_workspace_system(
     for entity in gates.iter().chain(wires.iter()) {
         commands.entity(entity).despawn();
     }
-    if event.workspace.definitions.iter().any(|(id, def)| {
-        library
-            .definitions
-            .get(id)
-            .is_none_or(|have| **have != **def)
-    }) {
-        library.merge(&event.workspace.definitions);
+    // The file's definitions are taken as they are: the open circuit is
+    // replaced, so no instance of another version of them is left. (A
+    // merge would keep the library's copies.)
+    for (id, def) in &event.workspace.definitions {
+        if library.get(*id).is_none_or(|have| **have != **def) {
+            library.replace(Arc::clone(def));
+        }
     }
+    pending.updates.clear();
     let root = &event.workspace.root;
+    let mut named = root.clone();
+    named.name = event.name.clone();
+    *loaded = LoadedRoot {
+        revision: root.revision,
+        hash: named.content_hash(),
+    };
     *active = ActiveCircuit {
         uuid: root.id,
         name: event.name.clone(),

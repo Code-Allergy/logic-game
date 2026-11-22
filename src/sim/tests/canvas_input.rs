@@ -260,3 +260,57 @@ fn presses_over_the_hud_are_ignored() {
     assert_eq!(drive(&app, a), 0);
     assert_eq!(selected(&app), None);
 }
+
+/// `Shift`+left is the multi-selection gesture (#105): the canvas pointer
+/// leaves it alone, so it neither selects, toggles nor moves a part.
+#[test]
+fn shift_left_presses_are_left_to_the_multi_selection() {
+    let mut app = pointer_app();
+    app.init_resource::<ButtonInput<KeyCode>>();
+    let a = place(&mut app, GateKind::Input { w: 1 }, "A", Vec2::ZERO);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ShiftLeft);
+    click(&mut app, Vec2::ZERO);
+    assert_eq!(drive(&app, a), 0, "not toggled");
+    assert_eq!(selected(&app), None, "not selected by the pointer");
+    press(&mut app, MouseButton::Left, Vec2::ZERO);
+    move_to(&mut app, Vec2::new(60.0, 0.0));
+    release(&mut app, MouseButton::Left, Vec2::new(60.0, 0.0));
+    assert_eq!(position(&app, a), Vec2::ZERO, "not moved");
+    // Without Shift it is a click again.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::ShiftLeft);
+    click(&mut app, Vec2::ZERO);
+    assert_eq!((drive(&app, a), selected(&app)), (1, Some(a)));
+}
+
+/// A right drag on a part of a group moves the whole group (#105) with the
+/// new pointer path (#100): the others follow the dragged part's snapped
+/// steps.
+#[test]
+fn a_right_drag_on_a_group_moves_the_group() {
+    let mut app = pointer_app();
+    app.init_resource::<crate::sim::MultiSelection>()
+        .add_systems(
+            Update,
+            crate::sim::multi_select::move_group_system.after(canvas_pointer_system),
+        );
+    let and = place(&mut app, GateKind::And { w: 1 }, "And", Vec2::ZERO);
+    let or = place(&mut app, GateKind::Or { w: 1 }, "Or", Vec2::new(200.0, 0.0));
+    let lone = place(&mut app, GateKind::Not { w: 1 }, "N", Vec2::new(0.0, 200.0));
+    {
+        let mut multi = app.world_mut().resource_mut::<crate::sim::MultiSelection>();
+        multi.insert(and);
+        multi.insert(or);
+    }
+    app.world_mut().resource_mut::<SelectedGate>().0 = Some(or);
+    press(&mut app, MouseButton::Right, Vec2::ZERO);
+    move_to(&mut app, Vec2::new(30.0, -20.0));
+    move_to(&mut app, Vec2::new(60.0, -40.0));
+    release(&mut app, MouseButton::Right, Vec2::new(60.0, -40.0));
+    assert_eq!(position(&app, and), Vec2::new(60.0, -40.0));
+    assert_eq!(position(&app, or), Vec2::new(260.0, -40.0));
+    assert_eq!(position(&app, lone), Vec2::new(0.0, 200.0));
+}

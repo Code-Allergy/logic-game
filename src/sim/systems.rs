@@ -273,7 +273,9 @@ type CanvasGate = (
 ///   [`input_click_value`];
 /// - a left drag on a part, past [`DRAG_THRESHOLD`], moves it, and a right
 ///   drag picks it up at once; it moves on the snap grid
-///   ([`SNAP`](super::layout::SNAP)), point to point.
+///   ([`SNAP`](super::layout::SNAP)), point to point;
+/// - a `Shift`+left press is a multi-selection gesture
+///   ([`super::multi_select`]) and is not handled here.
 ///
 /// Nothing moves in a read-only demo, and with a part armed or the wire
 /// tool on a left click only picks (no move, no toggle). The moved part
@@ -291,7 +293,11 @@ pub fn canvas_pointer_system(
     dragged: Query<Entity, With<Selected>>,
     mut commands: Commands,
     mut writers: CanvasPointerWriters,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
 ) {
+    let shift = keys
+        .as_ref()
+        .is_some_and(|k| super::multi_select::shift_held(k));
     let tool_in_hand = editor
         .as_ref()
         .is_some_and(|e| e.connection_mode || e.selected_gate_type.is_some());
@@ -305,6 +311,11 @@ pub fn canvas_pointer_system(
     // A new press.
     for button in [MouseButton::Left, MouseButton::Right] {
         if !buttons.just_pressed(button) || pointer.press.is_some() || ui_pointer.over_egui {
+            continue;
+        }
+        // Shift+left: a click adds to or takes from the group, a drag on
+        // empty canvas draws a box (`multi_select_pointer_system`).
+        if button == MouseButton::Left && shift {
             continue;
         }
         let (Some(screen), Some(world)) = (cursor.screen, cursor.world) else {
@@ -1015,8 +1026,11 @@ pub fn ui_for_selected_gate(
     theme: Res<Theme>,
     active: Res<crate::sim::ActiveCircuit>,
     editor: Option<ResMut<crate::editor::EditorState>>,
+    multi: Option<Res<crate::sim::MultiSelection>>,
 ) -> Result<(), BevyError> {
-    if game_state.get() != &crate::GameState::Simulating {
+    // Several parts selected: the selection card stands in for the
+    // inspector (`crate::editor::chips`).
+    if game_state.get() != &crate::GameState::Simulating || multi.is_some_and(|m| m.len() >= 2) {
         return Ok(());
     }
     let Some(entity) = sel.0 else { return Ok(()) };

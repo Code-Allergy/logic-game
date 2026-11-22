@@ -963,6 +963,7 @@ fn expand_circuit(
             .title
             .clone()
             .unwrap_or_else(|| circuit.name.clone()),
+        revision: 0,
         nodes: Vec::new(),
         wires: Vec::new(),
     };
