@@ -211,7 +211,7 @@ fn find_instance(
 }
 
 /// Spawn a definition's gates and wires as view items.
-fn spawn_view(commands: &mut Commands, doc: &CircuitDocument) {
+pub(crate) fn spawn_view(commands: &mut Commands, doc: &CircuitDocument) {
     for node in &doc.nodes {
         let e = spawn_gate(commands, node, doc.id);
         commands.entity(e).insert(InstanceViewItem);

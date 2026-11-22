@@ -11,22 +11,20 @@ use uuid::Uuid;
 
 use crate::camera::{FIT_PADDING, FitView, fit_view, scale_for_wpp};
 use crate::editor::parts::{kind_blurb, kind_title};
+use crate::editor::workspace::{OnConflict, WEB_SAVE_UNAVAILABLE, WorkspaceStore, exit_save_plan};
 use crate::theme::{Family, Theme};
 use crate::ui_style::{
     HudIcon, HudLayout, TOP_CARD_HEIGHT, caption, card, chip, chip_sized, chunky_button,
     chunky_icon_button, egui_color, format_live_value, heavy, rule, stroke,
 };
-use crate::{
-    MainCamera, UiPointerState, editor::workspace::save_workspace,
-    temp::GateComponentSelectionEvent,
-};
+use crate::{MainCamera, UiPointerState, temp::GateComponentSelectionEvent};
 
 use super::{
-    AuthoringFeedback, CircuitLibrary, CircuitReader, DeleteGate, DeleteWire, DisplayConfig,
-    DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind, GateLabel, GateLabelChanged,
-    GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected, SelectedGate, SetGateKind,
-    SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter, WireEndpoints,
-    WireState, WorkspaceRevision, art,
+    ActiveCircuit, AuthoringFeedback, CircuitLibrary, CircuitMember, CircuitReader, DeleteGate,
+    DeleteWire, DisplayConfig, DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind,
+    GateLabel, GateLabelChanged, GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected,
+    SelectedGate, SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig,
+    TickRateMeter, WireEndpoints, WireState, WorkspaceRevision, art,
     spatial_grid::SpatialGrid,
     view::{CircuitView, InstanceViewItem, OpenInstanceView},
 };
@@ -1328,47 +1326,106 @@ pub fn ui_for_selected_gate(
 // Save
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn save_on_exit_system(mut exit_events: MessageReader<AppExit>, reader: CircuitReader) {
-    // A read-only demo is not the player's work; it is never saved.
-    if exit_events.read().next().is_none() || reader.active.read_only {
+/// Save the open workspace when the app exits, if that would otherwise
+/// lose work (see [`exit_save_plan`]).
+///
+/// Runs in [`Last`] after [`bevy::window::ExitSystems`]: closing the
+/// window sends [`AppExit`] from `Last` (bevy_window's exit condition)
+/// and the title menu's Exit sends it in `Update`; the runner stops after
+/// the frame in which it was sent, so this is the last system that sees
+/// it, with the circuit still in the world.
+pub fn save_on_exit_system(
+    mut exit_events: MessageReader<AppExit>,
+    reader: CircuitReader,
+    revision: Res<WorkspaceRevision>,
+) {
+    if exit_events.read().next().is_none() {
         return;
     }
-    let name = if reader.active.name.trim().is_empty() {
-        "simulation".to_string()
-    } else {
-        reader.active.name.clone()
+    let store = WorkspaceStore::player();
+    let active = &reader.active;
+    let workspace = reader.workspace();
+    let empty = workspace.root.nodes.is_empty();
+    let Some(plan) = exit_save_plan(
+        store.as_ref(),
+        &active.name,
+        active.uuid,
+        active.read_only,
+        revision.is_dirty(),
+        empty,
+    ) else {
+        return;
     };
-    match save_workspace(&name, &reader.workspace()) {
-        Ok(()) => info!("Saved simulation workspace: {name}"),
-        Err(err) => error!("Failed to save simulation: {err}"),
+    let Some(store) = store else { return };
+    match store.save_open(&plan.name, &plan.name, workspace, OnConflict::Rename) {
+        Ok(saved) => info!(
+            "Saved workspace \"{}\" on exit in {}",
+            saved.name,
+            store.dir().display()
+        ),
+        Err(err) => error!("{err}"),
     }
 }
 
-/// Write the open circuit to disk on [`SaveWorkspaceEvent`].
+/// Write the open circuit to disk on [`SaveWorkspaceEvent`]. Saving under
+/// another name is a Save As: the saved copy gets a fresh root id and
+/// becomes the open workspace (the old file is left as it was). A name
+/// that holds a different workspace is refused.
+#[allow(clippy::too_many_arguments)]
 pub fn workspace_io_system(
     mut save_events: MessageReader<SaveWorkspaceEvent>,
-    reader: CircuitReader,
+    mut circuit: ParamSet<(CircuitReader, ResMut<ActiveCircuit>)>,
+    mut members: Query<&mut CircuitMember, Allow<bevy::ecs::entity_disabling::Disabled>>,
     mut revision: ResMut<WorkspaceRevision>,
     mut feedback: ResMut<AuthoringFeedback>,
     editor_state: Option<ResMut<crate::editor::EditorState>>,
 ) {
-    let mut saved = false;
-    for ev in save_events.read() {
-        if reader.active.read_only {
-            feedback.refuse(crate::sim::READ_ONLY_MESSAGE.into());
-            continue;
-        }
-        match save_workspace(&ev.name, &reader.workspace()) {
-            Ok(()) => {
-                revision.mark_saved();
-                feedback.message = Some(format!("Saved workspace \"{}\"", ev.name));
-                saved = true;
+    let Some(name) = save_events.read().last().map(|ev| ev.name.clone()) else {
+        return;
+    };
+    let reader = circuit.p0();
+    let previous = reader.active.name.clone();
+    let old_root = reader.active.uuid;
+    let result = if reader.active.read_only {
+        Err(crate::sim::READ_ONLY_MESSAGE.to_string())
+    } else {
+        match WorkspaceStore::player() {
+            Some(store) => {
+                store.save_open(&name, &previous, reader.workspace(), OnConflict::Refuse)
             }
-            Err(err) => feedback.message = Some(format!("Failed to save \"{}\": {err}", ev.name)),
+            None => Err(WEB_SAVE_UNAVAILABLE.to_string()),
         }
-    }
-    if saved && let Some(mut editor_state) = editor_state {
-        editor_state.saved_workspaces = None;
+    };
+    let outcome = match result {
+        Ok(saved) => {
+            revision.mark_saved();
+            if saved.root != old_root || saved.name != previous {
+                // The open workspace is now the saved one. No change
+                // detection: the camera stays where it is.
+                let mut active = circuit.p1();
+                let active = active.bypass_change_detection();
+                active.uuid = saved.root;
+                active.name = saved.name.clone();
+                for mut member in &mut members {
+                    if member.circuit_uuid == old_root {
+                        member.circuit_uuid = saved.root;
+                    }
+                }
+            }
+            let message = saved.message(&previous);
+            feedback.message = Some(message.clone());
+            Ok(message)
+        }
+        Err(err) => {
+            feedback.refuse(err.clone());
+            Err(err)
+        }
+    };
+    if let Some(mut editor_state) = editor_state {
+        if outcome.is_ok() {
+            editor_state.saved_workspaces = None;
+        }
+        editor_state.last_save = Some(outcome);
     }
 }
 
