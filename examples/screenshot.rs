@@ -29,6 +29,11 @@
 //! circuit with a combinational loop. `--drag LABEL:DX,DY` left-drags
 //! that part by (DX, DY) world units through the real pointer path (the
 //! window cursor and the left button) and drops it before the shot.
+//! `--wire FROM.PIN:TO.PIN` drags a wire from a pin of the part labelled
+//! FROM to a pin of TO the same way (a pin by name, such as `q`, or by
+//! number; the side is the one that names it, outputs first); with
+//! `--hold` the button stays down, so the shot shows the drag in
+//! progress. `--hover LABEL.PIN` points at a pin (its tooltip).
 //!
 //! `--map` shows the demo map instead of a demo (the id is ignored), with
 //! the demos listed by `--opened ID,ID,...` (the last one last) as the
@@ -44,11 +49,12 @@ use bevy_egui::EguiPlugin;
 
 use gate_quest::editor::demo_map::{DemoMapState, progress::DemoProgress};
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
+use gate_quest::sim::art::PinLayout;
 use gate_quest::sim::systems::canvas_cursor_system;
 use gate_quest::sim::{
-    ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel,
-    LoadWorkspaceEvent, OpenDefinitionView, SelectedGate, SetInputValue, SimBridge,
-    SimulationPlugin, WorkspaceDocument, demos, source,
+    ActiveCircuit, CircuitDocument, CircuitLibrary, DocNode, DocWire, GateIdentity, GateKind,
+    GateLabel, GateType, LoadWorkspaceEvent, OpenDefinitionView, SelectedGate, SetInputValue,
+    SimBridge, SimulationPlugin, WorkspaceDocument, demos, source,
 };
 use gate_quest::temp::GateComponentSelectionEvent;
 use gate_quest::theme::{Theme, ThemeMode, ThemePlugin};
@@ -75,7 +81,27 @@ struct Shot {
     fit: bool,
     editable: bool,
     drag: Option<(String, Vec2)>,
+    wire: Option<(PinSpec, PinSpec)>,
+    hold: bool,
+    hover: Option<PinSpec>,
     frame: u32,
+}
+
+/// A pin named on the command line: `LABEL.PIN`.
+#[derive(Clone, Debug)]
+struct PinSpec {
+    label: String,
+    pin: String,
+}
+
+fn pin_spec(spec: &str) -> PinSpec {
+    let (label, pin) = spec
+        .rsplit_once('.')
+        .unwrap_or_else(|| panic!("a pin is LABEL.PIN, got {spec}"));
+    PinSpec {
+        label: label.into(),
+        pin: pin.into(),
+    }
 }
 
 type Circuits = Vec<(String, Arc<CircuitDocument>)>;
@@ -144,6 +170,7 @@ fn main() {
     let (mut definition, mut fit) = (None, false);
     let mut editable = false;
     let mut drag = None;
+    let (mut wire, mut hold, mut hover) = (None, false, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--night" => night = true,
@@ -186,6 +213,15 @@ fn main() {
                 drag =
                     Some(parsed.unwrap_or_else(|| panic!("--drag wants LABEL:DX,DY, got {spec}")));
             }
+            "--wire" => {
+                let spec = args.next().unwrap_or_default();
+                let (from, to) = spec
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("--wire wants FROM.PIN:TO.PIN, got {spec}"));
+                wire = Some((pin_spec(from), pin_spec(to)));
+            }
+            "--hold" => hold = true,
+            "--hover" => hover = Some(pin_spec(&args.next().unwrap_or_default())),
             other => panic!("unknown argument {other}"),
         }
     }
@@ -226,6 +262,9 @@ fn main() {
             fit,
             editable,
             drag,
+            wire,
+            hold,
+            hover,
             frame: 0,
         })
         .add_systems(
@@ -234,7 +273,10 @@ fn main() {
         )
         .add_systems(bevy_egui::EguiPrimaryContextPass, update_ui_pointer_state)
         .add_systems(Update, drive)
-        .add_systems(Update, scripted_drag.before(canvas_cursor_system))
+        .add_systems(
+            Update,
+            (scripted_drag, scripted_wire).before(canvas_cursor_system),
+        )
         .run();
 }
 
@@ -410,6 +452,87 @@ fn scripted_drag(
             window.set_cursor_position(at.and_then(to_screen));
         }
         56 => buttons.release(MouseButton::Left),
+        _ => {}
+    }
+}
+
+/// World position of a pin named on the command line.
+fn find_pin(
+    spec: &PinSpec,
+    parts: &Query<(&GateLabel, &Transform, &GateType, &PinLayout)>,
+    library: &CircuitLibrary,
+) -> Vec2 {
+    let (_, t, ty, layout) = parts
+        .iter()
+        .find(|(l, ..)| l.value == spec.label)
+        .unwrap_or_else(|| panic!("no part labelled {}", spec.label));
+    let (ins, outs) = library.pin_names(&ty.kind);
+    let named = |names: &[String]| {
+        names
+            .iter()
+            .position(|n| n == &spec.pin)
+            .or_else(|| spec.pin.parse().ok().filter(|&i: &usize| i < names.len()))
+    };
+    let offset = match (named(&outs), named(&ins)) {
+        (Some(i), _) => layout.output(i as u8),
+        (None, Some(i)) => layout.input(i as u8),
+        _ => panic!(
+            "{} has no pin {} ({ins:?} / {outs:?})",
+            spec.label, spec.pin
+        ),
+    };
+    t.translation.truncate() + offset
+}
+
+/// `--wire` and `--hover`: point at the first pin (frame 44), press the
+/// left button (45), move to the second pin in steps (46-55) and release
+/// (56) unless `--hold`, before the shot at frame 70. `--hover` only
+/// points.
+fn scripted_wire(
+    shot: Res<Shot>,
+    mut windows: Query<&mut Window>,
+    cameras: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    parts: Query<(&GateLabel, &Transform, &GateType, &PinLayout)>,
+    library: Res<CircuitLibrary>,
+    mut buttons: ResMut<ButtonInput<MouseButton>>,
+    mut ends: Local<Option<(Vec2, Vec2)>>,
+) {
+    if shot.wire.is_none() && shot.hover.is_none() {
+        return;
+    }
+    let (Ok(mut window), Ok((camera, camera_transform))) = (windows.single_mut(), cameras.single())
+    else {
+        return;
+    };
+    let to_screen = |world: Vec2| {
+        camera
+            .world_to_viewport(camera_transform, world.extend(0.0))
+            .ok()
+    };
+    if let Some(spec) = &shot.hover {
+        if shot.frame == 44 {
+            let at = find_pin(spec, &parts, &library) + Vec2::new(1.0, -1.0);
+            window.set_cursor_position(to_screen(at));
+        }
+        return;
+    }
+    let Some((from, to)) = &shot.wire else {
+        return;
+    };
+    match shot.frame {
+        44 => {
+            let a = find_pin(from, &parts, &library);
+            let b = find_pin(to, &parts, &library);
+            *ends = Some((a, b));
+            window.set_cursor_position(to_screen(a));
+        }
+        45 => buttons.press(MouseButton::Left),
+        46..=55 => {
+            let step = (shot.frame - 45) as f32 / 10.0;
+            let at = ends.map(|(a, b)| a.lerp(b, step) + Vec2::new(1.0, -1.0) * step);
+            window.set_cursor_position(at.and_then(to_screen));
+        }
+        56 if !shot.hold => buttons.release(MouseButton::Left),
         _ => {}
     }
 }
