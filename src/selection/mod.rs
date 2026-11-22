@@ -1,6 +1,6 @@
+use crate::UiPointerState;
 use crate::sim::GateIdentity;
 use crate::sim::Selected;
-use crate::UiPointerState;
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::*;
 

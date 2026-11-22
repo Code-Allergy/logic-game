@@ -2,9 +2,9 @@ use std::time::Instant;
 
 use std::sync::Arc;
 
-use crate::sim::Sim;
 use super::*;
 use crate::netlist::{Builder, DefId, Design, NodeId, NodeKind};
+use crate::sim::Sim;
 use crate::testkit::{GenConfig, fixtures, generate};
 
 fn compile_ok(d: &Design) -> Program {
@@ -25,7 +25,10 @@ fn loops_of(d: &Design) -> Vec<Vec<NodePath>> {
 }
 
 fn at(instances: &[NodeId], node: NodeId) -> NodePath {
-    NodePath { instances: instances.to_vec(), node }
+    NodePath {
+        instances: instances.to_vec(),
+        node,
+    }
 }
 
 /// Check program invariants, then run the differential harness.
@@ -46,13 +49,20 @@ fn check_program_invariants(p: &Program) {
     let mut written_rank = vec![u32::MAX; p.slot_count as usize];
     let mut next = 0;
     for w in p.blocks.windows(2) {
-        assert!((w[0].rank, w[0].op) < (w[1].rank, w[1].op), "blocks out of order");
+        assert!(
+            (w[0].rank, w[0].op) < (w[1].rank, w[1].op),
+            "blocks out of order"
+        );
     }
     for b in &p.blocks {
         assert_eq!(b.start, next);
         next += b.len;
         for ins in &p.instrs[b.start as usize..(b.start + b.len) as usize] {
-            assert_eq!(written_rank[ins.dst as usize], u32::MAX, "slot written twice");
+            assert_eq!(
+                written_rank[ins.dst as usize],
+                u32::MAX,
+                "slot written twice"
+            );
             written_rank[ins.dst as usize] = b.rank;
         }
     }
@@ -68,7 +78,11 @@ fn check_program_invariants(p: &Program) {
             }
         }
     }
-    assert_eq!(written_rank[ZERO_SLOT as usize], u32::MAX, "zero slot written");
+    assert_eq!(
+        written_rank[ZERO_SLOT as usize],
+        u32::MAX,
+        "zero slot written"
+    );
     for &(s, _) in &p.consts {
         assert_eq!(written_rank[s as usize], u32::MAX, "const slot written");
     }
@@ -80,15 +94,33 @@ fn check_program_invariants(p: &Program) {
 fn generated_designs_match_the_reference() {
     let configs = [
         GenConfig::default(),
-        GenConfig { max_width: 64, ..Default::default() },
-        GenConfig { max_width: 1, ..Default::default() },
-        GenConfig { max_depth: 5, child_defs: 6, instance_percent: 20, ..Default::default() },
-        GenConfig { state_percent: 50, unconnected_percent: 20, ..Default::default() },
+        GenConfig {
+            max_width: 64,
+            ..Default::default()
+        },
+        GenConfig {
+            max_width: 1,
+            ..Default::default()
+        },
+        GenConfig {
+            max_depth: 5,
+            child_defs: 6,
+            instance_percent: 20,
+            ..Default::default()
+        },
+        GenConfig {
+            state_percent: 50,
+            unconnected_percent: 20,
+            ..Default::default()
+        },
         GenConfig::dag(0, 200, 32),
     ];
     for (ci, cfg) in configs.iter().enumerate() {
         for seed in 0..40 {
-            let g = generate(&GenConfig { seed: seed * 13 + ci as u64, ..cfg.clone() });
+            let g = generate(&GenConfig {
+                seed: seed * 13 + ci as u64,
+                ..cfg.clone()
+            });
             differential(&g.design, seed, 15);
         }
     }
@@ -148,7 +180,12 @@ fn latch_fixtures_report_their_loop() {
     ] {
         let mut want: Vec<_> = f.loop_nodes.iter().map(|&n| at(&[], n)).collect();
         want.sort();
-        assert_eq!(loops_of(&f.design), vec![want], "{}", f.design.root_def().name);
+        assert_eq!(
+            loops_of(&f.design),
+            vec![want],
+            "{}",
+            f.design.root_def().name
+        );
     }
 }
 
@@ -335,12 +372,25 @@ fn ports_debug_map_and_state_keys() {
     let p = compile_ok(&d);
 
     // Ports in order, with names.
-    let names: Vec<_> = p.ports.inputs.iter().map(|p| p.name.clone().unwrap()).collect();
+    let names: Vec<_> = p
+        .ports
+        .inputs
+        .iter()
+        .map(|p| p.name.clone().unwrap())
+        .collect();
     assert_eq!(names, ["a", "unused"]);
     assert_eq!(p.ports.inputs[1].width, 7);
-    let outs_names: Vec<_> = p.ports.outputs.iter().map(|p| p.name.clone().unwrap()).collect();
+    let outs_names: Vec<_> = p
+        .ports
+        .outputs
+        .iter()
+        .map(|p| p.name.clone().unwrap())
+        .collect();
     assert_eq!(outs_names, ["y", "z", "open", "q"]);
-    assert_eq!(p.ports.outputs[2].slot, ZERO_SLOT, "unconnected output reads zero");
+    assert_eq!(
+        p.ports.outputs[2].slot, ZERO_SLOT,
+        "unconnected output reads zero"
+    );
 
     // Port unification: no copy for the passthrough, one slot shared by
     // the root input, the child's input port net and the child's output.
@@ -349,7 +399,11 @@ fn ports_debug_map_and_state_keys() {
     let cdef = &d.defs[c];
     let child_a = cdef.nodes[cdef.inputs[0]].outputs[0];
     assert_eq!(p.debug.slot(&[inst], child_a), Some(a_slot));
-    assert_eq!(p.debug.nets_in_slot(a_slot).len(), 3, "root a, child a, root y");
+    assert_eq!(
+        p.debug.nets_in_slot(a_slot).len(),
+        3,
+        "root a, child a, root y"
+    );
     // Unconnected child input reads zero.
     let child_b = cdef.nodes[cdef.inputs[1]].outputs[0];
     assert_eq!(p.debug.slot(&[inst], child_b), Some(ZERO_SLOT));
@@ -452,8 +506,14 @@ fn compile_time_report() {
     };
     time("chain 100k", &chain(100_000));
     time("chain 1M", &chain(1_000_000));
-    time("random dag 100k", &generate(&GenConfig::dag(1, 100_000, 32)).design);
-    time("random dag 1M", &generate(&GenConfig::dag(1, 1_000_000, 32)).design);
+    time(
+        "random dag 100k",
+        &generate(&GenConfig::dag(1, 100_000, 32)).design,
+    );
+    time(
+        "random dag 1M",
+        &generate(&GenConfig::dag(1, 1_000_000, 32)).design,
+    );
     time("nested 20k", &nested(20_000));
 }
 
@@ -463,14 +523,33 @@ fn compile_time_report() {
 fn differential_many() {
     let configs = [
         GenConfig::default(),
-        GenConfig { max_width: 64, nodes: 150, ..Default::default() },
-        GenConfig { max_width: 1, ..Default::default() },
-        GenConfig { max_depth: 5, child_defs: 6, instance_percent: 20, ..Default::default() },
-        GenConfig { state_percent: 50, unconnected_percent: 20, ..Default::default() },
+        GenConfig {
+            max_width: 64,
+            nodes: 150,
+            ..Default::default()
+        },
+        GenConfig {
+            max_width: 1,
+            ..Default::default()
+        },
+        GenConfig {
+            max_depth: 5,
+            child_defs: 6,
+            instance_percent: 20,
+            ..Default::default()
+        },
+        GenConfig {
+            state_percent: 50,
+            unconnected_percent: 20,
+            ..Default::default()
+        },
     ];
     for (ci, cfg) in configs.iter().enumerate() {
         for seed in 0..2000 {
-            let g = generate(&GenConfig { seed: seed * 31 + ci as u64, ..cfg.clone() });
+            let g = generate(&GenConfig {
+                seed: seed * 31 + ci as u64,
+                ..cfg.clone()
+            });
             differential(&g.design, seed, 20);
         }
     }
@@ -479,13 +558,40 @@ fn differential_many() {
 // ── Simplify passes ──────────────────────────────────────────────────────
 
 fn pass_variants() -> Vec<(&'static str, Options)> {
-    let none = Options { debug: false, ..Options::unoptimized() };
+    let none = Options {
+        debug: false,
+        ..Options::unoptimized()
+    };
     vec![
         ("unoptimized", Options::unoptimized()),
-        ("const_fold", Options { const_fold: true, ..none.clone() }),
-        ("alias", Options { alias: true, ..none.clone() }),
-        ("cse", Options { cse: true, ..none.clone() }),
-        ("dce", Options { dce: true, ..none.clone() }),
+        (
+            "const_fold",
+            Options {
+                const_fold: true,
+                ..none.clone()
+            },
+        ),
+        (
+            "alias",
+            Options {
+                alias: true,
+                ..none.clone()
+            },
+        ),
+        (
+            "cse",
+            Options {
+                cse: true,
+                ..none.clone()
+            },
+        ),
+        (
+            "dce",
+            Options {
+                dce: true,
+                ..none.clone()
+            },
+        ),
         ("all", Options::default()),
         ("debug", Options::debug()),
     ]
@@ -547,13 +653,20 @@ fn constant_folding_and_identities() {
     b.output("o0", o0);
     b.output("x0", x0);
     let p = compile_ok(&d);
-    assert!(p.instrs.is_empty(), "everything folds or aliases: {:?}", p.instrs);
+    assert!(
+        p.instrs.is_empty(),
+        "everything folds or aliases: {:?}",
+        p.instrs
+    );
     let mut s = sim(p.clone());
     s.set("x", 0x5A);
     s.tick();
     assert_eq!(s.get("all"), 13 << 8 | 7);
     assert_eq!((s.get("a1"), s.get("o0"), s.get("x0")), (0x5A, 0x5A, 0));
-    assert_eq!(p.ports.outputs[1].slot, p.ports.inputs[0].slot, "x & 0xFF aliases x");
+    assert_eq!(
+        p.ports.outputs[1].slot, p.ports.inputs[0].slot,
+        "x & 0xFF aliases x"
+    );
     assert!(count(&d, &Options::unoptimized()) >= 8);
 }
 
@@ -570,7 +683,10 @@ fn cse_merges_identical_and_commuted_instructions() {
     let s2 = b.xor(a2, x);
     let out = b.or(s1, s2); // == s1 after CSE, then alias x|x
     b.output("out", out);
-    let only_cse = Options { cse: true, ..Options::unoptimized() };
+    let only_cse = Options {
+        cse: true,
+        ..Options::unoptimized()
+    };
     // The second xor merges too once the ands merge, leaving or(s1, s1).
     assert_eq!(count(&d, &only_cse), 3, "and, xor, or");
     assert_eq!(count(&d, &Options::default()), 2, "and, xor");
@@ -596,10 +712,17 @@ fn dce_keeps_outputs_state_and_probes() {
     // not, inc's sum, xor. inc's carry and the two reductions are dead, and
     // the delay's next-state copy aliases the xor.
     assert_eq!(p.instrs.len(), 3);
-    assert_eq!(p.debug.slot(&[], gone), None, "dead nets leave the debug map");
+    assert_eq!(
+        p.debug.slot(&[], gone),
+        None,
+        "dead nets leave the debug map"
+    );
     assert!(p.debug.slot(&[], dead2).is_some());
 
-    let with_probe = Options { probes: vec![(vec![], probe_only)], ..all };
+    let with_probe = Options {
+        probes: vec![(vec![], probe_only)],
+        ..all
+    };
     let p = compile(&d, &with_probe).unwrap();
     assert_eq!(p.instrs.len(), 4);
     let mut s = sim(p);
@@ -657,7 +780,10 @@ fn bitblasted_fixtures_shrink() {
         bitblast(&fixtures::counter(32)),
         fixtures::counter_bitblasted(32),
     ] {
-        let (before, after) = (count(&d, &Options::unoptimized()), count(&d, &Options::default()));
+        let (before, after) = (
+            count(&d, &Options::unoptimized()),
+            count(&d, &Options::default()),
+        );
         assert!(after < before, "{}: {before} -> {after}", d.root_def().name);
     }
 }

@@ -95,7 +95,11 @@ fn row(label: &str, work: usize, unit: &str, secs_per_tick: f64) {
 fn main() {
     let quick = std::env::args().any(|a| a == "--quick");
     let budget = Duration::from_millis(if quick { 200 } else { 1000 });
-    let sizes: &[usize] = if quick { &[10_000, 100_000] } else { &[10_000, 100_000, 1_000_000] };
+    let sizes: &[usize] = if quick {
+        &[10_000, 100_000]
+    } else {
+        &[10_000, 100_000, 1_000_000]
+    };
     let mut gate_ratio = None;
     let mut gate_compile = None;
 
@@ -103,7 +107,12 @@ fn main() {
     for &n in sizes {
         let d = generate(&GenConfig::dag(1, n, 32)).design;
         let (p, _) = compile_timed(&d);
-        row(&format!("sim dag32 ~{n}"), p.instrs.len(), "instr", time_sim(&p, budget));
+        row(
+            &format!("sim dag32 ~{n}"),
+            p.instrs.len(),
+            "instr",
+            time_sim(&p, budget),
+        );
     }
 
     println!("\n== 1-bit gate DAGs: Sim vs legacy SIMD runner (same logic) ==");
@@ -125,7 +134,12 @@ fn main() {
             }
             black_box(simd.output(legacy.outputs[0], 0));
         });
-        row(&format!("legacy SIMD gates1 {n}"), p.instrs.len(), "gate", simd_t);
+        row(
+            &format!("legacy SIMD gates1 {n}"),
+            p.instrs.len(),
+            "gate",
+            simd_t,
+        );
         let ratio = simd_t / sim_t;
         println!("{:<34} {ratio:.2}x", "  speedup");
         if n == 1_000_000 {
@@ -136,7 +150,10 @@ fn main() {
     println!("\n== CPU fixture (looping program), word-level vs bit-blasted ==");
     for (label, d) in [
         ("cpu word", fixtures::cpu(&fixtures::LOOP_PROGRAM)),
-        ("cpu bit-blasted", bitblast(&fixtures::cpu(&fixtures::LOOP_PROGRAM))),
+        (
+            "cpu bit-blasted",
+            bitblast(&fixtures::cpu(&fixtures::LOOP_PROGRAM)),
+        ),
     ] {
         let (p, _) = compile_timed(&d);
         let t = time_sim(&p, budget);
@@ -162,7 +179,10 @@ fn main() {
         ..Default::default()
     })
     .design;
-    for (label, d) in [("datapath word", dp.clone()), ("datapath bit-blasted", bitblast(&dp))] {
+    for (label, d) in [
+        ("datapath word", dp.clone()),
+        ("datapath bit-blasted", bitblast(&dp)),
+    ] {
         let (p, _) = compile_timed(&d);
         row(label, p.instrs.len(), "instr", time_sim(&p, budget));
     }
@@ -170,7 +190,10 @@ fn main() {
     println!("\n== Simplify passes: instruction count and throughput, unoptimized -> optimized ==");
     for (label, d) in [
         ("cpu word", fixtures::cpu(&fixtures::LOOP_PROGRAM)),
-        ("cpu bit-blasted", bitblast(&fixtures::cpu(&fixtures::LOOP_PROGRAM))),
+        (
+            "cpu bit-blasted",
+            bitblast(&fixtures::cpu(&fixtures::LOOP_PROGRAM)),
+        ),
         ("counter32 bit-blasted", fixtures::counter_bitblasted(32)),
         ("datapath bit-blasted", bitblast(&dp)),
     ] {
@@ -188,7 +211,11 @@ fn main() {
     }
 
     println!("\n== Compile time (all passes) ==");
-    let compile_sizes: &[usize] = if quick { &[100_000] } else { &[100_000, 1_000_000] };
+    let compile_sizes: &[usize] = if quick {
+        &[100_000]
+    } else {
+        &[100_000, 1_000_000]
+    };
     for &n in compile_sizes {
         for (label, d) in [
             ("gates1", generate(&GenConfig::gates(4, n, 1)).design),
@@ -210,7 +237,12 @@ fn main() {
     println!("\n== Engine (engine_v2) ==");
     {
         use logi_sim::engine_v2::{Engine, Probe, ProbeFrame, Rate};
-        let d = generate(&GenConfig::gates(5, if quick { 20_000 } else { 100_000 }, 1)).design;
+        let d = generate(&GenConfig::gates(
+            5,
+            if quick { 20_000 } else { 100_000 },
+            1,
+        ))
+        .design;
         let (p, _) = compile_with(&d, &Options::debug());
         let direct = 1.0 / time_sim_idle(&p, budget);
         let e = Engine::spawn(Options::debug());
@@ -234,13 +266,22 @@ fn main() {
         let nets: Vec<_> = d.root_def().nets.keys().collect();
         let mut frame = ProbeFrame::default();
         for n in [16usize, 1_000, nets.len()] {
-            core.set_probes(nets.iter().take(n).map(|&net| Probe { path: vec![], net }).collect());
+            core.set_probes(
+                nets.iter()
+                    .take(n)
+                    .map(|&net| Probe { path: vec![], net })
+                    .collect(),
+            );
             let t = measure(budget / 4, |k| {
                 for _ in 0..k {
                     core.publish(&mut frame);
                 }
             });
-            println!("publish {n:>7} probes ({} nets in design): {:>10.1} us/frame", nets.len(), t * 1e6);
+            println!(
+                "publish {n:>7} probes ({} nets in design): {:>10.1} us/frame",
+                nets.len(),
+                t * 1e6
+            );
         }
     }
 

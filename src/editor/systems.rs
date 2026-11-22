@@ -27,7 +27,10 @@ pub fn handle_connection_creation(
         match editor_state.connection_source {
             None => {
                 if outs.is_empty() {
-                    warn!("Cannot use {} as connection source: no output pins", ty.kind.display_name());
+                    warn!(
+                        "Cannot use {} as connection source: no output pins",
+                        ty.kind.display_name()
+                    );
                     continue;
                 }
                 editor_state.clear_connection();
@@ -45,7 +48,10 @@ pub fn handle_connection_creation(
             }
             Some(_) => {
                 if ins.is_empty() {
-                    warn!("Cannot use {} as connection sink: no input pins", ty.kind.display_name());
+                    warn!(
+                        "Cannot use {} as connection sink: no input pins",
+                        ty.kind.display_name()
+                    );
                     continue;
                 }
                 editor_state.connection_sink = Some(clicked);

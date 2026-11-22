@@ -44,11 +44,11 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::document::{CircuitDocument, CircuitLibrary, DocNode};
+use super::{ActiveCircuit, GateKind};
 use super::{
     AuthoringFeedback, CircuitLayer, DocumentQueries, GateIdentity, GateLabel, GateType,
     PersistentGateData, SelectedGate, WireEndpoints, WireIdentity, spawn_gate, spawn_wire,
 };
-use super::{ActiveCircuit, GateKind};
 
 /// Marks the gate and wire entities of an open instance or definition view.
 #[derive(Component, Debug, Clone, Copy, Default, Reflect)]
@@ -113,7 +113,9 @@ impl CircuitView {
 
     /// Ids of the circuits from the root (`root`) to the open one.
     pub fn circuit_chain(&self, root: Uuid) -> Vec<Uuid> {
-        std::iter::once(root).chain(self.frames.iter().map(|f| f.definition)).collect()
+        std::iter::once(root)
+            .chain(self.frames.iter().map(|f| f.definition))
+            .collect()
     }
 
     pub(crate) fn reset(&mut self) {
@@ -147,7 +149,10 @@ type RootItem = (
     Without<InstanceViewItem>,
     Allow<Disabled>,
 );
-type ViewItem = (Or<(With<GateIdentity>, With<WireIdentity>)>, With<InstanceViewItem>);
+type ViewItem = (
+    Or<(With<GateIdentity>, With<WireIdentity>)>,
+    With<InstanceViewItem>,
+);
 type RootGate = (Without<InstanceViewItem>, Allow<Disabled>);
 
 /// The first instance path from the root to `target`: gate ids, with the
@@ -167,8 +172,14 @@ fn find_instance(
             return None;
         }
         for (gate, def) in nodes {
-            let Some(doc) = library.get(def) else { continue };
-            let frame = ViewFrame { gate: Some(gate), definition: def, name: doc.name.clone() };
+            let Some(doc) = library.get(def) else {
+                continue;
+            };
+            let frame = ViewFrame {
+                gate: Some(gate),
+                definition: def,
+                name: doc.name.clone(),
+            };
             if def == target {
                 return Some(vec![frame]);
             }
@@ -226,9 +237,14 @@ impl PinRemap {
         let (oi, oo) = old.interface();
         let (ni, no) = new.interface();
         let map = |o: &[&DocNode], n: &[&DocNode]| -> Vec<Option<u8>> {
-            o.iter().map(|x| n.iter().position(|y| y.id == x.id).map(|p| p as u8)).collect()
+            o.iter()
+                .map(|x| n.iter().position(|y| y.id == x.id).map(|p| p as u8))
+                .collect()
         };
-        let remap = Self { inputs: map(&oi, &ni), outputs: map(&oo, &no) };
+        let remap = Self {
+            inputs: map(&oi, &ni),
+            outputs: map(&oo, &no),
+        };
         let identity = |v: &[Option<u8>]| v.iter().enumerate().all(|(i, p)| *p == Some(i as u8));
         (!identity(&remap.inputs) || !identity(&remap.outputs)).then_some(remap)
     }
@@ -287,7 +303,9 @@ impl DefinitionWriter<'_, '_> {
     /// Write the open view's document to the library if it differs.
     /// Returns whether it did.
     fn write_back(&mut self, view: &CircuitView, commands: &mut Commands) -> bool {
-        let Some(frame) = view.frames.last() else { return false };
+        let Some(frame) = view.frames.last() else {
+            return false;
+        };
         let def = frame.definition;
         let doc = self.items.document(def, frame.name.clone());
         let old = self.library.get(def).cloned();
@@ -349,7 +367,10 @@ impl DefinitionWriter<'_, '_> {
 
 /// Equal up to node and wire order.
 pub(crate) fn same_document(a: &CircuitDocument, b: &CircuitDocument) -> bool {
-    if a.id != b.id || a.name != b.name || a.nodes.len() != b.nodes.len() || a.wires.len() != b.wires.len()
+    if a.id != b.id
+        || a.name != b.name
+        || a.nodes.len() != b.nodes.len()
+        || a.wires.len() != b.wires.len()
     {
         return false;
     }
@@ -392,34 +413,45 @@ pub fn view_navigation_system(
     if let Some(event) = open.read().last() {
         requested = true;
         match gates.get(event.entity) {
-            Ok((id, GateType { kind: GateKind::SubCircuit { definition } })) => {
-                match writer.library.get(*definition) {
-                    Some(doc) => target.push(ViewFrame {
-                        gate: Some(id.uuid),
-                        definition: *definition,
-                        name: doc.name.clone(),
-                    }),
-                    None => feedback.refuse(format!(
-                        "Cannot open subcircuit: definition {definition} is missing"
-                    )),
-                }
-            }
+            Ok((
+                id,
+                GateType {
+                    kind: GateKind::SubCircuit { definition },
+                },
+            )) => match writer.library.get(*definition) {
+                Some(doc) => target.push(ViewFrame {
+                    gate: Some(id.uuid),
+                    definition: *definition,
+                    name: doc.name.clone(),
+                }),
+                None => feedback.refuse(format!(
+                    "Cannot open subcircuit: definition {definition} is missing"
+                )),
+            },
             _ => feedback.refuse("Only a subcircuit gate can be opened".into()),
         }
     }
     if let Some(event) = open_definition.read().last() {
         requested = true;
-        let roots: Vec<(Uuid, GateKind)> =
-            writer.root_gates.iter().map(|(id, ty)| (id.uuid, ty.kind.clone())).collect();
+        let roots: Vec<(Uuid, GateKind)> = writer
+            .root_gates
+            .iter()
+            .map(|(id, ty)| (id.uuid, ty.kind.clone()))
+            .collect();
         match writer.library.get(event.definition) {
             None => feedback.refuse(format!(
                 "Cannot open definition {}: it is not in the definition table",
                 event.definition
             )),
             Some(doc) => {
-                target = find_instance(&roots, &writer.library, event.definition).unwrap_or_else(|| {
-                    vec![ViewFrame { gate: None, definition: event.definition, name: doc.name.clone() }]
-                });
+                target =
+                    find_instance(&roots, &writer.library, event.definition).unwrap_or_else(|| {
+                        vec![ViewFrame {
+                            gate: None,
+                            definition: event.definition,
+                            name: doc.name.clone(),
+                        }]
+                    });
             }
         }
     }
@@ -430,7 +462,9 @@ pub fn view_navigation_system(
     // Leave the current view.
     if view.is_root() {
         for entity in &root_items {
-            commands.entity(entity).insert_recursive::<Children>(Disabled);
+            commands
+                .entity(entity)
+                .insert_recursive::<Children>(Disabled);
         }
     } else {
         writer.write_back(&view, &mut commands);
@@ -442,13 +476,20 @@ pub fn view_navigation_system(
     match target.last() {
         None => {
             for entity in &root_items {
-                commands.entity(entity).remove_recursive::<Children, Disabled>();
+                commands
+                    .entity(entity)
+                    .remove_recursive::<Children, Disabled>();
             }
         }
         Some(frame) => {
-            let mut doc = writer.library.get(frame.definition).map(|d| (**d).clone()).unwrap_or_else(|| {
-                CircuitDocument { id: frame.definition, ..CircuitDocument::new(frame.name.clone()) }
-            });
+            let mut doc = writer
+                .library
+                .get(frame.definition)
+                .map(|d| (**d).clone())
+                .unwrap_or_else(|| CircuitDocument {
+                    id: frame.definition,
+                    ..CircuitDocument::new(frame.name.clone())
+                });
             doc.id = frame.definition;
             spawn_view(&mut commands, &doc);
         }
@@ -470,7 +511,10 @@ type ChangedViewGate = (
     )>,
     With<GateIdentity>,
 );
-type ChangedViewWire = (With<InstanceViewItem>, Or<(Changed<WireEndpoints>, Changed<CircuitLayer>)>);
+type ChangedViewWire = (
+    With<InstanceViewItem>,
+    Or<(Changed<WireEndpoints>, Changed<CircuitLayer>)>,
+);
 
 /// While a subcircuit view is open, write edits made in it back to the
 /// shared definition in the library (the bridge then updates every

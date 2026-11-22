@@ -15,11 +15,11 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use uuid::Uuid;
 
+use super::GateKind;
 use super::document::{
     CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, PinAddr,
     WorkspaceDocument,
 };
-use super::GateKind;
 use super::view::{CircuitView, InstanceViewItem};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +35,10 @@ pub struct ActiveCircuit {
 
 impl Default for ActiveCircuit {
     fn default() -> Self {
-        Self { uuid: Uuid::new_v4(), name: "workspace".into() }
+        Self {
+            uuid: Uuid::new_v4(),
+            name: "workspace".into(),
+        }
     }
 }
 
@@ -90,7 +93,10 @@ pub struct CircuitLayer {
 
 impl Default for CircuitLayer {
     fn default() -> Self {
-        Self { layer_uuid: DEFAULT_LAYER_UUID, order: 0 }
+        Self {
+            layer_uuid: DEFAULT_LAYER_UUID,
+            order: 0,
+        }
     }
 }
 
@@ -136,7 +142,7 @@ pub enum DisplayRadix {
 }
 
 /// Presentation of a display gate's value.
-#[derive(Component, Debug, Clone, Copy, Reflect)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Reflect)]
 #[reflect(Component)]
 pub struct DisplayConfig {
     pub radix: DisplayRadix,
@@ -145,7 +151,10 @@ pub struct DisplayConfig {
 
 impl Default for DisplayConfig {
     fn default() -> Self {
-        Self { radix: DisplayRadix::Hexadecimal, leading_zeroes: true }
+        Self {
+            radix: DisplayRadix::Hexadecimal,
+            leading_zeroes: true,
+        }
     }
 }
 
@@ -215,10 +224,17 @@ pub fn spawn_gate(commands: &mut Commands, node: &DocNode, circuit_uuid: Uuid) -
         Visibility::Visible,
         GateIdentity { uuid: node.id },
         GateLabel { value: label },
-        GateType { kind: node.kind.clone() },
+        GateType {
+            kind: node.kind.clone(),
+        },
         CircuitMember { circuit_uuid },
-        CircuitLayer { layer_uuid: node.layer, order: node.layer_order },
-        PersistentGateData { custom_properties: node.properties.clone() },
+        CircuitLayer {
+            layer_uuid: node.layer,
+            order: node.layer_order,
+        },
+        PersistentGateData {
+            custom_properties: node.properties.clone(),
+        },
         GateValues::default(),
         GateProbes::default(),
     ));
@@ -247,7 +263,10 @@ pub fn spawn_wire(commands: &mut Commands, wire: &DocWire, circuit_uuid: Uuid) -
             },
             WireState::default(),
             CircuitMember { circuit_uuid },
-            CircuitLayer { layer_uuid: wire.layer, order: wire.layer_order },
+            CircuitLayer {
+                layer_uuid: wire.layer,
+                order: wire.layer_order,
+            },
         ))
         .id()
 }
@@ -274,7 +293,11 @@ type GateDocQuery = (
     &'static CircuitLayer,
     &'static PersistentGateData,
 );
-type WireDocQuery = (&'static WireIdentity, &'static WireEndpoints, &'static CircuitLayer);
+type WireDocQuery = (
+    &'static WireIdentity,
+    &'static WireEndpoints,
+    &'static CircuitLayer,
+);
 
 /// Gate and wire entities read as a document. With the default filter
 /// (`F = ()`) these are the entities of the open view: the root circuit's
@@ -308,14 +331,25 @@ impl<F: QueryFilter + 'static> DocumentQueries<'_, '_, F> {
             .iter()
             .map(|(id, ep, layer)| DocWire {
                 id: id.uuid,
-                from: PinAddr { node: ep.source_gate, pin: ep.source_pin },
-                to: PinAddr { node: ep.sink_gate, pin: ep.sink_pin },
+                from: PinAddr {
+                    node: ep.source_gate,
+                    pin: ep.source_pin,
+                },
+                to: PinAddr {
+                    node: ep.sink_gate,
+                    pin: ep.sink_pin,
+                },
                 layer: layer.layer_uuid,
                 layer_order: layer.order,
             })
             .collect();
         wires.sort_by_key(|w| w.id);
-        CircuitDocument { id, name, nodes, wires }
+        CircuitDocument {
+            id,
+            name,
+            nodes,
+            wires,
+        }
     }
 }
 
@@ -344,7 +378,8 @@ impl CircuitReader<'_, '_> {
 
     /// The root circuit, also while a subcircuit view is open.
     pub fn root_document(&self) -> CircuitDocument {
-        self.root.document(self.active.uuid, self.active.name.clone())
+        self.root
+            .document(self.active.uuid, self.active.name.clone())
     }
 
     /// The root circuit plus every definition it instances. Edits made in an
@@ -453,7 +488,10 @@ pub struct SaveWorkspaceEvent {
 fn generate_port_label<'a>(labels: impl Iterator<Item = &'a str>, base: &str) -> String {
     let prefix = format!("{base} ");
     let max = labels
-        .filter_map(|l| l.strip_prefix(&prefix).and_then(|s| s.parse::<usize>().ok()))
+        .filter_map(|l| {
+            l.strip_prefix(&prefix)
+                .and_then(|s| s.parse::<usize>().ok())
+        })
         .max()
         .unwrap_or(0);
     format!("{base} {}", max + 1)
@@ -485,18 +523,25 @@ pub fn apply_create_gate_system(
     let mut taken: Vec<String> = Vec::new();
     for event in events.read() {
         if let Err(reason) = event.kind.check() {
-            feedback.refuse(format!("Cannot place {}: {reason}", event.kind.display_name()));
+            feedback.refuse(format!(
+                "Cannot place {}: {reason}",
+                event.kind.display_name()
+            ));
             continue;
         }
         if let GateKind::SubCircuit { definition } = event.kind {
             if library.get(definition).is_none() {
-                feedback.refuse(format!("Cannot place subcircuit: unknown definition {definition}"));
+                feedback.refuse(format!(
+                    "Cannot place subcircuit: unknown definition {definition}"
+                ));
                 continue;
             }
             // The open circuit and every circuit around it in the view.
-            let refused = view.circuit_chain(active.uuid).into_iter().rev().find_map(|into| {
-                library.recursion_error(definition, into, &active.name)
-            });
+            let refused = view
+                .circuit_chain(active.uuid)
+                .into_iter()
+                .rev()
+                .find_map(|into| library.recursion_error(definition, into, &active.name));
             if let Some(message) = refused {
                 feedback.refuse(message);
                 continue;
@@ -507,7 +552,10 @@ pub fn apply_create_gate_system(
         if node.label.is_none() && event.kind.is_port() {
             let base = title_case(event.kind.display_name());
             let label = generate_port_label(
-                labels.iter().map(|l| l.value.as_str()).chain(taken.iter().map(String::as_str)),
+                labels
+                    .iter()
+                    .map(|l| l.value.as_str())
+                    .chain(taken.iter().map(String::as_str)),
                 &base,
             );
             taken.push(label.clone());
@@ -572,7 +620,12 @@ pub fn apply_create_wire_system(
                 commands.entity(entity).despawn();
             }
         }
-        let wire = DocWire::new(event.source_gate, event.source_pin, event.sink_gate, event.sink_pin);
+        let wire = DocWire::new(
+            event.source_gate,
+            event.source_pin,
+            event.sink_gate,
+            event.sink_pin,
+        );
         let circuit = view.definition().unwrap_or(active.uuid);
         let entity = spawn_wire(&mut commands, &wire, circuit);
         if !view.is_root() {
@@ -599,7 +652,9 @@ pub fn apply_delete_system(
         }
     }
     for event in gate_events.read() {
-        let Ok(identity) = gates.get(event.entity) else { continue };
+        let Ok(identity) = gates.get(event.entity) else {
+            continue;
+        };
         for (wire, ep) in &wires {
             if ep.source_gate == identity.uuid || ep.sink_gate == identity.uuid {
                 commands.entity(wire).despawn();
@@ -616,7 +671,9 @@ pub fn apply_set_input_system(
     mut feedback: ResMut<AuthoringFeedback>,
 ) {
     for event in events.read() {
-        let Ok((ty, mut drive, in_view)) = inputs.get_mut(event.entity) else { continue };
+        let Ok((ty, mut drive, in_view)) = inputs.get_mut(event.entity) else {
+            continue;
+        };
         if in_view {
             feedback.refuse(
                 "Inputs inside a subcircuit are driven by the parent circuit; change them there."
@@ -625,7 +682,9 @@ pub fn apply_set_input_system(
             continue;
         }
         let w = ty.kind.width().unwrap_or(64);
-        drive.set_if_neq(InputDrive { value: event.value & logi_sim::netlist::mask(w) });
+        drive.set_if_neq(InputDrive {
+            value: event.value & logi_sim::netlist::mask(w),
+        });
     }
 }
 
@@ -637,9 +696,14 @@ pub fn apply_set_kind_system(
     mut feedback: ResMut<AuthoringFeedback>,
 ) {
     for event in events.read() {
-        let Ok((mut ty, drive, display)) = gates.get_mut(event.entity) else { continue };
+        let Ok((mut ty, drive, display)) = gates.get_mut(event.entity) else {
+            continue;
+        };
         if let Err(reason) = event.kind.check() {
-            feedback.refuse(format!("Invalid {} settings: {reason}", event.kind.display_name()));
+            feedback.refuse(format!(
+                "Invalid {} settings: {reason}",
+                event.kind.display_name()
+            ));
             continue;
         }
         if ty.kind == event.kind {
@@ -650,7 +714,9 @@ pub fn apply_set_kind_system(
             commands.entity(event.entity).insert(InputDrive::default());
         }
         if matches!(event.kind, GateKind::Display { .. }) && display.is_none() {
-            commands.entity(event.entity).insert(DisplayConfig::default());
+            commands
+                .entity(event.entity)
+                .insert(DisplayConfig::default());
         }
         revision.mark_dirty();
     }
@@ -676,10 +742,14 @@ pub fn apply_register_definitions_system(
         if new.is_empty() {
             continue;
         }
-        let mut merged = CircuitLibrary { definitions: library.definitions.clone() };
+        let mut merged = CircuitLibrary {
+            definitions: library.definitions.clone(),
+        };
         merged.merge(&new);
         if let Some(cycle) = merged.find_cycle() {
-            let name = merged.get(cycle).map_or_else(String::new, |d| d.name.clone());
+            let name = merged
+                .get(cycle)
+                .map_or_else(String::new, |d| d.name.clone());
             feedback.refuse(format!(
                 "Cannot add subcircuit definitions: \"{name}\" would contain itself."
             ));
@@ -753,9 +823,7 @@ pub fn apply_authoring_messages_system(
 type NameSource = Or<(Changed<GateType>, Changed<GateLabel>)>;
 
 /// Keep `Name` in sync with the label and kind.
-pub fn sync_gate_names_system(
-    mut gates: Query<(&GateType, &GateLabel, &mut Name), NameSource>,
-) {
+pub fn sync_gate_names_system(mut gates: Query<(&GateType, &GateLabel, &mut Name), NameSource>) {
     for (ty, label, mut name) in &mut gates {
         name.set(format!("{} {}", ty.kind.display_name(), label.value));
     }
@@ -792,7 +860,9 @@ pub fn load_workspace_system(
     gates: Query<Entity, (With<GateIdentity>, Allow<Disabled>)>,
     wires: Query<Entity, (With<WireIdentity>, Allow<Disabled>)>,
 ) {
-    let Some(event) = events.read().last() else { return };
+    let Some(event) = events.read().last() else {
+        return;
+    };
     // Close any subcircuit view; parked root entities go too.
     if !view.is_root() {
         view.reset();
@@ -801,13 +871,18 @@ pub fn load_workspace_system(
         commands.entity(entity).despawn();
     }
     if event.workspace.definitions.iter().any(|(id, def)| {
-            library.definitions.get(id).is_none_or(|have| **have != **def)
-        })
-    {
+        library
+            .definitions
+            .get(id)
+            .is_none_or(|have| **have != **def)
+    }) {
         library.merge(&event.workspace.definitions);
     }
     let root = &event.workspace.root;
-    *active = ActiveCircuit { uuid: root.id, name: event.name.clone() };
+    *active = ActiveCircuit {
+        uuid: root.id,
+        name: event.name.clone(),
+    };
     spawn_document(&mut commands, root, root.id);
     *revision = WorkspaceRevision::default();
 }

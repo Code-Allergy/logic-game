@@ -504,3 +504,49 @@ ambiguous. Each is small and can be revisited.
     cycle is refused with `WorkspaceError::Invalid`. The bridge still
     guards against cycles when building, and `Design::add_instance`
     rejects them.
+27. **Change-driven visuals (M5, #30).** Gate and wire visuals live in
+    `SimulationVisualsPlugin` (`src/sim/visuals.rs`), which needs no window
+    or renderer, so headless tests run them. Each system reacts to change
+    detection and writes a component only when the value differs:
+    - **Wire geometry** is recomputed for wires whose `WireEndpoints`
+      changed and for the wires of gates whose `Transform` changed. The
+      gate-to-wire index is rebuilt only after structural changes (spawn,
+      despawn, endpoint change, view change). A drag therefore touches the
+      dragged gate's wires only, and never the `Design`: position-only
+      edits create no revision (tested at the root and in an instance
+      view, where the move is written back to the definition but the
+      structure key is unchanged).
+    - **Display text** remembers what it shows (`DisplayedValue`: value,
+      width, format) and is formatted only when that changes.
+    - **Idle cost.** `project_probes_system` already skips frames whose
+      probe frame (revision, tick, binding generation) is unchanged. With
+      the simulation paused and no input, no simulation or visual system
+      touches an entity. `EntityWorkCounter`, a resource the app never
+      inserts, counts touched entities for the acceptance test.
+    - **Editor definition table** is rebuilt only when the root's gates or
+      the library change, instead of every frame.
+28. **Multi-bit wires (M5, #30)** are drawn thicker (5 px against 2 px) and
+    in blue (brighter when non-zero), with a hex label (`0x` and one digit
+    per 4 bits) as a child of the wire, offset from the line and kept
+    upright. The label is spawned when the wire is connected and wider
+    than 1 bit, and its text changes only when the value does.
+29. **Loop errors (M5, #30).** `CompileFailure::loops` holds, per reported
+    loop, its nodes as `LoopNode { path, gate }`: the instance gate ids from
+    the root and the gate id, resolved from the compiler's `NodePath`s
+    through the bridge's node maps. A loop node is shown in the open view
+    when its path starts with the view's instance path: as itself when the
+    path is equal, otherwise as the instance gate one level down (so at
+    the root, a loop inside a subcircuit marks the instance gate). A bare
+    definition view (not live) shows none. Gates get `LoopHighlight` and a
+    red outline child; a wire is marked when both its ends are on the same
+    loop, since every edge inside a strongly connected component lies on a
+    cycle (the compiler reports components, not single cycles). The marks
+    follow `SimDiagnostics`, so they clear when a later revision loads.
+    The message names up to 8 gates (`cell1 / NOT "inv"`), then "and N
+    more", and says the loop needs a Delay (or a Register, DLatch, SrLatch
+    or Ram); the editor adds that the previous circuit keeps running.
+30. **Cargo features (#30).** The default build has neither
+    `bevy/dynamic_linking` nor the world inspector. `dev` enables both
+    (`inspector` alone enables the inspector); `cargo dev` is an alias for
+    `cargo run -p gate_quest --features dev`. The unused
+    `bevy_mod_debugdump` dependency was removed.

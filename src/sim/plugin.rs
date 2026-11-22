@@ -11,10 +11,6 @@ use crate::sim::{
     GateMoved, LoadWorkspaceEvent, RegisterDefinitions, SaveWorkspaceEvent, SelectedGate,
     SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimRuntime, SimulationConfig,
     TickRateMeter, WireIdentity, WorkspaceRevision,
-    view::{
-        CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView,
-        view_navigation_system, write_back_view_system,
-    },
     authoring::{
         apply_authoring_messages_system, apply_create_gate_system, apply_create_wire_system,
         apply_delete_system, apply_register_definitions_system, apply_set_input_system,
@@ -26,13 +22,16 @@ use crate::sim::{
         sync_design_system, update_tickrate_system,
     },
     systems::{
-        attach_gate_visuals_system, attach_wire_visuals_system, drag_selected_system,
-        draw_sim_background_system, fit_camera_to_circuit_system, gate_selection_system,
-        save_on_exit_system, simulation_config_ui_system, ui_for_selected_gate,
-        update_connections_system, update_input_colours_system, update_inputs_on_left_click,
-        update_logic_displays_system, update_selected_gate, update_spatial_grid_system,
-        workspace_io_system,
+        drag_selected_system, draw_sim_background_system, fit_camera_to_circuit_system,
+        gate_selection_system, save_on_exit_system, simulation_config_ui_system,
+        ui_for_selected_gate, update_inputs_on_left_click, update_selected_gate,
+        update_spatial_grid_system, workspace_io_system,
     },
+    view::{
+        CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView,
+        view_navigation_system, write_back_view_system,
+    },
+    visuals::SimulationVisualsPlugin,
 };
 
 use super::fixtures;
@@ -51,14 +50,18 @@ pub struct SimulationRuntimePlugin {
     pub runtime: SimRuntime,
 }
 
-/// Presentation and interaction. Expects [`SimulationRuntimePlugin`].
+/// Presentation and interaction (includes [`SimulationVisualsPlugin`]).
+/// Expects [`SimulationRuntimePlugin`].
 pub struct SimulationViewPlugin {
     pub state: GameState,
 }
 
 impl SimulationPlugin {
     pub fn new(state: GameState) -> Self {
-        Self { state, runtime: SimRuntime::platform_default() }
+        Self {
+            state,
+            runtime: SimRuntime::platform_default(),
+        }
     }
 
     pub fn with_runtime(state: GameState, runtime: SimRuntime) -> Self {
@@ -69,8 +72,12 @@ impl SimulationPlugin {
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            SimulationRuntimePlugin { runtime: self.runtime },
-            SimulationViewPlugin { state: self.state.clone() },
+            SimulationRuntimePlugin {
+                runtime: self.runtime,
+            },
+            SimulationViewPlugin {
+                state: self.state.clone(),
+            },
         ));
     }
 }
@@ -104,7 +111,11 @@ impl Plugin for SimulationRuntimePlugin {
             .add_message::<CloseView>()
             .add_systems(
                 PreUpdate,
-                (drive_local_engine_system, collect_engine_events_system, project_probes_system)
+                (
+                    drive_local_engine_system,
+                    collect_engine_events_system,
+                    project_probes_system,
+                )
                     .chain(),
             )
             .add_systems(
@@ -134,7 +145,8 @@ impl Plugin for SimulationViewPlugin {
     fn build(&self, app: &mut App) {
         let state = self.state.clone();
 
-        app.init_resource::<SelectedGate>()
+        app.add_plugins(SimulationVisualsPlugin)
+            .init_resource::<SelectedGate>()
             .insert_resource(SpatialGrid::new(100.0))
             .register_type::<crate::sim::LogicDisplay>()
             .register_type::<crate::sim::GateKind>()
@@ -165,7 +177,10 @@ impl Plugin for SimulationViewPlugin {
                     draw_sim_background_system,
                 ),
             )
-            .add_systems(OnExit(state.clone()), (pause_bridge_system, hide_circuit_system))
+            .add_systems(
+                OnExit(state.clone()),
+                (pause_bridge_system, hide_circuit_system),
+            )
             .add_systems(
                 Update,
                 (
@@ -175,15 +190,11 @@ impl Plugin for SimulationViewPlugin {
                     workspace_io_system,
                 ),
             )
-            .add_systems(PostUpdate, (attach_gate_visuals_system, attach_wire_visuals_system))
             .add_systems(
                 Update,
                 (
-                    update_input_colours_system,
-                    update_logic_displays_system,
                     gate_selection_system.before(drag_selected_system),
                     drag_selected_system,
-                    update_connections_system,
                     update_spatial_grid_system,
                     update_inputs_on_left_click,
                     update_selected_gate,
@@ -228,17 +239,13 @@ type CircuitItem = Or<(With<GateIdentity>, With<WireIdentity>)>;
 
 /// The circuit stays in the ECS outside the simulation state; it is only
 /// hidden.
-fn hide_circuit_system(
-    mut items: Query<&mut Visibility, CircuitItem>,
-) {
+fn hide_circuit_system(mut items: Query<&mut Visibility, CircuitItem>) {
     for mut visibility in &mut items {
         *visibility = Visibility::Hidden;
     }
 }
 
-fn show_circuit_system(
-    mut items: Query<&mut Visibility, CircuitItem>,
-) {
+fn show_circuit_system(mut items: Query<&mut Visibility, CircuitItem>) {
     for mut visibility in &mut items {
         *visibility = Visibility::Visible;
     }

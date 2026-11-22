@@ -28,17 +28,50 @@ fn add_node_rejects_bad_params_and_instances() {
     for kind in [
         NodeKind::And { w: 0 },
         NodeKind::Not { w: 65 },
-        NodeKind::Split { w: 8, lo: 4, len: 5 },
-        NodeKind::Split { w: 8, lo: 0, len: 0 },
-        NodeKind::Extend { from: 8, to: 4, signed: false },
-        NodeKind::Merge { widths: smallvec::smallvec![32, 33] },
-        NodeKind::Clock { period: 0, duty: 0, phase: 0 },
-        NodeKind::Clock { period: 2, duty: 3, phase: 0 },
-        NodeKind::Ram { addr_bits: 0, w: 8, init: Default::default() },
-        NodeKind::Rom { addr_bits: 1, w: 8, contents: vec![1, 2, 3].into() },
+        NodeKind::Split {
+            w: 8,
+            lo: 4,
+            len: 5,
+        },
+        NodeKind::Split {
+            w: 8,
+            lo: 0,
+            len: 0,
+        },
+        NodeKind::Extend {
+            from: 8,
+            to: 4,
+            signed: false,
+        },
+        NodeKind::Merge {
+            widths: smallvec::smallvec![32, 33],
+        },
+        NodeKind::Clock {
+            period: 0,
+            duty: 0,
+            phase: 0,
+        },
+        NodeKind::Clock {
+            period: 2,
+            duty: 3,
+            phase: 0,
+        },
+        NodeKind::Ram {
+            addr_bits: 0,
+            w: 8,
+            init: Default::default(),
+        },
+        NodeKind::Rom {
+            addr_bits: 1,
+            w: 8,
+            contents: vec![1, 2, 3].into(),
+        },
     ] {
         assert!(
-            matches!(d.add_node(r, kind.clone()), Err(NetlistError::BadParams { .. })),
+            matches!(
+                d.add_node(r, kind.clone()),
+                Err(NetlistError::BadParams { .. })
+            ),
             "{kind:?} accepted"
         );
     }
@@ -102,13 +135,21 @@ fn connect_rejects_width_mismatch_and_bad_pins() {
     let net = d.root_def().output_net(a, 0).unwrap();
     assert!(matches!(
         d.connect(r, net, (g, 0)),
-        Err(NetlistError::WidthMismatch { net_width: 8, pin_width: 1, .. })
+        Err(NetlistError::WidthMismatch {
+            net_width: 8,
+            pin_width: 1,
+            ..
+        })
     ));
     let one = d.add_node(r, NodeKind::Input { w: 1 }).unwrap();
     let one = d.root_def().output_net(one, 0).unwrap();
     assert!(matches!(
         d.connect(r, one, (g, 2)),
-        Err(NetlistError::PinOutOfRange { pin: 2, count: 2, .. })
+        Err(NetlistError::PinOutOfRange {
+            pin: 2,
+            count: 2,
+            ..
+        })
     ));
     assert!(matches!(
         d.connect_pins(r, (g, 3), (g, 0)),
@@ -134,7 +175,10 @@ fn unconnected_pin_never_shifts_later_pins() {
     let s1 = d.root_def().output_net(s1, 0).unwrap();
     d.connect(r, s1, (mux, 0)).unwrap();
     d.disconnect(r, (mux, 0)).unwrap();
-    assert_eq!(d.root_def().nodes[mux].inputs.as_slice(), &[None, None, Some(net)]);
+    assert_eq!(
+        d.root_def().nodes[mux].inputs.as_slice(),
+        &[None, None, Some(net)]
+    );
     d.validate().unwrap();
 }
 
@@ -189,7 +233,15 @@ fn removing_a_port_keeps_remaining_port_order() {
 
 /// A child definition with ports `a, b, c -> x, y, z`, instanced in the root
 /// with every pin connected.
-type InstancedChild = (Design, DefId, NodeId, Vec<NodeId>, Vec<NodeId>, Vec<NetId>, Vec<NodeId>);
+type InstancedChild = (
+    Design,
+    DefId,
+    NodeId,
+    Vec<NodeId>,
+    Vec<NodeId>,
+    Vec<NetId>,
+    Vec<NodeId>,
+);
 
 fn instanced_child() -> InstancedChild {
     let mut d = Design::new("top");
@@ -255,7 +307,10 @@ fn adding_a_child_port_appends_an_unconnected_instance_pin() {
     d.add_node(child, NodeKind::Input { w: 8 }).unwrap();
     d.add_node(child, NodeKind::Output { w: 16 }).unwrap();
     let def = d.root_def();
-    assert!(def.revision > rev, "parent revision bumps on instance pin change");
+    assert!(
+        def.revision > rev,
+        "parent revision bumps on instance pin change"
+    );
     let node = &def.nodes[inst];
     assert_eq!(node.inputs.len(), 4);
     assert_eq!(node.inputs[3], None);
@@ -268,7 +323,10 @@ fn adding_a_child_port_appends_an_unconnected_instance_pin() {
 fn add_and_remove_definition() {
     let (mut d, child, inst, ..) = instanced_child();
     let r = d.root;
-    assert_eq!(d.remove_definition(r).unwrap_err(), NetlistError::RemoveRoot);
+    assert_eq!(
+        d.remove_definition(r).unwrap_err(),
+        NetlistError::RemoveRoot
+    );
     assert!(matches!(
         d.remove_definition(child),
         Err(NetlistError::DefinitionInUse { by, .. }) if by == vec![(r, inst)]
@@ -339,28 +397,50 @@ fn validation_reports_structural_errors() {
     // Pin count wrong.
     def.nodes[g].inputs.push(None);
     let errs = d.validate().unwrap_err();
-    assert!(errs.iter().any(|e| matches!(e, ValidationError::PinCount { .. })), "{errs:?}");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, ValidationError::PinCount { .. })),
+        "{errs:?}"
+    );
 
     d.defs[r].nodes[g].inputs.pop();
     let errs = d.validate().unwrap_err();
     assert!(
-        errs.iter().any(|e| matches!(e, ValidationError::WidthMismatch { pin: 0, expected: 1, actual: 8, .. })),
+        errs.iter().any(|e| matches!(
+            e,
+            ValidationError::WidthMismatch {
+                pin: 0,
+                expected: 1,
+                actual: 8,
+                ..
+            }
+        )),
         "{errs:?}"
     );
 
     // Dangling net.
-    let ghost = d.defs[r].nets.insert(Net { width: 1, driver: (g, 7) });
+    let ghost = d.defs[r].nets.insert(Net {
+        width: 1,
+        driver: (g, 7),
+    });
     d.defs[r].nodes[g].inputs[0] = Some(ghost);
     d.defs[r].nets.remove(ghost);
     let errs = d.validate().unwrap_err();
-    assert!(errs.iter().any(|e| matches!(e, ValidationError::DanglingNet { .. })), "{errs:?}");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, ValidationError::DanglingNet { .. })),
+        "{errs:?}"
+    );
     d.defs[r].nodes[g].inputs[0] = None;
     d.validate().unwrap();
 
     // Port missing from its list.
     d.defs[r].inputs.clear();
     let errs = d.validate().unwrap_err();
-    assert!(errs.iter().any(|e| matches!(e, ValidationError::BadPort { node, .. } if *node == a)));
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, ValidationError::BadPort { node, .. } if *node == a))
+    );
 }
 
 #[test]

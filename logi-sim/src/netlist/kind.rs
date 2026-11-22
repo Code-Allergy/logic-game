@@ -25,64 +25,129 @@ pub type PinWidths = SmallVec<[u8; 4]>;
 pub enum NodeKind {
     // ── Definition ports ──────────────────────────────────────────────────
     /// Definition input port. Pins: `→ y`.
-    Input { w: u8 },
+    Input {
+        w: u8,
+    },
     /// Definition output port. Pins: `a →`.
-    Output { w: u8 },
+    Output {
+        w: u8,
+    },
 
     // ── Combinational ─────────────────────────────────────────────────────
     /// Pins: `→ y`. `value` is masked to `w`.
-    Const { w: u8, value: u64 },
+    Const {
+        w: u8,
+        value: u64,
+    },
     /// Pins: `a → y`.
-    Not { w: u8 },
+    Not {
+        w: u8,
+    },
     /// Pins: `a, b → y`.
-    And { w: u8 },
-    Or { w: u8 },
-    Xor { w: u8 },
-    Nand { w: u8 },
-    Nor { w: u8 },
-    Xnor { w: u8 },
+    And {
+        w: u8,
+    },
+    Or {
+        w: u8,
+    },
+    Xor {
+        w: u8,
+    },
+    Nand {
+        w: u8,
+    },
+    Nor {
+        w: u8,
+    },
+    Xnor {
+        w: u8,
+    },
     /// Pins: `sel(1), a, b → y`; `y = sel ? b : a`.
-    Mux { w: u8 },
+    Mux {
+        w: u8,
+    },
     /// Pins: `en(1), d → y`; `y = en ? d : 0`.
-    Switch { w: u8 },
+    Switch {
+        w: u8,
+    },
     /// Pins: `a, b, cin(1) → sum, cout(1)`.
-    Add { w: u8 },
+    Add {
+        w: u8,
+    },
     /// Pins: `a, b → y(1)`.
-    Eq { w: u8 },
+    Eq {
+        w: u8,
+    },
     /// Unsigned less-than. Pins: `a, b → y(1)`.
-    LtU { w: u8 },
+    LtU {
+        w: u8,
+    },
     /// Pins: `a → y(1)`.
-    ReduceOr { w: u8 },
-    ReduceAnd { w: u8 },
-    ReduceXor { w: u8 },
+    ReduceOr {
+        w: u8,
+    },
+    ReduceAnd {
+        w: u8,
+    },
+    ReduceXor {
+        w: u8,
+    },
     /// Bit slice `a[lo .. lo+len]`. Pins: `a(w) → y(len)`.
-    Split { w: u8, lo: u8, len: u8 },
+    Split {
+        w: u8,
+        lo: u8,
+        len: u8,
+    },
     /// Concatenation, input 0 in the lowest bits. Pins: `a0(widths[0]), .. → y(sum)`.
-    Merge { widths: SmallVec<[u8; 4]> },
+    Merge {
+        widths: SmallVec<[u8; 4]>,
+    },
     /// Zero or sign extension. Pins: `a(from) → y(to)`.
-    Extend { from: u8, to: u8, signed: bool },
+    Extend {
+        from: u8,
+        to: u8,
+        signed: bool,
+    },
     /// Pins: `→ y(1)`. At tick count `t`, `y = ((t + phase) % period) < duty`.
-    Clock { period: u32, duty: u32, phase: u32 },
+    Clock {
+        period: u32,
+        duty: u32,
+        phase: u32,
+    },
     /// Combinational read. Pins: `addr(addr_bits) → data(w)`. Words past the
     /// end of `contents` read 0; stored words are masked to `w` on read.
-    Rom { addr_bits: u8, w: u8, contents: Arc<[u64]> },
+    Rom {
+        addr_bits: u8,
+        w: u8,
+        contents: Arc<[u64]>,
+    },
     /// A reference to another definition. Pins follow that definition's
     /// `inputs`/`outputs` port lists.
     Instance(DefId),
 
     // ── State ─────────────────────────────────────────────────────────────
     /// Pins: `d → q`. Next = `d`; output = state.
-    Delay { w: u8 },
+    Delay {
+        w: u8,
+    },
     /// Pins: `en(1), d → q`. Next = `en ? d : state`; output = state.
-    Register { w: u8 },
+    Register {
+        w: u8,
+    },
     /// Pins: `en(1), d → q`. Next = `en ? d : state`; output = `en ? d : state`.
-    DLatch { w: u8 },
+    DLatch {
+        w: u8,
+    },
     /// Pins: `s(1), r(1) → q(1)`. Next = `r ? 0 : s ? 1 : state`; output = state.
     SrLatch,
     /// Pins: `addr(addr_bits), we(1), wdata(w) → rdata(w)`. Read is
     /// combinational from committed memory; the write is applied at commit.
     /// `init` holds initial contents (missing words are 0).
-    Ram { addr_bits: u8, w: u8, init: Arc<[u64]> },
+    Ram {
+        addr_bits: u8,
+        w: u8,
+        init: Arc<[u64]>,
+    },
 }
 
 /// Which pins of a node form combinational (same-tick) dependencies.
@@ -197,7 +262,10 @@ impl NodeKind {
             }
             Merge { widths } => {
                 need(!widths.is_empty(), "merge needs at least one input")?;
-                need(widths.iter().all(|&w| w_ok(w)), "merge input width must be 1..=64")?;
+                need(
+                    widths.iter().all(|&w| w_ok(w)),
+                    "merge input width must be 1..=64",
+                )?;
                 need(
                     widths.iter().map(|&w| w as u32).sum::<u32>() <= MAX_WIDTH as u32,
                     "merged width exceeds 64",
@@ -211,7 +279,11 @@ impl NodeKind {
                 need(*period >= 1, "clock period must be at least 1")?;
                 need(duty <= period, "clock duty exceeds period")
             }
-            Rom { addr_bits, w, contents } => {
+            Rom {
+                addr_bits,
+                w,
+                contents,
+            } => {
                 need(w_ok(*w), "width must be 1..=64")?;
                 need(
                     (1..=MAX_ADDR_BITS).contains(addr_bits),

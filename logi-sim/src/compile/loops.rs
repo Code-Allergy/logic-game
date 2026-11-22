@@ -113,8 +113,8 @@ pub(super) fn find_loops(e: &Elab<'_>) -> Vec<Vec<NodePath>> {
                         break;
                     }
                 }
-                let self_loop = scc.len() == 1
-                    && adj[start[vu] as usize..start[vu + 1] as usize].contains(&v);
+                let self_loop =
+                    scc.len() == 1 && adj[start[vu] as usize..start[vu + 1] as usize].contains(&v);
                 if scc.len() > 1 || self_loop {
                     loops.push(describe(e, &scc));
                 }
@@ -133,13 +133,22 @@ fn describe(e: &Elab<'_>, scc: &[u32]) -> Vec<NodePath> {
         let def = &e.design.defs[e.def_of(inst)];
         let driver = def.nets[net].driver.0;
         match def.nodes[driver].kind {
-            NodeKind::Instance(_) => crossings.push(NodePath { instances: e.path(inst), node: driver }),
+            NodeKind::Instance(_) => crossings.push(NodePath {
+                instances: e.path(inst),
+                node: driver,
+            }),
             NodeKind::Input { .. } => {
                 if let Some((parent, node)) = e.insts[inst as usize].parent {
-                    crossings.push(NodePath { instances: e.path(parent), node });
+                    crossings.push(NodePath {
+                        instances: e.path(parent),
+                        node,
+                    });
                 }
             }
-            _ => prims.push(NodePath { instances: e.path(inst), node: driver }),
+            _ => prims.push(NodePath {
+                instances: e.path(inst),
+                node: driver,
+            }),
         }
     }
     let mut out = if prims.is_empty() { crossings } else { prims };

@@ -157,7 +157,12 @@ impl Sim {
                         *self.slots.get_unchecked_mut(state as usize) = v;
                     }
                 }
-                Commit::RamWrite { mem, we, addr, data } => unsafe {
+                Commit::RamWrite {
+                    mem,
+                    we,
+                    addr,
+                    data,
+                } => unsafe {
                     if *self.slots.get_unchecked(we as usize) != 0 {
                         let m = self.mems.get_unchecked_mut(mem as usize);
                         let a = *self.slots.get_unchecked(addr as usize) as usize & (m.len() - 1);
@@ -195,7 +200,9 @@ impl Sim {
                     Op::Xnor => run2(s, ins, imms, |a, b, _, m| !(a ^ b) & m),
                     Op::Mux => run3(s, ins, imms, |a, b, c, _| if a != 0 { c } else { b }),
                     Op::Switch => run2(s, ins, imms, |a, b, _, _| if a != 0 { b } else { 0 }),
-                    Op::AddSum => run3(s, ins, imms, |a, b, c, m| a.wrapping_add(b).wrapping_add(c) & m),
+                    Op::AddSum => run3(s, ins, imms, |a, b, c, m| {
+                        a.wrapping_add(b).wrapping_add(c) & m
+                    }),
                     Op::AddCarry => run3(s, ins, imms, |a, b, c, w| {
                         ((a as u128 + b as u128 + c as u128) >> w) as u64 & 1
                     }),
@@ -207,7 +214,11 @@ impl Sim {
                     Op::Shr => run1(s, ins, imms, |a, i, m| (a >> i.b) & m),
                     Op::Concat => run2(s, ins, imms, |a, b, i, _| a | (b << i.c)),
                     Op::Sext => run1(s, ins, imms, |a, i, m| {
-                        if (a >> (i.b - 1)) & 1 == 1 { (a | !mask(i.b as u8)) & m } else { a }
+                        if (a >> (i.b - 1)) & 1 == 1 {
+                            (a | !mask(i.b as u8)) & m
+                        } else {
+                            a
+                        }
                     }),
                     Op::Clock => {
                         for i in ins {
@@ -241,7 +252,10 @@ impl Sim {
 
     /// Snapshot every state element, keyed by node path.
     pub fn export_state(&self) -> StateSnapshot {
-        let mut snap = StateSnapshot { tick: self.tick, ..Default::default() };
+        let mut snap = StateSnapshot {
+            tick: self.tick,
+            ..Default::default()
+        };
         for key in &self.program.state_keys {
             match key.loc {
                 StateLoc::Slot(s) => {
@@ -249,8 +263,10 @@ impl Sim {
                 }
                 StateLoc::Mem(m) => {
                     let d = &self.program.mems[m as usize];
-                    snap.mems
-                        .insert(key.path.clone(), (d.addr_bits, d.width, self.mems[m as usize].clone()));
+                    snap.mems.insert(
+                        key.path.clone(),
+                        (d.addr_bits, d.width, self.mems[m as usize].clone()),
+                    );
                 }
             }
         }
@@ -267,8 +283,10 @@ impl Sim {
         for key in &program.state_keys {
             match key.loc {
                 StateLoc::Slot(s) => {
-                    self.slots[s as usize] =
-                        snap.words.get(&key.path).map_or(0, |&v| v & mask(key.width));
+                    self.slots[s as usize] = snap
+                        .words
+                        .get(&key.path)
+                        .map_or(0, |&v| v & mask(key.width));
                 }
                 StateLoc::Mem(m) => {
                     let d = &program.mems[m as usize];
@@ -298,27 +316,21 @@ unsafe fn run1(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, &Instr,
 }
 
 #[inline(always)]
-unsafe fn run2(
-    s: *mut u64,
-    ins: &[Instr],
-    imms: &[u64],
-    f: impl Fn(u64, u64, &Instr, u64) -> u64,
-) {
+unsafe fn run2(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, u64, &Instr, u64) -> u64) {
     for (k, i) in ins.iter().enumerate() {
         unsafe {
-            *s.add(i.dst as usize) =
-                f(*s.add(i.a as usize), *s.add(i.b as usize), i, *imms.get_unchecked(k))
+            *s.add(i.dst as usize) = f(
+                *s.add(i.a as usize),
+                *s.add(i.b as usize),
+                i,
+                *imms.get_unchecked(k),
+            )
         };
     }
 }
 
 #[inline(always)]
-unsafe fn run3(
-    s: *mut u64,
-    ins: &[Instr],
-    imms: &[u64],
-    f: impl Fn(u64, u64, u64, u64) -> u64,
-) {
+unsafe fn run3(s: *mut u64, ins: &[Instr], imms: &[u64], f: impl Fn(u64, u64, u64, u64) -> u64) {
     for (k, i) in ins.iter().enumerate() {
         unsafe {
             *s.add(i.dst as usize) = f(
@@ -372,7 +384,12 @@ fn check(p: &Program) -> Result<(), BadProgram> {
     for c in &p.commits {
         let ok = match *c {
             Commit::Copy { state, next } => slot_ok(state) && slot_ok(next) && state != ZERO_SLOT,
-            Commit::RamWrite { mem, we, addr, data } => {
+            Commit::RamWrite {
+                mem,
+                we,
+                addr,
+                data,
+            } => {
                 (mem as usize) < p.mems.len()
                     && p.mems[mem as usize].writable
                     && slot_ok(we)

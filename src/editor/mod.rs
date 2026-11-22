@@ -93,10 +93,13 @@ pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<EditorState>()
-            .add_systems(
-                EguiPrimaryContextPass,
-                (catalog_init_system, editor_ui_system, handle_connection_creation),
-            );
+        app.init_resource::<EditorState>().add_systems(
+            EguiPrimaryContextPass,
+            (
+                catalog_init_system,
+                editor_ui_system,
+                handle_connection_creation,
+            ),
+        );
     }
 }

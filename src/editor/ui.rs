@@ -5,8 +5,11 @@ use bevy::ecs::entity_disabling::Disabled;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use bevy_egui::{
+    EguiContexts,
+    egui::{self, LayerId, Ui, UiBuilder},
+};
 use uuid::Uuid;
-use bevy_egui::{EguiContexts, egui::{self, LayerId, Ui, UiBuilder}};
 
 use crate::{
     GameState,
@@ -28,6 +31,12 @@ fn gate_name(label: &GateLabel, ty: &GateType) -> String {
     }
 }
 
+type ChangedRootGate = (
+    Changed<GateType>,
+    Without<InstanceViewItem>,
+    Allow<Disabled>,
+);
+
 /// The open view and the messages that change it, plus the root circuit's
 /// gates (also while parked behind a subcircuit view).
 #[derive(SystemParam)]
@@ -36,6 +45,28 @@ pub struct EditorViewParams<'w, 's> {
     close: MessageWriter<'w, CloseView>,
     open_definition: MessageWriter<'w, OpenDefinitionView>,
     root_gates: Query<'w, 's, &'static GateType, (Without<InstanceViewItem>, Allow<Disabled>)>,
+    changed_root_gates: Query<'w, 's, (), ChangedRootGate>,
+    removed_gates: RemovedComponents<'w, 's, GateType>,
+    /// The definition table, rebuilt only when the root's gates or the
+    /// library change.
+    table: Local<'s, Option<Vec<(Uuid, String, usize)>>>,
+}
+
+impl EditorViewParams<'_, '_> {
+    fn definition_table(&mut self, library: &Res<CircuitLibrary>) -> Vec<(Uuid, String, usize)> {
+        let removed = self.removed_gates.read().count() > 0;
+        if self.table.is_none()
+            || removed
+            || library.is_changed()
+            || !self.changed_root_gates.is_empty()
+        {
+            *self.table = Some(definition_table(
+                self.root_gates.iter().map(|t| &t.kind),
+                library,
+            ));
+        }
+        self.table.clone().unwrap_or_default()
+    }
 }
 
 /// Every definition the root circuit uses, with how many instances of it
@@ -63,7 +94,15 @@ fn definition_table<'a>(
     }
     let mut rows: Vec<(Uuid, String, usize)> = counts
         .into_iter()
-        .map(|(id, n)| (id, library.get(id).map_or_else(|| "(missing)".into(), |d| d.name.clone()), n))
+        .map(|(id, n)| {
+            (
+                id,
+                library
+                    .get(id)
+                    .map_or_else(|| "(missing)".into(), |d| d.name.clone()),
+                n,
+            )
+        })
         .collect();
     rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
     rows
@@ -92,20 +131,32 @@ pub fn editor_ui_system(
     }
 
     let ctx = contexts.ctx_mut()?;
-    let Ok(window) = q_window.single() else { return Ok(()) };
-    let Ok((camera, camera_transform)) = q_camera.single() else { return Ok(()) };
+    let Ok(window) = q_window.single() else {
+        return Ok(());
+    };
+    let Ok((camera, camera_transform)) = q_camera.single() else {
+        return Ok(());
+    };
 
     let mut root_ui = Ui::new(
         ctx.clone(),
         egui::Id::new("editor_root"),
-        UiBuilder::new().layer_id(LayerId::background()).max_rect(ctx.viewport_rect()),
+        UiBuilder::new()
+            .layer_id(LayerId::background())
+            .max_rect(ctx.viewport_rect()),
     );
 
     // Drop stale wire-builder picks (deleted gates).
-    if editor_state.connection_source.is_some_and(|e| !gates.contains(e)) {
+    if editor_state
+        .connection_source
+        .is_some_and(|e| !gates.contains(e))
+    {
         editor_state.clear_connection();
     }
-    if editor_state.connection_sink.is_some_and(|e| !gates.contains(e)) {
+    if editor_state
+        .connection_sink
+        .is_some_and(|e| !gates.contains(e))
+    {
         editor_state.connection_sink = None;
     }
     if editor_state.current_workspace.is_none() {
@@ -123,7 +174,7 @@ pub fn editor_ui_system(
     let mut place_saved: Option<String> = None;
     let mut close_requested: Option<bool> = None;
     let mut open_definition: Option<Uuid> = None;
-    let table = definition_table(views.root_gates.iter().map(|t| &t.kind), &library);
+    let table = views.definition_table(&library);
 
     egui::Panel::left("editor_panel").resizable(true).show_inside(&mut root_ui, |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -294,7 +345,9 @@ pub fn editor_ui_system(
         return Ok(());
     }
     if let Some(definition) = open_definition {
-        views.open_definition.write(OpenDefinitionView { definition });
+        views
+            .open_definition
+            .write(OpenDefinitionView { definition });
         return Ok(());
     }
 
@@ -311,7 +364,9 @@ pub fn editor_ui_system(
         let mut definitions: HashMap<_, _> = ws.definitions.clone();
         definitions.insert(ws.root.id, Arc::new(ws.root.clone()));
         register_definitions.write(RegisterDefinitions { definitions });
-        editor_state.selected_gate_type = Some(GateKind::SubCircuit { definition: ws.root.id });
+        editor_state.selected_gate_type = Some(GateKind::SubCircuit {
+            definition: ws.root.id,
+        });
         editor_state.selected_gate_label = Some(name);
         editor_state.connection_mode = false;
         editor_state.clear_connection();
@@ -338,7 +393,10 @@ pub fn editor_ui_system(
         editor_state.workspace_file_name = name.clone();
         editor_state.selected_gate_type = None;
         editor_state.clear_connection();
-        load_workspace_events.write(LoadWorkspaceEvent { name, workspace: ws });
+        load_workspace_events.write(LoadWorkspaceEvent {
+            name,
+            workspace: ws,
+        });
     };
 
     if let Some(i) = open_catalog {
@@ -362,73 +420,79 @@ pub fn editor_ui_system(
     }
 
     if editor_state.connection_mode {
-        let source = editor_state.connection_source.and_then(|e| gates.get(e).ok());
+        let source = editor_state
+            .connection_source
+            .and_then(|e| gates.get(e).ok());
         let sink = editor_state.connection_sink.and_then(|e| gates.get(e).ok());
-        egui::Window::new("Wire Builder").resizable(false).show(&root_ui, |ui| {
-            ui.label("Build a wire between gates");
-            let mut source_width = None;
-            match source {
-                Some((_, ty, label)) => {
-                    ui.label(format!("Source: {}", gate_name(label, ty)));
-                    let (_, outs) = library.pins(&ty.kind).unwrap_or_default();
-                    let (_, names) = library.pin_names(&ty.kind);
-                    source_width = draw_pin_selector(
-                        ui,
-                        "Source output pin",
-                        &mut editor_state.connection_source_pin,
-                        &outs,
-                        &names,
+        egui::Window::new("Wire Builder")
+            .resizable(false)
+            .show(&root_ui, |ui| {
+                ui.label("Build a wire between gates");
+                let mut source_width = None;
+                match source {
+                    Some((_, ty, label)) => {
+                        ui.label(format!("Source: {}", gate_name(label, ty)));
+                        let (_, outs) = library.pins(&ty.kind).unwrap_or_default();
+                        let (_, names) = library.pin_names(&ty.kind);
+                        source_width = draw_pin_selector(
+                            ui,
+                            "Source output pin",
+                            &mut editor_state.connection_source_pin,
+                            &outs,
+                            &names,
+                        );
+                    }
+                    None => {
+                        ui.label("Source: not selected");
+                    }
+                }
+                ui.separator();
+                let mut sink_width = None;
+                match sink {
+                    Some((_, ty, label)) => {
+                        ui.label(format!("Sink: {}", gate_name(label, ty)));
+                        let (ins, _) = library.pins(&ty.kind).unwrap_or_default();
+                        let (names, _) = library.pin_names(&ty.kind);
+                        sink_width = draw_pin_selector(
+                            ui,
+                            "Sink input pin",
+                            &mut editor_state.connection_sink_pin,
+                            &ins,
+                            &names,
+                        );
+                    }
+                    None => {
+                        ui.label("Sink: not selected");
+                    }
+                }
+                let widths_match = source_width.is_some() && source_width == sink_width;
+                if source_width.is_some() && sink_width.is_some() && !widths_match {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 200, 90),
+                        format!(
+                            "Pin widths differ ({} vs {} bits); use Split/Merge/Extend.",
+                            source_width.unwrap_or(0),
+                            sink_width.unwrap_or(0)
+                        ),
                     );
                 }
-                None => {
-                    ui.label("Source: not selected");
+                if ui
+                    .add_enabled(widths_match, egui::Button::new("Create Wire"))
+                    .clicked()
+                    && let (Some((src, ..)), Some((snk, ..))) = (source, sink)
+                {
+                    create_wire_events.write(CreateWire {
+                        source_gate: src.uuid,
+                        source_pin: editor_state.connection_source_pin,
+                        sink_gate: snk.uuid,
+                        sink_pin: editor_state.connection_sink_pin,
+                    });
+                    editor_state.clear_connection();
                 }
-            }
-            ui.separator();
-            let mut sink_width = None;
-            match sink {
-                Some((_, ty, label)) => {
-                    ui.label(format!("Sink: {}", gate_name(label, ty)));
-                    let (ins, _) = library.pins(&ty.kind).unwrap_or_default();
-                    let (names, _) = library.pin_names(&ty.kind);
-                    sink_width = draw_pin_selector(
-                        ui,
-                        "Sink input pin",
-                        &mut editor_state.connection_sink_pin,
-                        &ins,
-                        &names,
-                    );
+                if ui.button("Clear Selection").clicked() {
+                    editor_state.clear_connection();
                 }
-                None => {
-                    ui.label("Sink: not selected");
-                }
-            }
-            let widths_match = source_width.is_some() && source_width == sink_width;
-            if source_width.is_some() && sink_width.is_some() && !widths_match {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 200, 90),
-                    format!(
-                        "Pin widths differ ({} vs {} bits); use Split/Merge/Extend.",
-                        source_width.unwrap_or(0),
-                        sink_width.unwrap_or(0)
-                    ),
-                );
-            }
-            if ui.add_enabled(widths_match, egui::Button::new("Create Wire")).clicked()
-                && let (Some((src, ..)), Some((snk, ..))) = (source, sink)
-            {
-                create_wire_events.write(CreateWire {
-                    source_gate: src.uuid,
-                    source_pin: editor_state.connection_source_pin,
-                    sink_gate: snk.uuid,
-                    sink_pin: editor_state.connection_sink_pin,
-                });
-                editor_state.clear_connection();
-            }
-            if ui.button("Clear Selection").clicked() {
-                editor_state.clear_connection();
-            }
-        });
+            });
     }
 
     // World placement on left-click.
@@ -469,10 +533,12 @@ fn draw_pin_selector(
         let name = names.get(pin).map_or("", String::as_str);
         format!("pin {pin} {name} ({} bit)", widths[pin])
     };
-    egui::ComboBox::from_label(label).selected_text(describe(clamped)).show_ui(ui, |ui| {
-        for pin in 0..widths.len() {
-            ui.selectable_value(selected_pin, pin as u8, describe(pin));
-        }
-    });
+    egui::ComboBox::from_label(label)
+        .selected_text(describe(clamped))
+        .show_ui(ui, |ui| {
+            for pin in 0..widths.len() {
+                ui.selectable_value(selected_pin, pin as u8, describe(pin));
+            }
+        });
     widths.get(usize::from(*selected_pin)).copied()
 }

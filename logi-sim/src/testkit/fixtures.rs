@@ -70,7 +70,9 @@ pub fn ripple_adder(w: u8) -> Design {
 
 fn mux_ports(b: &mut Builder<'_>, sel_bits: u8, w: u8) -> (NetId, Vec<NetId>) {
     let sel = b.input("sel", sel_bits);
-    let ds = (0..1u32 << sel_bits).map(|i| b.input(format!("d{i}"), w)).collect();
+    let ds = (0..1u32 << sel_bits)
+        .map(|i| b.input(format!("d{i}"), w))
+        .collect();
     (sel, ds)
 }
 
@@ -98,7 +100,13 @@ pub fn mux_tree_bitblasted(sel_bits: u8, w: u8) -> Design {
     let decoded: Vec<NetId> = (0..ds.len())
         .map(|i| {
             let terms: Vec<NetId> = (0..sel_bits as usize)
-                .map(|k| if i >> k & 1 == 1 { sel_bits_v[k] } else { sel_not[k] })
+                .map(|k| {
+                    if i >> k & 1 == 1 {
+                        sel_bits_v[k]
+                    } else {
+                        sel_not[k]
+                    }
+                })
                 .collect();
             b.and_n(&terms)
         })
@@ -106,7 +114,9 @@ pub fn mux_tree_bitblasted(sel_bits: u8, w: u8) -> Design {
     let d_bits: Vec<Vec<NetId>> = ds.iter().map(|&x| b.bus_expand(x)).collect();
     let y_bits: Vec<NetId> = (0..w as usize)
         .map(|bit| {
-            let terms: Vec<NetId> = (0..ds.len()).map(|i| b.and(d_bits[i][bit], decoded[i])).collect();
+            let terms: Vec<NetId> = (0..ds.len())
+                .map(|i| b.and(d_bits[i][bit], decoded[i]))
+                .collect();
             b.or_n(&terms)
         })
         .collect();
@@ -274,7 +284,12 @@ pub fn cpu(program: &[u64]) -> Design {
         is(&mut b, ADD),
         is(&mut b, SUB),
     );
-    let (is_jmp, is_jz, is_hlt, is_addi) = (is(&mut b, JMP), is(&mut b, JZ), is(&mut b, HLT), is(&mut b, ADDI));
+    let (is_jmp, is_jz, is_hlt, is_addi) = (
+        is(&mut b, JMP),
+        is(&mut b, JZ),
+        is(&mut b, HLT),
+        is(&mut b, ADDI),
+    );
 
     let rdata = b.ram(operand, is_st, acc, &[]);
     let ram_node = d.root_def().nets[rdata].driver.0;
@@ -344,7 +359,11 @@ pub fn sr_latch_nor() -> LoopFixture {
     let (n1, n2, q, qn) = nor_pair(&mut b, s, r);
     b.output("Q", q);
     b.output("Qn", qn);
-    LoopFixture { design: d, def, loop_nodes: vec![n1, n2] }
+    LoopFixture {
+        design: d,
+        def,
+        loop_nodes: vec![n1, n2],
+    }
 }
 
 /// Cross-coupled NANDs (active-low SR latch). Ports `Sn, Rn -> Q, Qn`.
@@ -361,7 +380,11 @@ pub fn sr_latch_nand() -> LoopFixture {
     b.connect(qn, (n1, 1));
     b.output("Q", q);
     b.output("Qn", qn);
-    LoopFixture { design: d, def, loop_nodes: vec![n1, n2] }
+    LoopFixture {
+        design: d,
+        def,
+        loop_nodes: vec![n1, n2],
+    }
 }
 
 /// Legacy `d_flip_flop` (really a gated D latch): gating logic into a NOR
@@ -378,7 +401,11 @@ pub fn d_latch_gates() -> LoopFixture {
     let (n1, n2, q, qn) = nor_pair(&mut b, s, r);
     b.output("Q", q);
     b.output("Qn", qn);
-    LoopFixture { design: d, def, loop_nodes: vec![n1, n2] }
+    LoopFixture {
+        design: d,
+        def,
+        loop_nodes: vec![n1, n2],
+    }
 }
 
 /// Ring oscillator: `n` inverters in a ring (`n >= 1`). Output `y`.
@@ -396,7 +423,11 @@ pub fn ring_oscillator(n: usize) -> LoopFixture {
     }
     b.connect(prev, (first, 0));
     b.output("y", prev);
-    LoopFixture { design: d, def, loop_nodes: nodes }
+    LoopFixture {
+        design: d,
+        def,
+        loop_nodes: nodes,
+    }
 }
 
 /// The legal version of [`sr_latch_nor`]: the Qn→NOR1 feedback passes
@@ -421,5 +452,12 @@ pub fn sr_latch_nor_delayed() -> Design {
 /// `ram[0]` forever and doubles it into `acc` each pass.
 pub const LOOP_PROGRAM: [u64; 6] = {
     use isa::*;
-    [op(LDI, 0), op(ADDI, 1), op(ST, 0), op(LD, 0), op(ADD, 0), op(JMP, 1)]
+    [
+        op(LDI, 0),
+        op(ADDI, 1),
+        op(ST, 0),
+        op(LD, 0),
+        op(ADD, 0),
+        op(JMP, 1),
+    ]
 };

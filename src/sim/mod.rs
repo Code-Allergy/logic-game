@@ -11,7 +11,8 @@
 //!   sends revisions to the v2 engine and reads probes back.
 //! - [`view`] – instance views: opening a subcircuit shows its definition
 //!   with live values probed from the running root simulation.
-//! - [`systems`] – Bevy systems for rendering and user interaction.
+//! - [`visuals`] – change-driven gate and wire visuals, loop highlight.
+//! - [`systems`] – Bevy systems for picking, dragging and egui panels.
 //! - [`plugin`] – plugins that wire everything into Bevy.
 //! - [`spatial_grid`] – spatial acceleration for entity picking.
 
@@ -28,16 +29,20 @@ pub mod kind;
 pub mod spatial_grid;
 pub mod systems;
 pub mod view;
+pub mod visuals;
 
 pub use authoring::*;
-pub use bridge::{CompileFailure, SimBridge, SimDiagnostics, SimRuntime};
+pub use bridge::{CompileFailure, LoopNode, SimBridge, SimDiagnostics, SimRuntime};
 pub use document::{
     CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, PinAddr,
     WorkspaceDocument,
 };
 pub use kind::GateKind;
-pub use view::{CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame};
 pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin};
+pub use view::{
+    CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame,
+};
+pub use visuals::{EntityWorkCounter, LoopHighlight, SimulationVisualsPlugin};
 
 use bevy::prelude::*;
 use bevy::reflect::Reflect;
@@ -63,7 +68,10 @@ pub struct SimulationConfig {
 
 impl Default for SimulationConfig {
     fn default() -> Self {
-        Self { tick_rate: DEFAULT_TICK_RATE, unlimited_tick_rate: false }
+        Self {
+            tick_rate: DEFAULT_TICK_RATE,
+            unlimited_tick_rate: false,
+        }
     }
 }
 
@@ -104,7 +112,11 @@ impl TickRateMeter {
 
 /// Returns the base [`Sprite`] for a gate kind.
 pub fn get_gate_sprite(kind: &GateKind) -> Sprite {
-    Sprite { color: kind.color(), custom_size: Some(kind.size()), ..Default::default() }
+    Sprite {
+        color: kind.color(),
+        custom_size: Some(kind.size()),
+        ..Default::default()
+    }
 }
 
 /// Compute midpoint, rotation quaternion, and length for a connection line sprite.
@@ -121,7 +133,9 @@ pub fn calculate_connection_geometry(from: &Vec3, to: &Vec3) -> (Vec3, Quat, f32
 pub fn format_value(value: u64, width: u8, config: &DisplayConfig) -> String {
     let width = usize::from(width.max(1));
     match (config.radix, config.leading_zeroes) {
-        (DisplayRadix::Hexadecimal, true) => format!("0x{value:0digits$X}", digits = width.div_ceil(4)),
+        (DisplayRadix::Hexadecimal, true) => {
+            format!("0x{value:0digits$X}", digits = width.div_ceil(4))
+        }
         (DisplayRadix::Hexadecimal, false) => format!("0x{value:X}"),
         (DisplayRadix::Binary, true) => format!("0b{value:0width$b}"),
         (DisplayRadix::Binary, false) => format!("0b{value:b}"),

@@ -64,7 +64,8 @@ pub fn check_design(
     let program = compile(design, options).map_err(|e| DiffError::Compile(format!("{e:?}")))?;
     let program = Arc::new(program);
     let mut sim = Sim::new(Arc::clone(&program));
-    let mut reference = Reference::new(design).map_err(|e| DiffError::Reference(format!("{e:?}")))?;
+    let mut reference =
+        Reference::new(design).map_err(|e| DiffError::Reference(format!("{e:?}")))?;
     let widths: Vec<u8> = program.ports.inputs.iter().map(|p| p.width).collect();
     let mut rng = Rng::new(input_seed);
 
@@ -76,7 +77,9 @@ pub fn check_design(
                 reference.set_input(port, v);
             }
             sim.tick();
-            reference.tick().map_err(|e| DiffError::Reference(format!("{e:?}")))?;
+            reference
+                .tick()
+                .map_err(|e| DiffError::Reference(format!("{e:?}")))?;
         }
         for (port, p) in program.ports.outputs.iter().enumerate() {
             let (s, r) = (sim.output(port), reference.output(port));
@@ -92,7 +95,10 @@ pub fn check_design(
         for inst in 0..program.debug.instances.len() as u32 {
             let path = program.debug.path(inst);
             for (net, &slot) in &program.debug.net_slots[inst as usize] {
-                let (s, r) = (sim.read(slot), reference.net(&path, net).unwrap_or(u64::MAX));
+                let (s, r) = (
+                    sim.read(slot),
+                    reference.net(&path, net).unwrap_or(u64::MAX),
+                );
                 if s != r {
                     return Err(DiffError::Mismatch(Mismatch {
                         tick: t,
@@ -121,7 +127,10 @@ pub fn sweep(configs: &[GenConfig], count: u64, ticks: u64, options: &Options) -
     let mut n = 0;
     for (ci, base) in configs.iter().enumerate() {
         for k in 0..count {
-            let cfg = GenConfig { seed: k.wrapping_mul(0x9E37_79B9) ^ (ci as u64) << 48, ..base.clone() };
+            let cfg = GenConfig {
+                seed: k.wrapping_mul(0x9E37_79B9) ^ (ci as u64) << 48,
+                ..base.clone()
+            };
             if let Err(e) = check_generated(&cfg, ticks, options) {
                 panic!(
                     "differential failure: {e}\n  reproduce with: \
@@ -138,10 +147,26 @@ pub fn sweep(configs: &[GenConfig], count: u64, ticks: u64, options: &Options) -
 pub fn standard_configs() -> Vec<GenConfig> {
     vec![
         GenConfig::default(),
-        GenConfig { max_width: 64, nodes: 120, ..Default::default() },
-        GenConfig { max_width: 1, ..Default::default() },
-        GenConfig { max_depth: 5, child_defs: 6, instance_percent: 20, ..Default::default() },
-        GenConfig { state_percent: 50, unconnected_percent: 20, ..Default::default() },
+        GenConfig {
+            max_width: 64,
+            nodes: 120,
+            ..Default::default()
+        },
+        GenConfig {
+            max_width: 1,
+            ..Default::default()
+        },
+        GenConfig {
+            max_depth: 5,
+            child_defs: 6,
+            instance_percent: 20,
+            ..Default::default()
+        },
+        GenConfig {
+            state_percent: 50,
+            unconnected_percent: 20,
+            ..Default::default()
+        },
         GenConfig::dag(0, 200, 32),
     ]
 }

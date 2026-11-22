@@ -32,7 +32,11 @@ impl<'d> Elab<'d> {
         let mut def_nets = SecondaryMap::new();
         for d in design.defs_bottom_up() {
             let nets: Vec<NetId> = design.defs[d].nets.keys().collect();
-            let index = nets.iter().enumerate().map(|(i, &n)| (n, i as u32)).collect();
+            let index = nets
+                .iter()
+                .enumerate()
+                .map(|(i, &n)| (n, i as u32))
+                .collect();
             net_index.insert(d, index);
             def_nets.insert(d, nets);
         }
@@ -40,7 +44,10 @@ impl<'d> Elab<'d> {
         let root = design.root;
         let mut e = Elab {
             design,
-            insts: vec![InstanceInfo { def: root, parent: None }],
+            insts: vec![InstanceInfo {
+                def: root,
+                parent: None,
+            }],
             net_base: vec![0],
             n_nets: def_nets[root].len() as u32,
             net_index,
@@ -54,7 +61,10 @@ impl<'d> Elab<'d> {
             let def = &design.defs[e.insts[i].def];
             for (id, node) in &def.nodes {
                 if let NodeKind::Instance(child) = node.kind {
-                    e.insts.push(InstanceInfo { def: child, parent: Some((i as u32, id)) });
+                    e.insts.push(InstanceInfo {
+                        def: child,
+                        parent: Some((i as u32, id)),
+                    });
                     e.net_base.push(e.n_nets);
                     e.n_nets = e
                         .n_nets
@@ -106,7 +116,10 @@ impl<'d> Elab<'d> {
         // nets share a base with the next one).
         let inst = self.net_base.partition_point(|&b| b <= g) - 1;
         let def = self.def_of(inst as u32);
-        (inst as u32, self.def_nets[def][(g - self.net_base[inst]) as usize])
+        (
+            inst as u32,
+            self.def_nets[def][(g - self.net_base[inst]) as usize],
+        )
     }
 
     pub fn find(&mut self, mut x: u32) -> u32 {

@@ -100,7 +100,11 @@ impl GenConfig {
     /// gates) of exactly `nodes` gates at width `w`. With `w == 1` it maps
     /// one-to-one onto the legacy circuit model.
     pub fn gates(seed: u64, nodes: usize, w: u8) -> Self {
-        Self { ops: OpMix::Gates, max_width: w, ..Self::dag(seed, nodes, w) }
+        Self {
+            ops: OpMix::Gates,
+            max_width: w,
+            ..Self::dag(seed, nodes, w)
+        }
     }
 }
 
@@ -113,7 +117,10 @@ pub struct Generated {
 }
 
 pub fn generate(cfg: &GenConfig) -> Generated {
-    assert!((1..=64).contains(&cfg.max_width), "max_width must be 1..=64");
+    assert!(
+        (1..=64).contains(&cfg.max_width),
+        "max_width must be 1..=64"
+    );
     let mut rng = Rng::new(cfg.seed);
     let mut design = Design::new("root");
 
@@ -152,7 +159,10 @@ pub fn generate(cfg: &GenConfig) -> Generated {
         (def, g.inject_loop())
     });
 
-    Generated { design, injected_loop }
+    Generated {
+        design,
+        injected_loop,
+    }
 }
 
 /// Nesting depth of the instances inside `def`.
@@ -181,7 +191,14 @@ struct DefGen<'a> {
 impl<'a> DefGen<'a> {
     fn new(design: &'a mut Design, def: DefId, rng: &'a mut Rng, cfg: &'a GenConfig) -> Self {
         let pool = design.defs[def].nets.keys().collect();
-        Self { design, def, rng, cfg, pool, deferred: Vec::new() }
+        Self {
+            design,
+            def,
+            rng,
+            cfg,
+            pool,
+            deferred: Vec::new(),
+        }
     }
 
     fn width(&mut self) -> u8 {
@@ -242,9 +259,17 @@ impl<'a> DefGen<'a> {
             return net;
         } else if have > w {
             let lo = self.rng.range(0, (have - w) as u64) as u8;
-            NodeKind::Split { w: have, lo, len: w }
+            NodeKind::Split {
+                w: have,
+                lo,
+                len: w,
+            }
         } else {
-            NodeKind::Extend { from: have, to: w, signed: self.rng.coin() }
+            NodeKind::Extend {
+                from: have,
+                to: w,
+                signed: self.rng.coin(),
+            }
         };
         let id = self.add(kind);
         self.connect(Some(net), id, 0);
@@ -316,7 +341,11 @@ impl<'a> DefGen<'a> {
                 // addr is combinational (drawn before the node exists);
                 // we/wdata are deferred.
                 let src = self.source(addr_bits);
-                let id = self.add(NodeKind::Ram { addr_bits, w, init: Arc::from(init) });
+                let id = self.add(NodeKind::Ram {
+                    addr_bits,
+                    w,
+                    init: Arc::from(init),
+                });
                 self.connect(src, id, 0);
                 self.deferred.push((id, 1, 1));
                 self.deferred.push((id, 2, w));
@@ -384,7 +413,10 @@ impl<'a> DefGen<'a> {
                 }
                 NodeKind::Merge { widths }
             }
-            19 => NodeKind::Const { w, value: self.rng.next_u64() },
+            19 => NodeKind::Const {
+                w,
+                value: self.rng.next_u64(),
+            },
             20 => {
                 let period = self.rng.range(1, 8) as u32;
                 NodeKind::Clock {
@@ -398,7 +430,11 @@ impl<'a> DefGen<'a> {
                 let contents: Vec<u64> = (0..self.rng.below(1 << addr_bits) + 1)
                     .map(|_| self.rng.next_u64())
                     .collect();
-                NodeKind::Rom { addr_bits, w, contents: Arc::from(contents) }
+                NodeKind::Rom {
+                    addr_bits,
+                    w,
+                    contents: Arc::from(contents),
+                }
             }
         }
     }

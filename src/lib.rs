@@ -76,11 +76,7 @@ impl Default for GameSettings {
 }
 
 pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
-    commands.spawn((
-        Camera2d,
-        MainCamera,
-        Transform::from_xyz(0.0, 0.0, 1000.0),
-    ));
+    commands.spawn((Camera2d, MainCamera, Transform::from_xyz(0.0, 0.0, 1000.0)));
 }
 
 pub fn update_ui_pointer_state(mut state: ResMut<UiPointerState>, mut contexts: EguiContexts) {

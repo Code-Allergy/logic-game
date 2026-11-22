@@ -7,7 +7,6 @@
 use bevy::ecs::system::SystemParam;
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
@@ -18,10 +17,10 @@ use crate::{
 use super::{
     AuthoringFeedback, CircuitLibrary, CircuitReader, DeleteGate, DeleteWire, DisplayConfig,
     DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind, GateLabel, GateLabelChanged,
-    GateType, GateValues, InputDrive, LogicDisplay, SaveWorkspaceEvent, Selected, SelectedGate,
-    SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter,
-    WireEndpoints, WireState, WorkspaceRevision, calculate_connection_geometry, format_value,
-    get_gate_sprite, spatial_grid::SpatialGrid,
+    GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected, SelectedGate, SetGateKind,
+    SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter, WireEndpoints,
+    WireState, WorkspaceRevision,
+    spatial_grid::SpatialGrid,
     view::{CircuitView, InstanceViewItem, OpenInstanceView},
 };
 
@@ -29,57 +28,23 @@ use super::{
 pub struct SimBackground;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Visual attachment (reacting to authoring changes)
+// Background and camera
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Give new or re-kinded gates their sprite and value text.
-pub fn attach_gate_visuals_system(
-    mut commands: Commands,
-    gates: Query<(Entity, &GateType, Option<&Children>), Changed<GateType>>,
-    texts: Query<(), With<LogicDisplay>>,
-) {
-    for (entity, ty, children) in &gates {
-        for child in children.into_iter().flat_map(|c| c.iter()) {
-            if texts.contains(child) {
-                commands.entity(child).despawn();
-            }
-        }
-        commands.entity(entity).try_insert(get_gate_sprite(&ty.kind));
-        if matches!(ty.kind, GateKind::Output { .. } | GateKind::Display { .. }) {
-            commands.spawn((
-                Text2d::new(""),
-                TextFont::from_font_size(22.0),
-                TextColor(Color::srgb(0.3, 1.0, 0.5)),
-                Transform::from_xyz(0.0, 0.0, 1.0),
-                LogicDisplay,
-                ChildOf(entity),
-            ));
-        }
-    }
-}
-
-/// Give new wires a line sprite; [`update_connections_system`] places it.
-pub fn attach_wire_visuals_system(
-    mut commands: Commands,
-    wires: Query<Entity, Added<WireEndpoints>>,
-) {
-    for entity in &wires {
-        commands.entity(entity).try_insert((
-            Sprite { color: Color::WHITE, custom_size: Some(Vec2::new(1.0, 2.0)), ..default() },
-            Transform::from_xyz(0.0, 0.0, crate::temp::CONNECTION_Z_LEVEL),
-            Visibility::Visible,
-        ));
-    }
-}
-
 /// Draw a background behind all simulation entities.
-pub fn draw_sim_background_system(mut commands: Commands, query: Query<Entity, With<SimBackground>>) {
+pub fn draw_sim_background_system(
+    mut commands: Commands,
+    query: Query<Entity, With<SimBackground>>,
+) {
     if !query.is_empty() {
         return;
     }
     commands.spawn((
         SimBackground,
-        Sprite { color: Color::srgba(0.050, 0.229, 0.793, 1.000), ..Default::default() },
+        Sprite {
+            color: Color::srgba(0.050, 0.229, 0.793, 1.000),
+            ..Default::default()
+        },
         Transform {
             translation: Vec3::new(0.0, 0.0, -1000.0),
             scale: Vec3::new(8000.0, 6000.0, 1.0),
@@ -100,7 +65,8 @@ pub fn fit_camera_to_circuit_system(
     if !active.is_changed() && !view.is_changed() {
         return;
     }
-    let (Ok((mut projection, mut transform)), Ok(window)) = (cameras.single_mut(), windows.single())
+    let (Ok((mut projection, mut transform)), Ok(window)) =
+        (cameras.single_mut(), windows.single())
     else {
         return;
     };
@@ -126,78 +92,8 @@ pub fn fit_camera_to_circuit_system(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-frame visual updates
+// Spatial grid (gate visuals live in `super::visuals`)
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Show output and display values as text.
-pub fn update_logic_displays_system(
-    mut displays: Query<(&mut Text2d, &ChildOf), With<LogicDisplay>>,
-    gates: Query<(&GateType, &GateValues, Option<&DisplayConfig>)>,
-) {
-    for (mut text, child_of) in &mut displays {
-        let Ok((ty, values, config)) = gates.get(child_of.parent()) else { continue };
-        let value = values.inputs.first().copied().unwrap_or(0);
-        let formatted = format_value(value, ty.kind.width().unwrap_or(1), &config.copied().unwrap_or_default());
-        if text.0 != formatted {
-            text.0 = formatted;
-        }
-    }
-}
-
-/// Recolour input and output gates from their values.
-pub fn update_input_colours_system(mut query: Query<(&mut Sprite, &GateType, &GateValues)>) {
-    for (mut sprite, ty, values) in &mut query {
-        let color = match ty.kind {
-            GateKind::Input { .. } => {
-                if values.outputs.first().copied().unwrap_or(0) != 0 {
-                    Color::srgb(0.0, 1.0, 0.0)
-                } else {
-                    Color::srgb(0.8, 0.0, 0.0)
-                }
-            }
-            GateKind::Output { .. } => {
-                if values.inputs.first().copied().unwrap_or(0) != 0 {
-                    Color::srgb(1.0, 1.0, 1.0)
-                } else {
-                    Color::srgb(0.1, 0.1, 0.1)
-                }
-            }
-            _ => continue,
-        };
-        if sprite.color != color {
-            sprite.color = color;
-        }
-    }
-}
-
-/// Place wire sprites between their gates and colour them by value.
-pub fn update_connections_system(
-    gates: Query<(&GateIdentity, &Transform), Without<WireEndpoints>>,
-    mut lines: Query<(&mut Transform, &mut Sprite, &WireEndpoints, &WireState), Without<GateIdentity>>,
-) {
-    let positions: HashMap<Uuid, Vec3> =
-        gates.iter().map(|(id, t)| (id.uuid, t.translation)).collect();
-    for (mut transform, mut sprite, ep, state) in &mut lines {
-        let (Some(&from), Some(&to)) = (positions.get(&ep.source_gate), positions.get(&ep.sink_gate))
-        else {
-            continue;
-        };
-        let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
-        transform.translation = mid.with_z(crate::temp::CONNECTION_Z_LEVEL);
-        transform.rotation = rot;
-        let thickness = if state.width > 1 { 4.0 } else { 2.0 };
-        sprite.custom_size = Some(Vec2::new(dist, thickness));
-        sprite.color = if !state.connected {
-            Color::srgba(0.8, 0.6, 0.2, 1.0)
-        } else if state.value != 0 {
-            Color::srgb(0.0, 1.0, 0.0)
-        } else if state.width > 1 {
-            Color::srgb(0.25, 0.7, 1.0)
-        } else {
-            Color::WHITE
-        };
-    }
-}
 
 type MovedGate = (With<GateIdentity>, Changed<Transform>);
 
@@ -225,14 +121,20 @@ fn cursor_world_pos(
     camera_transform: &GlobalTransform,
 ) -> Option<Vec2> {
     let screen_pos = window.cursor_position()?;
-    let ray = camera.viewport_to_world(camera_transform, screen_pos).ok()?;
+    let ray = camera
+        .viewport_to_world(camera_transform, screen_pos)
+        .ok()?;
     let distance = -ray.origin.z / ray.direction.z;
     Some((ray.origin + ray.direction * distance).truncate())
 }
 
 fn hit(transform: &Transform, kind: &GateKind, world: Vec2) -> bool {
     let half = kind.size() * 0.5;
-    let local = transform.to_matrix().inverse().transform_point3(world.extend(0.0)).truncate();
+    let local = transform
+        .to_matrix()
+        .inverse()
+        .transform_point3(world.extend(0.0))
+        .truncate();
     local.x.abs() <= half.x && local.y.abs() <= half.y
 }
 
@@ -248,10 +150,13 @@ pub fn update_inputs_on_left_click(
     if ui_pointer.over_egui || !mouse_button_input.just_pressed(MouseButton::Left) {
         return;
     }
-    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single()) else {
+    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single())
+    else {
         return;
     };
-    let Some(world) = cursor_world_pos(window, camera, camera_transform) else { return };
+    let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
+        return;
+    };
     if let Some((entity, ..)) = query.iter().find(|(_, t, ty)| hit(t, &ty.kind, world)) {
         select_writer.write(GateComponentSelectionEvent { entity });
     }
@@ -285,10 +190,13 @@ pub fn gate_selection_system(
     for e in &selected_query {
         commands.entity(e).remove::<Selected>();
     }
-    let (Ok(window), Ok((camera, global_transform))) = (q_window.single(), q_camera.single()) else {
+    let (Ok(window), Ok((camera, global_transform))) = (q_window.single(), q_camera.single())
+    else {
         return;
     };
-    let Some(world) = cursor_world_pos(window, camera, global_transform) else { return };
+    let Some(world) = cursor_world_pos(window, camera, global_transform) else {
+        return;
+    };
     for entity in grid.query_near(world, 100.0) {
         if let Ok((transform, ty)) = query.get(entity)
             && hit(transform, &ty.kind, world)
@@ -311,10 +219,13 @@ pub fn drag_selected_system(
     if ui_pointer.over_egui || !mouse_button_input.pressed(MouseButton::Right) {
         return;
     }
-    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single()) else {
+    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single())
+    else {
         return;
     };
-    let Some(world) = cursor_world_pos(window, camera, camera_transform) else { return };
+    let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
+        return;
+    };
     for (mut transform, selected) in &mut query {
         let new_pos = world + selected.offset;
         transform.translation.x = new_pos.x;
@@ -346,7 +257,10 @@ pub fn simulation_config_ui_system(
 
     egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
         ui.label("Tick Rate (Hz)");
-        if ui.checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate").changed() {
+        if ui
+            .checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate")
+            .changed()
+        {
             tick_rate_meter.reset(tick_count);
         }
         ui.label(match tick_rate_meter.average_hz {
@@ -380,10 +294,19 @@ pub fn simulation_config_ui_system(
             ui.separator();
             ui.colored_label(
                 egui::Color32::from_rgb(255, 120, 90),
-                format!("Edit {} not applied; the previous circuit keeps running:", error.revision),
+                format!(
+                    "Edit {} not applied; the previous circuit keeps running:",
+                    error.revision
+                ),
             );
             for message in &error.messages {
                 ui.colored_label(egui::Color32::from_rgb(255, 120, 90), message);
+            }
+            if error.loops.iter().any(|l| !l.is_empty()) {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 120, 90),
+                    "The gates and wires on the loop are outlined in red.",
+                );
             }
         }
         if let Some(message) = &feedback.message {
@@ -395,9 +318,16 @@ pub fn simulation_config_ui_system(
 }
 
 pub(crate) fn format_si_hz(rate: f64) -> String {
-    const UNITS: [(&str, f64); 4] =
-        [("GHz", 1_000_000_000.0), ("MHz", 1_000_000.0), ("kHz", 1_000.0), ("Hz", 1.0)];
-    let (unit, scale) = UNITS.into_iter().find(|(_, scale)| rate >= *scale).unwrap_or(("Hz", 1.0));
+    const UNITS: [(&str, f64); 4] = [
+        ("GHz", 1_000_000_000.0),
+        ("MHz", 1_000_000.0),
+        ("kHz", 1_000.0),
+        ("Hz", 1.0),
+    ];
+    let (unit, scale) = UNITS
+        .into_iter()
+        .find(|(_, scale)| rate >= *scale)
+        .unwrap_or(("Hz", 1.0));
     format!("{:.1} {unit}", rate / scale)
 }
 
@@ -434,7 +364,11 @@ fn width_drag(ui: &mut egui::Ui, label: &str, value: &mut u8, range: std::ops::R
 fn edit_kind_params(ui: &mut egui::Ui, kind: &GateKind) -> GateKind {
     let mut k = kind.clone();
     match &mut k {
-        GateKind::Clock { period, duty, phase } => {
+        GateKind::Clock {
+            period,
+            duty,
+            phase,
+        } => {
             ui.horizontal(|ui| {
                 ui.label("Period");
                 ui.add(egui::DragValue::new(period).range(1..=u32::MAX));
@@ -460,7 +394,10 @@ fn edit_kind_params(ui: &mut egui::Ui, kind: &GateKind) -> GateKind {
             {
                 *widths = vec![part_w; usize::from(parts)];
             }
-            ui.label(format!("Output: {} bits", widths.iter().map(|&w| u32::from(w)).sum::<u32>()));
+            ui.label(format!(
+                "Output: {} bits",
+                widths.iter().map(|&w| u32::from(w)).sum::<u32>()
+            ));
         }
         GateKind::SrLatch | GateKind::SubCircuit { .. } => {}
         _ => {
@@ -490,7 +427,12 @@ fn edit_kind_params(ui: &mut egui::Ui, kind: &GateKind) -> GateKind {
                     ui.checkbox(signed, "Sign extend");
                 }
                 GateKind::Ram { addr_bits, .. } | GateKind::Rom { addr_bits, .. } => {
-                    width_drag(ui, "Address bits", addr_bits, 1..=logi_sim::netlist::MAX_ADDR_BITS);
+                    width_drag(
+                        ui,
+                        "Address bits",
+                        addr_bits,
+                        1..=logi_sim::netlist::MAX_ADDR_BITS,
+                    );
                 }
                 _ => {}
             }
@@ -536,134 +478,168 @@ pub fn ui_for_selected_gate(
         names
             .iter()
             .find(|(id, ..)| id.uuid == uuid)
-            .map(|(_, l, t)| if l.value.is_empty() { t.kind.display_name().to_string() } else { l.value.clone() })
+            .map(|(_, l, t)| {
+                if l.value.is_empty() {
+                    t.kind.display_name().to_string()
+                } else {
+                    l.value.clone()
+                }
+            })
             .unwrap_or_else(|| "?".into())
     };
     let (in_names, out_names) = library.pin_names(&ty.kind);
     let mut close = false;
 
-    egui::Window::new("Gate Properties").collapsible(false).show(ctx, |ui| {
-        ui.label(format!("Kind: {}", ty.kind.display_name()));
-        ui.label(format!("UUID: {}", identity.uuid));
+    egui::Window::new("Gate Properties")
+        .collapsible(false)
+        .show(ctx, |ui| {
+            ui.label(format!("Kind: {}", ty.kind.display_name()));
+            ui.label(format!("UUID: {}", identity.uuid));
 
-        let mut label_text = label.value.clone();
-        if ui.text_edit_singleline(&mut label_text).changed() {
-            writers.labels.write(GateLabelChanged { gate_uuid: identity.uuid, label: label_text });
-        }
-
-        if in_view && ty.kind.is_input() {
-            ui.separator();
-            ui.label(if view.is_live() {
-                "Driven by the parent circuit (live value below); change it there."
-            } else {
-                "Driven by the parent circuit."
-            });
-        } else if let (Some(drive), GateKind::Input { w }) = (drive, &ty.kind) {
-            ui.separator();
-            let mut value = drive.value;
-            if *w == 1 {
-                let mut on = value != 0;
-                if ui.checkbox(&mut on, "Driven value").changed() {
-                    value = u64::from(on);
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label("Driven value");
-                    ui.add(egui::DragValue::new(&mut value).hexadecimal(1, false, true));
+            let mut label_text = label.value.clone();
+            if ui.text_edit_singleline(&mut label_text).changed() {
+                writers.labels.write(GateLabelChanged {
+                    gate_uuid: identity.uuid,
+                    label: label_text,
                 });
-                if *w <= 16 {
-                    ui.horizontal_wrapped(|ui| {
-                        for bit in (0..*w).rev() {
-                            let mut on = (value >> bit) & 1 != 0;
-                            if ui.checkbox(&mut on, format!("{bit}")).changed() {
-                                value ^= 1 << bit;
+            }
+
+            if in_view && ty.kind.is_input() {
+                ui.separator();
+                ui.label(if view.is_live() {
+                    "Driven by the parent circuit (live value below); change it there."
+                } else {
+                    "Driven by the parent circuit."
+                });
+            } else if let (Some(drive), GateKind::Input { w }) = (drive, &ty.kind) {
+                ui.separator();
+                let mut value = drive.value;
+                if *w == 1 {
+                    let mut on = value != 0;
+                    if ui.checkbox(&mut on, "Driven value").changed() {
+                        value = u64::from(on);
+                    }
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label("Driven value");
+                        ui.add(egui::DragValue::new(&mut value).hexadecimal(1, false, true));
+                    });
+                    if *w <= 16 {
+                        ui.horizontal_wrapped(|ui| {
+                            for bit in (0..*w).rev() {
+                                let mut on = (value >> bit) & 1 != 0;
+                                if ui.checkbox(&mut on, format!("{bit}")).changed() {
+                                    value ^= 1 << bit;
+                                }
                             }
+                        });
+                    }
+                }
+                if value != drive.value {
+                    writers.inputs.write(SetInputValue { entity, value });
+                }
+            }
+
+            ui.separator();
+            ui.label("Pins");
+            for (i, v) in values.inputs.iter().enumerate() {
+                let name = in_names.get(i).map_or("?", String::as_str);
+                ui.label(format!("  in {i} ({name}) = {v:#x}"));
+            }
+            for (i, v) in values.outputs.iter().enumerate() {
+                let name = out_names.get(i).map_or("?", String::as_str);
+                ui.label(format!("  out {i} ({name}) = {v:#x}"));
+            }
+
+            ui.separator();
+            let edited = edit_kind_params(ui, &ty.kind);
+            if edited != ty.kind {
+                writers.kinds.write(SetGateKind {
+                    entity,
+                    kind: edited,
+                });
+            }
+
+            if let Some(config) = display {
+                let mut radix = config.radix;
+                egui::ComboBox::from_label("Radix")
+                    .selected_text(format!("{radix:?}"))
+                    .show_ui(ui, |ui| {
+                        for r in [
+                            DisplayRadix::Hexadecimal,
+                            DisplayRadix::Decimal,
+                            DisplayRadix::Binary,
+                        ] {
+                            ui.selectable_value(&mut radix, r, format!("{r:?}"));
                         }
+                    });
+                let mut leading = config.leading_zeroes;
+                ui.checkbox(&mut leading, "Leading zeroes");
+                if radix != config.radix || leading != config.leading_zeroes {
+                    writers.displays.write(DisplayConfigChanged {
+                        gate_uuid: identity.uuid,
+                        radix,
+                        leading_zeroes: leading,
                     });
                 }
             }
-            if value != drive.value {
-                writers.inputs.write(SetInputValue { entity, value });
+
+            if let GateKind::SubCircuit { definition } = ty.kind {
+                ui.separator();
+                let name = library
+                    .get(definition)
+                    .map_or("(missing definition)", |d| d.name.as_str());
+                ui.label(format!("Subcircuit: {name}"));
+                ui.label(format!("Definition id: {definition}"));
+                if ui.button("Open instance (live values)").clicked() {
+                    writers.open.write(OpenInstanceView { entity });
+                }
             }
-        }
 
-        ui.separator();
-        ui.label("Pins");
-        for (i, v) in values.inputs.iter().enumerate() {
-            let name = in_names.get(i).map_or("?", String::as_str);
-            ui.label(format!("  in {i} ({name}) = {v:#x}"));
-        }
-        for (i, v) in values.outputs.iter().enumerate() {
-            let name = out_names.get(i).map_or("?", String::as_str);
-            ui.label(format!("  out {i} ({name}) = {v:#x}"));
-        }
-
-        ui.separator();
-        let edited = edit_kind_params(ui, &ty.kind);
-        if edited != ty.kind {
-            writers.kinds.write(SetGateKind { entity, kind: edited });
-        }
-
-        if let Some(config) = display {
-            let mut radix = config.radix;
-            egui::ComboBox::from_label("Radix")
-                .selected_text(format!("{radix:?}"))
-                .show_ui(ui, |ui| {
-                    for r in [DisplayRadix::Hexadecimal, DisplayRadix::Decimal, DisplayRadix::Binary] {
-                        ui.selectable_value(&mut radix, r, format!("{r:?}"));
+            ui.separator();
+            ui.label("Wires");
+            for (wire, ep, state) in &wires {
+                let text = if ep.sink_gate == identity.uuid {
+                    format!(
+                        "in {} <- {} out {}",
+                        ep.sink_pin,
+                        gate_name(ep.source_gate),
+                        ep.source_pin
+                    )
+                } else if ep.source_gate == identity.uuid {
+                    format!(
+                        "out {} -> {} in {}",
+                        ep.source_pin,
+                        gate_name(ep.sink_gate),
+                        ep.sink_pin
+                    )
+                } else {
+                    continue;
+                };
+                ui.horizontal(|ui| {
+                    let text = if state.connected {
+                        text
+                    } else {
+                        format!("{text} (not simulated)")
+                    };
+                    ui.label(text);
+                    if ui.small_button("Delete").clicked() {
+                        writers.delete_wire.write(DeleteWire { entity: wire });
                     }
                 });
-            let mut leading = config.leading_zeroes;
-            ui.checkbox(&mut leading, "Leading zeroes");
-            if radix != config.radix || leading != config.leading_zeroes {
-                writers.displays.write(DisplayConfigChanged {
-                    gate_uuid: identity.uuid,
-                    radix,
-                    leading_zeroes: leading,
-                });
             }
-        }
 
-        if let GateKind::SubCircuit { definition } = ty.kind {
             ui.separator();
-            let name = library.get(definition).map_or("(missing definition)", |d| d.name.as_str());
-            ui.label(format!("Subcircuit: {name}"));
-            ui.label(format!("Definition id: {definition}"));
-            if ui.button("Open instance (live values)").clicked() {
-                writers.open.write(OpenInstanceView { entity });
-            }
-        }
-
-        ui.separator();
-        ui.label("Wires");
-        for (wire, ep, state) in &wires {
-            let text = if ep.sink_gate == identity.uuid {
-                format!("in {} <- {} out {}", ep.sink_pin, gate_name(ep.source_gate), ep.source_pin)
-            } else if ep.source_gate == identity.uuid {
-                format!("out {} -> {} in {}", ep.source_pin, gate_name(ep.sink_gate), ep.sink_pin)
-            } else {
-                continue;
-            };
             ui.horizontal(|ui| {
-                let text = if state.connected { text } else { format!("{text} (not simulated)") };
-                ui.label(text);
-                if ui.small_button("Delete").clicked() {
-                    writers.delete_wire.write(DeleteWire { entity: wire });
+                if ui.button("Delete gate").clicked() {
+                    writers.delete_gate.write(DeleteGate { entity });
+                    close = true;
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
                 }
             });
-        }
-
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("Delete gate").clicked() {
-                writers.delete_gate.write(DeleteGate { entity });
-                close = true;
-            }
-            if ui.button("Close").clicked() {
-                close = true;
-            }
         });
-    });
     if close {
         sel.0 = None;
     }

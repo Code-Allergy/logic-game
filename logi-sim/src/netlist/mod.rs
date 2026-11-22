@@ -87,18 +87,34 @@ pub enum NetlistError {
     NoSuchNode(NodeId),
     NoSuchNet(NetId),
     /// The pin index is past the node's pin count.
-    PinOutOfRange { node: NodeId, pin: u8, count: usize },
+    PinOutOfRange {
+        node: NodeId,
+        pin: u8,
+        count: usize,
+    },
     /// Driver and sink widths differ.
-    WidthMismatch { net: NetId, net_width: u8, pin_width: u8 },
+    WidthMismatch {
+        net: NetId,
+        net_width: u8,
+        pin_width: u8,
+    },
     /// The kind's parameters are invalid.
-    BadParams { reason: String },
+    BadParams {
+        reason: String,
+    },
     /// `NodeKind::Instance` must be added with [`Design::add_instance`].
     UseAddInstance,
     /// Instancing `child` inside `parent` would make a definition contain
     /// itself.
-    InstanceRecursion { parent: DefId, child: DefId },
+    InstanceRecursion {
+        parent: DefId,
+        child: DefId,
+    },
     /// The definition is still instanced somewhere.
-    DefinitionInUse { def: DefId, by: Vec<(DefId, NodeId)> },
+    DefinitionInUse {
+        def: DefId,
+        by: Vec<(DefId, NodeId)>,
+    },
     /// The root definition cannot be removed.
     RemoveRoot,
 }
@@ -274,7 +290,9 @@ impl Design {
     }
 
     fn def_mut(&mut self, id: DefId) -> Result<&mut Definition> {
-        self.defs.get_mut(id).ok_or(NetlistError::NoSuchDefinition(id))
+        self.defs
+            .get_mut(id)
+            .ok_or(NetlistError::NoSuchDefinition(id))
     }
 
     /// A builder for adding logic to `def`. Panics if `def` does not exist.
@@ -306,7 +324,11 @@ impl Design {
 
     /// Pin widths `(inputs, outputs)` of a node, resolving instances.
     pub fn pin_widths(&self, def: DefId, node: NodeId) -> Result<(PinWidths, PinWidths)> {
-        let n = self.def(def)?.nodes.get(node).ok_or(NetlistError::NoSuchNode(node))?;
+        let n = self
+            .def(def)?
+            .nodes
+            .get(node)
+            .ok_or(NetlistError::NoSuchNode(node))?;
         match &n.kind {
             NodeKind::Instance(child) => Ok(self.def(*child)?.signature()),
             k => Ok(k.pins().expect("non-instance kinds have fixed pins")),
@@ -391,11 +413,13 @@ impl Design {
         let (ins, _) = self.pin_widths(def, sink.0)?;
         let d = self.def_mut(def)?;
         let net_width = d.nets.get(net).ok_or(NetlistError::NoSuchNet(net))?.width;
-        let pin_width = *ins.get(sink.1 as usize).ok_or(NetlistError::PinOutOfRange {
-            node: sink.0,
-            pin: sink.1,
-            count: ins.len(),
-        })?;
+        let pin_width = *ins
+            .get(sink.1 as usize)
+            .ok_or(NetlistError::PinOutOfRange {
+                node: sink.0,
+                pin: sink.1,
+                count: ins.len(),
+            })?;
         if net_width != pin_width {
             return Err(NetlistError::WidthMismatch {
                 net,
@@ -403,14 +427,15 @@ impl Design {
                 pin_width,
             });
         }
-        let slot = d.nodes[sink.0]
-            .inputs
-            .get_mut(sink.1 as usize)
-            .ok_or(NetlistError::PinOutOfRange {
-                node: sink.0,
-                pin: sink.1,
-                count: ins.len(),
-            })?;
+        let slot =
+            d.nodes[sink.0]
+                .inputs
+                .get_mut(sink.1 as usize)
+                .ok_or(NetlistError::PinOutOfRange {
+                    node: sink.0,
+                    pin: sink.1,
+                    count: ins.len(),
+                })?;
         *slot = Some(net);
         d.revision += 1;
         Ok(())
@@ -434,7 +459,10 @@ impl Design {
     /// Disconnect input pin `sink`, returning the net it was connected to.
     pub fn disconnect(&mut self, def: DefId, sink: PinRef) -> Result<Option<NetId>> {
         let d = self.def_mut(def)?;
-        let node = d.nodes.get_mut(sink.0).ok_or(NetlistError::NoSuchNode(sink.0))?;
+        let node = d
+            .nodes
+            .get_mut(sink.0)
+            .ok_or(NetlistError::NoSuchNode(sink.0))?;
         let count = node.inputs.len();
         let slot = node
             .inputs

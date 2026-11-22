@@ -370,9 +370,17 @@ fn eval(
         Extend { from, to, signed } => {
             let a = i(0);
             let neg = *signed && (a >> (from - 1)) & 1 == 1;
-            smallvec![if neg { (a | !mask(*from)) & mask(*to) } else { a }]
+            smallvec![if neg {
+                (a | !mask(*from)) & mask(*to)
+            } else {
+                a
+            }]
         }
-        Clock { period, duty, phase } => {
+        Clock {
+            period,
+            duty,
+            phase,
+        } => {
             let t = (ctx.tick + *phase as u64) % *period as u64;
             smallvec![b(t < *duty as u64)]
         }
@@ -405,7 +413,11 @@ fn compute_next(def: &Definition, inst: &mut Inst) {
         let next = match &node.kind {
             NodeKind::Delay { .. } => i(0),
             NodeKind::Register { .. } | NodeKind::DLatch { .. } => {
-                if i(0) != 0 { i(1) } else { inst.state[id] }
+                if i(0) != 0 {
+                    i(1)
+                } else {
+                    inst.state[id]
+                }
             }
             NodeKind::SrLatch => {
                 if i(1) != 0 {
@@ -447,7 +459,12 @@ pub fn check_loops(design: &Design) -> Result<(), ReferenceError> {
 }
 
 /// Does output `q` of `node` depend combinationally on input `p`?
-fn depends(node_kind: &NodeKind, p: usize, q: usize, paths: &SecondaryMap<DefId, PortPaths>) -> bool {
+fn depends(
+    node_kind: &NodeKind,
+    p: usize,
+    q: usize,
+    paths: &SecondaryMap<DefId, PortPaths>,
+) -> bool {
     match node_kind.comb_deps() {
         CombDeps::All => true,
         CombDeps::None => false,
@@ -464,7 +481,8 @@ fn check_def(
     let def = &design.defs[def_id];
     // Net graph: an edge net_in -> net_out for every combinational
     // input->output pin pair.
-    let mut succ: SecondaryMap<NetId, Vec<NetId>> = def.nets.keys().map(|n| (n, Vec::new())).collect();
+    let mut succ: SecondaryMap<NetId, Vec<NetId>> =
+        def.nets.keys().map(|n| (n, Vec::new())).collect();
     for node in def.nodes.values() {
         for (p, net_in) in node.inputs.iter().enumerate() {
             let Some(net_in) = net_in else { continue };
@@ -499,7 +517,10 @@ fn check_def(
             *k += 1;
             match colour.get(next) {
                 Some(C::Grey) => {
-                    let pos = stack.iter().position(|(n, _)| *n == next).expect("grey on stack");
+                    let pos = stack
+                        .iter()
+                        .position(|(n, _)| *n == next)
+                        .expect("grey on stack");
                     let nodes = stack[pos..]
                         .iter()
                         .map(|(n, _)| def.nets[*n].driver.0)

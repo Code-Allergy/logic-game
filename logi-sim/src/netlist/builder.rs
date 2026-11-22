@@ -111,7 +111,13 @@ impl<'a> Builder<'a> {
     }
 
     pub fn konst(&mut self, w: u8, value: u64) -> NetId {
-        self.node1(NodeKind::Const { w, value: value & super::mask(w) }, &[])
+        self.node1(
+            NodeKind::Const {
+                w,
+                value: value & super::mask(w),
+            },
+            &[],
+        )
     }
 
     pub fn zero(&mut self, w: u8) -> NetId {
@@ -166,12 +172,21 @@ impl<'a> Builder<'a> {
 
     #[track_caller]
     fn tree(&mut self, xs: &[NetId], f: fn(&mut Self, NetId, NetId) -> NetId) -> NetId {
-        assert!(!xs.is_empty(), "builder: n-input gate needs at least one input");
+        assert!(
+            !xs.is_empty(),
+            "builder: n-input gate needs at least one input"
+        );
         let mut layer = xs.to_vec();
         while layer.len() > 1 {
             layer = layer
                 .chunks(2)
-                .map(|c| if c.len() == 2 { f(self, c[0], c[1]) } else { c[0] })
+                .map(|c| {
+                    if c.len() == 2 {
+                        f(self, c[0], c[1])
+                    } else {
+                        c[0]
+                    }
+                })
                 .collect();
         }
         layer[0]
@@ -278,7 +293,11 @@ impl<'a> Builder<'a> {
 
     /// Bit `i` of `a`. A 1-bit net is returned as is.
     pub fn bit(&mut self, a: NetId, i: u8) -> NetId {
-        if self.width(a) == 1 && i == 0 { a } else { self.split(a, i, 1) }
+        if self.width(a) == 1 && i == 0 {
+            a
+        } else {
+            self.split(a, i, 1)
+        }
     }
 
     /// Concatenate, `xs[0]` in the low bits.
@@ -292,7 +311,14 @@ impl<'a> Builder<'a> {
         if from == to {
             return a;
         }
-        self.node1(NodeKind::Extend { from, to, signed: false }, &[a])
+        self.node1(
+            NodeKind::Extend {
+                from,
+                to,
+                signed: false,
+            },
+            &[a],
+        )
     }
 
     pub fn sext(&mut self, a: NetId, to: u8) -> NetId {
@@ -300,7 +326,14 @@ impl<'a> Builder<'a> {
         if from == to {
             return a;
         }
-        self.node1(NodeKind::Extend { from, to, signed: true }, &[a])
+        self.node1(
+            NodeKind::Extend {
+                from,
+                to,
+                signed: true,
+            },
+            &[a],
+        )
     }
 
     /// Bus expand: one 1-bit net per bit, low bit first.
@@ -310,7 +343,11 @@ impl<'a> Builder<'a> {
 
     /// Bus collect: the inverse of [`Self::bus_expand`].
     pub fn bus_collect(&mut self, bits: &[NetId]) -> NetId {
-        if bits.len() == 1 { bits[0] } else { self.merge(bits) }
+        if bits.len() == 1 {
+            bits[0]
+        } else {
+            self.merge(bits)
+        }
     }
 
     /// Decoder: `2^width(sel)` 1-bit outputs, output `i` high iff `sel == i`.
@@ -332,13 +369,24 @@ impl<'a> Builder<'a> {
     // ── Sources ───────────────────────────────────────────────────────────
 
     pub fn clock(&mut self, period: u32, duty: u32, phase: u32) -> NetId {
-        self.node1(NodeKind::Clock { period, duty, phase }, &[])
+        self.node1(
+            NodeKind::Clock {
+                period,
+                duty,
+                phase,
+            },
+            &[],
+        )
     }
 
     pub fn rom(&mut self, addr: NetId, w: u8, contents: &[u64]) -> NetId {
         let addr_bits = self.width(addr);
         self.node1(
-            NodeKind::Rom { addr_bits, w, contents: Arc::from(contents) },
+            NodeKind::Rom {
+                addr_bits,
+                w,
+                contents: Arc::from(contents),
+            },
             &[addr],
         )
     }
@@ -375,7 +423,11 @@ impl<'a> Builder<'a> {
         let addr_bits = self.width(addr);
         let w = self.width(wdata);
         self.node1(
-            NodeKind::Ram { addr_bits, w, init: Arc::from(init) },
+            NodeKind::Ram {
+                addr_bits,
+                w,
+                init: Arc::from(init),
+            },
             &[addr, we, wdata],
         )
     }
