@@ -41,7 +41,10 @@ pub struct ViewArgs {
     /// The circuit: a chip's name, or leave out for the root ("main").
     pub circuit: Option<String>,
     /// One of: outline (default), diagnostics, stats, groups (parts that
-    /// would make chips, as lists for make_chip).
+    /// would make chips, as lists for make_chip), compiled (which chips
+    /// the compiler recognised as word functions, the program's size with
+    /// and without its word-level passes, and a "compiled" test that pins
+    /// it).
     pub what: Option<String>,
     /// Outline: only parts whose name or kind starts with this.
     pub filter: Option<String>,
@@ -186,7 +189,8 @@ impl Server {
     #[tool(
         description = "Read a circuit of the open workspace as text: one line per part with what \
                        drives each input (outline), build errors and unconnected inputs \
-                       (diagnostics), or part counts (stats)."
+                       (diagnostics), part counts (stats), or what the compiler made of it: \
+                       chips recognised as word functions and the program's size (compiled)."
     )]
     fn view(&self, Parameters(args): Parameters<ViewArgs>) -> Result<String, String> {
         self.session().view_tool(
@@ -237,8 +241,12 @@ impl Server {
 
     #[tool(
         description = "Run the tests stored with the chips of the open workspace (set them with \
-                       edit: {\"tests\": [...]}). Reports each failure with its first failing \
-                       case, and a count of what passed."
+                       edit: {\"tests\": [...]}). Kinds: table, formula, sequence, equivalent \
+                       {\"to\": chip}, script {\"steps\": [...]}, compiled {\"matched\": [chips], \
+                       \"instructions\": {\"max\": n}} (pins what the compiler does; view \
+                       compiled prints one), unoptimized {\"samples\": n, \"off\": [\"func_match\", \
+                       \"lift\", \"words\"]} (the same with those compiler passes off). Reports \
+                       each failure with its first failing case, and a count of what passed."
     )]
     fn test(&self, Parameters(args): Parameters<TestArgs>) -> Result<String, String> {
         self.session()

@@ -643,7 +643,7 @@ fn a_chip_that_is_not_placed_yet_is_built_too() {
     );
     let errors = report.build.unwrap_err();
     assert!(
-        errors[0].starts_with("chip \"ring\": combinational loop"),
+        errors[0].starts_with("chip \"ring\": a loop of gates with no state in it: a -> b -> a"),
         "{errors:?}"
     );
 }

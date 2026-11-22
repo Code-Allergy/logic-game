@@ -2,6 +2,7 @@
 
 mod app;
 mod chips;
+mod compiled;
 mod expand;
 mod sim;
 
@@ -532,7 +533,10 @@ fn diagnostics_report_loops_open_inputs_and_size() {
     );
     let text = view::diagnostics(&ws);
     assert!(text.contains("build: failed"), "{text}");
-    assert!(text.contains("combinational loop"), "{text}");
+    assert!(
+        text.contains("a loop of gates with no state in it: a -> b -> a"),
+        "{text}"
+    );
     assert!(
         text.contains("unconnected inputs in \"main\" (they read 0): many[0].in, many[1].in"),
         "{text}"

@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use super::batch::{self, Place};
 use super::rig::Rig;
 use super::run::{self, RunState};
-use super::{testing, view};
+use super::{compiled, testing, view};
 use crate::editor::workspace::{OnConflict, WorkspaceStore};
 use crate::sim::demos::catalog;
 use crate::sim::source::Externals;
@@ -358,7 +358,7 @@ impl Session {
     }
 
     /// The `view` tool: `outline` (the default), `diagnostics`, `stats`,
-    /// `groups`.
+    /// `groups`, `status`, `compiled`.
     pub fn view_tool(
         &mut self,
         circuit: Option<&str>,
@@ -368,8 +368,10 @@ impl Session {
     ) -> Result<String, String> {
         self.sync()?;
         let ws = &self.opened()?.workspace;
-        let doc = match batch::find_circuit(ws, circuit)? {
-            Some(place @ (Place::Root | Place::Definition(_))) => batch::circuit_at(ws, place),
+        let (place, doc) = match batch::find_circuit(ws, circuit)? {
+            Some(place @ (Place::Root | Place::Definition(_))) => {
+                (place, batch::circuit_at(ws, place))
+            }
             None => {
                 let mut names: Vec<&str> =
                     ws.definitions.values().map(|d| d.name.as_str()).collect();
@@ -392,8 +394,10 @@ impl Session {
             "stats" => Ok(view::stats(ws, doc)),
             "groups" => Ok(view::groups(ws, doc)),
             "status" => Ok(view::status(ws)),
+            "compiled" => compiled::view(ws, place),
             other => Err(format!(
-                "unknown view \"{other}\" (views: outline, diagnostics, stats, groups, status)"
+                "unknown view \"{other}\" (views: outline, diagnostics, stats, groups, status, \
+                 compiled)"
             )),
         }
     }
