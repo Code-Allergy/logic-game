@@ -15,6 +15,9 @@ env:
   # This variable is used to name release output files.
   GAME_EXECUTABLE_NAME: gate_quest
   GAME_OSX_APP_NAME: GateQuest
+  # Release binaries must run on players' CPUs, not just the build runner's:
+  # override `-C target-cpu=native` from .cargo/config.toml.
+  RUSTFLAGS: ""
 
 permissions:
   contents: write

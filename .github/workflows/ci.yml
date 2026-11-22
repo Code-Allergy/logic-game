@@ -21,6 +21,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # .cargo/config.toml builds with `-C target-cpu=native` for local speed. On CI
+  # the cached target/ can come from a runner with a different CPU, so build
+  # scripts compiled there die with SIGILL here. An empty RUSTFLAGS overrides
+  # the config's rustflags.
+  RUSTFLAGS: ""
 
 jobs:
   lint:

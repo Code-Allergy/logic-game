@@ -11,6 +11,11 @@ concurrency:
   group: bench-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Override `-C target-cpu=native` from .cargo/config.toml: the cached target/
+  # may come from a runner with a different CPU (SIGILL in build scripts).
+  RUSTFLAGS: ""
+
 jobs:
   benchmark:
     runs-on: ubuntu-latest
