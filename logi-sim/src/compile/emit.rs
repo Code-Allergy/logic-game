@@ -6,13 +6,15 @@ use std::sync::Arc;
 
 use slotmap::SecondaryMap;
 
-use super::{FastMap, Options};
 use super::elaborate::Elab;
+use super::func::replace::Ref;
+use super::func::{Analysis, DefInfo};
 use super::lift;
 use super::pack;
 use super::program::*;
 use super::simplify::simplify;
-use crate::netlist::{NetId, NodeKind, ScreenMode, mask};
+use super::{FastMap, Options};
+use crate::netlist::{NetId, NodeId, NodeKind, ScreenMode, mask};
 
 const UNASSIGNED: u32 = u32::MAX;
 
@@ -51,18 +53,91 @@ impl Emitter {
     }
 }
 
+/// An instance that runs as its definition's word implementation.
+struct Sub {
+    inst: u32,
+    info: Arc<DefInfo>,
+    /// Class of each output pin's net.
+    outs: Vec<u32>,
+}
+
 pub(super) fn emit(
     mut e: Elab<'_>,
     opts: &Options,
+    analysis: &Analysis,
     mut pass_done: impl FnMut(super::Pass),
 ) -> Program {
     let design = e.design;
     let n = e.n_nets as usize;
 
+    // ── Function matching: instances that run as a word implementation ────
+    // `top[i]`: the substituted instance covering instance `i` (itself
+    // included), or NONE. The root is never substituted, nor an instance
+    // whose output port is wired straight to an input port or to another
+    // output port (its classes would be shared).
+    const NONE: u32 = u32::MAX;
+    let ninst = e.insts.len();
+    let mut top = vec![NONE; ninst];
+    let mut subs: Vec<Sub> = Vec::new();
+    if opts.func_match && !analysis.is_empty() {
+        for i in 1..ninst {
+            let (p, node) = e.insts[i].parent.expect("non-root");
+            if top[p as usize] != NONE {
+                top[i] = top[p as usize];
+                continue;
+            }
+            let Some(info) = analysis.get(e.insts[i].def) else {
+                continue;
+            };
+            if !info.matched() {
+                continue;
+            }
+            let pdef = &design.defs[e.insts[p as usize].def];
+            let cdef = &design.defs[e.insts[i].def];
+            let outs: Vec<u32> = pdef.nodes[node]
+                .outputs
+                .iter()
+                .map(|&net| {
+                    let g = e.global(p, net);
+                    e.find(g)
+                })
+                .collect();
+            let ins: Vec<u32> = cdef
+                .inputs
+                .iter()
+                .map(|&port| {
+                    let g = e.global(i as u32, cdef.nodes[port].outputs[0]);
+                    e.find(g)
+                })
+                .collect();
+            let separate = outs
+                .iter()
+                .enumerate()
+                .all(|(k, o)| !outs[..k].contains(o) && !ins.contains(o));
+            if !separate {
+                continue;
+            }
+            top[i] = i as u32;
+            subs.push(Sub {
+                inst: i as u32,
+                info: Arc::clone(info),
+                outs,
+            });
+        }
+    }
+
     // ── Slot assignment: one slot per driven class ─────────────────────────
     // A class is driven if it contains a primitive output or a root input.
     let mut driven = vec![false; n];
+    for sub in &subs {
+        for &r in &sub.outs {
+            driven[r as usize] = true;
+        }
+    }
     for inst in 0..e.insts.len() as u32 {
+        if top[inst as usize] != NONE {
+            continue;
+        }
         let def = &design.defs[e.def_of(inst)];
         for node in def.nodes.values() {
             let is_driver = match node.kind {
@@ -124,6 +199,7 @@ pub(super) fn emit(
     }
 
     // ── Debug map ──────────────────────────────────────────────────────────
+    let mut pending: Vec<(u32, NetId)> = Vec::new();
     let mut debug = DebugMap {
         instances: e.insts.clone(),
         children: FastMap::default(),
@@ -134,11 +210,24 @@ pub(super) fn emit(
             debug.children.insert((p, node), i as u32);
         }
         let base = e.net_base[i] as usize;
-        let map: SecondaryMap<NetId, u32> = e.def_nets[info.def]
-            .iter()
-            .enumerate()
-            .map(|(k, &net)| (net, net_slot[base + k]))
-            .collect();
+        let mut map: SecondaryMap<NetId, u32> = SecondaryMap::new();
+        for (k, &net) in e.def_nets[info.def].iter().enumerate() {
+            let g = base + k;
+            // (An input port net of the substituted instance itself keeps
+            // its slot even when unconnected: its shadow reads it.)
+            let own_input = top[i] == i as u32
+                && matches!(
+                    design.defs[info.def].nodes[design.defs[info.def].nets[net].driver.0].kind,
+                    NodeKind::Input { .. }
+                );
+            if top[i] != NONE && net_slot[g] == ZERO_SLOT && !own_input {
+                // Inside a substituted instance, computed only there: a
+                // shadow slot, added after renumbering.
+                pending.push((i as u32, net));
+            } else {
+                map.insert(net, net_slot[g]);
+            }
+        }
         debug.net_slots.push(map);
     }
 
@@ -153,7 +242,50 @@ pub(super) fn emit(
         mems: Vec::new(),
         state_keys: Vec::new(),
     };
+    // Slot of input pin `pin` of substituted instance `inst`.
+    let pin_slot = |inst: u32, pin: usize| -> u32 {
+        let (p, node) = e.insts[inst as usize].parent.expect("non-root");
+        let pdef = &design.defs[e.def_of(p)];
+        pdef.nodes[node].inputs[pin].map_or(ZERO_SLOT, |net| net_slot[e.global(p, net) as usize])
+    };
+    for sub in &subs {
+        let repl = sub.info.repl.as_ref().expect("matched");
+        let i = sub.inst;
+        let temps: Vec<u32> = repl.temps.iter().map(|&w| em.temp(w)).collect();
+        let r = |rf: Ref| match rf {
+            Ref::Zero => ZERO_SLOT,
+            Ref::In(pin) => pin_slot(i, pin as usize),
+            Ref::Out(pin) => class_slot[sub.outs[pin as usize] as usize],
+            Ref::Temp(t) => temps[t as usize],
+        };
+        let base_path = e.path(i);
+        for rn in &repl.nodes {
+            let key = |loc, width| {
+                let (rel, node) = match rn.state {
+                    Some(k) => repl.states[k as usize].clone(),
+                    None => (Vec::new(), e.insts[i as usize].parent.expect("non-root").1),
+                };
+                let mut instances = base_path.clone();
+                instances.extend(rel);
+                StateKey {
+                    path: NodePath { instances, node },
+                    loc,
+                    width,
+                }
+            };
+            lower(
+                &mut em,
+                &rn.kind,
+                &|k| r(rn.ins[k]),
+                &|k| r(rn.outs[k]),
+                key,
+            );
+        }
+    }
     for inst in 0..e.insts.len() as u32 {
+        if top[inst as usize] != NONE {
+            continue;
+        }
         let def = &design.defs[e.def_of(inst)];
         let base = e.net_base[inst as usize] as usize;
         let index = &e.net_index[e.def_of(inst)];
@@ -174,12 +306,29 @@ pub(super) fn emit(
     }
     pass_done(super::Pass::Lower);
 
+    // A probe on a net inside a substituted instance keeps the instance's
+    // inputs alive (its shadow reads them).
+    let mut probe_extra: Vec<u32> = Vec::new();
+    if !subs.is_empty() {
+        for (path, net) in &opts.probes {
+            if let Some(inst) = debug.instance(path)
+                && top[inst as usize] != NONE
+                && debug.net_slots[inst as usize].get(*net).is_none()
+            {
+                let t = top[inst as usize];
+                let ports = design.defs[e.def_of(t)].inputs.len();
+                probe_extra.extend((0..ports).map(|pin| pin_slot(t, pin)));
+            }
+        }
+    }
+
     // ── Simplify ───────────────────────────────────────────────────────────
     if opts.const_fold || opts.alias || opts.cse || (opts.dce && !opts.debug) {
         let probe_slots: Vec<u32> = opts
             .probes
             .iter()
             .filter_map(|(path, net)| debug.slot(path, *net))
+            .chain(probe_extra.iter().copied())
             .collect();
         let (_, order) = levelize(&em.ops, &em.instrs, em.widths.len());
         simplify(&mut em, &order, &mut ports, &mut debug, &probe_slots, opts);
@@ -192,6 +341,7 @@ pub(super) fn emit(
             .probes
             .iter()
             .filter_map(|(path, net)| debug.slot(path, *net))
+            .chain(probe_extra.iter().copied())
             .collect();
         lift::lift(&mut em, &mut ports, &mut debug, &probe_slots, opts)
     } else {
@@ -398,10 +548,101 @@ pub(super) fn emit(
         gathers,
         scatters,
         views: Vec::new(),
+        shadows: Vec::new(),
+        shadow_nets: Vec::new(),
     };
     renumber(&mut p, &out_ops, &dsts, &plan.lane_of, &views);
+    if !pending.is_empty() {
+        add_shadows(&mut p, &e, &subs, &top, &pending);
+    }
     pass_done(super::Pass::Renumber);
     p
+}
+
+/// Give the internal nets of substituted instances (`pending`) shadow
+/// slots, for every substituted instance whose input values and state are
+/// still observable.
+fn add_shadows(p: &mut Program, e: &Elab<'_>, subs: &[Sub], top: &[u32], pending: &[(u32, NetId)]) {
+    let state_slot: FastMap<&NodePath, u32> = p
+        .state_keys
+        .iter()
+        .filter_map(|k| match k.loc {
+            StateLoc::Slot(s) => Some((&k.path, s)),
+            StateLoc::Mem(_) => None,
+        })
+        .collect();
+    let mut shadow_of: FastMap<u32, Option<u32>> = FastMap::default();
+    let mut shadows = Vec::new();
+    for sub in subs {
+        let i = sub.inst;
+        let def = e.def_of(i);
+        let cdef = &e.design.defs[def];
+        let shadow = (|| {
+            let flat = sub.info.inspect(e.design, def)?;
+            let inputs = cdef
+                .inputs
+                .iter()
+                .map(|&port| {
+                    p.debug.net_slots[i as usize]
+                        .get(cdef.nodes[port].outputs[0])
+                        .copied()
+                })
+                .collect::<Option<Vec<u32>>>()?;
+            let base = e.path(i);
+            let states = flat
+                .states
+                .iter()
+                .map(|st| {
+                    let mut instances = base.clone();
+                    instances.extend_from_slice(&st.path);
+                    state_slot
+                        .get(&NodePath {
+                            instances,
+                            node: st.node,
+                        })
+                        .copied()
+                })
+                .collect::<Option<Vec<u32>>>()?;
+            Some(Shadow {
+                flat,
+                inputs,
+                states,
+            })
+        })();
+        shadow_of.insert(
+            i,
+            shadow.map(|s| {
+                shadows.push(s);
+                (shadows.len() - 1) as u32
+            }),
+        );
+    }
+    p.shadows = shadows;
+    let base = p.shadow_base();
+    let depth: FastMap<u32, usize> = subs
+        .iter()
+        .map(|s| (s.inst, e.path(s.inst).len()))
+        .collect();
+    // `pending` is grouped by instance: one relative path per instance.
+    let mut rel: (u32, Vec<NodeId>) = (u32::MAX, Vec::new());
+    for &(inst, net) in pending {
+        let t = top[inst as usize];
+        let Some(Some(s)) = shadow_of.get(&t) else {
+            continue;
+        };
+        if rel.0 != inst {
+            rel = (inst, e.path(inst)[depth[&t]..].to_vec());
+        }
+        let key = (std::mem::take(&mut rel.1), net);
+        let found = p.shadows[*s as usize].flat.nets.get(&key).copied();
+        rel.1 = key.0;
+        let Some(v) = found else {
+            continue;
+        };
+        let slot = base + p.shadow_nets.len() as u64;
+        p.shadow_nets.push((*s, v));
+        p.debug.net_slots[inst as usize].insert(net, slot as u32);
+    }
 }
 
 /// Estimated relative cost of one instruction of `op` (for balancing

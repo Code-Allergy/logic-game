@@ -319,8 +319,23 @@ impl Sim {
     pub fn read(&self, slot: u32) -> u64 {
         match self.program.resolve(slot) {
             Some((s, shift, m)) => (self.slots[s as usize] >> shift) & m,
-            None => panic!("slot {slot} out of range"),
+            None => match self.program.shadow(slot) {
+                Some((shadow, value)) => self.read_shadow(shadow, value),
+                None => panic!("slot {slot} out of range"),
+            },
         }
+    }
+
+    /// Value `value` of a substituted instance's gate-level evaluation
+    /// (see [`crate::compile::Shadow`]), from its inputs and state now.
+    fn read_shadow(&self, shadow: &crate::compile::Shadow, value: u32) -> u64 {
+        let ins: smallvec::SmallVec<[u64; 8]> =
+            shadow.inputs.iter().map(|&s| self.read(s)).collect();
+        let state: smallvec::SmallVec<[u64; 8]> =
+            shadow.states.iter().map(|&s| self.read(s)).collect();
+        let mut vals = vec![0u64; shadow.flat.values()];
+        shadow.flat.eval(&ins, &state, &mut vals);
+        vals[value as usize]
     }
 
     /// Write `value` into `slot` (a plain, lane or view slot), leaving the
@@ -722,6 +737,23 @@ fn check(p: &Program) -> Result<(), BadProgram> {
     for v in &p.views {
         if !slot_ok(v.slot) || v.width == 0 || v.shift as u32 + v.width as u32 > 64 {
             return bad(format!("bad view {v:?}"));
+        }
+    }
+    for sh in &p.shadows {
+        let real = |s: u32| p.resolve(s).is_some_and(|(s, _, _)| slot_ok(s));
+        if !sh.inputs.iter().chain(&sh.states).all(|&s| real(s))
+            || sh.inputs.len() != sh.flat.inputs.len()
+            || sh.states.len() != sh.flat.states.len()
+        {
+            return bad("bad shadow".to_string());
+        }
+    }
+    for &(s, v) in &p.shadow_nets {
+        if p.shadows
+            .get(s as usize)
+            .is_none_or(|sh| v as usize >= sh.flat.values())
+        {
+            return bad(format!("bad shadow net {s}/{v}"));
         }
     }
     for key in &p.state_keys {

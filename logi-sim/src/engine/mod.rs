@@ -29,7 +29,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::compile::{CompileError, NodePath, Options, Program, compile};
+use crate::compile::func::MatchCache;
+use crate::compile::{CompileError, NodePath, Options, Program, compile_cached};
 use crate::netlist::{Design, NetId, NodeId};
 use crate::sim::{Sim, SimOptions};
 
@@ -130,6 +131,9 @@ pub struct EngineCore {
     mem_requested: bool,
     /// Something observable changed since the last publish.
     dirty: bool,
+    /// Function-matching analyses of earlier compiles: an edit re-analyses
+    /// only the definitions it changed.
+    match_cache: MatchCache,
 }
 
 impl EngineCore {
@@ -153,6 +157,7 @@ impl EngineCore {
             mem_copies: Vec::new(),
             mem_requested: false,
             dirty: true,
+            match_cache: MatchCache::new(),
         }
     }
 
@@ -320,7 +325,7 @@ impl EngineCore {
 
     /// Compile and install inline (the threadless path).
     pub fn load(&mut self, design: &Design, revision: u64) -> EngineEvent {
-        match compile(design, &self.options) {
+        match compile_cached(design, &self.options, &mut self.match_cache, |_| {}) {
             Ok(p) => self.install(Arc::new(p), revision),
             Err(errors) => EngineEvent::CompileFailed { revision, errors },
         }
@@ -576,13 +581,15 @@ mod threaded {
             let compiler = std::thread::Builder::new()
                 .name("sim-compile".into())
                 .spawn(move || {
+                    let mut cache = MatchCache::new();
                     while let Ok(mut job) = compile_rx.recv() {
                         // Latest revision wins.
                         while let Ok(newer) = compile_rx.try_recv() {
                             job = newer;
                         }
                         let (design, rev) = job;
-                        let result = compile(&design, &compile_options).map(Arc::new);
+                        let result = compile_cached(&design, &compile_options, &mut cache, |_| {})
+                            .map(Arc::new);
                         if back.send(Msg::Compiled(rev, result)).is_err() {
                             break;
                         }

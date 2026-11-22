@@ -40,7 +40,6 @@
 //! Each round is linear in the instruction count (hash maps keyed by
 //! operand descriptors); there are at most [`MAX_ROUNDS`] rounds.
 
-
 use smallvec::{SmallVec, smallvec};
 
 use super::Options;

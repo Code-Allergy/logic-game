@@ -415,6 +415,19 @@ pub struct View {
     pub width: u8,
 }
 
+/// The gate-level evaluation of one substituted instance (issue #117,
+/// function matching), for reading its internal nets: they have no slot,
+/// since the instance runs as its word implementation. A read evaluates
+/// the definition once from the instance's input port values and state.
+#[derive(Debug, Clone)]
+pub struct Shadow {
+    pub flat: Arc<super::func::flat::Flat>,
+    /// Slot (plain, lane or view) of each input port's value.
+    pub inputs: Vec<u32>,
+    /// Slot of each state element of `flat`, in its order.
+    pub states: Vec<u32>,
+}
+
 /// Where a state element's state lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateLoc {
@@ -462,6 +475,11 @@ pub struct Program {
     /// `slot_count + 64 * lane_words.len() + k` is `views[k]`
     /// ([`Program::resolve`]).
     pub views: Vec<View>,
+    /// Substituted instances whose internal nets are observable.
+    pub shadows: Vec<Shadow>,
+    /// Shadow slot `shadow_base() + k` is value `shadow_nets[k].1` of
+    /// `shadows[shadow_nets[k].0]` ([`Program::shadow`]).
+    pub shadow_nets: Vec<(u32, u32)>,
     /// With `Options::partitions` > 1: the partition of each block
     /// (parallel to `blocks`). Empty otherwise. A runtime with that many
     /// threads gives thread `t` the blocks of partition `t`.
@@ -497,6 +515,19 @@ impl Program {
         let lane = (slot - self.slot_count) as usize;
         let word = *self.lane_words.get(lane / 64)?;
         Some((word, Some((lane % 64) as u8)))
+    }
+
+    /// First shadow slot: past the lane and view slots.
+    pub fn shadow_base(&self) -> u64 {
+        self.slot_count as u64 + 64 * self.lane_words.len() as u64 + self.views.len() as u64
+    }
+
+    /// The shadow and value a shadow slot reads (see [`Shadow`]), or `None`
+    /// for any other slot.
+    pub fn shadow(&self, slot: u32) -> Option<(&Shadow, u32)> {
+        let k = (slot as u64).checked_sub(self.shadow_base())?;
+        let &(s, v) = self.shadow_nets.get(k as usize)?;
+        Some((self.shadows.get(s as usize)?, v))
     }
 
     /// Real slot, shift and mask holding `slot`: a plain slot is itself

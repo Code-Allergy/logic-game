@@ -1611,6 +1611,36 @@ fn lifting_matches(
     debug: bool,
     ticks: u64,
 ) -> (usize, usize) {
+    use logi_sim::compile::Options;
+    options_match(name, design, debug, ticks, |o| Options { lift: false, ..o })
+}
+
+/// [`lifting_matches`] for function matching (logi-sim issue #117, stage
+/// 2): matched against unmatched, every tick, outputs, state and every
+/// net (including nets inside substituted subcircuits).
+fn func_matching_matches(
+    name: &str,
+    design: &logi_sim::netlist::Design,
+    debug: bool,
+    ticks: u64,
+) -> (usize, usize) {
+    use logi_sim::compile::Options;
+    options_match(name, design, debug, ticks, |o| Options {
+        func_match: false,
+        ..o
+    })
+}
+
+/// Compare the editor's (`debug`) or the default options against the same
+/// with `off` applied (see [`lifting_matches`]). Returns the instruction
+/// counts (on, off).
+fn options_match(
+    name: &str,
+    design: &logi_sim::netlist::Design,
+    debug: bool,
+    ticks: u64,
+    off: impl Fn(logi_sim::compile::Options) -> logi_sim::compile::Options,
+) -> (usize, usize) {
     use logi_sim::compile::{Options, compile};
     use logi_sim::sim::Sim;
     let on_opts = if debug {
@@ -1618,10 +1648,7 @@ fn lifting_matches(
     } else {
         Options::default()
     };
-    let off_opts = Options {
-        lift: false,
-        ..on_opts.clone()
-    };
+    let off_opts = off(on_opts.clone());
     let p_on = Arc::new(compile(design, &on_opts).unwrap());
     let p_off = Arc::new(compile(design, &off_opts).unwrap());
     let (mut on, mut off) = (Sim::new(Arc::clone(&p_on)), Sim::new(Arc::clone(&p_off)));
@@ -1696,6 +1723,34 @@ fn word_lifting_preserves_the_gate_cpu() {
     let design = crate::sim::netlist::design_of(&demos().get("cpu16").unwrap().workspace).unwrap();
     for debug in [true, false] {
         let (on, off) = lifting_matches("cpu16", &design, debug, 3000);
+        assert!(on * 3 < off, "debug {debug}: {off} -> {on} instructions");
+    }
+}
+
+/// Function matching changes nothing observable in any demo or gallery
+/// item, under the editor's options and the defaults: outputs, state and
+/// every net, including the internal nets of substituted subcircuits.
+#[test]
+fn function_matching_preserves_every_demo_and_gallery_item() {
+    let catalog = demos();
+    for item in catalog.demos.iter().chain(&catalog.gallery) {
+        if item.id == "cpu16" {
+            continue; // below, for longer
+        }
+        let design = crate::sim::netlist::design_of(&item.workspace).unwrap();
+        for debug in [true, false] {
+            func_matching_matches(&item.id, &design, debug, 150);
+        }
+    }
+}
+
+/// The gate-level CPU, matched and not, for 3000 ticks: identical outputs,
+/// state and nets every tick, and matching makes it much smaller still.
+#[test]
+fn function_matching_preserves_the_gate_cpu() {
+    let design = crate::sim::netlist::design_of(&demos().get("cpu16").unwrap().workspace).unwrap();
+    for debug in [true, false] {
+        let (on, off) = func_matching_matches("cpu16", &design, debug, 3000);
         assert!(on * 3 < off, "debug {debug}: {off} -> {on} instructions");
     }
 }
