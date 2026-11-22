@@ -41,6 +41,7 @@
 //! operand descriptors); there are at most [`MAX_ROUNDS`] rounds.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use smallvec::{SmallVec, smallvec};
 
@@ -50,10 +51,42 @@ use super::program::*;
 use crate::netlist::mask;
 
 const NONE: u32 = u32::MAX;
+
+/// A fast hasher for the small integer keys of this pass (FxHash's
+/// multiply-rotate; the default SipHash dominated the pass's time).
+#[derive(Default)]
+struct Fx(u64);
+
+impl Hasher for Fx {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(i as u64);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(i as u64);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type Map<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 /// Label rounds (each may add state banks).
 const MAX_ROUNDS: usize = 6;
 /// Times the rounds are rerun after rejecting unprofitable state banks.
 const MAX_ATTEMPTS: usize = 3;
+/// Passes of the group cost model.
+const MAX_COST_PASSES: usize = 4;
 
 /// Bits `off..off + len` of slot `base`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -268,7 +301,7 @@ pub(super) fn lift(
     ) = loop {
         attempt += 1;
         let mut banks: Vec<Bank> = Vec::new();
-        let mut bank_of: HashMap<u32, (u32, u8)> = HashMap::new();
+        let mut bank_of: Map<u32, (u32, u8)> = Map::default();
         let mut rounds = 0;
         let round = loop {
             rounds += 1;
@@ -298,7 +331,7 @@ pub(super) fn lift(
         } = round;
 
         // ── Which groups to lift ───────────────────────────────────────────────
-        let mut group_of_word: HashMap<u32, usize> = HashMap::new();
+        let mut group_of_word: Map<u32, usize> = Map::default();
         for (g, gr) in groups.iter().enumerate() {
             group_of_word.insert(gr.word, g);
         }
@@ -313,7 +346,11 @@ pub(super) fn lift(
             }
             v
         };
+        // Each pass of the cost model unlifts a layer of groups; a few
+        // passes settle it (whatever is left lifted is still exact).
+        let mut passes = 0;
         let real = loop {
+            passes += 1;
             for g in 0..groups.len() {
                 let gr = &groups[g];
                 lifted[g] = !bad[g]
@@ -371,7 +408,7 @@ pub(super) fn lift(
                     changed = true;
                 }
             }
-            if !changed {
+            if !changed || passes >= MAX_COST_PASSES {
                 break real;
             }
         };
@@ -430,8 +467,8 @@ pub(super) fn lift(
         ops: Vec::with_capacity(ops.len()),
         instrs: Vec::with_capacity(instrs.len()),
         imms: Vec::with_capacity(imms.len()),
-        dsts: HashMap::new(),
-        adapters: HashMap::new(),
+        dsts: Map::default(),
+        adapters: Map::default(),
     };
     for k in 0..instrs.len() {
         if !absorbed[k] {
@@ -439,7 +476,7 @@ pub(super) fn lift(
         }
     }
     // Group word ops.
-    let mut const_words: HashMap<(u64, u8), u32> = HashMap::new();
+    let mut const_words: Map<(u64, u8), u32> = Map::default();
     for (g, gr) in groups.iter().enumerate() {
         if !lifted[g] {
             continue;
@@ -677,7 +714,7 @@ pub(super) fn lift(
 
     // Views for everything labelled and not materialized.
     let mut views: Vec<(u32, Seg)> = Vec::new();
-    let mut view_of: HashMap<Seg, u32> = HashMap::new();
+    let mut view_of: Map<Seg, u32> = Map::default();
     let mut view = |seg: Seg, widths: &mut Vec<u8>| -> u32 {
         *view_of.entry(seg).or_insert_with(|| {
             let f = widths.len() as u32;
@@ -762,10 +799,10 @@ struct Out {
     instrs: Vec<Instr>,
     imms: Vec<u64>,
     /// Destinations written so far.
-    dsts: HashMap<u32, ()>,
+    dsts: Map<u32, ()>,
     /// `(base, delta, width, need an instruction) -> slot`, and
     /// `(slot, u32::MAX, width)` for broadcasts.
-    adapters: HashMap<(u32, i32, u8, bool), u32>,
+    adapters: Map<(u32, i32, u8, bool), u32>,
 }
 
 impl Out {
@@ -888,9 +925,9 @@ fn run_round(ctx: &Ctx<'_>, widths: &mut Vec<u8>, banks: &[Bank], rejected: &[bo
         }
     }
     let mut groups: Vec<Group> = Vec::new();
-    let mut group_of: HashMap<Key, u32> = HashMap::new();
+    let mut group_of: Map<Key, u32> = Map::default();
     let mut member = vec![(NONE, 0u8); ctx.instrs.len()];
-    let mut count: HashMap<Key, u32> = HashMap::new();
+    let mut count: Map<Key, u32> = Map::default();
     // Per candidate instruction of a rank: its variants.
     struct Variant {
         key: Key,
@@ -1133,11 +1170,11 @@ fn proposals(
     ctx: &Ctx<'_>,
     r: &Round,
     widths: &[u8],
-    bank_of: &HashMap<u32, (u32, u8)>,
+    bank_of: &Map<u32, (u32, u8)>,
     rejected: &[bool],
 ) -> Vec<(u8, Vec<(u8, u32)>)> {
-    let mut claimed: HashMap<u32, ()> = HashMap::new();
-    let free = |s: u32, claimed: &HashMap<u32, ()>| {
+    let mut claimed: Map<u32, ()> = Map::default();
+    let free = |s: u32, claimed: &Map<u32, ()>| {
         ctx.is_state1(s)
             && !rejected[s as usize]
             && !bank_of.contains_key(&s)
@@ -1146,7 +1183,7 @@ fn proposals(
     let mut out = Vec::new();
     // Whole merges (a concatenation that does not continue into another
     // one), innermost first: a register's own output bus.
-    let mut continued: HashMap<u32, ()> = HashMap::new();
+    let mut continued: Map<u32, ()> = Map::default();
     for (k, ins) in ctx.instrs.iter().enumerate() {
         if ctx.ops[k] == Op::Concat {
             continued.insert(ins.a, ());
@@ -1233,12 +1270,7 @@ fn bank_runs(
 
 /// Whether `s` is written by an instruction of `out` that is known now:
 /// a lifted group word, or (scanning) any emitted instruction.
-fn out_dsts_contains(
-    out: &Out,
-    s: u32,
-    group_of_word: &HashMap<u32, usize>,
-    lifted: &[bool],
-) -> bool {
+fn out_dsts_contains(out: &Out, s: u32, group_of_word: &Map<u32, usize>, lifted: &[bool]) -> bool {
     group_of_word.get(&s).is_some_and(|&g| lifted[g]) || out.dsts.contains_key(&s)
 }
 
@@ -1340,7 +1372,7 @@ fn dce(
     for (k, ins) in em.instrs.iter().enumerate() {
         producer[ins.dst as usize] = k as u32;
     }
-    let view_base: HashMap<u32, u32> = views.iter().map(|&(f, s)| (f, s.base)).collect();
+    let view_base: Map<u32, u32> = views.iter().map(|&(f, s)| (f, s.base)).collect();
     let mut live = vec![false; n];
     let mut stack = Vec::new();
     let mark = |s: u32, live: &mut Vec<bool>, stack: &mut Vec<u32>| {
