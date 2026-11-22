@@ -2,16 +2,13 @@
 //!
 //! Exposes all public modules and shared constants used by `main.rs`.
 
-use bevy::{
-    camera::ScalingMode, platform::collections::HashMap, prelude::*, window::PrimaryWindow,
-};
+use bevy::{camera::ScalingMode, prelude::*, window::PrimaryWindow};
 use bevy_egui::EguiContexts;
 
 pub mod camera;
 pub mod editor;
 pub mod fonts;
 pub mod settings;
-pub mod settings_overlay;
 pub mod sim;
 pub mod theme;
 pub mod title;
@@ -56,27 +53,6 @@ pub enum GameState {
     DemoMap,
     Paused,
     Settings,
-}
-
-#[derive(Resource)]
-pub struct GameSettings {
-    pub resolution: (u32, u32),
-    pub fullscreen: bool,
-    pub vsync: bool,
-    pub volume: f32,
-    pub controls: HashMap<String, String>,
-}
-
-impl Default for GameSettings {
-    fn default() -> Self {
-        GameSettings {
-            resolution: (1920, 1080),
-            fullscreen: false,
-            vsync: true,
-            volume: 0.5,
-            controls: HashMap::new(),
-        }
-    }
 }
 
 pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
