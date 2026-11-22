@@ -867,13 +867,34 @@ ambiguous. Each is small and can be revisited.
     rounded up to the grid for wider ones such as a `Display`), 60 apart,
     splits right and merges left with separate stacks. Only generated
     positions change: ids, wiring and behaviour are the same, so existing
-    files load the same circuits. Some curriculum demos still have
-    overlapping boxes (two word inputs whose split columns meet in
+    files load the same circuits. The curriculum demos that still had
+    overlapping boxes (two word inputs whose split columns met in
     `ripple_adder/adder8` and `mux/mux2x8`, and the AND/OR arrays spaced 40
-    apart in `alu/alu8`); the no-overlap test covers the gallery only.
+    apart in `alu/alu8`) were re-laid out by hand, as were the other
+    demos (positions only: ids, wiring and behaviour are unchanged), and
+    the no-overlap and on-grid test now covers the curriculum as well as
+    the gallery. A wire from a word input to its own generated split
+    column still passes over the splits above its own; that follows from
+    the fixed adapter placement and cannot be avoided by moving nodes.
 49. **Preview renderer.** `examples/render_svg.rs` writes SVG previews of
     circuits (see `docs/save-format.md`, "Previews") and reports
     overlapping boxes and wires drawn through boxes. It is a development
     tool only; the app does not use it. `layout.rs` is unchanged: the
     gallery is placed by hand, not by `layout_circuit`.
 
+50. **A 16-bit CPU of gates and its word twin.** The gallery gains
+    `cpu16`, a multi-cycle 16-bit CPU whose state is all curriculum
+    flip-flops (about 14 700 primitives after flattening, the largest
+    hand-made design so far), and `cpu16_rtl`, the same instruction set of
+    word primitives; both run the same prime-number program (see
+    `docs/save-format.md`, "The 16-bit CPUs"). To simulate a workspace
+    without the app, `gate_quest::sim::netlist::design_of` builds the
+    `Design` the bridge would build (ports in interface order, root
+    `Display`s as outputs named by their labels); the CPU tests and
+    `examples/cpu_bench.rs` use it with `logi_sim::sim::Sim` directly,
+    which is far faster than stepping the app. The gallery stays within
+    its 20 to 30 items (29). The CPU files were laid out with the help of
+    a script that checked every candidate position against the two
+    `render_svg` checks; a test now also checks that no wire of either CPU
+    passes through a box (the other items are only checked for
+    overlapping boxes, as before).

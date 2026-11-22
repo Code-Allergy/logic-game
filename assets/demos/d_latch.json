@@ -7,13 +7,13 @@
       "name": "d_latch",
       "title": "D latch",
       "nodes": [
-        {"name": "D", "type": "Input", "at": [-350, 60]},
-        {"name": "E", "type": "Input", "at": [-350, -60]},
-        {"name": "not_d", "use": "gates/not", "at": [-200, -120]},
-        {"name": "set", "use": "gates/and", "at": [-50, 60]},
-        {"name": "reset", "use": "gates/and", "at": [-50, -60]},
-        {"name": "latch", "use": "sr_latch/sr_latch", "at": [120, 0]},
-        {"name": "Q", "type": "Output", "at": [300, 0]}
+        {"name": "D", "type": "Input", "at": [0, 80]},
+        {"name": "E", "type": "Input", "at": [0, -80]},
+        {"name": "not_d", "use": "gates/not", "at": [140, -160]},
+        {"name": "set", "use": "gates/and", "at": [280, 80]},
+        {"name": "reset", "use": "gates/and", "at": [280, -80]},
+        {"name": "latch", "use": "sr_latch/sr_latch", "at": [420, 0]},
+        {"name": "Q", "type": "Output", "at": [560, 0]}
       ],
       "wires": [
         ["D", "set.A", "not_d.A"],
@@ -28,12 +28,12 @@
       "name": "main",
       "title": "D latch",
       "nodes": [
-        {"name": "D", "type": "Input", "at": [-300, 60]},
-        {"name": "E", "type": "Input", "at": [-300, -60]},
-        {"name": "latch", "use": "d_latch", "label": "D latch (gates)", "at": [0, 60]},
-        {"name": "prim", "type": "DLatch", "label": "DLatch primitive", "at": [0, -100]},
-        {"name": "q_gates", "type": "Output", "label": "Q (gates)", "at": [300, 60]},
-        {"name": "q_prim", "type": "Output", "label": "Q (DLatch)", "at": [300, -100]}
+        {"name": "D", "type": "Input", "at": [0, 80]},
+        {"name": "E", "type": "Input", "at": [0, -80]},
+        {"name": "latch", "use": "d_latch", "label": "D latch (gates)", "at": [280, 80]},
+        {"name": "prim", "type": "DLatch", "label": "DLatch primitive", "at": [280, -80]},
+        {"name": "q_gates", "type": "Output", "label": "Q (gates)", "at": [420, 80]},
+        {"name": "q_prim", "type": "Output", "label": "Q (DLatch)", "at": [420, -80]}
       ],
       "wires": [
         ["D", "latch.D", "prim.d"],
