@@ -995,3 +995,16 @@ fn literal_operands_past_the_slot_table_are_not_read_as_slots() {
     s.tick();
     assert_eq!(s.get("hi"), 1);
 }
+
+#[test]
+fn compile_observed_reports_every_pass_in_order() {
+    let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
+    let mut seen = Vec::new();
+    let p = compile_observed(&d, &Options::default(), |pass| seen.push(pass)).unwrap();
+    assert_eq!(seen, Pass::ALL);
+    let q = compile_ok(&d);
+    assert_eq!(
+        (p.instrs, p.blocks, p.slot_count),
+        (q.instrs, q.blocks, q.slot_count)
+    );
+}

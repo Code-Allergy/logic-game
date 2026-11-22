@@ -50,7 +50,11 @@ impl Emitter {
     }
 }
 
-pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
+pub(super) fn emit(
+    mut e: Elab<'_>,
+    opts: &Options,
+    mut pass_done: impl FnMut(super::Pass),
+) -> Program {
     let design = e.design;
     let n = e.n_nets as usize;
 
@@ -167,6 +171,7 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
             lower(&mut em, &node.kind, &i, &o, key);
         }
     }
+    pass_done(super::Pass::Lower);
 
     // ── Simplify ───────────────────────────────────────────────────────────
     if opts.const_fold || opts.alias || opts.cse || (opts.dce && !opts.debug) {
@@ -178,6 +183,7 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         let (_, order) = levelize(&em.ops, &em.instrs, em.widths.len());
         simplify(&mut em, &order, &mut ports, &mut debug, &probe_slots, opts);
     }
+    pass_done(super::Pass::Simplify);
 
     // ── Levelize and group into blocks ─────────────────────────────────────
     let Emitter {
@@ -207,6 +213,7 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         &ports,
         widths.len(),
     );
+    pass_done(super::Pass::Levelize);
 
     // ── Lane packing and blocks ────────────────────────────────────────────
     let mut widths = widths;
@@ -359,6 +366,7 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         None => exec_dsts(&blocks, &out, &packs, &scatters),
     };
 
+    pass_done(super::Pass::Pack);
     let mut p = Program {
         slot_count: widths.len() as u32,
         consts,
@@ -377,6 +385,7 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
         scatters,
     };
     renumber(&mut p, &out_ops, &dsts, &plan.lane_of);
+    pass_done(super::Pass::Renumber);
     p
 }
 
