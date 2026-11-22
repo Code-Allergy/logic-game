@@ -184,17 +184,23 @@ pub fn canvas_click(hit: Option<Entity>, selected: &mut SelectedGate) -> Option<
 }
 
 /// Left-click selects a gate; a left click on empty canvas (not over the
-/// HUD) clears the selection.
+/// HUD) clears the selection. `Shift`+click is a multi-selection gesture
+/// ([`super::multi_select`]), not handled here.
+#[allow(clippy::too_many_arguments)]
 pub fn update_inputs_on_left_click(
     q_window: Query<&Window, With<PrimaryWindow>>,
     ui_pointer: Res<UiPointerState>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     query: Query<(Entity, &Transform, &GateType)>,
     mut select_writer: MessageWriter<GateComponentSelectionEvent>,
     mut selected: ResMut<SelectedGate>,
 ) {
-    if ui_pointer.over_egui || !mouse_button_input.just_pressed(MouseButton::Left) {
+    if ui_pointer.over_egui
+        || !mouse_button_input.just_pressed(MouseButton::Left)
+        || keys.is_some_and(|k| super::multi_select::shift_held(&k))
+    {
         return;
     }
     let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single())
@@ -783,8 +789,11 @@ pub fn ui_for_selected_gate(
     theme: Res<Theme>,
     active: Res<crate::sim::ActiveCircuit>,
     editor: Option<ResMut<crate::editor::EditorState>>,
+    multi: Option<Res<crate::sim::MultiSelection>>,
 ) -> Result<(), BevyError> {
-    if game_state.get() != &crate::GameState::Simulating {
+    // Several parts selected: the selection card stands in for the
+    // inspector (`crate::editor::chips`).
+    if game_state.get() != &crate::GameState::Simulating || multi.is_some_and(|m| m.len() >= 2) {
         return Ok(());
     }
     let Some(entity) = sel.0 else { return Ok(()) };

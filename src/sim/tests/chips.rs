@@ -5,13 +5,16 @@
 //! hash, revision, merges that never replace silently), the refresh of a
 //! stale chip, and every new operation as one undo step.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use logi_sim::reference::Reference;
 
 use super::*;
+use crate::sim::chip::stays_outside;
 use crate::sim::{
-    AuthoringFeedback, CircuitLibrary, CircuitView, CloseView, HistoryCommand, Incoming,
-    LoadedRoot, OpenInstanceView, PendingChipUpdates, RefreshDefinitions, RegisterDefinitions,
-    UndoHistory, WorkspaceRevision,
+    AuthoringFeedback, CircuitLibrary, CircuitView, CloseView, DocWire, HistoryCommand, Incoming,
+    LoadedRoot, MakeChip, MultiSelection, OpenInstanceView, PendingChipUpdates, RefreshDefinitions,
+    RegisterDefinitions, UndoHistory, WorkspaceRevision, plan_chip,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -111,6 +114,76 @@ fn adder_circuit() -> CircuitDocument {
     d
 }
 
+fn ids_labelled(doc: &CircuitDocument, labels: &[&str]) -> HashSet<Uuid> {
+    doc.nodes
+        .iter()
+        .filter(|n| labels.contains(&n.label.as_deref().unwrap_or("")))
+        .map(|n| n.id)
+        .collect()
+}
+
+/// Every node that can go into a chip.
+fn all_logic(doc: &CircuitDocument) -> HashSet<Uuid> {
+    doc.nodes
+        .iter()
+        .filter(|n| !stays_outside(&n.kind))
+        .map(|n| n.id)
+        .collect()
+}
+
+/// `ws` with a chip made of `selection` in its root.
+fn with_chip(ws: &WorkspaceDocument, selection: &HashSet<Uuid>) -> WorkspaceDocument {
+    let library = CircuitLibrary {
+        definitions: ws.definitions.clone(),
+    };
+    let plan = plan_chip(&ws.root, selection, "Chip", &library).expect("a chip");
+    let mut out = ws.clone();
+    out.root = plan.apply(&ws.root);
+    out.define(plan.definition);
+    out
+}
+
+/// A small deterministic generator for input stimuli.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 17
+    }
+}
+
+/// Run both workspaces on the reference simulator with the same random
+/// inputs for `ticks` ticks; every output (ports and displays) must match
+/// at every tick. Returns the number of output values compared.
+fn same_behaviour(before: &WorkspaceDocument, after: &WorkspaceDocument, ticks: u64) -> usize {
+    let design_a = crate::sim::netlist::design_of(before).expect("design before");
+    let design_b = crate::sim::netlist::design_of(after).expect("design after");
+    let mut ra = Reference::new(&design_a).expect("reference before");
+    let mut rb = Reference::new(&design_b).expect("reference after");
+    let inputs = design_a.root_def().inputs.len();
+    assert_eq!(inputs, design_b.root_def().inputs.len(), "same input ports");
+    assert_eq!(ra.outputs().len(), rb.outputs().len(), "same output ports");
+    assert_eq!(ra.outputs(), rb.outputs(), "same outputs at reset");
+    let mut rng = Lcg(0x5eed);
+    let mut compared = 0;
+    for tick in 0..ticks {
+        for port in 0..inputs {
+            let v = rng.next();
+            ra.set_input(port, v);
+            rb.set_input(port, v);
+        }
+        ra.tick().expect("tick");
+        rb.tick().expect("tick");
+        assert_eq!(ra.outputs(), rb.outputs(), "outputs differ at tick {tick}");
+        compared += ra.outputs().len();
+    }
+    compared
+}
+
 fn steps(app: &App) -> (usize, usize) {
     let h = app.world().resource::<UndoHistory>();
     (h.undo_len(), h.redo_len())
@@ -134,6 +207,13 @@ fn library(app: &App) -> &CircuitLibrary {
     app.world().resource::<CircuitLibrary>()
 }
 
+/// Load `doc` as an editable workspace and let the history take its
+/// baseline.
+fn open_bench(app: &mut App, doc: CircuitDocument) {
+    load(app, WorkspaceDocument::new(doc));
+    settle(app);
+}
+
 fn chip_instances(app: &mut App) -> Vec<(Entity, Uuid)> {
     let mut q = app.world_mut().query::<(Entity, &GateType)>();
     q.iter(app.world())
@@ -142,6 +222,442 @@ fn chip_instances(app: &mut App) -> Vec<(Entity, Uuid)> {
             _ => None,
         })
         .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Make chip: the plan
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Combinational and stateful logic moved into a chip behaves exactly as
+/// before, tick by tick, on the reference simulator.
+#[test]
+fn make_chip_preserves_behaviour() {
+    let ws = WorkspaceDocument::new(adder_circuit());
+    // The whole adder and counter (ports selected too: they stay outside).
+    let everything: HashSet<Uuid> = ws.root.nodes.iter().map(|n| n.id).collect();
+    let after = with_chip(&ws, &everything);
+    assert!(same_behaviour(&ws, &after, 64) > 0);
+    // Only part of it: the boundary cuts through the adder.
+    let part = ids_labelled(&ws.root, &["s", "carry", "reg"]);
+    let mut part = part;
+    part.extend(
+        ws.root
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, GateKind::Xor { .. }) && n.label.is_none())
+            .map(|n| n.id),
+    );
+    let after = with_chip(&ws, &part);
+    same_behaviour(&ws, &after, 64);
+    // A chip around that chip and the remaining AND gates.
+    let outer: HashSet<Uuid> = after
+        .root
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, GateKind::And { .. } | GateKind::SubCircuit { .. }))
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(outer.len(), 3);
+    let nested = with_chip(&after, &outer);
+    same_behaviour(&ws, &nested, 64);
+}
+
+/// Every demo: its root's logic made into a chip (all of it, and every
+/// other part) behaves the same on the reference simulator.
+#[test]
+fn make_chip_preserves_the_demos() {
+    let mut checked = 0;
+    for demo in demos().all() {
+        let ws = (*demo.workspace).clone();
+        let Ok(design) = crate::sim::netlist::design_of(&ws) else {
+            continue;
+        };
+        if Reference::new(&design).is_err() {
+            continue;
+        }
+        let logic = all_logic(&ws.root);
+        if logic.is_empty() {
+            continue;
+        }
+        let after = with_chip(&ws, &logic);
+        same_behaviour(&ws, &after, 40);
+        let mut ids: Vec<Uuid> = logic.into_iter().collect();
+        ids.sort();
+        let half: HashSet<Uuid> = ids.into_iter().step_by(2).collect();
+        let after = with_chip(&ws, &half);
+        same_behaviour(&ws, &after, 40);
+        checked += 1;
+    }
+    assert!(checked >= 5, "only {checked} demos checked");
+}
+
+/// Every wire that crosses the selection boundary becomes a port: the
+/// instance takes its place, on the pin of a port wired inside to the
+/// same pin it was on.
+#[test]
+fn ports_are_created_for_every_crossing_wire() {
+    let ws = WorkspaceDocument::new(adder_circuit());
+    let root = &ws.root;
+    let selection = ids_labelled(root, &["s", "carry"]);
+    let plan = plan_chip(root, &selection, "Chip", &CircuitLibrary::default()).unwrap();
+    let def = &plan.definition;
+    let (ins, outs) = def.interface();
+    let instance = plan.instance.id;
+    let crossing: Vec<&DocWire> = root
+        .wires
+        .iter()
+        .filter(|w| selection.contains(&w.from.node) != selection.contains(&w.to.node))
+        .collect();
+    assert!(!crossing.is_empty());
+    for w in crossing {
+        assert!(plan.removed_wires.contains(&w.id));
+        if selection.contains(&w.to.node) {
+            // Into the chip: outside driver → instance pin p; inside, port p
+            // drives the old sink.
+            let new = plan
+                .new_wires
+                .iter()
+                .find(|n| n.from == w.from && n.to.node == instance)
+                .unwrap_or_else(|| panic!("no instance wire for {w:?}"));
+            let port = ins[usize::from(new.to.pin)];
+            assert!(
+                def.wires
+                    .iter()
+                    .any(|i| i.from.node == port.id && i.to == w.to),
+                "port {:?} does not reach the sink",
+                port.label
+            );
+        } else {
+            let new = plan
+                .new_wires
+                .iter()
+                .find(|n| n.to == w.to && n.from.node == instance)
+                .unwrap_or_else(|| panic!("no instance wire for {w:?}"));
+            let port = outs[usize::from(new.from.pin)];
+            assert!(
+                def.wires
+                    .iter()
+                    .any(|i| i.to.node == port.id && i.from == w.from)
+            );
+        }
+    }
+    // Wires from one outside driver share a port: x1 drives both the
+    // selected XOR `s` and the unselected AND, A and Cin drive one each.
+    let names: Vec<&str> = ins.iter().map(|n| n.label.as_deref().unwrap()).collect();
+    let outs: Vec<&str> = outs.iter().map(|n| n.label.as_deref().unwrap()).collect();
+    // Unlabelled drivers fall back to the sink pin's name (`a`, `b`).
+    assert_eq!(names.len(), 4, "{names:?}");
+    assert!(names.contains(&"Cin"), "{names:?}");
+    // Output ports are named after their inside driver.
+    assert_eq!(outs, vec!["carry", "s"]);
+}
+
+/// Port names: the source's label, the pin name for a part with several
+/// outputs, fallbacks, and duplicates made unique.
+#[test]
+fn port_names_follow_the_sources_and_are_unique() {
+    let mut d = CircuitDocument::new("names");
+    let at = Vec2::new;
+    let a1 = d.add(DocNode::labeled(
+        GateKind::Input { w: 4 },
+        at(-200.0, 0.0),
+        "x",
+    ));
+    let a2 = d.add(DocNode::labeled(
+        GateKind::Input { w: 4 },
+        at(-200.0, -60.0),
+        "x",
+    ));
+    let free = d.add(DocNode::new(
+        GateKind::Const { w: 4, value: 3 },
+        at(-200.0, -120.0),
+    ));
+    let add = d.add(DocNode::labeled(
+        GateKind::Add { w: 4 },
+        at(-100.0, 0.0),
+        "alu",
+    ));
+    let not = d.add(DocNode::new(GateKind::Not { w: 4 }, at(0.0, 0.0)));
+    let sum = d.add(DocNode::labeled(
+        GateKind::Output { w: 4 },
+        at(200.0, 0.0),
+        "Total",
+    ));
+    let carry = d.add(DocNode::labeled(
+        GateKind::Output { w: 1 },
+        at(200.0, -60.0),
+        "C",
+    ));
+    d.connect(a1, 0, add, 0);
+    d.connect(a2, 0, add, 1);
+    d.connect(free, 0, not, 0);
+    d.connect(add, 1, carry, 0);
+    d.connect(not, 0, sum, 0);
+    // The Add's cin is left open.
+    let sel = [add, not].into_iter().collect();
+    let plan = plan_chip(&d, &sel, "  Named ", &CircuitLibrary::default()).unwrap();
+    assert_eq!(plan.definition.name, "Named");
+    let (ins, outs) = plan.definition.interface();
+    let mut names: Vec<&str> = ins.iter().map(|n| n.label.as_deref().unwrap()).collect();
+    names.sort();
+    // Two inputs both labelled `x`, an unlabelled Const (the NOT's pin).
+    assert_eq!(names, vec!["in", "x", "x 2"]);
+    let mut outs: Vec<&str> = outs.iter().map(|n| n.label.as_deref().unwrap()).collect();
+    outs.sort();
+    // `alu.cout` (several outputs), the unlabelled NOT → its sink `Total`.
+    assert_eq!(outs, vec!["Total", "alu.cout"]);
+    assert!(plan_chip(&d, &sel, " ", &CircuitLibrary::default()).is_err());
+    let ports_only = [sum, carry].into_iter().collect();
+    assert!(plan_chip(&d, &ports_only, "P", &CircuitLibrary::default()).is_err());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Make chip in the editor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `MakeChip` replaces the parts with one instance wired the same way: the
+/// circuit simulates the same, the definition is in the library (and in a
+/// save), and the whole change is one undo step.
+#[test]
+fn make_chip_in_the_editor_is_one_undo_step() {
+    let mut app = app();
+    let doc = adder_circuit();
+    open_bench(&mut app, doc.clone());
+    let inputs: [(&str, u64); 3] = [("A", 1), ("B", 0), ("Cin", 1)];
+    let before_values = eval(&mut app, &inputs, &["Sum", "Cout"]);
+    let before = root_doc(&mut app);
+    let steps_before = steps(&app);
+
+    let gates: Vec<Uuid> = doc.nodes.iter().map(|n| n.id).collect();
+    send(
+        &mut app,
+        MakeChip {
+            gates,
+            name: "Full adder".into(),
+        },
+    );
+    settle(&mut app);
+    let chips = chip_instances(&mut app);
+    assert_eq!(chips.len(), 1);
+    let (chip, def) = chips[0];
+    assert_eq!(library(&app).get(def).unwrap().name, "Full adder");
+    assert_eq!(steps(&app).0, steps_before.0 + 1, "one step");
+    assert!(feedback(&app).contains("Made chip"), "{}", feedback(&app));
+    assert!(wires(&mut app).iter().all(|(_, _, s)| s.connected));
+    // Ports and the display stay; the logic is gone from the root.
+    let root = root_doc(&mut app);
+    assert_eq!(
+        root.nodes.len(),
+        4 + 3 + 1 + 1,
+        "inputs, outputs, display, chip"
+    );
+    assert!(root.nodes.iter().any(|n| n.id == uuid(&app, chip)));
+    let after_values = eval(&mut app, &inputs, &["Sum", "Cout"]);
+    assert_eq!(after_values, before_values);
+    set_input(&mut app, "En", 1);
+    run(&mut app, 1);
+    let count = value_at(&mut app, "Count");
+    run(&mut app, 3);
+    assert_eq!(
+        value_at(&mut app, "Count"),
+        count + 3,
+        "the counter runs inside"
+    );
+    // Saved with the workspace.
+    let ws = app
+        .world_mut()
+        .run_system_once(|reader: CircuitReader| reader.workspace())
+        .unwrap();
+    assert!(ws.definitions.contains_key(&def));
+
+    // Undo: the parts are back, as they were.
+    send(&mut app, HistoryCommand::Undo);
+    assert!(chip_instances(&mut app).is_empty());
+    assert!(
+        root_doc(&mut app).same_content(&before),
+        "undo restores the circuit"
+    );
+    assert_eq!(eval(&mut app, &inputs, &["Sum", "Cout"]), before_values);
+    send(&mut app, HistoryCommand::Redo);
+    assert_eq!(chip_instances(&mut app).len(), 1);
+    assert_eq!(eval(&mut app, &inputs, &["Sum", "Cout"]), before_values);
+}
+
+/// In a read-only demo, Make chip is refused and nothing changes.
+#[test]
+fn make_chip_is_refused_in_a_read_only_demo() {
+    let mut app = app();
+    let ws = demo("full_adder");
+    let before = ws.root.clone();
+    app.world_mut().write_message(LoadWorkspaceEvent {
+        name: "demo".into(),
+        workspace: Arc::new(ws),
+        read_only: true,
+    });
+    settle(&mut app);
+    send(
+        &mut app,
+        MakeChip {
+            gates: before.nodes.iter().map(|n| n.id).collect(),
+            name: "X".into(),
+        },
+    );
+    assert!(chip_instances(&mut app).len() == before.instanced_definitions().count());
+    assert!(feedback(&app).contains("read-only"), "{}", feedback(&app));
+}
+
+/// Inside an open definition, Make chip nests a new chip in it: every
+/// instance of the outer definition gets it, and it still simulates.
+#[test]
+fn make_chip_inside_a_definition_nests_it() {
+    let mut app = app();
+    let mut cell = adder_circuit();
+    cell.name = "Cell".into();
+    // The display is left out of definitions; drop it.
+    cell.nodes.retain(|n| n.label.as_deref() != Some("Shown"));
+    cell.wires
+        .retain(|w| cell.nodes.iter().any(|n| n.id == w.to.node));
+    let cell_id = cell.id;
+    let mut root = CircuitDocument::new("Top");
+    let ports = ["A", "B", "Cin", "En"];
+    let mut top_inputs = Vec::new();
+    for (i, p) in ports.iter().enumerate() {
+        top_inputs.push(root.add(DocNode::labeled(
+            GateKind::Input { w: 1 },
+            Vec2::new(-300.0, -60.0 * i as f32),
+            *p,
+        )));
+    }
+    let inst1 = root.add(DocNode::new(
+        GateKind::SubCircuit {
+            definition: cell_id,
+        },
+        Vec2::ZERO,
+    ));
+    let inst2 = root.add(DocNode::new(
+        GateKind::SubCircuit {
+            definition: cell_id,
+        },
+        Vec2::new(0.0, -300.0),
+    ));
+    let s1 = root.add(DocNode::labeled(
+        GateKind::Output { w: 1 },
+        Vec2::new(300.0, 0.0),
+        "S1",
+    ));
+    let s2 = root.add(DocNode::labeled(
+        GateKind::Output { w: 1 },
+        Vec2::new(300.0, -300.0),
+        "S2",
+    ));
+    // Cell ports: inputs A, B, Cin, En (sorted); outputs Count, Cout, Sum.
+    for inst in [inst1, inst2] {
+        for (pin, input) in top_inputs.iter().enumerate() {
+            root.connect(*input, 0, inst, pin as u8);
+        }
+    }
+    root.connect(inst1, 2, s1, 0);
+    root.connect(inst2, 2, s2, 0);
+    let mut ws = WorkspaceDocument::new(root);
+    ws.define(cell.clone());
+    load(&mut app, ws);
+    settle(&mut app);
+    let first = eval(&mut app, &[("A", 1), ("B", 1), ("Cin", 1)], &["S1", "S2"]);
+    assert_eq!(first, vec![1, 1]);
+
+    let e1 = chip_instances(&mut app)
+        .into_iter()
+        .find(|(_, d)| *d == cell_id)
+        .unwrap()
+        .0;
+    send(&mut app, OpenInstanceView { entity: e1 });
+    let steps_before = steps(&app).0;
+    let inner = ids_labelled(&cell, &["s", "carry"]);
+    send(
+        &mut app,
+        MakeChip {
+            gates: inner.into_iter().collect(),
+            name: "Inner".into(),
+        },
+    );
+    settle(&mut app);
+    assert_eq!(steps(&app).0, steps_before + 1, "one step");
+    let lib = library(&app);
+    let cell_now = lib.get(cell_id).unwrap();
+    let nested: Vec<Uuid> = cell_now.instanced_definitions().collect();
+    assert_eq!(nested.len(), 1, "the cell instances the new chip");
+    assert_eq!(lib.get(nested[0]).unwrap().name, "Inner");
+    assert!(cell_now.revision > cell.revision, "the edit counts");
+    send(&mut app, CloseView { to_root: true });
+    let again = eval(&mut app, &[("A", 1), ("B", 0), ("Cin", 1)], &["S1", "S2"]);
+    assert_eq!(again, vec![0, 0], "both instances run the nested chip");
+    let again = eval(&mut app, &[("A", 1), ("B", 0), ("Cin", 0)], &["S1", "S2"]);
+    assert_eq!(again, vec![1, 1]);
+}
+
+/// Deleting several parts in one frame (a multi-selection) is one step.
+#[test]
+fn deleting_a_selection_is_one_undo_step() {
+    let mut app = app();
+    open_bench(&mut app, adder_circuit());
+    let before = steps(&app).0;
+    let doomed: Vec<Entity> = ["s", "carry", "reg"]
+        .iter()
+        .map(|l| gate(&mut app, l))
+        .collect();
+    for entity in doomed {
+        app.world_mut().write_message(DeleteGate { entity });
+    }
+    settle(&mut app);
+    assert_eq!(steps(&app).0, before + 1);
+    send(&mut app, HistoryCommand::Undo);
+    for l in ["s", "carry", "reg"] {
+        gate(&mut app, l);
+    }
+}
+
+#[test]
+fn multi_selection_toggles_and_keeps_a_primary() {
+    let mut world = World::new();
+    let [a, b, c] = [(); 3].map(|_| world.spawn_empty().id());
+    let mut m = MultiSelection::default();
+    // Shift+click on b with a in the inspector: a group of a and b.
+    assert_eq!(m.toggle(b, Some(a)), Some(b));
+    assert_eq!(m.entities(), &[a, b]);
+    assert_eq!(m.toggle(c, Some(b)), Some(c));
+    // Taking the primary out makes the last one primary.
+    assert_eq!(m.toggle(c, Some(c)), Some(b));
+    // Taking another one out keeps the primary.
+    assert_eq!(m.toggle(a, Some(b)), Some(b));
+    assert_eq!(m.entities(), &[b]);
+    assert_eq!(m.all(Some(b)), vec![b]);
+    m.clear();
+    assert_eq!(m.all(Some(a)), vec![a]);
+    assert!(m.all(None).is_empty());
+}
+
+#[test]
+fn box_select_takes_parts_whose_centre_is_inside() {
+    use crate::sim::multi_select::{BoxSelect, parts_in_box};
+    let mut world = World::new();
+    let [a, b, c] = [(); 3].map(|_| world.spawn_empty().id());
+    let parts = [
+        (a, Vec2::new(0.0, 0.0)),
+        (b, Vec2::new(50.0, 40.0)),
+        (c, Vec2::new(500.0, 0.0)),
+    ];
+    let rect = BoxSelect {
+        start: Some(Vec2::new(100.0, -20.0)),
+        current: Some(Vec2::new(-20.0, 60.0)),
+    }
+    .rect()
+    .unwrap();
+    assert_eq!(parts_in_box(rect, parts.into_iter()), vec![b, a]);
+    let click = BoxSelect {
+        start: Some(Vec2::ONE),
+        current: Some(Vec2::ONE),
+    };
+    assert_eq!(click.rect(), None, "a click is not a box");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

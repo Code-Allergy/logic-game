@@ -34,7 +34,14 @@ use crate::sim::{
     visuals::SimulationVisualsPlugin,
 };
 use crate::sim::{HistoryCommand, UndoHistory, history::edit_history_system};
-use crate::sim::{LoadedRoot, PendingChipUpdates, RefreshDefinitions};
+use crate::sim::{
+    LoadedRoot, MakeChip, MultiSelection, PendingChipUpdates, RefreshDefinitions,
+    chip::apply_make_chip_system,
+    multi_select::{
+        BoxSelect, draw_box_select_system, move_group_system, multi_select_pointer_system,
+        prune_multi_selection_system,
+    },
+};
 
 use super::demos;
 use super::spatial_grid::SpatialGrid;
@@ -99,6 +106,7 @@ impl Plugin for SimulationRuntimePlugin {
             .init_resource::<LoadedRoot>()
             .init_resource::<PendingChipUpdates>()
             .add_message::<HistoryCommand>()
+            .add_message::<MakeChip>()
             .add_message::<RefreshDefinitions>()
             .add_message::<CreateGate>()
             .add_message::<CreateWire>()
@@ -136,6 +144,7 @@ impl Plugin for SimulationRuntimePlugin {
                     apply_create_gate_system,
                     apply_create_wire_system,
                     apply_delete_system,
+                    apply_make_chip_system,
                     apply_set_kind_system,
                     apply_set_input_system,
                     apply_authoring_messages_system,
@@ -158,6 +167,8 @@ impl Plugin for SimulationViewPlugin {
 
         app.add_plugins(SimulationVisualsPlugin)
             .init_resource::<SelectedGate>()
+            .init_resource::<MultiSelection>()
+            .init_resource::<BoxSelect>()
             .add_message::<crate::camera::FitView>()
             .insert_resource(SpatialGrid::new(100.0))
             .register_type::<crate::sim::LogicDisplay>()
@@ -212,6 +223,12 @@ impl Plugin for SimulationViewPlugin {
                     update_spatial_grid_system,
                     update_inputs_on_left_click,
                     update_selected_gate,
+                    (multi_select_pointer_system, prune_multi_selection_system)
+                        .chain()
+                        .after(update_selected_gate)
+                        .after(update_inputs_on_left_click),
+                    move_group_system.after(drag_selected_system),
+                    draw_box_select_system,
                 )
                     .run_if(in_state(state.clone())),
             )
