@@ -569,19 +569,18 @@ claude mcp add --transport http gatequest "$(jq -r .url mcp.json)" \
   --header "Authorization: Bearer $(jq -r .token mcp.json)"
 ```
 
-(The token changes with every run of the game.) For `gatequest-mcp` and
-Claude Code, in `.mcp.json`:
+(The token changes with every run of the game, so this is done per run.)
 
-```json
-{
-  "mcpServers": {
-    "gatequest": {
-      "command": "cargo",
-      "args": ["run", "-q", "-p", "gate_quest", "--features", "mcp", "--bin", "gatequest-mcp"],
-      "env": {"GATEQUEST_DATA_DIR": "/tmp/gatequest-mcp"}
-    }
-  }
-}
+The repository's `.mcp.json` starts `gatequest-mcp` for Claude Code
+sessions opened in it, as the server `gatequest`. Its workspaces go in
+`.gatequest/` at the repository root (ignored by git), away from the
+player's own; change `GATEQUEST_DATA_DIR` there to work on real ones, or
+add `"--", "--app"` to the arguments for a simulation to drive. Build
+once first, since a first `cargo run` takes longer than a client waits
+for a server to start:
+
+```sh
+cargo build -p gate_quest --features mcp --bin gatequest-mcp
 ```
 
 The code is in `src/mcp/`: `batch.rs` (the edit function), `view.rs`,

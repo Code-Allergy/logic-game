@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "gatequest": {
+      "command": "cargo",
+      "args": ["run", "-q", "-p", "gate_quest", "--features", "mcp", "--bin", "gatequest-mcp"],
+      "env": {
+        "GATEQUEST_DATA_DIR": ".gatequest"
+      }
+    }
+  }
+}
