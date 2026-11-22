@@ -30,7 +30,8 @@ use bevy::math::Vec2;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use super::{memfile, testing};
+use super::{chips, memfile, testing};
+use crate::sim::chip::plan_chip;
 use crate::sim::layout::{self, LayoutNode};
 use crate::sim::source::{
     self, Context, Dir, Element, Externals, NodeBody, NodeEntry, NodeTable, SourceError,
@@ -41,6 +42,9 @@ use crate::sim::{CircuitDocument, CircuitLibrary, DocNode, GateKind, WorkspaceDo
 /// chips: a layered layout of one flat circuit stops being readable long
 /// before it stops being correct.
 pub const ADVISORY_PARTS: usize = 150;
+
+/// Arrays are named as arrays up to this many elements.
+const MAX_ARRAY: u32 = 4096;
 
 /// Space left between the placed parts of a circuit and a block of newly
 /// laid out ones.
@@ -84,6 +88,8 @@ pub struct CircuitReport {
     pub laid_out: usize,
     /// Wires taken out because a `set` changed the pin they were on.
     pub dropped_wires: Vec<String>,
+    /// Parts replaced by their gate-level chips.
+    pub expanded: usize,
     /// Stored tests set and removed.
     pub tests_set: usize,
     pub tests_removed: usize,
@@ -124,6 +130,9 @@ impl fmt::Display for Report {
             change(c.adapters_added, '+', "adapters")?;
             if c.laid_out > 0 {
                 write!(f, " ({} laid out)", c.laid_out)?;
+            }
+            if c.expanded > 0 {
+                write!(f, " ({} expanded to gates)", c.expanded)?;
             }
             if c.tests_set > 0 {
                 write!(f, " +{} tests", c.tests_set)?;
@@ -227,6 +236,7 @@ fn merge_report(all: &mut Vec<CircuitReport>, one: CircuitReport) {
             have.adapters_added += one.adapters_added;
             have.laid_out += one.laid_out;
             have.dropped_wires.extend(one.dropped_wires);
+            have.expanded += one.expanded;
             have.tests_set += one.tests_set;
             have.tests_removed += one.tests_removed;
             have.tests = one.tests;
@@ -236,13 +246,61 @@ fn merge_report(all: &mut Vec<CircuitReport>, one: CircuitReport) {
     }
 }
 
-/// Compile the workspace: the flattened part count, or the errors.
+/// Compile the workspace: the root, and every chip the root does not
+/// reach (a chip not placed yet is compiled on its own, so that it is
+/// checked too). The root's flattened part count, or the errors.
 pub fn build(ws: &WorkspaceDocument) -> Result<usize, Vec<String>> {
-    let design = crate::sim::netlist::design_of(ws).map_err(|e| vec![e])?;
     let options = logi_sim::compile::Options::default();
-    match logi_sim::compile::compile(&design, &options) {
-        Ok(_) => Ok(flat_parts(ws)),
-        Err(errors) => Err(errors.iter().map(ToString::to_string).collect()),
+    let compile = |ws: &WorkspaceDocument| -> Result<(), Vec<String>> {
+        let design = crate::sim::netlist::design_of(ws).map_err(|e| vec![e])?;
+        logi_sim::compile::compile(&design, &options)
+            .map(|_| ())
+            .map_err(|errors| errors.iter().map(ToString::to_string).collect())
+    };
+    let mut errors = compile(ws).err().unwrap_or_default();
+    let library = CircuitLibrary {
+        definitions: ws.definitions.clone(),
+    };
+    let reached = library.reachable_from(&ws.root);
+    let mut loose: Vec<&Arc<CircuitDocument>> = ws
+        .definitions
+        .values()
+        .filter(|d| !reached.contains_key(&d.id))
+        .collect();
+    loose.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
+    // A chip placed in another loose chip is compiled with that one.
+    let mut covered: HashSet<Uuid> = HashSet::new();
+    let inside: Vec<HashSet<Uuid>> = loose
+        .iter()
+        .map(|d| library.reachable_from(d).into_keys().collect())
+        .collect();
+    for (i, def) in loose.iter().enumerate() {
+        if inside
+            .iter()
+            .enumerate()
+            .any(|(j, set)| j != i && set.contains(&def.id))
+        {
+            covered.insert(def.id);
+        }
+    }
+    for def in loose {
+        if covered.contains(&def.id) {
+            continue;
+        }
+        let mut alone = ws.clone();
+        alone.root = (**def).clone();
+        if let Err(found) = compile(&alone) {
+            errors.extend(
+                found
+                    .into_iter()
+                    .map(|e| format!("chip \"{}\": {e}", def.name)),
+            );
+        }
+    }
+    if errors.is_empty() {
+        Ok(flat_parts(ws))
+    } else {
+        Err(errors)
     }
 }
 
@@ -285,14 +343,264 @@ pub fn advisories(ws: &WorkspaceDocument) -> Vec<String> {
     circuits
         .into_iter()
         .map(|d| {
+            let groups = groups(d);
+            let hint = match groups.first() {
+                Some(g) => format!(
+                    " ({} groups of parts would make chips, the largest of {} parts with {} \
+                     nets crossing; list them with view \"groups\")",
+                    groups.len(),
+                    g.parts.len(),
+                    g.crossing
+                ),
+                None => String::new(),
+            };
             format!(
                 "\"{}\" has {} parts in one circuit (more than {ADVISORY_PARTS}); \
-                 split it into chips so it stays readable",
+                 split it into chips so it stays readable{hint}",
                 d.name,
                 d.nodes.len()
             )
         })
         .collect()
+}
+
+/// Parts that hang together and touch the rest of their circuit through
+/// few nets: a candidate for `make_chip`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartGroup {
+    pub parts: Vec<Uuid>,
+    /// Nets that cross the group's boundary (what would be its ports).
+    pub crossing: usize,
+}
+
+/// A part whose output goes to more parts than this is a bus or a
+/// control line: it joins everything, so it is not what holds a group
+/// together.
+const HUB_FANOUT: usize = 8;
+/// The smallest group worth a chip.
+const MIN_GROUP: usize = 6;
+
+/// Groups of parts of `doc` that would make chips, largest first: the
+/// parts connected to each other when ports and widely used signals are
+/// left out. A circuit that is one tangle has none.
+pub fn groups(doc: &CircuitDocument) -> Vec<PartGroup> {
+    let index: HashMap<Uuid, usize> = doc
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id, i))
+        .collect();
+    let mut fanout = vec![0usize; doc.nodes.len()];
+    for w in &doc.wires {
+        if let Some(&i) = index.get(&w.from.node) {
+            fanout[i] += 1;
+        }
+    }
+    let member: Vec<bool> = doc
+        .nodes
+        .iter()
+        .zip(&fanout)
+        .map(|(n, f)| !n.kind.is_port() && *f <= HUB_FANOUT)
+        .collect();
+    // Union-find over the wires between members.
+    let mut parent: Vec<usize> = (0..doc.nodes.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for w in &doc.wires {
+        let (Some(&a), Some(&b)) = (index.get(&w.from.node), index.get(&w.to.node)) else {
+            continue;
+        };
+        if member[a] && member[b] {
+            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            parent[ra] = rb;
+        }
+    }
+    let mut sets: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, is_member) in member.iter().enumerate() {
+        if *is_member {
+            let root = find(&mut parent, i);
+            sets.entry(root).or_default().push(i);
+        }
+    }
+    let members = member.iter().filter(|m| **m).count();
+    let mut out: Vec<PartGroup> = sets
+        .into_values()
+        .filter(|set| set.len() >= MIN_GROUP && set.len() * 10 <= members * 7)
+        .map(|set| {
+            let inside: HashSet<usize> = set.iter().copied().collect();
+            let crossing: HashSet<(Uuid, u8)> = doc
+                .wires
+                .iter()
+                .filter(|w| {
+                    let a = index.get(&w.from.node).is_some_and(|i| inside.contains(i));
+                    let b = index.get(&w.to.node).is_some_and(|i| inside.contains(i));
+                    a != b
+                })
+                .map(|w| (w.from.node, w.from.pin))
+                .collect();
+            PartGroup {
+                parts: set.iter().map(|&i| doc.nodes[i].id).collect(),
+                crossing: crossing.len(),
+            }
+        })
+        .collect();
+    // Largest first; equal ones in the order of their first part.
+    let first = |g: &PartGroup| g.parts.first().and_then(|id| index.get(id)).copied();
+    out.sort_by(|a, b| {
+        b.parts
+            .len()
+            .cmp(&a.parts.len())
+            .then(first(a).cmp(&first(b)))
+    });
+    out
+}
+
+/// References as few strings as name them: array elements as ranges
+/// (`fa[0..4]`), in order.
+pub fn compress_refs(mut refs: Vec<String>) -> Vec<String> {
+    let key = |r: &String| match array_label(r) {
+        Some((base, i)) => (base.to_string(), Some(i)),
+        None => (r.clone(), None),
+    };
+    refs.sort_by_cached_key(key);
+    let mut out: Vec<String> = Vec::new();
+    let mut run: Option<(String, u32, u32)> = None;
+    let flush = |run: &mut Option<(String, u32, u32)>, out: &mut Vec<String>| {
+        if let Some((base, a, b)) = run.take() {
+            out.push(if b == a + 1 {
+                format!("{base}[{a}]")
+            } else {
+                format!("{base}[{a}..{b}]")
+            });
+        }
+    };
+    for r in refs {
+        match array_label(&r) {
+            Some((base, i)) => match &mut run {
+                Some((b, _, end)) if b == base && *end == i => *end = i + 1,
+                _ => {
+                    flush(&mut run, &mut out);
+                    run = Some((base.to_string(), i, i + 1));
+                }
+            },
+            None => {
+                flush(&mut run, &mut out);
+                out.push(r);
+            }
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+/// A chip's ports changed from `old` to `new` (the same chip, by id):
+/// make the wires on its placements, everywhere in `ws`, follow their
+/// ports. Pins are numbered in label order, so a port that was added,
+/// removed or renamed moves the others; each wire stays on the port of
+/// the label it was on. A wire whose port is gone or changed width is
+/// removed and returned as text.
+pub fn rebind_instances(
+    ws: &mut WorkspaceDocument,
+    old: &CircuitDocument,
+    new: &CircuitDocument,
+) -> Vec<String> {
+    /// Ports as `(label, width)`.
+    type Ports = Vec<(String, u8)>;
+    let ports = |doc: &CircuitDocument| -> (Ports, Ports) {
+        let (ins, outs) = doc.interface();
+        let port = |n: &&DocNode| {
+            (
+                n.label.clone().unwrap_or_default(),
+                n.kind.width().unwrap_or(1),
+            )
+        };
+        (
+            ins.iter().map(port).collect(),
+            outs.iter().map(port).collect(),
+        )
+    };
+    let (old_ports, new_ports) = (ports(old), ports(new));
+    if old_ports == new_ports {
+        return Vec::new();
+    }
+    // Old pin -> new pin, where the port is still there with its width.
+    let map = |old: &[(String, u8)], new: &[(String, u8)]| -> Vec<Option<u8>> {
+        old.iter()
+            .map(|port| new.iter().position(|p| p == port).map(|i| i as u8))
+            .collect()
+    };
+    let (in_map, out_map) = (
+        map(&old_ports.0, &new_ports.0),
+        map(&old_ports.1, &new_ports.1),
+    );
+    let chip = old.id;
+    let mut dropped = Vec::new();
+    let mut fix = |doc: &mut CircuitDocument| {
+        let instances: HashSet<Uuid> = doc
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, GateKind::SubCircuit { definition } if definition == chip))
+            .map(|n| n.id)
+            .collect();
+        if instances.is_empty() {
+            return false;
+        }
+        let label = |id: Uuid| {
+            doc.nodes
+                .iter()
+                .find(|n| n.id == id)
+                .and_then(|n| n.label.clone())
+                .unwrap_or_else(|| "?".into())
+        };
+        let mut gone = Vec::new();
+        let mut wires = std::mem::take(&mut doc.wires);
+        wires.retain_mut(|w| {
+            let mut keep = true;
+            if instances.contains(&w.to.node) {
+                match in_map.get(usize::from(w.to.pin)).copied().flatten() {
+                    Some(pin) => w.to.pin = pin,
+                    None => keep = false,
+                }
+            }
+            if instances.contains(&w.from.node) {
+                match out_map.get(usize::from(w.from.pin)).copied().flatten() {
+                    Some(pin) => w.from.pin = pin,
+                    None => keep = false,
+                }
+            }
+            if !keep {
+                gone.push((w.from.node, w.to.node));
+            }
+            keep
+        });
+        for (from, to) in gone {
+            dropped.push(format!(
+                "{} -> {} in \"{}\" (the port of \"{}\" is gone or changed width)",
+                label(from),
+                label(to),
+                doc.name,
+                old.name
+            ));
+        }
+        doc.wires = wires;
+        true
+    };
+    fix(&mut ws.root);
+    for def in ws.definitions.values_mut() {
+        if def.id != chip
+            && def.nodes.iter().any(
+                |n| matches!(n.kind, GateKind::SubCircuit { definition } if definition == chip),
+            )
+        {
+            fix(Arc::make_mut(def));
+        }
+    }
+    dropped
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -480,18 +788,38 @@ pub fn names_of(doc: &CircuitDocument, library: &CircuitLibrary) -> Names {
         }
     }
     for (base, elements) in arrays {
-        let whole = elements.keys().copied().eq(0..elements.len() as u32);
-        let nodes: Vec<&DocNode> = elements.into_values().collect();
-        let pins = library.pins(&nodes[0].kind);
-        let alike = nodes.iter().all(|n| library.pins(&n.kind) == pins);
-        if !whole || !alike || table.contains_key(base) || ambiguous.contains(base) {
+        let last = *elements.keys().next_back().expect("an array has elements");
+        let first = *elements.values().next().expect("an array has elements");
+        let pins = library.pins(&first.kind);
+        let alike = elements.values().all(|n| library.pins(&n.kind) == pins);
+        if last >= MAX_ARRAY || !alike || table.contains_key(base) || ambiguous.contains(base) {
             continue;
         }
-        let names: Vec<String> = (0..nodes.len()).map(|i| format!("{base}[{i}]")).collect();
-        for (n, name) in nodes.iter().zip(&names) {
-            reference.insert(n.id, name.clone());
-        }
-        table.insert(base.to_string(), entry(&nodes, names, true));
+        // Elements that were removed (or moved into a chip) leave gaps:
+        // the others keep their index, and a gap is an element with no
+        // part ([`Uuid::nil`]), refused when it is named.
+        let mut array = entry(&[first], vec![String::new()], true);
+        array.elements = (0..=last)
+            .map(|i| {
+                let name = format!("{base}[{i}]");
+                match elements.get(&i) {
+                    Some(n) => {
+                        reference.insert(n.id, name.clone());
+                        Element {
+                            id: n.id,
+                            name,
+                            pos: [n.x, n.y],
+                        }
+                    }
+                    None => Element {
+                        id: Uuid::nil(),
+                        name,
+                        pos: [0.0, 0.0],
+                    },
+                }
+            })
+            .collect();
+        table.insert(base.to_string(), array);
     }
     for n in &doc.nodes {
         let id = &ids[&n.id];
@@ -543,7 +871,18 @@ impl Names {
                 &entry.elements[a as usize..b as usize]
             }
         };
-        Ok(elements.iter().map(|e| e.id).collect())
+        // A whole array is the elements it still has; a gap named by
+        // index is an error.
+        if r.index.is_some()
+            && let Some(gap) = elements.iter().find(|e| e.id.is_nil())
+        {
+            return err(format!("\"{}\" is not there any more", gap.name));
+        }
+        Ok(elements
+            .iter()
+            .map(|e| e.id)
+            .filter(|id| !id.is_nil())
+            .collect())
     }
 }
 
@@ -563,6 +902,14 @@ fn strings(value: &Value, what: &str) -> Result<Vec<String>, SourceError> {
     }
 }
 
+/// The number of ops a group was given.
+fn group_ops(group: &Map<String, Value>) -> usize {
+    group
+        .get("ops")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len)
+}
+
 struct Group<'a> {
     doc: CircuitDocument,
     library: CircuitLibrary,
@@ -573,6 +920,10 @@ struct Group<'a> {
     used: RefCell<HashSet<Uuid>>,
     /// Parts waiting for the auto-layout.
     unplaced: HashSet<Uuid>,
+    /// The workspace's root id: the ids of new chips derive from it.
+    root_id: Uuid,
+    /// Chips made by the ops (`make_chip`, `expand`), for the workspace.
+    new_defs: Vec<Arc<CircuitDocument>>,
     /// Stored tests to set (by name) and names to remove (`None`: all).
     tests_set: Vec<Value>,
     tests_removed: Vec<Option<String>>,
@@ -625,6 +976,36 @@ fn apply_group(
             Place::Definition(id)
         }
     };
+    // `copy_of` as the first op starts a new chip as a copy of a circuit.
+    let mut ops = &ops[..];
+    if let Some(Value::Object(first)) = ops.first()
+        && let Some(source) = first.get("copy_of")
+    {
+        let Value::String(source) = source else {
+            return err("ops[0]: copy_of: takes the name of a circuit");
+        };
+        if !report.created || first.len() != 1 {
+            return err(format!(
+                "ops[0]: copy_of starts a new chip; \"{}\" exists already",
+                name.unwrap_or("main")
+            ));
+        }
+        let from = find_circuit(ws, Some(source))
+            .map_err(SourceError)?
+            .ok_or_else(|| SourceError(format!("ops[0]: copy_of: no circuit \"{source}\"")))?;
+        let Place::Definition(id) = place else {
+            unreachable!("a new circuit is a definition")
+        };
+        let mut copy = circuit_at(ws, from).clone();
+        copy.id = id;
+        copy.name = name.expect("a new circuit has a name").to_string();
+        copy.revision = 0;
+        report.parts_added = copy.nodes.len();
+        report.wires_added = copy.wires.len();
+        ws.definitions.insert(id, Arc::new(copy));
+        ops = &ops[1..];
+    }
+    let skipped = group_ops(group) - ops.len();
     let doc = circuit_at(ws, place).clone();
     report.circuit = match place {
         Place::Root => "main".to_string(),
@@ -657,13 +1038,15 @@ fn apply_group(
         externals,
         used: RefCell::new(used),
         unplaced: HashSet::new(),
+        root_id: ws.root.id,
+        new_defs: Vec::new(),
         tests_set: Vec::new(),
         tests_removed: Vec::new(),
         report,
     };
     for (oi, op) in ops.iter().enumerate() {
         g.op(op)
-            .context(format_args!("ops[{oi}]"))
+            .context(format_args!("ops[{}]", oi + skipped))
             .context(&context)?;
     }
     g.place_unplaced();
@@ -673,6 +1056,7 @@ fn apply_group(
         mut doc,
         library,
         mut report,
+        new_defs,
         tests_set,
         tests_removed,
         ..
@@ -683,6 +1067,9 @@ fn apply_group(
         doc.revision = before.revision + 1;
     }
     let circuit_id = doc.id;
+    for def in new_defs {
+        ws.definitions.insert(def.id, def);
+    }
     // Chips of the catalog that the circuit now uses become part of the
     // workspace.
     for (id, def) in library.reachable_from(&doc) {
@@ -691,6 +1078,10 @@ fn apply_group(
     match place {
         Place::Root => ws.root = doc,
         Place::Definition(id) => {
+            // Placements of the chip keep their wires on the same ports.
+            report
+                .dropped_wires
+                .extend(rebind_instances(ws, &before, &doc));
             ws.definitions.insert(id, Arc::new(doc));
         }
     }
@@ -787,6 +1178,9 @@ impl Group<'_> {
             "remove" => self.remove(arg),
             "set" => self.set(arg),
             "layout" => self.layout(arg),
+            "make_chip" => self.make_chip(arg),
+            "expand" => self.expand(arg),
+            "copy_of" => err("must be the first op of a new chip"),
             "tests" => match arg {
                 Value::Array(tests) => {
                     self.tests_set.extend(tests.iter().cloned());
@@ -810,8 +1204,8 @@ impl Group<'_> {
                 }
             },
             other => err(format!(
-                "unknown op \"{other}\" (ops: add, wire, unwire, remove, set, layout, tests, \
-                 remove_tests)"
+                "unknown op \"{other}\" (ops: add, wire, unwire, remove, set, layout, make_chip, \
+                 expand, copy_of, tests, remove_tests)"
             )),
         }
         .context(name)
@@ -883,19 +1277,20 @@ impl Group<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         let names = self.names();
         let plan = source::plan_wires(&names.table, &wires).map_err(|e| names.explain(e))?;
+        let driven: HashMap<(Uuid, u8), Uuid> = self
+            .doc
+            .wires
+            .iter()
+            .map(|w| ((w.to.node, w.to.pin), w.from.node))
+            .collect();
         for (node, pin) in &plan.sinks {
-            if let Some(w) = self
-                .doc
-                .wires
-                .iter()
-                .find(|w| w.to.node == *node && w.to.pin == *pin)
-            {
+            if let Some(from) = driven.get(&(*node, *pin)) {
                 let (_, pins) = self.pin_names(*node);
                 return err(format!(
                     "input \"{}\" of \"{}\" is already driven by \"{}\"; unwire it first",
                     pins.get(usize::from(*pin)).map_or("?", String::as_str),
                     names.reference[node],
-                    names.reference[&w.from.node],
+                    names.reference[from],
                 ));
             }
         }
@@ -1192,6 +1587,223 @@ impl Group<'_> {
                     self.unplaced.extend(names.parts(&text)?);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Register a chip the ops made, so later ops can use it.
+    fn define(&mut self, def: CircuitDocument) -> Uuid {
+        let def = Arc::new(def);
+        self.chips.entry(def.name.clone()).or_default().push(def.id);
+        self.library.definitions.insert(def.id, Arc::clone(&def));
+        self.new_defs.retain(|d| d.id != def.id);
+        let id = def.id;
+        self.new_defs.push(def);
+        id
+    }
+
+    /// The id for a new chip named `name`.
+    fn chip_id(&self, name: &str) -> Result<Uuid, SourceError> {
+        if !source::valid_name(name) {
+            return err(format!(
+                "a chip's name is letters, digits and '_', not \"{name}\""
+            ));
+        }
+        if self.chips.contains_key(name) {
+            return err(format!("a chip named \"{name}\" exists already"));
+        }
+        let id = source::item_id(self.root_id, &format!("circuit/{name}"));
+        if self.library.definitions.contains_key(&id) || id == self.doc.id {
+            return err(format!("cannot make chip \"{name}\": its id is taken"));
+        }
+        Ok(id)
+    }
+
+    /// `{"parts": [refs], "name": chip}`: the parts become a new chip
+    /// and are replaced by one instance of it, wired the same way
+    /// ([`crate::sim::chip::plan_chip`]).
+    fn make_chip(&mut self, arg: &Value) -> Result<(), SourceError> {
+        let (Some(parts), Some(Value::String(name))) = (arg.get("parts"), arg.get("name")) else {
+            return err("takes {\"parts\": [references], \"name\": chip name}");
+        };
+        let names = self.names();
+        let mut selection = HashSet::new();
+        for text in strings(parts, "parts")? {
+            selection.extend(names.parts(&text)?);
+        }
+        let def_id = self.chip_id(name)?;
+        if let Some(entry) = names.table.get(name.as_str())
+            && entry.elements.iter().any(|e| !selection.contains(&e.id))
+        {
+            return err(format!(
+                "a part is already labelled \"{name}\"; the chip's instance takes that label"
+            ));
+        }
+        let plan = plan_chip(&self.doc, &selection, name, &self.library).map_err(SourceError)?;
+
+        // The plan's new ids are random; derive them, so that the same
+        // request gives the same workspace.
+        let moved: HashSet<Uuid> = plan.moved.iter().copied().collect();
+        let mut def = plan.definition.clone();
+        def.id = def_id;
+        let (old_ins, old_outs) = {
+            let (i, o) = def.interface();
+            (
+                i.iter().map(|n| n.id).collect::<Vec<_>>(),
+                o.iter().map(|n| n.id).collect::<Vec<_>>(),
+            )
+        };
+        let mut remap: HashMap<Uuid, Uuid> = HashMap::new();
+        let mut taken: HashSet<String> = HashSet::new();
+        let mut ports = 0;
+        for node in &mut def.nodes {
+            if moved.contains(&node.id) {
+                continue;
+            }
+            // A port: a name for a label, unique among the ports.
+            let base = node
+                .label
+                .as_deref()
+                .and_then(as_name)
+                .unwrap_or_else(|| "p".into());
+            let mut label = base.clone();
+            let mut n = 2;
+            while !taken.insert(label.clone()) {
+                label = format!("{base}_{n}");
+                n += 1;
+            }
+            node.label = Some(label);
+            let id = source::item_id(def_id, &format!("port/{ports}"));
+            ports += 1;
+            remap.insert(node.id, id);
+            node.id = id;
+        }
+        let kept_wires: HashSet<Uuid> = self.doc.wires.iter().map(|w| w.id).collect();
+        for (k, wire) in def.wires.iter_mut().enumerate() {
+            if let Some(&id) = remap.get(&wire.from.node) {
+                wire.from.node = id;
+            }
+            if let Some(&id) = remap.get(&wire.to.node) {
+                wire.to.node = id;
+            }
+            if !kept_wires.contains(&wire.id) {
+                wire.id = source::item_id(def_id, &format!("wire/{k}"));
+            }
+        }
+        // Pins follow the ports' label order, which the renaming may
+        // have changed.
+        let (new_ins, new_outs) = {
+            let (i, o) = def.interface();
+            (
+                i.iter().map(|n| n.id).collect::<Vec<_>>(),
+                o.iter().map(|n| n.id).collect::<Vec<_>>(),
+            )
+        };
+        let repin = |old: &[Uuid], new: &[Uuid], pin: u8| -> u8 {
+            let port = remap[&old[usize::from(pin)]];
+            new.iter().position(|id| *id == port).expect("a port") as u8
+        };
+        let old_instance = plan.instance.id;
+        let mut instance = plan.instance.clone();
+        instance.id = fresh_id(&self.used, self.doc.id, &format!("node/{name}"));
+        instance.kind = GateKind::SubCircuit { definition: def_id };
+
+        let wires = self.doc.wires.len();
+        self.doc.nodes.retain(|n| !moved.contains(&n.id));
+        self.doc
+            .wires
+            .retain(|w| !plan.removed_wires.contains(&w.id));
+        self.report.wires_removed += wires - self.doc.wires.len();
+        for wire in &plan.new_wires {
+            let mut wire = wire.clone();
+            if wire.to.node == old_instance {
+                wire.to.node = instance.id;
+                wire.to.pin = repin(&old_ins, &new_ins, wire.to.pin);
+            } else {
+                wire.from.node = instance.id;
+                wire.from.pin = repin(&old_outs, &new_outs, wire.from.pin);
+            }
+            wire.id = fresh_id(
+                &self.used,
+                self.doc.id,
+                &format!("wire/{}/{}/{name}", wire.to.node, wire.to.pin),
+            );
+            self.doc.wires.push(wire);
+            self.report.wires_added += 1;
+        }
+        self.doc.nodes.push(instance);
+        self.unplaced.retain(|id| !moved.contains(id));
+        self.report.parts_removed += moved.len();
+        self.report.parts_added += 1;
+        self.define(def);
+        Ok(())
+    }
+
+    /// `true`, or references: word-level parts become instances of
+    /// their gate-level chips ([`chips::gate_chip`]), made on first use.
+    fn expand(&mut self, arg: &Value) -> Result<(), SourceError> {
+        let targets: Vec<Uuid> = match arg {
+            Value::Bool(true) => self
+                .doc
+                .nodes
+                .iter()
+                .filter(|n| chips::expandable(&n.kind))
+                .map(|n| n.id)
+                .collect(),
+            Value::Bool(false) => Vec::new(),
+            parts => {
+                let names = self.names();
+                let mut ids = Vec::new();
+                for text in strings(parts, "expand")? {
+                    ids.extend(names.parts(&text)?);
+                }
+                ids
+            }
+        };
+        for id in targets {
+            let node = self.doc.node(id).expect("named parts are in the document");
+            let kind = node.kind.clone();
+            if !chips::expandable(&kind) {
+                let what = match &kind {
+                    GateKind::SubCircuit { .. } => "chip".to_string(),
+                    k => k.display_name().to_string(),
+                };
+                return err(format!(
+                    "a {what} has no gate-level form (it is a gate, a memory, wiring or a chip \
+                     already)"
+                ));
+            }
+            let name = chips::gate_chip_name(&kind);
+            let def_id = match self.chips.get(&name).map(Vec::as_slice) {
+                Some([id]) => *id,
+                Some(_) => return err(format!("several chips are named \"{name}\"")),
+                None => {
+                    let def_id = self.chip_id(&name)?;
+                    let chip = chips::gate_chip(&kind, def_id).map_err(SourceError)?;
+                    self.define(chip)
+                }
+            };
+            let chip = Arc::clone(&self.library.definitions[&def_id]);
+            let (in_map, out_map) = chips::pin_maps(&kind, &chip);
+            for wire in &mut self.doc.wires {
+                if wire.to.node == id {
+                    wire.to.pin = in_map.get(usize::from(wire.to.pin)).copied().unwrap_or(0);
+                }
+                if wire.from.node == id {
+                    wire.from.pin = out_map
+                        .get(usize::from(wire.from.pin))
+                        .copied()
+                        .unwrap_or(0);
+                }
+            }
+            let node = self
+                .doc
+                .nodes
+                .iter_mut()
+                .find(|n| n.id == id)
+                .expect("checked above");
+            node.kind = GateKind::SubCircuit { definition: def_id };
+            self.report.expanded += 1;
         }
         Ok(())
     }

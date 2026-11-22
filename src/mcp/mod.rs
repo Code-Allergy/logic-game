@@ -18,6 +18,8 @@
 //! it.
 
 pub mod batch;
+pub mod chips;
+pub mod import;
 pub mod memfile;
 pub mod rig;
 pub mod run;

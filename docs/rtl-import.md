@@ -46,6 +46,11 @@ The files with several modules are imported one module at a time with
 
 ## Running the importer
 
+Through the MCP server, `import_rtl` does all of this in one call: it
+runs Yosys on a Verilog file (or takes the JSON), labels every part with
+its netlist name and opens the result as a workspace or adds the modules
+as chips (`docs/mcp-server.md`, "`import_rtl`"). By hand:
+
 ```sh
 cargo run --example rtl_import -- examples/rtl/top.json out.json          # version 6
 cargo run --example rtl_import -- in.json out.json --v5                   # version 5

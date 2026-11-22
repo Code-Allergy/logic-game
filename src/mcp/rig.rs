@@ -347,6 +347,9 @@ impl Rig {
             }
             Some(_) => return Err(format!("\"{text}\": no such element")),
         };
+        if let Some(gap) = elements.iter().find(|e| e.id.is_nil()) {
+            return Err(format!("\"{}\" is not there any more", gap.name));
+        }
         Ok(elements.iter().map(|e| e.id).collect())
     }
 

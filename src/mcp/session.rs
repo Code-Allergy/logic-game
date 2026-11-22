@@ -223,7 +223,8 @@ impl Session {
         }
     }
 
-    /// The `view` tool: `outline` (the default), `diagnostics`, `stats`.
+    /// The `view` tool: `outline` (the default), `diagnostics`, `stats`,
+    /// `groups`.
     pub fn view_tool(
         &self,
         circuit: Option<&str>,
@@ -254,8 +255,10 @@ impl Session {
             )),
             "diagnostics" => Ok(view::diagnostics(ws)),
             "stats" => Ok(view::stats(ws, doc)),
+            "groups" => Ok(view::groups(ws, doc)),
+            "status" => Ok(view::status(ws)),
             other => Err(format!(
-                "unknown view \"{other}\" (views: outline, diagnostics, stats)"
+                "unknown view \"{other}\" (views: outline, diagnostics, stats, groups, status)"
             )),
         }
     }
@@ -308,6 +311,70 @@ impl Session {
             self.generation += 1;
         }
         Ok(report.to_string())
+    }
+
+    /// The `import_rtl` tool: Verilog (`.v`, `.sv`; through Yosys) or a
+    /// Yosys JSON netlist. `into` is `"new"` (a new workspace named `name`
+    /// or after the top module) or `"open"` (the modules become chips of
+    /// the open workspace; with `replace`, chips of the same name are
+    /// replaced). The default is `"open"` when a workspace is open.
+    pub fn import_rtl_tool(
+        &mut self,
+        file: &Path,
+        top: Option<&str>,
+        name: Option<&str>,
+        into: Option<&str>,
+        replace: bool,
+        discard: bool,
+    ) -> Result<String, String> {
+        let into = into.unwrap_or(if self.open.is_some() { "open" } else { "new" });
+        if !matches!(into, "new" | "open") {
+            return Err(format!("\"into\" is \"new\" or \"open\", not \"{into}\""));
+        }
+        if into == "new" {
+            self.may_replace(discard)?;
+        } else {
+            self.opened()?;
+        }
+        let imported = super::import::file(file, top, name)?;
+        let mut out = String::new();
+        if into == "new" {
+            let name = self.store.unique_name(&imported.workspace.root.name);
+            let mut workspace = imported.workspace;
+            workspace.root.name = name.clone();
+            out.push_str(&format!(
+                "imported {} as new workspace \"{name}\" (not saved yet)\n{}",
+                file.display(),
+                view::status(&workspace)
+            ));
+            self.generation += 1;
+            self.open = Some(Open {
+                name,
+                workspace,
+                unsaved: true,
+            });
+        } else {
+            let open = self.open.as_mut().expect("checked above");
+            let mut workspace = open.workspace.clone();
+            let done = super::import::add_as_chips(&mut workspace, &imported.workspace, replace)?;
+            out.push_str(&format!(
+                "imported {} into \"{}\"\n",
+                file.display(),
+                open.name
+            ));
+            for line in done {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            out.push_str(&view::diagnostics(&workspace));
+            open.workspace = workspace;
+            open.unsaved = true;
+            self.generation += 1;
+        }
+        for warning in imported.warnings {
+            out.push_str(&format!("warning: {warning}\n"));
+        }
+        Ok(out)
     }
 
     /// The `test` tool: run the stored tests of one circuit, or of every

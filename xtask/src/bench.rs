@@ -69,6 +69,13 @@ pub const SUITES: &[Suite] = &[
         file: "perf/benches/frame.rs",
         about: "headless frame time: idle, drag, running CPU",
     },
+    Suite {
+        name: "mcp",
+        package: "perf",
+        bench: "mcp",
+        file: "perf/benches/mcp.rs",
+        about: "MCP document tools on 10,000 parts: build, edit, outline, make chip, expand, test",
+    },
 ];
 
 /// What to run.

@@ -402,6 +402,42 @@ impl GateKind {
         })
     }
 
+    /// The editor kind of a simulator kind, for the kinds a gate-level
+    /// expansion is made of (`crate::mcp::chips`): ports, constants, the
+    /// bitwise gates, `Mux`, `Split`, `Merge` and the one-word state
+    /// elements. `None` for the others.
+    pub fn from_netlist(kind: &NodeKind) -> Option<Self> {
+        use GateKind as G;
+        Some(match kind {
+            NodeKind::Input { w } => G::Input { w: *w },
+            NodeKind::Output { w } => G::Output { w: *w },
+            NodeKind::Const { w, value } => G::Const {
+                w: *w,
+                value: *value,
+            },
+            NodeKind::Not { w } => G::Not { w: *w },
+            NodeKind::And { w } => G::And { w: *w },
+            NodeKind::Or { w } => G::Or { w: *w },
+            NodeKind::Xor { w } => G::Xor { w: *w },
+            NodeKind::Nand { w } => G::Nand { w: *w },
+            NodeKind::Nor { w } => G::Nor { w: *w },
+            NodeKind::Xnor { w } => G::Xnor { w: *w },
+            NodeKind::Mux { w } => G::Mux { w: *w },
+            NodeKind::Split { w, lo, len } => G::Split {
+                w: *w,
+                lo: *lo,
+                len: *len,
+            },
+            NodeKind::Merge { widths } => G::Merge {
+                widths: widths.iter().copied().collect(),
+            },
+            NodeKind::Delay { w } => G::Delay { w: *w },
+            NodeKind::Register { w } => G::Register { w: *w },
+            NodeKind::DLatch { w } => G::DLatch { w: *w },
+            _ => return None,
+        })
+    }
+
     /// Check the kind's parameters. Subcircuits are checked when the bridge
     /// builds their definition.
     pub fn check(&self) -> Result<(), String> {

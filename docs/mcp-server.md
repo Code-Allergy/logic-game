@@ -1,8 +1,9 @@
 # MCP server
 
-Status: design agreed (#104). Milestones 1 (#122) and 2 (#123) are
-implemented: the batch editor, the views, stored tests, experiment
-scripts, the `workspace`, `view`, `edit`, `test` and `run` tools and the
+Status: design agreed (#104). Milestones 1 (#122), 2 (#123) and 3 (#124)
+are implemented: the batch editor with chips and gate-level expansion,
+the views, stored tests, experiment scripts, Verilog import, the
+`workspace`, `view`, `edit`, `test`, `run` and `import_rtl` tools and the
 `gatequest-mcp` program. Each section says which milestone it belongs to;
 "Running it" and "Where milestone 1 stands" are at the end.
 
@@ -134,7 +135,7 @@ Seven tools in the first stage. Each takes its bulk argument inline or as
 | Tool | Tier | Milestone | Does |
 |---|---|---|---|
 | `workspace` | document | 1 | `list`, `open`, `new`, `save`, `status`, `demos`, `open_demo` |
-| `view` | document | 1 | Text views of a circuit: outline, diagnostics, stats |
+| `view` | document | 1 | Text views of a circuit: outline, diagnostics, stats, groups |
 | `edit` | document | 1 | Apply a batch of operations atomically |
 | `test` | document | 2 | Run stored tests of one chip or the whole workspace |
 | `run` | document | 2 | Run an experiment script on a private simulation |
@@ -171,7 +172,8 @@ whose name or kind starts with it.
 
 `diagnostics` gives the build result, the inputs nothing drives and the
 layout advisory. `stats` gives part counts by kind and the flattened
-size.
+size. `groups` lists the parts that would make chips ("Auto-layout",
+below).
 
 ### `edit`
 
@@ -214,9 +216,35 @@ demos are examples of the syntax and one parser serves both. Differences:
 | `remove` | Parts by reference, with their wires. |
 | `set` | `{"part": ref, …parameters, "label": …, "at": …, "use": …}`, or an array of these: change parameters, the label, the position or (for a chip) the definition. Each entry is checked when it is applied: wires to pins that no longer exist or whose width no longer matches the other end are removed and reported. To change the width of a whole path, remove and add. |
 | `layout` | Lay out the circuit again, or only the parts named. |
-| `make_chip` (3) | `{"parts": [refs], "name": …}`: the editor's "make chip" (`sim/chip.rs`). |
-| `expand` (3) | `{"part": ref}` or `{"circuit": name, "as": name}`: a gate-level copy of a word-level part or chip (`logi_sim::testkit::bitblast`, made hierarchical), as an editable chip. |
-| `tests` (2) | Set the chip's stored tests. |
+| `make_chip` (3) | `{"parts": [refs], "name": chip}`: the parts become a new chip and are replaced by one instance of it, wired the same way (the editor's "make chip", `sim/chip.rs`). Ports are named after what they connect to. |
+| `copy_of` (3) | `"circuit name"`, as the first op of a chip that does not exist yet: the chip starts as a copy of that circuit. |
+| `expand` (3) | References, or `true` for every part of the circuit that has one: a word-level part is replaced by an instance of its gate-level chip (below). |
+| `tests`, `remove_tests` (2) | Set stored tests (by name), or remove them. |
+
+**Gate-level chips.** `expand` turns an 8-bit `Add` into an instance of
+the chip `Add_8_gates`: a ripple-carry adder of `Xor`, `And` and `Or`
+gates between ports named after the part's pins. The chip is made on
+first use (`logi_sim::testkit::bitblast` on that one part, read back as
+a circuit and laid out, `mcp/chips.rs`), is shared by every part of that
+kind and width, and is an ordinary chip that can be opened, edited and
+tested. Word-wide gates, `Mux`, `Switch`, `Add`, `Eq`, `LtU`, the
+reductions and `Delay`, `Register` and `DLatch` have one; 1-bit gates,
+memories, wiring and chips do not. To get the gate-level form of a whole
+chip and keep the original as its reference:
+
+```json
+{"circuit": "alu_gates", "ops": [
+  {"copy_of": "alu"},
+  {"expand": true},
+  {"tests": [{"name": "same as alu", "equivalent": {"to": "alu"}}]}
+]}
+```
+
+**A chip's ports.** Pins of a placed chip are numbered in the order of
+its port labels, so adding, removing or renaming a port moves the
+others. When an edit (or a replacing import) changes a chip's ports,
+every wire on its placements stays on the port of the same label; a wire
+whose port is gone or changed width is removed and reported.
 
 A call may hold several `{circuit, ops}` groups (`"edits": […]`), applied
 in order; a circuit that does not exist is created as a definition.
@@ -362,13 +390,27 @@ relative to the server's working directory.
 
 ### `import_rtl` (milestone 3)
 
-`import_rtl {file | text, top, into}` takes Verilog or Yosys JSON
-(`docs/rtl-import.md`). For Verilog the server runs the `yosys` on
-`PATH` with the script of that document (`memory -nomap` added when the
-design has memories) and says so plainly when it is missing; the Nix
-flake provides it. `into` is a new workspace, or the open one, where the
-modules become chips (an existing chip of the same name is replaced only
-with `replace`). CI tests use checked-in JSON and never need Yosys.
+`import_rtl {file, top, into, name, replace}` takes a Verilog file
+(`.v`, `.sv`) or a Yosys JSON netlist (`docs/rtl-import.md`). For
+Verilog the server runs the `yosys` on `PATH`:
+
+```
+read_verilog -sv <file>; hierarchy -check -top <top>; proc; opt; memory -nomap; opt; write_json
+```
+
+(`-auto-top` without `top`). A missing Yosys is said plainly, with the
+command to run by hand; a Verilog error comes back as Yosys wrote it.
+The Nix flake provides Yosys. Tests that need it skip themselves where
+it is not installed; the others use the checked-in JSON.
+
+Each module becomes a circuit of word-level parts, laid out
+automatically, and every part is labelled with its name in the netlist,
+so its signals can be read by path. With `into: "new"` (the default when
+no workspace is open) the top module is the root of a new workspace.
+With `into: "open"` every module, the top one too, becomes a chip of the
+open workspace; a chip that has the name of a module is an error, or
+with `replace` is replaced in place, its placements keeping their wires
+by port name.
 
 The intended loop for a large design: write the reference in Verilog,
 import it as `x_ref`, build `x` from gates and smaller chips, store an
@@ -382,9 +424,20 @@ beside the existing ones; `layout` redoes a whole circuit.
 
 A layered layout of one flat circuit stops being readable long before it
 stops being correct. Every edit report and `view diagnostics` carries an
-advisory when a circuit passes **150 parts**: its size, and the largest
-groups of parts that connect to the rest through few wires, as
-candidates for `make_chip`. It is advice; nothing is refused.
+advisory when a circuit passes **150 parts**: its size, and how many
+groups of its parts would make chips. `view {"what": "groups"}` lists
+them, each as the references a `make_chip` takes:
+
+```
+group 1: 50 parts, 2 nets crossing
+  ["p[0..50]"]
+```
+
+A group is a set of parts connected to each other when the ports and
+the widely used signals (an output that goes to more than eight parts: a
+bus, a control line) are left out, of at least six parts and at most 70%
+of the circuit. A circuit that is one tangle has none and is split by
+function instead. It is advice; nothing is refused.
 
 Routing is the editor's job and happens only in the game host.
 
@@ -425,9 +478,9 @@ op is the server's hook into the same expansion.
    over stdio; tests through an in-process client.
 2. **Testing.** Stored tests and the save format addition; `test`;
    `run` with sessions, traces, compare, snapshots and memory loading.
-3. **Scale.** `import_rtl` with Yosys; `make_chip`; `expand`; the layout
-   advisory's grouping; a benchmark of `apply` and `view` on a
-   10,000-part workspace in `perf/`.
+3. **Scale.** `import_rtl` with Yosys; `make_chip`, `copy_of` and
+   `expand`; wires that follow a chip's ports; the layout advisory's
+   groups; the `mcp` benchmark suite on a 10,000-part circuit in `perf/`.
 4. **The game as host.** `--mcp`, the exclusive system, edits by
    difference as undo steps, `transport`, `app state`.
 
@@ -454,6 +507,7 @@ it away from real workspaces. For Claude Code, in `.mcp.json`:
 ```
 
 The code is in `src/mcp/`: `batch.rs` (the edit function), `view.rs`,
+`chips.rs` (gate-level chips), `import.rs` (Verilog and netlists),
 `testing.rs` (stored tests), `rig.rs` (a private simulation with signals
 by name), `run.rs` (experiment scripts), `memfile.rs` (memory files),
 `session.rs` (the tools as plain functions on one open workspace) and
@@ -462,7 +516,7 @@ need the `mcp` feature.
 
 ## Where milestone 1 stands
 
-Done: everything listed under milestones 1 and 2 below. Known gaps, to
+Done: everything listed under milestones 1, 2 and 3 below. Known gaps, to
 close in later milestones:
 
 - A combinational loop is reported with the simulator's node ids, not
@@ -477,6 +531,10 @@ close in later milestones:
   served yet.
 - New parts in a placed circuit are laid out as one block below it;
   they are not fitted near the parts they connect to.
+- `expand` works one circuit at a time: the chips placed in it are not
+  expanded with it (run it in each).
+- A gate-level chip is flat: a 64-bit adder is one circuit of 320 gates,
+  above the size the layout advice asks for.
 
 ## Testing the server
 

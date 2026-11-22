@@ -74,6 +74,7 @@ integer additions per settle.)
 | app | `history/undo_redo/cpu16` | undo + redo of one step |
 | app | `challenges/check/adder8` | the Check of a challenge |
 | app | `chip/plan/<id>` | `plan_chip` of every part of a root circuit |
+| mcp | `mcp/{build,edit,outline,make_chip,expand,test}` | the MCP server's document tools on one circuit of 10,000 parts (`src/mcp`): the request that makes it, a small edit, its outline, a chip of 1,000 of its parts, a 64-bit adder expanded to gates, a stored test |
 | frame | `frame/idle/<id>` | one `App::update` of a large circuit, paused |
 | frame | `frame/drag/cpu16` | a frame while dragging a part |
 | frame | `frame/running/{cpu16,cpu16_rtl}` | a frame while the CPU runs unlimited on the worker thread |

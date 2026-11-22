@@ -958,6 +958,14 @@ pub(crate) fn resolve<'e>(
             &entry.elements[a as usize..b as usize]
         }
     };
+    // An array named by the batch editor may have gaps where elements
+    // were removed (see `crate::mcp::batch::names_of`).
+    if let Some(gap) = elements.iter().find(|e| e.id.is_nil()) {
+        return err(format!(
+            "\"{}\" is not there any more; name the elements that are",
+            gap.name
+        ));
+    }
     let pin = find_pin(entry, r.node, r.pin, dir)?;
     let width = match dir {
         Dir::Out => entry.outputs.0[usize::from(pin)],

@@ -40,7 +40,8 @@ pub struct WorkspaceArgs {
 pub struct ViewArgs {
     /// The circuit: a chip's name, or leave out for the root ("main").
     pub circuit: Option<String>,
-    /// One of: outline (default), diagnostics, stats.
+    /// One of: outline (default), diagnostics, stats, groups (parts that
+    /// would make chips, as lists for make_chip).
     pub what: Option<String>,
     /// Outline: only parts whose name or kind starts with this.
     pub filter: Option<String>,
@@ -69,6 +70,25 @@ pub struct EditArgs {
     pub file: Option<String>,
     /// Report what would change, and change nothing.
     pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ImportArgs {
+    /// A Verilog file (.v, .sv: read with Yosys, which must be on PATH)
+    /// or a Yosys JSON netlist.
+    pub file: String,
+    /// The top module. Left out: the one no other module uses.
+    pub top: Option<String>,
+    /// "open": the modules become chips of the open workspace (the
+    /// default when one is open). "new": a new workspace.
+    pub into: Option<String>,
+    /// For "new": the workspace's name (default: the top module's).
+    pub name: Option<String>,
+    /// For "open": replace chips that have the name of an imported
+    /// module. Their placements keep their wires, by port name.
+    pub replace: Option<bool>,
+    /// For "new": drop the unsaved changes of the open workspace.
+    pub discard: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -176,6 +196,23 @@ impl Server {
         let file = args.file.map(PathBuf::from);
         self.session()
             .edit_tool(request, file.as_deref(), args.dry_run.unwrap_or(false))
+    }
+
+    #[tool(
+        description = "Import Verilog (through Yosys) or a Yosys JSON netlist: each module \
+                       becomes a chip of word-level parts, laid out automatically. Use an \
+                       imported chip as the reference a gate-level chip is tested against \
+                       (a stored test {\"equivalent\": {\"to\": chip}})."
+    )]
+    fn import_rtl(&self, Parameters(args): Parameters<ImportArgs>) -> Result<String, String> {
+        self.session().import_rtl_tool(
+            std::path::Path::new(&args.file),
+            args.top.as_deref(),
+            args.name.as_deref(),
+            args.into.as_deref(),
+            args.replace.unwrap_or(false),
+            args.discard.unwrap_or(false),
+        )
     }
 
     #[tool(

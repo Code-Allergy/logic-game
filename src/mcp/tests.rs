@@ -1,5 +1,6 @@
 //! Tests of the batch editor and the views.
 
+mod chips;
 mod sim;
 
 use std::sync::Arc;
@@ -42,54 +43,56 @@ fn sim(ws: &WorkspaceDocument) -> Sim {
 
 /// A half adder chip, a full adder chip of two, and an 8-bit adder of
 /// eight full adders as the root.
-pub(super) fn adder8() -> WorkspaceDocument {
-    let (ws, report) = edit(
-        &empty(),
-        json!({"edits": [
-            {"circuit": "half_adder", "ops": [
-                {"add": [
-                    {"name": "A", "type": "Input"},
-                    {"name": "B", "type": "Input"},
-                    {"name": "x", "type": "Xor"},
-                    {"name": "c", "type": "And"},
-                    {"name": "Sum", "type": "Output"},
-                    {"name": "Carry", "type": "Output"}
-                ]},
-                {"wire": [["A", "x.a", "c.a"], ["B", "x.b", "c.b"], ["x", "Sum"], ["c", "Carry"]]}
+/// The request that builds [`adder8`].
+pub(super) fn adder8_request() -> Value {
+    json!({"edits": [
+        {"circuit": "half_adder", "ops": [
+            {"add": [
+                {"name": "A", "type": "Input"},
+                {"name": "B", "type": "Input"},
+                {"name": "x", "type": "Xor"},
+                {"name": "c", "type": "And"},
+                {"name": "Sum", "type": "Output"},
+                {"name": "Carry", "type": "Output"}
             ]},
-            {"circuit": "full_adder", "ops": [
-                {"add": [
-                    {"name": "A", "type": "Input"},
-                    {"name": "B", "type": "Input"},
-                    {"name": "Cin", "type": "Input"},
-                    {"name": "h1", "use": "half_adder"},
-                    {"name": "h2", "use": "half_adder"},
-                    {"name": "carry", "type": "Or"},
-                    {"name": "Sum", "type": "Output"},
-                    {"name": "Cout", "type": "Output"}
-                ]},
-                {"wire": [
-                    ["A", "h1.A"], ["B", "h1.B"], ["h1.Sum", "h2.A"], ["Cin", "h2.B"],
-                    ["h2.Sum", "Sum"], ["h1.Carry", "carry.a"], ["h2.Carry", "carry.b"],
-                    ["carry", "Cout"]
-                ]}
+            {"wire": [["A", "x.a", "c.a"], ["B", "x.b", "c.b"], ["x", "Sum"], ["c", "Carry"]]}
+        ]},
+        {"circuit": "full_adder", "ops": [
+            {"add": [
+                {"name": "A", "type": "Input"},
+                {"name": "B", "type": "Input"},
+                {"name": "Cin", "type": "Input"},
+                {"name": "h1", "use": "half_adder"},
+                {"name": "h2", "use": "half_adder"},
+                {"name": "carry", "type": "Or"},
+                {"name": "Sum", "type": "Output"},
+                {"name": "Cout", "type": "Output"}
             ]},
-            {"ops": [
-                {"add": [
-                    {"name": "A", "type": "Input", "w": 8},
-                    {"name": "B", "type": "Input", "w": 8},
-                    {"name": "Cin", "type": "Input"},
-                    {"name": "fa", "use": "full_adder", "count": 8},
-                    {"name": "Sum", "type": "Output", "w": 8},
-                    {"name": "Cout", "type": "Output"}
-                ]},
-                {"wire": [
-                    ["A", "fa.A"], ["B", "fa.B"], ["Cin", "fa[0].Cin"],
-                    ["fa[0..7].Cout", "fa[1..8].Cin"], ["fa.Sum", "Sum"], ["fa[7].Cout", "Cout"]
-                ]}
+            {"wire": [
+                ["A", "h1.A"], ["B", "h1.B"], ["h1.Sum", "h2.A"], ["Cin", "h2.B"],
+                ["h2.Sum", "Sum"], ["h1.Carry", "carry.a"], ["h2.Carry", "carry.b"],
+                ["carry", "Cout"]
             ]}
-        ]}),
-    );
+        ]},
+        {"ops": [
+            {"add": [
+                {"name": "A", "type": "Input", "w": 8},
+                {"name": "B", "type": "Input", "w": 8},
+                {"name": "Cin", "type": "Input"},
+                {"name": "fa", "use": "full_adder", "count": 8},
+                {"name": "Sum", "type": "Output", "w": 8},
+                {"name": "Cout", "type": "Output"}
+            ]},
+            {"wire": [
+                ["A", "fa.A"], ["B", "fa.B"], ["Cin", "fa[0].Cin"],
+                ["fa[0..7].Cout", "fa[1..8].Cin"], ["fa.Sum", "Sum"], ["fa[7].Cout", "Cout"]
+            ]}
+        ]}
+    ]})
+}
+
+pub(super) fn adder8() -> WorkspaceDocument {
+    let (ws, report) = edit(&empty(), adder8_request());
     // Eight full adders of 18 parts, five ports and 17 adapters.
     assert_eq!(report.build, Ok(8 * (2 * 6 + 6) + 5 + 17), "{report}");
     ws
@@ -676,7 +679,10 @@ mod protocol {
                 .map(|t| t.name.to_string())
                 .collect();
             tools.sort();
-            assert_eq!(tools, ["edit", "run", "test", "view", "workspace"]);
+            assert_eq!(
+                tools,
+                ["edit", "import_rtl", "run", "test", "view", "workspace"]
+            );
 
             let call = |name: &'static str, args: Value| {
                 let Value::Object(args) = args else {

@@ -59,6 +59,8 @@
             pkgs.libXi
             pkgs.libxkbcommon
             pkgs.trunk
+            # Verilog import through the MCP server (docs/mcp-server.md).
+            pkgs.yosys
             pkgs.wayland
             pkgs.vulkan-loader
           ];

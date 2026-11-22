@@ -365,7 +365,18 @@ impl SuiteReport {
             chips.len()
         );
         if !self.untested.is_empty() {
-            let _ = writeln!(out, "no tests: {}", self.untested.join(", "));
+            let shown: Vec<&str> = self.untested.iter().take(12).map(String::as_str).collect();
+            let more = self.untested.len() - shown.len();
+            let _ = writeln!(
+                out,
+                "no tests: {}{}",
+                shown.join(", "),
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            );
         }
         out
     }

@@ -337,6 +337,49 @@ pub fn diagnostics(ws: &WorkspaceDocument) -> String {
     out
 }
 
+/// The groups of parts of `doc` that would make chips
+/// ([`batch::groups`]), each as the references a `make_chip` takes.
+pub fn groups(ws: &WorkspaceDocument, doc: &CircuitDocument) -> String {
+    let library = library_of(ws);
+    let names = names_of(doc, &library);
+    let groups = batch::groups(doc);
+    let mut out = format!(
+        "\"{}\": {} parts; {} group(s) that would make chips\n",
+        if doc.id == ws.root.id {
+            "main"
+        } else {
+            &doc.name
+        },
+        doc.nodes.len(),
+        groups.len()
+    );
+    if groups.is_empty() {
+        out.push_str(
+            "no part of it hangs together apart from the rest; split it by function instead\n",
+        );
+    }
+    for (i, group) in groups.iter().take(12).enumerate() {
+        let refs: Vec<String> = group
+            .parts
+            .iter()
+            .map(|id| names.reference[id].clone())
+            .collect();
+        let refs = batch::compress_refs(refs);
+        let _ = writeln!(
+            out,
+            "group {}: {} parts, {} nets crossing\n  {}",
+            i + 1,
+            group.parts.len(),
+            group.crossing,
+            serde_json::to_string(&refs).unwrap_or_default()
+        );
+    }
+    if groups.len() > 12 {
+        let _ = writeln!(out, "... {} smaller groups", groups.len() - 12);
+    }
+    out
+}
+
 /// Part counts by kind, of one circuit and flattened.
 pub fn stats(ws: &WorkspaceDocument, doc: &CircuitDocument) -> String {
     let library = library_of(ws);
