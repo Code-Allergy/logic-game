@@ -1,9 +1,15 @@
 name: Benchmarks
 
+# Benchmarks build all of Bevy with LTO and take a long time, so they run only
+# on main and by hand (Actions tab → Benchmarks → Run workflow).
 on:
   push:
-    branches: ["*"]
-  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   benchmark:

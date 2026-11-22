@@ -1,14 +1,99 @@
 name: CI
 
+# What runs when (we have 20 concurrent runners; keep everyday pushes cheap):
+# - push to any branch except main: lint (fmt + clippy), 1 runner
+# - pull request into any branch except main: tests + doc tests on Linux,
+#   1 runner (lint already ran on the push of the same commit)
+# - pull request into main: lint, tests + doc tests on Linux, and tests on
+#   Windows and macOS, 4 runners
+# - push to main, manual run: the same 4 jobs
+# A newer push to the same branch or PR cancels its older, still-running jobs
+# (except on main, where every commit gets a full run).
+
 on:
-  pull_request:
   push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  lint:
+    # Pushes, manual runs, pull requests into main, and pull requests from
+    # forks (which run no push jobs here).
+    if: >-
+      github.event_name == 'push'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+          && (github.event.pull_request.head.repo.fork || github.base_ref == 'main'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-cargo-lint-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ubuntu-latest-cargo-lint-
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Install alsa and udev
+        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
+      - name: Check format
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -Dwarnings
+
+  test-linux:
+    # Every pull request, pushes to main, and manual runs.
+    if: >-
+      github.event_name == 'pull_request'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: Linux-cargo-test-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: Linux-cargo-test-
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install alsa and udev
+        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
+      - name: Build & run tests
+        run: cargo test --all-targets --all-features --workspace
+      - name: Run doc tests (this also compiles README examples)
+        run: cargo test --doc --all-features
+
+  test-other-os:
+    # Windows and macOS: pull requests into main, pushes to main, manual runs.
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main')
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
+      fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -20,55 +105,10 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-      - name: Install alsa and udev
-        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
-        if: runner.os == 'linux'
       - name: Build & run tests
         run: cargo test --all-targets --all-features --workspace
-  all-doc-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ubuntu-latest-cargo-all-doc-tests-${{ hashFiles('**/Cargo.toml') }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-      - name: Install alsa and udev
-        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
-      - name: Run doc tests with all features (this also compiles README examples)
-        run: cargo test --doc --all-features
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ubuntu-latest-cargo-lint-${{ hashFiles('**/Cargo.toml') }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-      - name: Install alsa and udev
-        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -Dwarnings
-      - name: Check format
-        run: cargo fmt --all -- --check
