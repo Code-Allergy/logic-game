@@ -69,7 +69,10 @@ the wheel zooms about the cursor.
 [--fit] [--definition NAME]` saves a screenshot of a demo, a gallery item
 (or `empty`, a new workspace, or `loop`, a build error) or a version 6
 file (optionally one of its definitions); `--map [--opened ID,ID,...]
-[--level N]` shows the demo map instead, with that progress (in memory).
+[--level N]` shows the demo map instead, with that progress (in memory);
+`--completed ID,...` marks challenges done. `--challenge ID` opens a
+challenge (the first argument `-` for its starter, or a circuit file in its
+place) and `--check` presses Check.
 
 ## The demo map
 
@@ -86,15 +89,37 @@ returns to the editor. The app still starts on the title menu.
 - The level panel shows the level's description (`levels[].description`
   in the manifest) and its demos with thumbnails drawn from the circuit,
   a visited box (click to tick or clear), "Open" and "Copy to my
-  workshop".
+  workshop". Below them, its **challenges** (see below).
 - The gallery shelf filters by category; click a card to open it.
 
 Opened demos are recorded whenever a demo or gallery item is open, however
-it was opened. Native builds keep the record in
-`workspaces/.demo-progress.json` (`{"format": "gatequest-progress",
-"version": 1, "opened": [...], "last": "..."}`, written atomically; hidden
-files are not listed as workspaces). The web build keeps it in memory for
-the session.
+it was opened, and so are passed challenges. Native builds keep the record
+in `workspaces/.demo-progress.json` (`{"format": "gatequest-progress",
+"version": 2, "opened": [...], "last": "...", "completed": [...]}`, written
+atomically; version 1 files still load; hidden files are not listed as
+workspaces). The web build keeps it in memory for the session.
+
+### Challenges
+
+Levels 1 to 7 each have one or two build-it challenges (eleven in all:
+AND and XOR from NAND only, a half and a full adder, an 8-bit adder, a
+multiplexer and a 2-to-4 decoder, an SR latch, a D latch, a 4-bit
+register and a 4-bit counter). They are listed in the level panel under
+the demos and in the Library; a stop with challenges wears a "done/total"
+pill, and the progress card counts them.
+
+"Build it" opens the challenge as your own editable workspace, named
+`<title> (challenge)`, with its input and output ports placed and
+labelled (or your saved work for it, if you saved or quit before). The
+challenge card under the file card shows the brief and the parts rule;
+parts outside the rule are greyed out in the parts bar. **Check** tests
+the circuit on a separate simulation, so it is instant and leaves the
+running one alone, and shows "Passed" or the first failing case: its
+inputs, the expected outputs and what the circuit gave (or a part that is
+not allowed, a missing port, a loop). A pass ticks the challenge on the
+map. "Start over" (click twice) goes back to the bare ports. Challenges
+are defined in `assets/demos/manifest.json` with a starter file each; see
+[docs/save-format.md](docs/save-format.md#challenges).
 
 ## Documentation
 
