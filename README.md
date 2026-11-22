@@ -34,10 +34,13 @@ For example `cargo run -p gate_quest --features dev`, or
 The canvas and panels use the "Studio Workshop" design: chunky tiles with
 an ink outline and a solid bottom edge, cased wires (an ink casing around a
 coloured core; marigold for on, slate for off, teal for buses with a value
-pill), on a dot-grid bench. Every colour comes from the `Theme` resource
+pill), on a dot-grid bench. Wires are routed on the grid in horizontal and
+vertical runs with rounded corners, a dot where a net branches and a gap
+where one wire passes over another (`src/sim/routing.rs`). Every colour comes from the `Theme` resource
 (`src/theme.rs`), with a day and a night palette; press `T` or use the
 Day/Night card to switch. `cargo run --example screenshot -- <id> out.png
-[--night]` saves a screenshot of a demo or gallery item.
+[--night] [--fit] [--definition NAME]` saves a screenshot of a demo, a
+gallery item or a version 6 file (optionally one of its definitions).
 
 ## Documentation
 
@@ -80,7 +83,7 @@ its twin of word primitives). See `docs/save-format.md` ("Gallery").
 `cargo run --example demo_fmt` rewrites the demo and gallery files in
 canonical form (`-- --check` checks them); `cargo run --example
 render_svg -- <id>` draws SVG previews of a demo's or gallery item's
-circuits.
+circuits (`--ortho` routes the wires as the editor does).
 
 ## Credits
 
