@@ -1,0 +1,18 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "main",
+      "title": "Half adder",
+      "nodes": [
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "Sum", "type": "Output", "at": [480, 40]},
+        {"name": "Carry", "type": "Output", "at": [480, -40]}
+      ],
+      "wires": []
+    }
+  ]
+}

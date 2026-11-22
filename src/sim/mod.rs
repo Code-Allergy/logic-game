@@ -10,6 +10,8 @@
 //! - [`source`] – save format version 6, the hand-editable authoring form
 //!   (names, arrays, bus wiring), and its expansion into documents.
 //! - [`demos`] – the built-in demos, loaded from `assets/demos/`.
+//! - [`challenges`] – the build-it challenges on the demo road and their
+//!   checks.
 //! - [`rtl`] – RTL import: a Yosys JSON netlist becomes a workspace.
 //! - [`netlist`] – a workspace as a `logi_sim` design, for simulating it
 //!   without the app (tests, benchmarks).
@@ -37,6 +39,7 @@ mod tests;
 pub mod art;
 pub mod authoring;
 pub mod bridge;
+pub mod challenges;
 pub mod demos;
 pub mod document;
 pub mod kind;

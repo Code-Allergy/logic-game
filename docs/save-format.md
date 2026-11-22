@@ -438,7 +438,78 @@ edits show up after a restart without a rebuild; if those files do not
 load, the embedded copies are used and a warning is logged. To add a demo,
 write its file, add it to the manifest and to the `embed!` list, and run
 `cargo run --example demo_fmt`; the tests check that the folder, the
-embedded list and the manifest agree.
+embedded list and the manifest agree (challenge starters included).
+
+### Challenges
+
+The demo manifest may list build-it challenges under `"challenges"`
+(optional: a manifest without them still loads). Each is a task on the
+road: a brief, a starter workspace with the ports already placed and
+labelled, the parts the player may use, and a test the editor's **Check**
+runs on the player's circuit.
+
+```json
+"challenges": [
+  {
+    "id": "xor_from_nand",
+    "level": 1,
+    "title": "XOR from NAND",
+    "brief": "Build XOR using only NAND gates: …",
+    "allowed": ["Nand"],
+    "test": {"table": {"inputs": ["A", "B"], "outputs": ["Y"],
+                       "rows": [[0, 0, 0], [0, 1, 1], [1, 0, 1], [1, 1, 0]]}}
+  },
+  {
+    "id": "adder8",
+    "level": 3,
+    "title": "Build an 8-bit adder",
+    "brief": "…",
+    "forbidden": ["Add", "ripple_adder/adder8"],
+    "test": {"formula": {"expect": {"Sum": "A + B + Cin", "Cout": "(A + B + Cin) >> 8"},
+                         "samples": 300, "seed": 95}}
+  },
+  …
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | The challenge's id (its own namespace; progress records it). Its starter is the version 6 file `challenge_<id>.json` beside the demos, whose ids derive from the key `challenges/<id>`. |
+| `level` | The stop it belongs to. |
+| `title`, `brief` | Shown on the road and in the editor's challenge card. |
+| `allowed` | Optional. The only primitive `type`s the circuit may use besides `Input`, `Output` and `Display`. |
+| `forbidden` | Optional. Primitive `type`s, and `"demo/circuit"` definitions (a demo placed as a chip that would be the answer), it must not use. |
+| `uses` | As for demos: the `"demo/circuit"` references in the starter file (usually none). |
+| `test` | One of `table`, `formula` or `sequence`, below. |
+
+The rules apply to the whole circuit: chips (subcircuits, demos, saved
+workspaces) may be used, and what is inside them is checked too.
+
+- **`table`**: `inputs` and `outputs` name starter ports; each row holds
+  the input values, then the expected outputs. For combinational
+  circuits.
+- **`formula`**: `expect` gives each output as an expression over the
+  inputs (`+ - * / % & | ^ ~ ! << >> == != < <= > >= && || ?:`, with C
+  precedence; the value is cut to the output's width). Without `samples`
+  every input combination is tried (at most 16 input bits); with
+  `samples`, all-zero, all-ones and that many random combinations from
+  `seed` (a fixed sequence, so every run checks the same cases).
+- **`sequence`**: `steps`, each `{"set": {…}, "ticks": n, "expect": {…}}`
+  (`ticks` defaults to 1). From power-on with every input 0, a step sets
+  its inputs (they hold until set again), runs `n` ticks and compares the
+  outputs it names. For sequential circuits; a new input is seen by the
+  logic at the next tick and by state the tick after.
+
+Values are numbers or strings in hex, binary or decimal, as in a version
+6 file. A check builds a separate simulation of the workspace
+(`sim::netlist::design_of`, compiled for `logi_sim::sim::Sim`), so it is
+instant and does not disturb the running circuit. It reports the first
+failure: a part the rules refuse, a missing or resized port, a circuit
+that does not build (a loop of gates with no state in it), or the first
+case whose outputs differ, with its inputs, the expected outputs and the
+outputs it got. Loading refuses a challenge whose test names a port the
+starter does not have, a row of the wrong length, an expression that
+does not parse, or an unknown part.
 
 ## Gallery
 

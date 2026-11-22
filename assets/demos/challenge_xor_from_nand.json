@@ -1,0 +1,17 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "main",
+      "title": "XOR from NAND",
+      "nodes": [
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "Y", "type": "Output", "at": [480, 0]}
+      ],
+      "wires": []
+    }
+  ]
+}

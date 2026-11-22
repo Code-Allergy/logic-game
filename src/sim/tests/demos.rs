@@ -34,11 +34,18 @@ fn embedded_files_match_the_demo_folder() {
             "{name}"
         );
     }
-    // Every demo file is listed in the manifest.
+    // Every demo file is listed in the manifest, and so is every
+    // challenge starter.
     let listed: BTreeSet<String> = demos()
         .demos
         .iter()
         .map(|d| format!("{}.json", d.id))
+        .chain(
+            demos()
+                .challenges
+                .iter()
+                .map(|c| crate::sim::challenges::starter_file(&c.id)),
+        )
         .chain([MANIFEST_FILE.to_string()])
         .collect();
     assert_eq!(listed, on_disk.into_iter().collect());

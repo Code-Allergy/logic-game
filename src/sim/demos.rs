@@ -27,6 +27,7 @@ use std::sync::{Arc, OnceLock};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::challenges::{self, Challenge, ManifestChallenge};
 use super::source::{self, Externals, SourceFile};
 use super::{CircuitDocument, CircuitLibrary, GateKind, WorkspaceDocument};
 
@@ -68,6 +69,17 @@ pub const EMBEDDED: &[(&str, &str)] = embed!(
     "register_file.json",
     "alu.json",
     "cpu.json",
+    "challenge_and_from_nand.json",
+    "challenge_xor_from_nand.json",
+    "challenge_half_adder.json",
+    "challenge_full_adder.json",
+    "challenge_adder8.json",
+    "challenge_mux2.json",
+    "challenge_decoder2.json",
+    "challenge_sr_latch.json",
+    "challenge_d_latch.json",
+    "challenge_register4.json",
+    "challenge_counter4.json",
 );
 
 /// Every file of `assets/gallery/`, embedded (checked like [`EMBEDDED`]).
@@ -116,6 +128,9 @@ struct ManifestFile {
     version: u32,
     levels: Vec<Level>,
     demos: Vec<ManifestDemo>,
+    /// Build-it challenges (optional: older manifests have none).
+    #[serde(default)]
+    challenges: Vec<ManifestChallenge>,
 }
 
 /// A level of the pyramid: a stop on the demo map.
@@ -213,6 +228,8 @@ pub struct DemoCatalog {
     pub categories: Vec<Category>,
     /// The gallery items in manifest order (grouped by category).
     pub gallery: Vec<Demo>,
+    /// The build-it challenges in manifest order.
+    pub challenges: Vec<Challenge>,
     /// `"demo/circuit"` -> definition id, for every circuit of every demo
     /// and gallery item.
     names: HashMap<String, Uuid>,
@@ -340,6 +357,7 @@ impl DemoCatalog {
                 circuits: expansion.circuits,
             });
         }
+        challenges::load(&mut catalog, manifest.challenges, &read)?;
         catalog.load_gallery(read_gallery)?;
         Ok(catalog)
     }
@@ -434,6 +452,22 @@ impl DemoCatalog {
     /// The demo or gallery item whose root circuit has this id.
     pub fn by_root(&self, root: Uuid) -> Option<&Demo> {
         self.all().find(|d| d.workspace.root.id == root)
+    }
+
+    /// The challenge `id`.
+    pub fn challenge(&self, id: &str) -> Option<&Challenge> {
+        self.challenges.iter().find(|c| c.id == id)
+    }
+
+    /// The challenge whose player workspace is called `name`
+    /// ([`Challenge::workspace_name`]).
+    pub fn challenge_for_workspace(&self, name: &str) -> Option<&Challenge> {
+        self.challenges.iter().find(|c| c.workspace_name() == name)
+    }
+
+    /// The definition id of a `"demo/circuit"` reference.
+    pub fn definition_id(&self, reference: &str) -> Option<Uuid> {
+        self.names.get(reference).copied()
     }
 
     pub fn category_title(&self, id: &str) -> &str {
