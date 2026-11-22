@@ -1213,66 +1213,74 @@ fn zoomed_in_text_is_rasterised_at_its_screen_size() {
     assert_eq!(texts(&mut app), at_one);
 }
 
-/// The gap a wire cuts where it passes over another interrupts only the
-/// crossed wire: it spans that wire's casing (wider for a bus) and no
-/// more, so a wire running beside it is untouched; across, it is the
-/// upper wire's casing plus the gap on each side, centred on the drawn
-/// (rounded) upper wire, even next to a corner.
+/// Where one wire passes over another, nothing is painted between them:
+/// the upper wire's own casing is the only edge the crossed wire meets. (A
+/// bench-coloured "crossing gap" used to be cut around the upper wire; at
+/// high zoom it read as a wide extra outline and cut into junction dots.)
 #[test]
-fn a_crossing_gap_covers_only_the_crossed_wire() {
-    use crate::sim::art::{BIT_CASING, BUS_CASING};
-    use crate::sim::shapes::{Shape, round_corners};
-    use crate::sim::visuals::{WIRE_CORNER, crossing_gap};
+fn crossing_wires_paint_nothing_between_them() {
+    use crate::sim::art::{CanvasArt, Paint};
 
-    let gap_width = BIT_CASING + 2.0 * 3.0;
-    // A straight 1-bit wire going up across a horizontal wire at y = 0.
-    let upper = Shape::path_stroke(
-        &[Vec2::new(40.0, -100.0), Vec2::new(40.0, 100.0)],
-        gap_width,
-    );
-    for lower in [BIT_CASING, BUS_CASING] {
-        let gap = crossing_gap(&upper, Vec2::new(40.0, 0.0), true, lower);
-        let (lo, hi) = gap.bounds().expect("a gap");
-        assert!((hi.y - lo.y - (lower + 1.0)).abs() < 1e-3, "{lo} {hi}");
-        assert!((hi.x - lo.x - gap_width).abs() < 1e-3, "{lo} {hi}");
-        assert!(((lo.x + hi.x) * 0.5 - 40.0).abs() < 1e-3);
-        // A wire beside the crossed one, a clearance away, is untouched.
-        let beside = (lower + BIT_CASING) * 0.5 + crate::sim::routing::WIRE_GAP;
-        assert!(hi.y < beside - BIT_CASING * 0.5, "{hi} {beside}");
-        let area = gap.area();
-        assert!((area - (lower + 1.0) * gap_width).abs() < 0.5, "{area}");
+    // 3 columns of 6 gates, each fed by two gates of the column before,
+    // the last row from the first, so wires cross.
+    let (cols, rows) = (3, 6);
+    let mut doc = CircuitDocument::new("Crossings");
+    let mut ids = Vec::new();
+    for c in 0..cols {
+        for r in 0..rows {
+            let kind = if c == 0 {
+                GateKind::Input {
+                    w: if r % 2 == 0 { 1 } else { 8 },
+                }
+            } else {
+                GateKind::And {
+                    w: if r % 2 == 0 { 1 } else { 8 },
+                }
+            };
+            let at = Vec2::new(c as f32 * 200.0, -(r as f32) * 120.0);
+            ids.push(doc.add(DocNode::labeled(kind, at, format!("g{c}_{r}"))));
+        }
     }
+    for c in 1..cols {
+        for r in 0..rows {
+            let to = ids[c * rows + r];
+            doc.connect(ids[(c - 1) * rows + r], 0, to, 0);
+            doc.connect(ids[(c - 1) * rows + (r + 2) % rows], 0, to, 1);
+        }
+    }
+    let mut app = visual_app();
+    load(&mut app, WorkspaceDocument::new(doc));
+    idle_frames(&mut app, 3);
 
-    // Next to a corner: the upper wire turns 15 units below the crossing
-    // (the nearest a parallel row may be), so its drawn curve runs off
-    // its polyline there; the gap follows the curve (every point of it is
-    // near the drawn wire), not the polyline.
-    let points = [
-        Vec2::new(-100.0, -15.0),
-        Vec2::new(40.0, -15.0),
-        Vec2::new(40.0, 100.0),
-    ];
-    let round = round_corners(&points, WIRE_CORNER);
-    let upper = Shape::path_stroke(&round, gap_width);
-    let gap = crossing_gap(&upper, Vec2::new(40.0, 0.0), true, BIT_CASING);
-    let (lo, hi) = gap.bounds().expect("a gap");
-    assert!(lo.y >= -BIT_CASING * 0.5 - 0.5 - 1e-3 && hi.y <= BIT_CASING * 0.5 + 0.5 + 1e-3);
-    let distance = |p: Vec2| {
-        round
-            .windows(2)
-            .map(|w| {
-                let (a, b) = (w[0], w[1]);
-                let t = ((p - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
-                p.distance(a + (b - a) * t)
-            })
-            .fold(f32::MAX, f32::min)
+    // The wires do cross: a horizontal run of one passes through a
+    // vertical run of another.
+    let paths: Vec<Vec<Vec2>> = wires(&mut app)
+        .iter()
+        .map(|(e, ..)| app.world().get::<WirePath>(*e).unwrap().points.clone())
+        .collect();
+    let segments = |p: &Vec<Vec2>| p.windows(2).map(|w| (w[0], w[1])).collect::<Vec<_>>();
+    let crosses = |(a, b): (Vec2, Vec2), (c, d): (Vec2, Vec2)| {
+        let horizontal = a.y == b.y && c.x == d.x;
+        horizontal
+            && c.x > a.x.min(b.x)
+            && c.x < a.x.max(b.x)
+            && a.y > c.y.min(d.y)
+            && a.y < c.y.max(d.y)
     };
-    assert!(
-        gap.positions
-            .iter()
-            .all(|&p| distance(p) <= gap_width * 0.5 + 0.5),
-        "the gap hugs the drawn wire"
-    );
-    // The curve is left of the polyline's column there.
-    assert!(lo.x < 40.0 - gap_width * 0.5 - 0.5, "{lo}");
+    let crossing = paths.iter().enumerate().any(|(i, p)| {
+        paths.iter().enumerate().any(|(j, q)| {
+            i != j
+                && segments(p)
+                    .iter()
+                    .any(|s| segments(q).iter().any(|t| crosses(*s, *t)))
+        })
+    });
+    assert!(crossing, "the test circuit has a crossing");
+
+    // Nothing on the canvas is painted in the bench colour (only a drag's
+    // veils use it, and nothing is being dragged).
+    let bench = app.world().resource::<CanvasArt>().material(Paint::Bench);
+    let mut q = app.world_mut().query::<&MeshMaterial2d<ColorMaterial>>();
+    let painted = q.iter(app.world()).filter(|m| m.0 == bench).count();
+    assert_eq!(painted, 0, "bench-coloured shapes over the wires");
 }
