@@ -1105,3 +1105,110 @@ fn captions_name_tags_and_pills_follow_the_zoom() {
     assert_eq!(tag_scale(&mut app, input), 1.0);
     assert_eq!(pill_scale(&mut app), 1.0);
 }
+
+/// Zoomed in, canvas text is rasterised at its size on screen: the font
+/// grows by the (quantised) zoom and the transform shrinks by as much, so
+/// the world size stays; a pill's meshes keep their size; small zoom
+/// steps within a raster step write nothing, and an idle zoomed-in canvas
+/// touches nothing.
+#[test]
+fn zoomed_in_text_is_rasterised_at_its_screen_size() {
+    use crate::sim::visuals::{
+        CanvasZoom, MAX_TEXT_RASTER_PX, NameTag, PillPiece, TextBase, TileCaption,
+        raster_scale_for, text_raster_scale,
+    };
+
+    assert_eq!(text_raster_scale(0.5), 1.0);
+    assert_eq!(text_raster_scale(1.0), 1.0);
+    assert!((text_raster_scale(2.0) - 2.0).abs() < 1e-5);
+    assert!((text_raster_scale(4.1) - 4.0).abs() < 1e-5);
+    assert_eq!(text_raster_scale(3.0), text_raster_scale(2.9), "quantised");
+    assert!(raster_scale_for(10.0, 40.0) * 40.0 <= MAX_TEXT_RASTER_PX + 1e-3);
+
+    let mut app = visual_app();
+    let reg = create_gate(&mut app, GateKind::Register { w: 8 }, "r");
+    let input = create_gate(&mut app, GateKind::Input { w: 8 }, "in");
+    let display = create_gate(&mut app, GateKind::Display { w: 8 }, "D");
+    create_wire(&mut app, input, 0, reg, 1);
+    create_wire(&mut app, reg, 0, display, 0);
+    idle_frames(&mut app, 3);
+
+    // (kind, font px, transform scale) of each text, and the pill
+    // meshes' scale relative to the wire (their own times their text's).
+    let texts = |app: &mut App| {
+        let mut q = app.world_mut().query::<(
+            &TextFont,
+            &Transform,
+            Has<TileCaption>,
+            Has<NameTag>,
+            Has<WireValueLabel>,
+            Has<TextBase>,
+        )>();
+        let mut out = Vec::new();
+        for (font, transform, caption, tag, pill, base) in q.iter(app.world()) {
+            let FontSize::Px(px) = font.font_size else {
+                panic!("canvas text is sized in pixels")
+            };
+            let kind = [caption, tag, pill, base].iter().position(|&b| b);
+            out.push((kind, px, transform.scale.x));
+        }
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        out
+    };
+    let pieces = |app: &mut App| {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&Transform, &ChildOf), With<PillPiece>>();
+        let pieces: Vec<(f32, Entity)> = q
+            .iter(app.world())
+            .map(|(t, parent)| (t.scale.x, parent.parent()))
+            .collect();
+        pieces
+            .into_iter()
+            .map(|(s, text)| s * app.world().get::<Transform>(text).unwrap().scale.x)
+            .collect::<Vec<f32>>()
+    };
+    let at_one = texts(&mut app);
+    assert!(at_one.iter().all(|&(_, _, s)| s == 1.0), "{at_one:?}");
+    assert!(
+        (0..4).all(|k| at_one.iter().any(|t| t.0 == Some(k))),
+        "captions, tags, pills and readouts: {at_one:?}"
+    );
+    let at_one_pieces = pieces(&mut app);
+    assert!(at_one_pieces.len() >= 2 && at_one_pieces.iter().all(|&s| s == 1.0));
+
+    app.world_mut().resource_mut::<CanvasZoom>().0 = 3.0;
+    idle_frames(&mut app, 2);
+    let q = text_raster_scale(3.0);
+    assert!(q > 2.5 && q < 3.5, "{q}");
+    let at_three = texts(&mut app);
+    for (before, after) in at_one.iter().zip(&at_three) {
+        assert_eq!(before.0, after.0);
+        // Rasterised q times larger, drawn 1/q as large: the same world size.
+        assert!(
+            (after.1 - before.1 * q).abs() < 1e-3,
+            "{before:?} {after:?}"
+        );
+        assert!((after.1 * after.2 - before.1).abs() < 1e-3, "{after:?}");
+    }
+    for s in pieces(&mut app) {
+        assert!((s - 1.0).abs() < 1e-5, "pill meshes keep their size: {s}");
+    }
+
+    // A small zoom step within the same raster step writes no text.
+    idle_frames(&mut app, 2);
+    clear_changes(&mut app);
+    app.world_mut().resource_mut::<CanvasZoom>().0 = 3.05;
+    idle_frames(&mut app, 3);
+    assert!(
+        changes(&app).texts.is_empty() && changes(&app).transforms.is_empty(),
+        "{:?}",
+        changes(&app)
+    );
+    assert_idle_does_no_work(&mut app, "zoomed in");
+
+    // Back at 100%, text is drawn as before.
+    app.world_mut().resource_mut::<CanvasZoom>().0 = 1.0;
+    idle_frames(&mut app, 2);
+    assert_eq!(texts(&mut app), at_one);
+}

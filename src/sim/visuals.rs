@@ -546,6 +546,7 @@ fn build_tile(
                 TextColor(Color::WHITE),
                 Tone(if readout { Paint::On } else { Paint::Text }),
                 Transform::from_xyz(0.0, 0.0, 0.5),
+                TextBase(font_size),
                 DisplayedValue::default(),
                 TileArt,
                 ChildOf(entity),
@@ -563,7 +564,7 @@ fn build_tile(
         let text = label.map(|l| l.value.clone()).unwrap_or_default();
         commands.spawn((
             Text2d::new(text),
-            art.fonts.name(13.0),
+            art.fonts.name(CANVAS_TEXT_SIZE),
             TextColor(Color::WHITE),
             Tone(Paint::Text),
             Transform::from_xyz(0.0, name_tag_y(size.y, 1.0), 0.5),
@@ -1166,26 +1167,126 @@ pub fn label_scale(zoom: f32) -> f32 {
     }
 }
 
+/// The largest font size canvas text is rasterised at.
+pub const MAX_TEXT_RASTER_PX: f32 = 256.0;
+
+/// The size of a piece of canvas text that is neither a caption nor a
+/// label (a display's or a word input's readout): its world size.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct TextBase(pub f32);
+
+/// A mesh of a value pill (a child of its [`WireValueLabel`] text), scaled
+/// back up by the text's raster scale so the pill keeps its size.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct PillPiece;
+
+/// How much finer than its world size canvas text is rasterised at
+/// `zoom`, so it stays sharp when zoomed in: the zoom rounded to a
+/// quarter octave (so zooming re-rasterises at most every ~19%), never
+/// below 1 (zoomed out, text is drawn as before).
+pub fn text_raster_scale(zoom: f32) -> f32 {
+    if !zoom.is_finite() || zoom <= 1.0 {
+        return 1.0;
+    }
+    let steps = (zoom.log2() * 4.0).round();
+    2f32.powf(steps / 4.0).max(1.0)
+}
+
+/// [`text_raster_scale`] for text of `size`, capped so the font is at
+/// most [`MAX_TEXT_RASTER_PX`].
+pub fn raster_scale_for(zoom: f32, size: f32) -> f32 {
+    text_raster_scale(zoom)
+        .min(MAX_TEXT_RASTER_PX / size.max(1.0))
+        .max(1.0)
+}
+
+/// Set a text's font size (`size` world units drawn `scale` times) and
+/// its transform's scale so it rasterises at `raster` times that and
+/// still covers the same world size. Writes only what changed.
+fn set_text_raster(
+    font: &mut Mut<TextFont>,
+    transform: &mut Mut<Transform>,
+    size: f32,
+    scale: f32,
+    raster: f32,
+) {
+    let px = FontSize::Px(size * raster);
+    if font.font_size != px {
+        font.font_size = px;
+    }
+    let s = scale / raster;
+    if transform.scale.x != s || transform.scale.y != s {
+        transform.scale = Vec3::new(s, s, 1.0);
+    }
+}
+
 type NewLabel = Or<(Added<NameTag>, Added<WireValueLabel>)>;
+type LabelOnly = (Without<TileCaption>, Without<TextBase>, Without<PillPiece>);
+type CaptionOnly = (
+    Without<NameTag>,
+    Without<WireValueLabel>,
+    Without<TextBase>,
+    Without<PillPiece>,
+);
+type ReadoutOnly = (
+    Without<NameTag>,
+    Without<WireValueLabel>,
+    Without<TileCaption>,
+    Without<PillPiece>,
+);
+type PillPieceOnly = (
+    With<PillPiece>,
+    Without<NameTag>,
+    Without<WireValueLabel>,
+    Without<TileCaption>,
+    Without<TextBase>,
+);
 
 /// Switch tile captions, name tags and value pills between their full and
 /// simplified ([`CaptionMode`]) look when the zoom crosses a threshold,
-/// and give new ones the current look. Idle (no zoom change, nothing new)
-/// it touches nothing.
+/// and give new ones the current look. Zoomed in, every canvas text
+/// (captions, name tags, pills and readouts) is rasterised at its size on
+/// screen ([`text_raster_scale`]: a larger font, scaled down by its
+/// transform to the same world size), so it stays sharp. Idle (no zoom
+/// change, nothing new) it touches nothing; a zoom change writes only
+/// the texts whose look or raster step changed.
 #[allow(clippy::type_complexity)]
 pub fn apply_caption_mode_system(
     zoom: Option<Res<CanvasZoom>>,
     mut captions: ParamSet<(
-        Query<(&TileCaption, &mut Text2d, &mut TextFont)>,
-        Query<(&TileCaption, &mut Text2d, &mut TextFont), Added<TileCaption>>,
+        Query<(&TileCaption, &mut Text2d, &mut TextFont, &mut Transform), CaptionOnly>,
+        Query<
+            (&TileCaption, &mut Text2d, &mut TextFont, &mut Transform),
+            (Added<TileCaption>, CaptionOnly),
+        >,
     )>,
     mut labels: ParamSet<(
         Query<
-            (&mut Transform, Option<&ChildOf>, Has<NameTag>),
-            Or<(With<NameTag>, With<WireValueLabel>)>,
+            (
+                &mut Transform,
+                &mut TextFont,
+                Option<&ChildOf>,
+                Option<&Children>,
+                Has<NameTag>,
+            ),
+            (Or<(With<NameTag>, With<WireValueLabel>)>, LabelOnly),
         >,
-        Query<(&mut Transform, Option<&ChildOf>, Has<NameTag>), NewLabel>,
+        Query<
+            (
+                &mut Transform,
+                &mut TextFont,
+                Option<&ChildOf>,
+                Option<&Children>,
+                Has<NameTag>,
+            ),
+            (NewLabel, LabelOnly),
+        >,
     )>,
+    mut readouts: ParamSet<(
+        Query<(&TextBase, &mut TextFont, &mut Transform), ReadoutOnly>,
+        Query<(&TextBase, &mut TextFont, &mut Transform), (Added<TextBase>, ReadoutOnly)>,
+    )>,
+    mut pill_pieces: Query<&mut Transform, PillPieceOnly>,
     gates: Query<&GateType>,
     mut shown: Local<Option<f32>>,
 ) {
@@ -1194,40 +1295,81 @@ pub fn apply_caption_mode_system(
     // the zoom moved (zooming is a step at a time, not every frame).
     let changed = *shown != Some(zoom);
     *shown = Some(zoom);
-    let set_caption = |caption: &TileCaption, mut text: Mut<Text2d>, mut font: Mut<TextFont>| {
+    let set_caption = |caption: &TileCaption,
+                       mut text: Mut<Text2d>,
+                       mut font: Mut<TextFont>,
+                       mut transform: Mut<Transform>| {
         let (want, size) = caption.at(zoom);
         if text.0 != want {
             text.0 = want.to_string();
         }
-        if font.font_size != FontSize::Px(size) {
-            font.font_size = FontSize::Px(size);
-        }
+        set_text_raster(
+            &mut font,
+            &mut transform,
+            size,
+            1.0,
+            raster_scale_for(zoom, size),
+        );
     };
     let scale = label_scale(zoom);
-    let set_label = |mut transform: Mut<Transform>, parent: Option<&ChildOf>, tag: bool| {
-        if transform.scale.x != scale {
-            transform.scale = Vec3::new(scale, scale, 1.0);
-        }
+    let label_raster = raster_scale_for(zoom, CANVAS_TEXT_SIZE);
+    let mut pieces: Vec<Entity> = Vec::new();
+    let mut set_label = |mut transform: Mut<Transform>,
+                         mut font: Mut<TextFont>,
+                         parent: Option<&ChildOf>,
+                         children: Option<&Children>,
+                         tag: bool| {
+        set_text_raster(
+            &mut font,
+            &mut transform,
+            CANVAS_TEXT_SIZE,
+            scale,
+            label_raster,
+        );
         if tag && let Some(gate) = parent.and_then(|p| gates.get(p.parent()).ok()) {
             let y = name_tag_y(gate.kind.size().y, scale);
             if transform.translation.y != y {
                 transform.translation.y = y;
             }
         }
+        pieces.extend(children.into_iter().flatten().copied());
+    };
+    let set_readout = |base: &TextBase, mut font: Mut<TextFont>, mut transform: Mut<Transform>| {
+        set_text_raster(
+            &mut font,
+            &mut transform,
+            base.0,
+            1.0,
+            raster_scale_for(zoom, base.0),
+        );
     };
     if changed {
-        for (caption, text, font) in &mut captions.p0() {
-            set_caption(caption, text, font);
+        for (caption, text, font, transform) in &mut captions.p0() {
+            set_caption(caption, text, font, transform);
         }
-        for (transform, parent, tag) in &mut labels.p0() {
-            set_label(transform, parent, tag);
+        for (transform, font, parent, children, tag) in &mut labels.p0() {
+            set_label(transform, font, parent, children, tag);
+        }
+        for (base, font, transform) in &mut readouts.p0() {
+            set_readout(base, font, transform);
         }
     } else {
-        for (caption, text, font) in &mut captions.p1() {
-            set_caption(caption, text, font);
+        for (caption, text, font, transform) in &mut captions.p1() {
+            set_caption(caption, text, font, transform);
         }
-        for (transform, parent, tag) in &mut labels.p1() {
-            set_label(transform, parent, tag);
+        for (transform, font, parent, children, tag) in &mut labels.p1() {
+            set_label(transform, font, parent, children, tag);
+        }
+        for (base, font, transform) in &mut readouts.p1() {
+            set_readout(base, font, transform);
+        }
+    }
+    // A pill's meshes undo its text's raster scale.
+    for entity in pieces {
+        if let Ok(mut transform) = pill_pieces.get_mut(entity)
+            && transform.scale.x != label_raster
+        {
+            transform.scale = Vec3::new(label_raster, label_raster, 1.0);
         }
     }
 }
@@ -1644,7 +1786,7 @@ fn spawn_value_label(
     commands
         .spawn((
             Text2d::new(wire_label_text(want.value, want.width)),
-            art.fonts.mono(13.0),
+            art.fonts.mono(CANVAS_TEXT_SIZE),
             TextColor(Color::WHITE),
             Tone(label_paint(want.value)),
             Transform::from_translation(at),
@@ -1652,8 +1794,8 @@ fn spawn_value_label(
             ChildOf(wire),
         ))
         .with_children(|pill| {
-            pill.spawn(ink);
-            pill.spawn(face);
+            pill.spawn((ink, PillPiece));
+            pill.spawn((face, PillPiece));
         });
 }
 
