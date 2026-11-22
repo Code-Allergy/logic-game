@@ -1,0 +1,26 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "dff",
+  "circuits": [
+    {
+      "name": "dff",
+      "title": "D flip-flop (rising edge)",
+      "nodes": [
+        {"name": "D", "type": "Input", "at": [0, 80]},
+        {"name": "Clk", "type": "Input", "at": [0, -80]},
+        {"name": "not_clk", "use": "gates/not", "at": [140, 0]},
+        {"name": "master", "use": "d_latch/d_latch", "at": [280, 80]},
+        {"name": "slave", "use": "d_latch/d_latch", "at": [420, 0]},
+        {"name": "Q", "type": "Output", "at": [560, 0]}
+      ],
+      "wires": [
+        ["D", "master.D"],
+        ["Clk", "not_clk.A", "slave.E"],
+        ["not_clk", "master.E"],
+        ["master", "slave.D"],
+        ["slave", "Q"]
+      ]
+    }
+  ]
+}

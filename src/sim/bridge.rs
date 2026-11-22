@@ -1,5 +1,5 @@
 //! `SimBridge`: maps the ECS authoring components onto a `logi_sim` v2
-//! [`Design`] and drives the v2 engine.
+//! [`Design`] and drives the engine.
 //!
 //! ## Mapping
 //!
@@ -53,8 +53,8 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use logi_sim::compile::{CompileError, NodePath, Options};
 #[cfg(not(target_arch = "wasm32"))]
-use logi_sim::engine_v2::Engine;
-use logi_sim::engine_v2::{EngineEvent, LocalEngine, Probe, ProbeFrame, Rate};
+use logi_sim::engine::Engine;
+use logi_sim::engine::{EngineEvent, LocalEngine, MemProbe, Probe, ProbeFrame, Rate};
 use logi_sim::netlist::{DefId, Design, NodeId, NodeKind, PinRef};
 use uuid::Uuid;
 
@@ -69,9 +69,9 @@ use super::{
 /// Which engine runs the simulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimRuntime {
-    /// `logi_sim::engine_v2::Engine` on a worker thread (native default).
+    /// `logi_sim::engine::Engine` on a worker thread (native default).
     Threaded,
-    /// `logi_sim::engine_v2::LocalEngine` run in-frame (wasm default).
+    /// `logi_sim::engine::LocalEngine` run in-frame (wasm default).
     Threadless,
 }
 
@@ -199,6 +199,8 @@ pub struct SimBridge {
     /// Probe index by `(node, output pin)` of the probed definition (the
     /// root, or the definition of the open view).
     probe_index: HashMap<(NodeId, u8), u32>,
+    /// Memory probe index by screen node of the probed definition.
+    mem_probe_index: HashMap<NodeId, u32>,
     /// A subcircuit view is open.
     view_open: bool,
     /// Gate ids from the root to the open instance (live views only).
@@ -243,6 +245,7 @@ impl SimBridge {
             built: HashMap::new(),
             def_ids: HashMap::new(),
             probe_index: HashMap::new(),
+            mem_probe_index: HashMap::new(),
             view_open: false,
             view_path: None,
             view_resolved: None,
@@ -864,8 +867,19 @@ impl SimBridge {
 
     fn rebuild_probes(&mut self) {
         self.probe_index.clear();
+        self.mem_probe_index.clear();
         self.view_resolved = None;
         let mut probes = Vec::new();
+        let mut mem_probes = Vec::new();
+        let mut screen = |index: &mut HashMap<NodeId, u32>, path: &[NodeId], node, kind| {
+            if matches!(kind, &NodeKind::Screen { .. }) {
+                index.insert(node, mem_probes.len() as u32);
+                mem_probes.push(MemProbe {
+                    path: path.to_vec(),
+                    node,
+                });
+            }
+        };
         if !self.view_open {
             let root = self.design.root_def();
             let mut nodes: Vec<NodeId> = self.node_entity.keys().copied().collect();
@@ -874,6 +888,7 @@ impl SimBridge {
                 let Some(n) = root.nodes.get(node) else {
                     continue;
                 };
+                screen(&mut self.mem_probe_index, &[], node, &n.kind);
                 for (pin, &net) in n.outputs.iter().enumerate() {
                     self.probe_index
                         .insert((node, pin as u8), probes.len() as u32);
@@ -895,6 +910,12 @@ impl SimBridge {
             let mut nodes: Vec<NodeId> = d.nodes.keys().collect();
             nodes.sort();
             for node in nodes {
+                screen(
+                    &mut self.mem_probe_index,
+                    &resolved.0,
+                    node,
+                    &d.nodes[node].kind,
+                );
                 for (pin, &net) in d.nodes[node].outputs.iter().enumerate() {
                     self.probe_index
                         .insert((node, pin as u8), probes.len() as u32);
@@ -910,11 +931,39 @@ impl SimBridge {
             #[cfg(not(target_arch = "wasm32"))]
             Runtime::Threaded(engine) => {
                 engine.set_probes(probes);
+                engine.set_mem_probes(mem_probes);
                 // Frames read after this use the new probe layout.
                 engine.sync();
             }
-            Runtime::Local { engine, .. } => engine.core.set_probes(probes),
+            Runtime::Local { engine, .. } => {
+                engine.core.set_probes(probes);
+                engine.core.set_mem_probes(mem_probes);
+            }
         });
+    }
+
+    /// Whether any screen is probed (see [`Self::request_screens`]).
+    pub fn has_screens(&self) -> bool {
+        !self.mem_probe_index.is_empty()
+    }
+
+    /// Ask the engine for fresh copies of the screens' memories, once per
+    /// drawn frame (the in-frame engine copies them by itself).
+    pub fn request_screens(&self) {
+        if !self.has_screens() {
+            return;
+        }
+        self.with_runtime(|rt| match rt {
+            #[cfg(not(target_arch = "wasm32"))]
+            Runtime::Threaded(engine) => engine.request_mems(),
+            Runtime::Local { .. } => {}
+        });
+    }
+
+    /// Memory probe of a screen of the open view.
+    pub fn view_mem_probe(&self, gate: Uuid) -> Option<u32> {
+        let node = self.view_node(gate)?;
+        self.mem_probe_index.get(&node).copied()
     }
 
     /// Probe indices for a gate's input and output pins.
@@ -937,7 +986,11 @@ impl SimBridge {
         let outputs = (0..n.outputs.len())
             .map(|pin| self.probe_index.get(&(node, pin as u8)).copied())
             .collect();
-        GateProbes { inputs, outputs }
+        GateProbes {
+            inputs,
+            outputs,
+            memory: self.mem_probe_index.get(&node).copied(),
+        }
     }
 
     /// Probe index for a wire's net.
@@ -1005,6 +1058,18 @@ impl SimBridge {
             #[cfg(not(target_arch = "wasm32"))]
             Runtime::Threaded(engine) => engine.step(n),
             Runtime::Local { engine, .. } => engine.core.step(n),
+        });
+    }
+
+    /// Return the simulation to power-on: tick 0, every register, RAM,
+    /// latch, delay and clock phase at its initial value (ROM and RAM
+    /// contents from their `init`), root inputs kept at their driven
+    /// values. The run/pause state and tick rate are unchanged.
+    pub fn reset(&self) {
+        self.with_runtime(|rt| match rt {
+            #[cfg(not(target_arch = "wasm32"))]
+            Runtime::Threaded(engine) => engine.reset(),
+            Runtime::Local { engine, .. } => engine.core.reset(),
         });
     }
 
@@ -1140,6 +1205,7 @@ impl ViewBindings<'_, '_> {
                 outputs: (0..outs.len() as u8)
                     .map(|pin| bridge.view_probe(id.uuid, pin))
                     .collect(),
+                memory: bridge.view_mem_probe(id.uuid),
             };
             probes.set_if_neq(bound);
         }
@@ -1371,7 +1437,7 @@ pub fn loop_message(names: &[String]) -> String {
     let gates = if count == 1 { "gate" } else { "gates" };
     format!(
         "Combinational loop through {count} {gates}: {list}. A feedback loop needs a state \
-         element: put a Delay (or a Register, DLatch, SrLatch or Ram) on the loop."
+         element: put a Delay (or a Register, D latch, SR latch or RAM) on the loop."
     )
 }
 
@@ -1443,6 +1509,11 @@ pub fn collect_engine_events_system(
             }
         }
     }
+}
+
+/// Ask the engine for this frame's copies of the screens' memories.
+pub fn request_screens_system(bridge: Res<SimBridge>) {
+    bridge.request_screens();
 }
 
 /// Run the in-frame engine (threadless runtime only).

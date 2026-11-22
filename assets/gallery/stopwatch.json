@@ -1,0 +1,53 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "stopwatch",
+  "circuits": [
+    {
+      "name": "stopwatch",
+      "title": "Stopwatch",
+      "nodes": [
+        {"name": "five", "type": "Const", "w": 4, "value": 5, "at": [0, 440]},
+        {"name": "nine", "type": "Const", "w": 4, "value": 9, "at": [0, 320]},
+        {"name": "Reset", "type": "Input", "at": [0, 200]},
+        {"name": "Run", "type": "Input", "at": [0, 80]},
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Clock (tenths)",
+          "at": [0, -80]
+        },
+        {"name": "tick", "use": "edge_detector/rising", "label": "rising edge", "at": [160, -80]},
+        {"name": "go", "type": "And", "label": "count", "at": [300, 0]},
+        {"name": "tenths", "use": "bcd_counter/mod_counter", "label": "tenths", "at": [460, 0]},
+        {"name": "secs", "use": "bcd_counter/mod_counter", "label": "seconds", "at": [640, 120]},
+        {
+          "name": "tens",
+          "use": "bcd_counter/mod_counter",
+          "label": "tens of seconds",
+          "at": [820, 240]
+        },
+        {"name": "Tens", "type": "Display", "w": 4, "label": "Tens of seconds", "at": [1020, 240]},
+        {"name": "Secs", "type": "Display", "w": 4, "label": "Seconds", "at": [1020, 120]},
+        {"name": "Tenths", "type": "Display", "w": 4, "label": "Tenths", "at": [1020, 0]}
+      ],
+      "wires": [
+        ["clock", "tick"],
+        ["tick", "go.a"],
+        ["Run", "go.b"],
+        ["go", "tenths.Step"],
+        ["tenths.Carry", "secs.Step"],
+        ["secs.Carry", "tens.Step"],
+        ["nine", "tenths.Last", "secs.Last"],
+        ["five", "tens.Last"],
+        ["Reset", "tenths.Clear", "secs.Clear", "tens.Clear"],
+        ["tenths.Q", "Tenths"],
+        ["secs.Q", "Secs"],
+        ["tens.Q", "Tens"]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "fsm",
+  "circuits": [
+    {
+      "name": "fsm",
+      "title": "Sequence detector",
+      "nodes": [
+        {"name": "Bit", "type": "Input", "at": [0, 120]},
+        {"name": "Step", "type": "Input", "at": [0, -80]},
+        {"name": "edge", "use": "edge_detector/rising", "label": "step pressed", "at": [160, -80]},
+        {
+          "name": "addr",
+          "type": "Merge",
+          "widths": [3, 1],
+          "label": "state, bit",
+          "at": [300, 120]
+        },
+        {
+          "name": "table",
+          "type": "Rom",
+          "addr_bits": 4,
+          "w": 3,
+          "contents": [0, 2, 0, 2, 2, 0, 0, 0, 1, 1, 3, 4, 1, 0, 0, 0],
+          "label": "next-state table",
+          "at": [440, 120]
+        },
+        {"name": "state", "type": "Register", "w": 3, "label": "state", "at": [600, 40]},
+        {"name": "four", "type": "Const", "w": 3, "value": 4, "at": [600, -120]},
+        {"name": "found", "type": "Eq", "w": 3, "label": "state 4?", "at": [760, -40]},
+        {"name": "show", "type": "Display", "w": 3, "label": "State", "at": [920, 120]},
+        {"name": "Found", "type": "Output", "label": "Found 1011", "at": [900, -40]}
+      ],
+      "wires": [
+        ["Bit", "addr.a1"],
+        ["Step", "edge"],
+        ["state", "addr.a0", "found.a", "show"],
+        ["addr", "table"],
+        ["table", "state.d"],
+        ["edge", "state.en"],
+        ["four", "found.b"],
+        ["found", "Found"]
+      ]
+    }
+  ]
+}

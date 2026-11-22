@@ -475,6 +475,193 @@ fn ram_write_then_read() {
     }
 }
 
+/// A `Ram` and a `Ram2` (with one read port at the write address) fed the
+/// same inputs.
+fn ram_and_ram2(w: u8, init: &[u64]) -> Design {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let addr = b.input("addr", 3);
+    let we = b.input("we", 1);
+    let data = b.input("data", w);
+    let q1 = b.ram(addr, we, data, init);
+    let q2 = b.ram2(addr, we, data, &[addr], init);
+    b.output("q1", q1);
+    b.output("q2", q2[0]);
+    d
+}
+
+#[test]
+fn ram2_matches_ram_at_the_tick_boundary() {
+    // Read during write returns the old word, the write shows after the
+    // next commit, init contents and masking: all as for `Ram`.
+    let mut rng = crate::testkit::Rng::new(5);
+    for w in WIDTHS {
+        let mut r = Reference::new(&ram_and_ram2(w, &[7, u64::MAX, 3])).unwrap();
+        assert_eq!(r.get("q1"), 7 & mask(w));
+        assert_eq!(r.get("q2"), 7 & mask(w));
+        for t in 0..200 {
+            r.set("addr", rng.below(8) as u64);
+            r.set("we", rng.coin() as u64);
+            r.set("data", rng.next_u64());
+            r.tick().unwrap();
+            assert_eq!(r.get("q1"), r.get("q2"), "w {w} tick {t}");
+        }
+    }
+}
+
+#[test]
+fn ram2_reads_and_writes_at_independent_addresses() {
+    for w in WIDTHS {
+        let mut d = Design::new("top");
+        let r = d.root;
+        let mut b = d.builder(r);
+        let waddr = b.input("waddr", 3);
+        let we = b.input("we", 1);
+        let wdata = b.input("wdata", w);
+        let ra = b.input("ra", 3);
+        let rb = b.input("rb", 3);
+        let q = b.ram2(waddr, we, wdata, &[ra, rb], &[1, 2, 3, 0x1_0000_0000_0004]);
+        b.output("qa", q[0]);
+        b.output("qb", q[1]);
+        let node = d.root_def().nets[q[0]].driver.0;
+        let mut r = Reference::new(&d).unwrap();
+        assert_eq!((r.get("qa"), r.get("qb")), (1, 1), "init word 0");
+        r.set("ra", 3);
+        r.set("rb", 7);
+        r.tick().unwrap();
+        assert_eq!(r.get("qa"), 0x1_0000_0000_0004 & mask(w), "init masked");
+        assert_eq!(r.get("qb"), 0, "missing init words are 0");
+
+        // Write 5 while reading 3 and 5.
+        let v = 0xC3 & mask(w);
+        r.set("waddr", 5);
+        r.set("wdata", v);
+        r.set("we", 1);
+        r.set("ra", 5);
+        r.set("rb", 2);
+        r.tick().unwrap();
+        let three = 3 & mask(w);
+        assert_eq!((r.get("qa"), r.get("qb")), (0, three), "write pending");
+        r.set("we", 0);
+        r.tick().unwrap();
+        assert_eq!((r.get("qa"), r.get("qb")), (v, three), "written at commit");
+        assert_eq!(r.mem(&[], node).unwrap()[5], v);
+        assert_eq!(r.mem(&[], node).unwrap()[2], three);
+    }
+}
+
+#[test]
+fn ram2_per_bit_write_enable() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let waddr = b.input("waddr", 2);
+    let we = b.input("we", 16);
+    let wdata = b.input("wdata", 16);
+    let ra = b.input("ra", 2);
+    let q = b.ram2(waddr, we, wdata, &[ra], &[0x1234, 0x5678]);
+    b.output("q", q[0]);
+    let node = d.root_def().nets[q[0]].driver.0;
+    assert!(matches!(
+        d.root_def().nodes[node].kind,
+        NodeKind::Ram2 { mask: true, .. }
+    ));
+    let mut r = Reference::new(&d).unwrap();
+    r.set("waddr", 1);
+    r.set("we", 0xFF00);
+    r.set("wdata", 0xABCD);
+    r.set("ra", 1);
+    r.tick().unwrap();
+    r.set("we", 0);
+    r.tick().unwrap();
+    assert_eq!(r.get("q"), 0xAB78, "only the high byte is written");
+    r.set("we", 0x000F);
+    r.set("wdata", 0xFFF0);
+    r.tick().unwrap();
+    r.set("we", 0);
+    r.tick().unwrap();
+    assert_eq!(r.get("q"), 0xAB70);
+}
+
+#[test]
+fn ram2_read_addresses_feed_only_their_own_data() {
+    let ram2 = |reads| NodeKind::Ram2 {
+        addr_bits: 2,
+        w: 2,
+        reads,
+        mask: false,
+        init: Arc::from(vec![1, 2, 3, 0]),
+    };
+    // rdata0 -> raddr1, and rdata1 -> waddr/wdata/we: pointer chasing and
+    // feedback into the write port are legal.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let a = b.input("a", 2);
+    let (ram, _) = b.state_placeholder(ram2(2));
+    let q0 = b.out(ram, 0);
+    let q1 = b.out(ram, 1);
+    b.connect(a, (ram, 3));
+    b.connect(q0, (ram, 4));
+    b.connect(q1, (ram, 0));
+    b.connect(q1, (ram, 2));
+    let one = b.one();
+    b.connect(one, (ram, 1));
+    b.output("q1", q1);
+    let mut r = Reference::new(&d).unwrap();
+    // a = 0: q0 = mem[0] = 1, q1 = mem[1] = 2.
+    assert_eq!(r.get("q1"), 2);
+    // Commit writes mem[2] = 2; nothing it reads changes.
+    r.tick().unwrap();
+    assert_eq!(r.get("q1"), 2);
+    r.set("a", 2);
+    r.tick().unwrap();
+    // q0 = mem[2] = 2 (written), q1 = mem[2] = 2.
+    assert_eq!(r.get("q1"), 2);
+
+    // rdata1 -> raddr1 is a loop through the node.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let (ram, _) = b.state_placeholder(ram2(2));
+    let q1 = b.out(ram, 1);
+    b.connect(q1, (ram, 4));
+    assert!(matches!(
+        Reference::new(&d),
+        Err(ReferenceError::CombinationalLoop { nodes, .. }) if nodes == vec![ram]
+    ));
+}
+
+#[test]
+fn ram2_parameters_are_checked() {
+    let k = |addr_bits, w, reads, init: Vec<u64>| NodeKind::Ram2 {
+        addr_bits,
+        w,
+        reads,
+        mask: false,
+        init: Arc::from(init),
+    };
+    assert!(k(20, 64, 8, vec![]).check_params().is_ok());
+    assert!(k(4, 8, 0, vec![]).check_params().is_err());
+    assert!(k(4, 8, 9, vec![]).check_params().is_err());
+    assert!(k(0, 8, 1, vec![]).check_params().is_err());
+    assert!(k(21, 8, 1, vec![]).check_params().is_err());
+    assert!(k(4, 65, 1, vec![]).check_params().is_err());
+    assert!(k(2, 8, 1, vec![0; 5]).check_params().is_err());
+    let (ins, outs) = NodeKind::Ram2 {
+        addr_bits: 5,
+        w: 12,
+        reads: 3,
+        mask: true,
+        init: Arc::from(vec![]),
+    }
+    .pins()
+    .unwrap();
+    assert_eq!(ins.as_slice(), &[5, 12, 12, 5, 5, 5]);
+    assert_eq!(outs.as_slice(), &[12, 12, 12]);
+}
+
 #[test]
 fn counter_from_add_and_register() {
     let mut d = Design::new("top");

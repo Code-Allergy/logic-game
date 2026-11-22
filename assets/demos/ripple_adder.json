@@ -1,0 +1,57 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "adder8",
+      "title": "8-bit ripple-carry adder",
+      "nodes": [
+        {"name": "A", "type": "Input", "w": 8, "at": [0, 0]},
+        {"name": "B", "type": "Input", "w": 8, "at": [0, -480]},
+        {"name": "Cin", "type": "Input", "at": [0, 80]},
+        {
+          "name": "fa",
+          "use": "full_adder/full_adder",
+          "at": [360, -40],
+          "count": 8,
+          "step": [0, -120]
+        },
+        {"name": "Sum", "type": "Output", "w": 8, "at": [640, -460]},
+        {"name": "Cout", "type": "Output", "at": [640, -880]}
+      ],
+      "wires": [
+        ["A", "fa.A"],
+        ["B", "fa.B"],
+        ["Cin", "fa[0].Cin"],
+        ["fa[0..7].Cout", "fa[1..8].Cin"],
+        ["fa.Sum", "Sum"],
+        ["fa[7].Cout", "Cout"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "Ripple-carry adder beside the Add primitive",
+      "nodes": [
+        {"name": "A", "type": "Input", "w": 8, "at": [0, 80]},
+        {"name": "B", "type": "Input", "w": 8, "at": [0, 0]},
+        {"name": "Cin", "type": "Input", "at": [0, -80]},
+        {"name": "ripple", "use": "adder8", "label": "8-bit ripple adder", "at": [280, 80]},
+        {"name": "add", "type": "Add", "w": 8, "label": "Add primitive", "at": [280, -80]},
+        {"name": "sum_gates", "type": "Output", "w": 8, "label": "Sum (gates)", "at": [560, 120]},
+        {"name": "cout_gates", "type": "Output", "label": "Cout (gates)", "at": [560, 40]},
+        {"name": "sum_add", "type": "Output", "w": 8, "label": "Sum (Add)", "at": [560, -40]},
+        {"name": "cout_add", "type": "Output", "label": "Cout (Add)", "at": [560, -120]}
+      ],
+      "wires": [
+        ["A", "ripple.A", "add.a"],
+        ["B", "ripple.B", "add.b"],
+        ["Cin", "ripple.Cin", "add.cin"],
+        ["ripple.Sum", "sum_gates"],
+        ["ripple.Cout", "cout_gates"],
+        ["add.sum", "sum_add"],
+        ["add.cout", "cout_add"]
+      ]
+    }
+  ]
+}

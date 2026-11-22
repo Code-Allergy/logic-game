@@ -15,7 +15,7 @@ fn sim_of(d: &Design) -> Sim {
 #[test]
 fn differential_random_designs() {
     let n = diff::sweep(&diff::standard_configs(), 170, 20, &Options::default());
-    assert_eq!(n, 1020);
+    assert_eq!(n, 1190);
 }
 
 /// Acceptance sweep (10,000+ designs):
@@ -35,6 +35,7 @@ fn fixtures_match_the_reference() {
         ripple_adder(8),
         adder(64),
         ripple_adder(64),
+        nested_adder16(),
         mux_tree(3, 8),
         mux_tree_bitblasted(3, 8),
         counter(8),
@@ -42,6 +43,8 @@ fn fixtures_match_the_reference() {
         counter(64),
         counter_bitblasted(64),
         register_file(3, 16),
+        register_file_ram2(4, 64, &[u64::MAX, 1]),
+        fifo(4, 12),
         sr_latch_nor_delayed(),
         cpu(&MULTIPLY_PROGRAM),
     ]
@@ -64,6 +67,99 @@ fn cpu_halts_with_the_expected_result() {
     }
     assert_eq!(s.get("acc"), fixtures::MULTIPLY_RESULT);
     assert_eq!(s.tick_count(), ticks);
+}
+
+/// Port of the legacy per-runner truth tables (`primitive_gates.rs`,
+/// `runner/{gates,complex}.rs`): every 1-bit primitive and the builder's
+/// demux, exhaustively, on the compiled `Sim` rather than the reference.
+#[test]
+fn primitive_truth_tables_on_the_compiled_sim() {
+    type Table = (NodeKind, fn(&[u64]) -> u64);
+    let tables: [Table; 9] = [
+        (NodeKind::Not { w: 1 }, |x| x[0] ^ 1),
+        (NodeKind::And { w: 1 }, |x| x[0] & x[1]),
+        (NodeKind::Or { w: 1 }, |x| x[0] | x[1]),
+        (NodeKind::Xor { w: 1 }, |x| x[0] ^ x[1]),
+        (NodeKind::Nand { w: 1 }, |x| (x[0] & x[1]) ^ 1),
+        (NodeKind::Nor { w: 1 }, |x| (x[0] | x[1]) ^ 1),
+        (NodeKind::Xnor { w: 1 }, |x| (x[0] ^ x[1]) ^ 1),
+        // sel, a, b: `sel ? b : a`.
+        (
+            NodeKind::Mux { w: 1 },
+            |x| if x[0] == 1 { x[2] } else { x[1] },
+        ),
+        // en, d: the legacy tri-state buffer, with 0 for "Z".
+        (NodeKind::Switch { w: 1 }, |x| x[0] & x[1]),
+    ];
+    for opts in [Options::default(), Options::unoptimized()] {
+        for (kind, f) in &tables {
+            let mut d = Design::new("top");
+            let r = d.root;
+            let mut b = d.builder(r);
+            let n = kind.pins().unwrap().0.len();
+            let ins: Vec<_> = (0..n).map(|i| Some(b.input(format!("i{i}"), 1))).collect();
+            let id = b.node(kind.clone(), &ins);
+            let y = b.out(id, 0);
+            b.output("y", y);
+            let mut s = Sim::new(Arc::new(compile(&d, &opts).unwrap()));
+            for row in 0..1u64 << n {
+                let x: Vec<u64> = (0..n).map(|i| row >> (n - 1 - i) & 1).collect();
+                for (i, &v) in x.iter().enumerate() {
+                    s.set_input(i, v);
+                }
+                s.tick();
+                assert_eq!(s.output(0), f(&x), "{kind:?} {x:?}");
+            }
+        }
+
+        // Demux: output `i` is `d` when `sel == i`, else 0.
+        for sel_bits in [1u8, 2] {
+            let mut d = Design::new("top");
+            let r = d.root;
+            let mut b = d.builder(r);
+            let sel = b.input("sel", sel_bits);
+            let x = b.input("d", 1);
+            let outs = b.demux(sel, x);
+            for (i, &o) in outs.iter().enumerate() {
+                b.output(format!("y{i}"), o);
+            }
+            let mut s = Sim::new(Arc::new(compile(&d, &opts).unwrap()));
+            for sel in 0..1u64 << sel_bits {
+                for v in 0..2 {
+                    s.set("sel", sel);
+                    s.set("d", v);
+                    s.tick();
+                    for i in 0..1u64 << sel_bits {
+                        let want = if i == sel { v } else { 0 };
+                        assert_eq!(s.get(&format!("y{i}")), want, "sel {sel} d {v} y{i}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Port of the legacy `test_recursive_16bit_adder_all_runners` and the
+/// compiler's dead-code test: four levels of instances flatten into one
+/// program that adds, and the simplify passes remove the floating gates
+/// inside every half adder.
+#[test]
+fn nested_adder_flattens_and_drops_dead_gates() {
+    let d = fixtures::nested_adder16();
+    let mut s = sim_of(&d);
+    for (a, b, c) in [(1, 1, 0), (0xFFFF, 1, 0), (0xBEEF, 0x1111, 1)] {
+        s.set("a", a);
+        s.set("b", b);
+        s.set("cin", c);
+        s.tick();
+        let t = a + b + c;
+        assert_eq!((s.get("sum"), s.get("cout")), (t & 0xFFFF, t >> 16));
+    }
+    // 16 full adders, each two half adders.
+    let dead = 16 * 2 * 2 * fixtures::NESTED_ADDER_DEAD_PAIRS;
+    let opt = compile(&d, &Options::default()).unwrap().instrs.len();
+    let raw = compile(&d, &Options::unoptimized()).unwrap().instrs.len();
+    assert!(raw >= opt + dead, "unoptimized {raw}, optimized {opt}");
 }
 
 // ── Basic API ────────────────────────────────────────────────────────────
@@ -132,6 +228,26 @@ fn malformed_programs_are_rejected() {
 
     let mut p = good;
     p.slot_count -= 1;
+    assert!(Sim::try_new(Arc::new(p)).is_err());
+
+    // A masked RAM write: a bad slot, a read-only memory.
+    let mut b = Design::new("top");
+    let r = b.root;
+    let mut bb = b.builder(r);
+    let a = bb.input("a", 2);
+    let m = bb.input("m", 4);
+    let q = bb.ram2(a, m, m, &[a], &[]);
+    bb.output("q", q[0]);
+    let good = compile(&b, &Options::default()).unwrap();
+    assert!(Sim::try_new(Arc::new(good.clone())).is_ok());
+    let mut p = good.clone();
+    let Commit::RamWriteMasked { mask, .. } = &mut p.commits[0] else {
+        panic!("{:?}", p.commits[0])
+    };
+    *mask = p.slot_count;
+    assert!(Sim::try_new(Arc::new(p)).is_err());
+    let mut p = good;
+    p.mems[0].writable = false;
     assert!(Sim::try_new(Arc::new(p)).is_err());
 }
 
@@ -288,6 +404,68 @@ fn register_and_ram_survive_an_unrelated_edit() {
 }
 
 #[test]
+fn reset_returns_to_power_on_and_keeps_inputs() {
+    let build = || {
+        let mut d = Design::new("top");
+        let r = d.root;
+        let mut b = d.builder(r);
+        let one = b.one();
+        let (reg, q) = b.state_placeholder(NodeKind::Register { w: 8 });
+        let n = b.inc(q);
+        b.connect(one, (reg, 0));
+        b.connect(n, (reg, 1));
+        let addr = b.split(q, 0, 4);
+        let ram = b.ram(addr, one, q, &[7, 8, 9]);
+        let rom = b.rom(addr, 8, &[5, 6]);
+        let clk = b.clock(3, 1, 0);
+        let x = b.input("x", 4);
+        let dx = b.delay(x);
+        b.output("q", q);
+        b.output("ram", ram);
+        b.output("rom", rom);
+        b.output("clk", clk);
+        b.output("x", x);
+        b.output("dx", dx);
+        d
+    };
+    let d = build();
+    let fresh = |x: u64| {
+        // Power-on with `x` already driven at the tick-0 settle, the way
+        // the engine loads a program.
+        let mut s = sim_of(&d);
+        s.set("x", x);
+        let snap = s.export_state();
+        s.import_state(&snap);
+        s
+    };
+    let outs = |s: &Sim| {
+        ["q", "ram", "rom", "clk", "x", "dx"]
+            .map(|n| s.get(n))
+            .to_vec()
+    };
+    let mut s = fresh(0);
+    s.run(1);
+    s.set("x", 3);
+    s.run(12);
+    assert_eq!(s.get("q"), 13);
+    s.reset();
+    assert_eq!(s.tick_count(), 0);
+    assert_eq!(s.get("q"), 0);
+    assert_eq!(s.get("x"), 3, "the input keeps its value");
+    assert_eq!(s.get("dx"), 0, "the delay is back to its initial value");
+    let m = s.program().mems.iter().position(|m| m.writable).unwrap() as u32;
+    assert_eq!(&s.mem(m)[..4], &[7, 8, 9, 0], "RAM init restored");
+    // From here it runs exactly like a power-on with the input set at tick 0.
+    let mut f = fresh(3);
+    assert_eq!(outs(&s), outs(&f));
+    for _ in 0..20 {
+        s.tick();
+        f.tick();
+        assert_eq!(outs(&s), outs(&f));
+    }
+}
+
+#[test]
 fn unmatched_state_resets() {
     let d1 = stateful(false);
     let mut s1 = sim_of(&d1);
@@ -311,6 +489,57 @@ fn unmatched_state_resets() {
         s2.mem(m).iter().all(|&w| w == 0),
         "geometry change resets RAM"
     );
+}
+
+/// A `Ram2` written at a counter address and read at `ra`, plus an extra
+/// gate on request.
+fn stateful_ram2(extra_gate: bool, addr_bits: u8) -> Design {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let one = b.one();
+    let ra = b.input("ra", addr_bits);
+    let (reg, q) = b.state_placeholder(NodeKind::Register { w: 8 });
+    let n = b.inc(q);
+    b.connect(one, (reg, 0));
+    b.connect(n, (reg, 1));
+    let waddr = b.split(q, 0, addr_bits);
+    let data = b.ram2(waddr, one, q, &[ra], &[0xEE; 4]);
+    b.output("q", q);
+    b.output("data", data[0]);
+    if extra_gate {
+        let x = b.input("x", 1);
+        let nx = b.not(x);
+        b.output("nx", nx);
+    }
+    d
+}
+
+#[test]
+fn ram2_contents_survive_an_edit_and_reset_on_a_new_geometry() {
+    let mut s1 = sim_of(&stateful_ram2(false, 5));
+    s1.run(10);
+    let snap = s1.export_state();
+    assert_eq!(snap.mems.len(), 1);
+
+    let mut s2 = sim_of(&stateful_ram2(true, 5));
+    s2.import_state(&snap);
+    for a in 0..10 {
+        s2.set("ra", a);
+        s2.tick();
+        // Tick 10 + a writes address 10 + a; 0..10 hold their count.
+        assert_eq!(s2.get("data"), a, "address {a}");
+    }
+    s2.set("ra", 31);
+    s2.tick();
+    assert_eq!(s2.get("data"), 0, "never written, past init");
+
+    // A different address width resets to the initial contents.
+    let mut s3 = sim_of(&stateful_ram2(true, 6));
+    s3.import_state(&snap);
+    let m = s3.program().mems.len() as u32 - 1;
+    assert_eq!(&s3.mem(m)[..5], &[0xEE, 0xEE, 0xEE, 0xEE, 0]);
+    assert_eq!(s3.get("q"), 10, "the register keeps its state");
 }
 
 #[test]
@@ -484,7 +713,7 @@ fn perf_switches_match_the_reference() {
     let designs = perf_designs();
     for (name, opts, so) in perf_variants() {
         let n = diff::sweep_with(&diff::standard_configs(), 20, 15, &opts, &so);
-        assert_eq!(n, 120, "{name}");
+        assert_eq!(n, 140, "{name}");
         for (i, d) in designs.iter().enumerate() {
             crate::compile::tests::check_program_invariants(&compile(d, &opts).unwrap());
             diff::check_design_with(d, i as u64, 40, &opts, &so)
@@ -667,4 +896,173 @@ fn one_thread_spawns_nothing_and_matches_threads() {
             }
         }
     }
+}
+
+// ── Screens ──────────────────────────────────────────────────────────────
+
+/// A root design with one screen whose pins are all root inputs, named
+/// after the pins.
+fn screen_design(mode: crate::netlist::ScreenMode, x_bits: u8, y_bits: u8, w: u8) -> Design {
+    let kind = NodeKind::Screen {
+        mode,
+        x_bits,
+        y_bits,
+        w,
+    };
+    let names: &[&str] = match mode {
+        crate::netlist::ScreenMode::Pixel => &["x", "y", "colour", "draw", "clear"],
+        crate::netlist::ScreenMode::Memory => &["addr", "we", "wdata"],
+        crate::netlist::ScreenMode::Scan => &["colour", "hsync", "vsync"],
+    };
+    let (widths, _) = kind.pins().unwrap();
+    let mut d = Design::new("screen");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let ins: Vec<_> = names
+        .iter()
+        .zip(&widths)
+        .map(|(n, &w)| Some(b.input(*n, w)))
+        .collect();
+    b.screen(mode, x_bits, y_bits, w, &ins);
+    d
+}
+
+/// Drive `steps` (input values in pin order, one tick each) into the
+/// compiled sim under every layout and runtime switch and into the
+/// reference; check they agree on the screen memory after every tick, and
+/// return the final memory.
+fn run_screen(d: &Design, steps: &[&[u64]]) -> Vec<u64> {
+    let mut reference = Reference::new(d).unwrap();
+    let screen = d
+        .root_def()
+        .nodes
+        .iter()
+        .find(|(_, n)| matches!(n.kind, NodeKind::Screen { .. }))
+        .unwrap()
+        .0;
+    let path = NodePath {
+        instances: Vec::new(),
+        node: screen,
+    };
+    let mut sims: Vec<(String, Sim)> = perf_variants()
+        .into_iter()
+        .map(|(name, o, so)| {
+            (
+                name,
+                Sim::with_options(Arc::new(compile(d, &o).unwrap()), so),
+            )
+        })
+        .collect();
+    for (t, step) in steps.iter().enumerate() {
+        for (port, &v) in step.iter().enumerate() {
+            reference.set_input(port, v);
+            for (_, s) in &mut sims {
+                s.set_input(port, v);
+            }
+        }
+        reference.tick().unwrap();
+        let want = reference.mem(&[], screen).unwrap();
+        for (name, s) in &mut sims {
+            s.tick();
+            let m = s.mem_index(&path).expect("the screen has a memory");
+            assert_eq!(s.mem(m), want, "{name}, tick {}", t + 1);
+        }
+    }
+    reference.mem(&[], screen).unwrap().to_vec()
+}
+
+#[test]
+fn pixel_screen_draws_and_clears() {
+    use crate::netlist::ScreenMode;
+    let d = screen_design(ScreenMode::Pixel, 3, 2, 4);
+    // x, y, colour, draw, clear. A pin change reaches the memory at the
+    // second tick (staged input, then commit).
+    let m = run_screen(
+        &d,
+        &[
+            &[1, 2, 7, 1, 0],
+            &[5, 3, 9, 1, 0],
+            &[6, 0, 3, 0, 0],
+            &[0, 0, 0, 0, 0],
+        ],
+    );
+    let mut want = vec![0; 32];
+    want[2 << 3 | 1] = 7;
+    want[3 << 3 | 5] = 9;
+    assert_eq!(m, want);
+    // Clear wins over everything drawn before it, then the same tick's
+    // pixel is drawn on the clean screen.
+    let m = run_screen(&d, &[&[1, 1, 5, 1, 0], &[2, 2, 6, 1, 1], &[0, 0, 0, 0, 0]]);
+    let mut want = vec![0; 32];
+    want[2 << 3 | 2] = 6;
+    assert_eq!(m, want);
+}
+
+#[test]
+fn memory_screen_is_a_write_only_ram() {
+    use crate::netlist::ScreenMode;
+    let d = screen_design(ScreenMode::Memory, 2, 2, 8);
+    let m = run_screen(
+        &d,
+        &[&[3, 1, 0x41], &[15, 1, 0x48], &[4, 0, 0x99], &[0, 0, 0]],
+    );
+    let mut want = vec![0; 16];
+    want[3] = 0x41;
+    want[15] = 0x48;
+    assert_eq!(m, want);
+}
+
+#[test]
+fn scan_screen_follows_the_beam() {
+    use crate::netlist::ScreenMode;
+    // 4 x 2 pixels. colour, hsync, vsync.
+    let d = screen_design(ScreenMode::Scan, 2, 1, 4);
+    let px = |c: u64| -> [u64; 3] { [c, 0, 0] };
+    let hs = [0, 1, 0];
+    let vs = [0, 0, 1];
+    let mut steps: Vec<[u64; 3]> = vec![vs];
+    // Line 0: five pixels; the fifth is past the right edge and dropped.
+    steps.extend([1, 2, 3, 4, 5].map(px));
+    steps.push(hs);
+    // Line 1: two pixels, then two hsyncs: the beam stops below the
+    // bottom, and pixels there are dropped.
+    steps.extend([6, 7].map(px));
+    steps.extend([hs, hs, px(8), px(9)]);
+    // A new frame overwrites from the top left.
+    steps.extend([vs, px(10)]);
+    steps.push([0, 0, 0]);
+    let refs: Vec<&[u64]> = steps.iter().map(|s| &s[..]).collect();
+    let m = run_screen(&d, &refs);
+    assert_eq!(m, vec![10, 2, 3, 4, 6, 7, 0, 0]);
+}
+
+#[test]
+fn memory_versions_change_only_on_writes() {
+    use crate::netlist::ScreenMode;
+    let d = screen_design(ScreenMode::Memory, 2, 2, 8);
+    let mut s = sim_of(&d);
+    let node = d.root_def().nodes.keys().last().unwrap();
+    let m = s
+        .mem_index(&NodePath {
+            instances: Vec::new(),
+            node,
+        })
+        .unwrap();
+    let v0 = s.mem_version(m);
+    s.run(5);
+    assert_eq!(s.mem_version(m), v0, "no writes, same version");
+    s.set("we", 1);
+    s.run(2);
+    assert_ne!(s.mem_version(m), v0);
+    let v1 = s.mem_version(m);
+    s.set("we", 0);
+    s.run(1);
+    let v2 = s.mem_version(m);
+    s.run(3);
+    assert_eq!(s.mem_version(m), v2);
+    assert!(v2 >= v1);
+    // An import (a program swap) counts as a change.
+    let snap = s.export_state();
+    s.import_state(&snap);
+    assert_ne!(s.mem_version(m), v2);
 }

@@ -13,6 +13,30 @@ pub const MAX_WIDTH: u8 = 64;
 /// 8 MiB of `u64`s, which is plenty for game circuits.
 pub const MAX_ADDR_BITS: u8 = 20;
 
+/// Most read ports a [`NodeKind::Ram2`] can have.
+pub const MAX_READ_PORTS: u8 = 8;
+
+/// Largest screen side, in address bits (256 pixels or cells).
+pub const MAX_SCREEN_BITS: u8 = 8;
+
+/// How a [`NodeKind::Screen`] is written (design doc section 3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScreenMode {
+    /// Pins: `x(x_bits), y(y_bits), colour(w), draw(1), clear(1) →`. At
+    /// commit, `clear` zeroes the memory, then `draw` writes `colour` at
+    /// `y << x_bits | x`.
+    Pixel,
+    /// Pins: `addr(x_bits + y_bits), we(1), wdata(w) →`. A write-only RAM:
+    /// at commit, `we` writes `wdata` at `addr`.
+    Memory,
+    /// Pins: `colour(w), hsync(1), vsync(1) →`. A beam `(x, y)` is state.
+    /// At commit: `vsync` moves it to `(0, 0)`; otherwise `hsync` to
+    /// `(0, y + 1)`; otherwise `colour` is written at the beam (if it is on
+    /// the screen) and the beam moves right. The beam stops one past the
+    /// right edge (and `y` one past the bottom), where nothing is written.
+    Scan,
+}
+
 /// Pin widths of one node: one entry per input pin and per output pin.
 pub type PinWidths = SmallVec<[u8; 4]>;
 
@@ -148,6 +172,32 @@ pub enum NodeKind {
         w: u8,
         init: Arc<[u64]>,
     },
+    /// A memory with one write port and `reads` independent read ports
+    /// (1..=[`MAX_READ_PORTS`]). Pins: `waddr(addr_bits), we, wdata(w),
+    /// raddr0(addr_bits) .. raddr{reads-1} → rdata0(w) .. rdata{reads-1}`.
+    /// `we` is 1 bit, or `w` bits when `mask` is set: a per-bit write
+    /// enable (`mem[waddr] = (mem[waddr] & !we) | (wdata & we)`). Reads
+    /// are combinational from committed memory (`rdata_k = mem[raddr_k]`)
+    /// and the write is applied at commit, exactly as for [`Self::Ram`]:
+    /// a read at the address being written returns the old word until the
+    /// next tick. `init` holds initial contents (missing words are 0).
+    Ram2 {
+        addr_bits: u8,
+        w: u8,
+        reads: u8,
+        mask: bool,
+        init: Arc<[u64]>,
+    },
+    /// A screen: a write-only memory of `2^(x_bits + y_bits)` words of `w`
+    /// bits, pixel `(x, y)` at address `y << x_bits | x`, written as `mode`
+    /// says. No outputs; the memory is read back by the host (a memory
+    /// probe), once per frame. Starts all zero.
+    Screen {
+        mode: ScreenMode,
+        x_bits: u8,
+        y_bits: u8,
+        w: u8,
+    },
 }
 
 /// Which pins of a node form combinational (same-tick) dependencies.
@@ -159,6 +209,9 @@ pub enum CombDeps {
     None,
     /// Only the listed input pin indices feed the outputs (Ram: addr).
     Pins(&'static [u8]),
+    /// Output `q` depends only on input pin `first + q` (Ram2: read
+    /// address `q` → read data `q`).
+    Diagonal { first: u8 },
     /// Depends on the referenced definition's internal paths.
     Instance(DefId),
 }
@@ -173,16 +226,20 @@ impl NodeKind {
                 | NodeKind::DLatch { .. }
                 | NodeKind::SrLatch
                 | NodeKind::Ram { .. }
+                | NodeKind::Ram2 { .. }
+                | NodeKind::Screen { .. }
         )
     }
 
     /// Combinational input→output edges for loop detection and ranking.
     pub fn comb_deps(&self) -> CombDeps {
         match self {
-            NodeKind::Delay { .. } | NodeKind::Register { .. } | NodeKind::SrLatch => {
-                CombDeps::None
-            }
+            NodeKind::Delay { .. }
+            | NodeKind::Register { .. }
+            | NodeKind::SrLatch
+            | NodeKind::Screen { .. } => CombDeps::None,
             NodeKind::Ram { .. } => CombDeps::Pins(&[0]),
+            NodeKind::Ram2 { .. } => CombDeps::Diagonal { first: 3 },
             NodeKind::Instance(def) => CombDeps::Instance(*def),
             _ => CombDeps::All,
         }
@@ -221,6 +278,28 @@ impl NodeKind {
             Register { w } | DLatch { w } => p(&[1, *w], &[*w]),
             SrLatch => p(&[1, 1], &[1]),
             Ram { addr_bits, w, .. } => p(&[*addr_bits, 1, *w], &[*w]),
+            Ram2 {
+                addr_bits,
+                w,
+                reads,
+                mask,
+                ..
+            } => {
+                let we = if *mask { *w } else { 1 };
+                let mut ins = PinWidths::from_slice(&[*addr_bits, we, *w]);
+                ins.extend(std::iter::repeat_n(*addr_bits, *reads as usize));
+                Some((ins, std::iter::repeat_n(*w, *reads as usize).collect()))
+            }
+            Screen {
+                mode,
+                x_bits,
+                y_bits,
+                w,
+            } => match mode {
+                ScreenMode::Pixel => p(&[*x_bits, *y_bits, *w, 1, 1], &[]),
+                ScreenMode::Memory => p(&[x_bits + y_bits, 1, *w], &[]),
+                ScreenMode::Scan => p(&[*w, 1, 1], &[]),
+            },
         }
     }
 
@@ -303,6 +382,37 @@ impl NodeKind {
                 need(
                     init.len() <= 1usize << addr_bits,
                     "RAM contents exceed address space",
+                )
+            }
+            Ram2 {
+                addr_bits,
+                w,
+                reads,
+                init,
+                ..
+            } => {
+                need(w_ok(*w), "width must be 1..=64")?;
+                need(
+                    (1..=MAX_ADDR_BITS).contains(addr_bits),
+                    "address width must be 1..=20",
+                )?;
+                need(
+                    (1..=MAX_READ_PORTS).contains(reads),
+                    "read ports must be 1..=8",
+                )?;
+                need(
+                    init.len() <= 1usize << addr_bits,
+                    "RAM contents exceed address space",
+                )
+            }
+            Screen {
+                x_bits, y_bits, w, ..
+            } => {
+                need(w_ok(*w), "width must be 1..=64")?;
+                need(
+                    (1..=MAX_SCREEN_BITS).contains(x_bits)
+                        && (1..=MAX_SCREEN_BITS).contains(y_bits),
+                    "screen sides must be 1..=8 address bits",
                 )
             }
             SrLatch | Instance(_) => Ok(()),

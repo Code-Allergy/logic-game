@@ -1,0 +1,62 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "pattern",
+  "circuits": [
+    {
+      "name": "pattern",
+      "title": "XOR pattern",
+      "nodes": [
+        {"name": "one", "type": "Const", "value": 1, "at": [0, 0]},
+        {"name": "write", "type": "Const", "value": 1, "label": "always", "at": [700, -200]},
+        {"name": "a", "type": "Register", "w": 14, "label": "address and frame", "at": [160, 100]},
+        {"name": "ainc", "type": "Add", "w": 14, "label": "+1", "at": [160, -60]},
+        {"name": "xs", "type": "Split", "w": 14, "lo": 0, "len": 4, "label": "x", "at": [340, 220]},
+        {"name": "ys", "type": "Split", "w": 14, "lo": 5, "len": 4, "label": "y", "at": [340, 120]},
+        {
+          "name": "frame",
+          "type": "Split",
+          "w": 14,
+          "lo": 10,
+          "len": 4,
+          "label": "frame",
+          "at": [340, -20]
+        },
+        {
+          "name": "addr",
+          "type": "Split",
+          "w": 14,
+          "lo": 0,
+          "len": 10,
+          "label": "address",
+          "at": [340, -120]
+        },
+        {"name": "xy", "type": "Xor", "w": 4, "label": "x xor y", "at": [500, 160]},
+        {"name": "shade", "type": "Add", "w": 4, "label": "+ frame", "at": [660, 60]},
+        {
+          "name": "screen",
+          "type": "Screen",
+          "mode": "Framebuffer",
+          "width": 32,
+          "height": 32,
+          "palette": "Colors16",
+          "scale": 6,
+          "label": "Framebuffer",
+          "at": [920, 0]
+        }
+      ],
+      "wires": [
+        ["one", "a.en", "ainc.cin"],
+        ["write", "screen.we"],
+        ["a", "ainc.a", "xs", "ys", "frame", "addr"],
+        ["ainc.sum", "a.d"],
+        ["xs", "xy.a"],
+        ["ys", "xy.b"],
+        ["xy", "shade.a"],
+        ["frame", "shade.b"],
+        ["addr", "screen.addr"],
+        ["shade.sum", "screen.wdata"]
+      ]
+    }
+  ]
+}

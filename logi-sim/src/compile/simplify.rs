@@ -52,8 +52,9 @@ pub(super) fn simplify(
                 commit_written[state as usize] = true;
                 commit_read[next as usize] = true;
             }
-            Commit::RamWrite { we, addr, data, .. } => {
-                for s in [we, addr, data] {
+            Commit::MemClear { en, .. } => commit_read[en as usize] = true,
+            _ => {
+                for s in c.reads() {
                     commit_read[s as usize] = true;
                 }
             }
@@ -163,23 +164,7 @@ pub(super) fn simplify(
 
     // Apply replacements everywhere else.
     for c in &mut em.commits {
-        *c = match *c {
-            Commit::Copy { state, next } => Commit::Copy {
-                state,
-                next: resolve(&mut repl, next),
-            },
-            Commit::RamWrite {
-                mem,
-                we,
-                addr,
-                data,
-            } => Commit::RamWrite {
-                mem,
-                we: resolve(&mut repl, we),
-                addr: resolve(&mut repl, addr),
-                data: resolve(&mut repl, data),
-            },
-        };
+        *c = c.map_reads(|s| resolve(&mut repl, s));
     }
     for p in &mut ports.outputs {
         p.slot = resolve(&mut repl, p.slot);
@@ -213,8 +198,9 @@ pub(super) fn simplify(
         for c in &em.commits {
             match *c {
                 Commit::Copy { next, .. } => mark(next, &mut live_slot, &mut stack),
-                Commit::RamWrite { we, addr, data, .. } => {
-                    for s in [we, addr, data] {
+                Commit::MemClear { en, .. } => mark(en, &mut live_slot, &mut stack),
+                _ => {
+                    for s in c.reads() {
                         mark(s, &mut live_slot, &mut stack);
                     }
                 }
@@ -367,7 +353,12 @@ enum Outcome {
 /// Identities with a constant operand, or with a constant result.
 fn const_identity(op: Op, i: &Instr, w: u8, c: &dyn Fn(u32) -> Option<u64>) -> Outcome {
     let m = mask(w);
-    let (ca, cb, cc) = (c(i.a), c(i.b), c(i.c));
+    // Only slot operands name slots: the others are immediates (a
+    // concatenation's shift, a slice's offset), which can exceed the slot
+    // count.
+    let (sa, sb, sc) = op.slot_operands();
+    let slot = |is_slot: bool, s: u32| if is_slot { c(s) } else { None };
+    let (ca, cb, cc) = (slot(sa, i.a), slot(sb, i.b), slot(sc, i.c));
     match op {
         Op::And => match (ca, cb) {
             (Some(0), _) | (_, Some(0)) => Outcome::Const(0),

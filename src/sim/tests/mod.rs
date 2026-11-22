@@ -1,12 +1,18 @@
 //! Integration tests for the ECS → `Design` → v2 engine path, run in a
 //! headless `App` with [`SimulationRuntimePlugin`].
 
+mod demos;
+mod gallery;
 pub mod geometry_tests;
 mod instance_views;
+mod routing;
+mod rtl;
+mod rtl_cells;
+mod screens;
 mod visuals;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use bevy::ecs::system::RunSystemOnce;
@@ -16,11 +22,12 @@ use uuid::Uuid;
 use crate::editor::workspace::{
     WorkspaceError, list_workspaces_in, read_workspace_in, save_workspace_in,
 };
+use crate::sim::demos::DemoCatalog;
 use crate::sim::{
     CircuitDocument, CircuitReader, CreateGate, CreateWire, DeleteGate, DeleteWire, DocNode,
     GateIdentity, GateKind, GateLabel, GateType, GateValues, LoadWorkspaceEvent, SetGateKind,
     SetInputValue, SimBridge, SimDiagnostics, SimRuntime, SimulationConfig,
-    SimulationRuntimePlugin, WireEndpoints, WireState, WorkspaceDocument, fixtures,
+    SimulationRuntimePlugin, WireEndpoints, WireState, WorkspaceDocument,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -37,12 +44,33 @@ fn app() -> App {
     app_with(SimRuntime::Threadless)
 }
 
+/// Load `workspace` (editable).
 fn load(app: &mut App, workspace: WorkspaceDocument) {
     app.world_mut().write_message(LoadWorkspaceEvent {
         name: workspace.root.name.clone(),
         workspace: Arc::new(workspace),
+        read_only: false,
     });
     settle(app);
+}
+
+/// The built-in demos, from the embedded files.
+fn demos() -> &'static DemoCatalog {
+    static CATALOG: OnceLock<DemoCatalog> = OnceLock::new();
+    CATALOG.get_or_init(|| DemoCatalog::embedded().expect("the demos load"))
+}
+
+/// The expanded workspace of demo `id`.
+fn demo(id: &str) -> WorkspaceDocument {
+    let demo = demos().get(id).unwrap_or_else(|| panic!("no demo {id}"));
+    (*demo.workspace).clone()
+}
+
+/// The value on input pin 0 of the gate labelled `label` (an output port
+/// or display).
+fn value_at(app: &mut App, label: &str) -> u64 {
+    let e = gate(app, label);
+    input_value(app, e, 0)
 }
 
 /// Apply pending commands: authoring in `Update`, design sync and load in
@@ -72,23 +100,21 @@ fn run(app: &mut App, ticks: u64) {
     app.update();
 }
 
+/// Set inputs, run one tick, and read outputs.
+fn eval(app: &mut App, inputs: &[(&str, u64)], outputs: &[&str]) -> Vec<u64> {
+    for &(label, value) in inputs {
+        set_input(app, label, value);
+    }
+    run(app, 1);
+    outputs.iter().map(|label| value_at(app, label)).collect()
+}
+
 fn gate(app: &mut App, label: &str) -> Entity {
     let mut q = app.world_mut().query::<(Entity, &GateLabel)>();
     q.iter(app.world())
         .find(|(_, l)| l.value == label)
         .map(|(e, _)| e)
         .unwrap_or_else(|| panic!("no gate labelled {label}"))
-}
-
-fn gate_of_kind(app: &mut App, pred: impl Fn(&GateKind) -> bool) -> Entity {
-    let mut q = app.world_mut().query::<(Entity, &GateType)>();
-    let found: Vec<Entity> = q
-        .iter(app.world())
-        .filter(|(_, t)| pred(&t.kind))
-        .map(|(e, _)| e)
-        .collect();
-    assert_eq!(found.len(), 1, "expected exactly one matching gate");
-    found[0]
 }
 
 fn uuid(app: &App, entity: Entity) -> Uuid {
@@ -153,11 +179,6 @@ fn temp_dir() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("gatequest-test-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-fn display_value(app: &mut App) -> u64 {
-    let display = gate_of_kind(app, |k| matches!(k, GateKind::Display { .. }));
-    input_value(app, display, 0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -351,29 +372,40 @@ fn changing_a_width_disconnects_mismatched_wires() {
 // State across edits
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The counter demo, loaded editable: edits elsewhere keep the state of
+/// both its gate-built counter (flip-flops with Delays inside nested
+/// definitions) and its word-level `Register` counter.
 #[test]
 fn register_state_survives_edits() {
     let mut app = app();
-    load(&mut app, fixtures::build_register_counter());
+    load(&mut app, demo("counter"));
     set_input(&mut app, "Enable", 1);
-    run(&mut app, 20);
-    let before = display_value(&mut app);
-    assert!(before >= 18, "counter ran: {before}");
+    run(&mut app, 40);
+    let before = value_at(&mut app, "Count");
+    assert!(before >= 9, "counter ran: {before}");
+    assert_eq!(value_at(&mut app, "Count (Register)"), before);
 
     // Edits: add a gate, wire it, delete it again.
     let extra = create_gate(&mut app, GateKind::Not { w: 1 }, "extra");
     let enable = gate(&mut app, "Enable");
     create_wire(&mut app, enable, 0, extra, 0);
     assert_eq!(
-        display_value(&mut app),
+        value_at(&mut app, "Count"),
+        before,
+        "edit did not reset the flip-flops"
+    );
+    assert_eq!(
+        value_at(&mut app, "Count (Register)"),
         before,
         "edit did not reset the register"
     );
     send(&mut app, DeleteGate { entity: extra });
-    assert_eq!(display_value(&mut app), before);
+    assert_eq!(value_at(&mut app, "Count"), before);
 
-    run(&mut app, 5);
-    assert_eq!(display_value(&mut app), before + 5);
+    // One clock period is one count.
+    run(&mut app, 8);
+    assert_eq!(value_at(&mut app, "Count"), before + 2);
+    assert_eq!(value_at(&mut app, "Count (Register)"), before + 2);
 }
 
 #[test]
@@ -409,6 +441,154 @@ fn ram_contents_survive_edits() {
     set_input(&mut app, "Addr", 1);
     run(&mut app, 1);
     assert_eq!(input_value(&app, q, 0), 0x5A);
+}
+
+/// A dual-port RAM with initial contents: written at `WA`, read at `RA`
+/// and `RB`.
+fn ram2_circuit(app: &mut App) -> (Entity, Entity, Entity) {
+    let wa = create_gate(app, GateKind::Input { w: 3 }, "WA");
+    let we = create_gate(app, GateKind::Input { w: 1 }, "WE");
+    let data = create_gate(app, GateKind::Input { w: 8 }, "Data");
+    let ra = create_gate(app, GateKind::Input { w: 3 }, "RA");
+    let rb = create_gate(app, GateKind::Input { w: 3 }, "RB");
+    let kind = GateKind::Ram2 {
+        addr_bits: 3,
+        w: 8,
+        reads: 2,
+        mask: false,
+        init: vec![0x11, 0x22, 0x33],
+    };
+    let ram = create_gate(app, kind, "ram");
+    let qa = create_gate(app, GateKind::Output { w: 8 }, "QA");
+    let qb = create_gate(app, GateKind::Output { w: 8 }, "QB");
+    for (k, src) in [wa, we, data, ra, rb].into_iter().enumerate() {
+        create_wire(app, src, 0, ram, k as u8);
+    }
+    create_wire(app, ram, 0, qa, 0);
+    create_wire(app, ram, 1, qb, 0);
+    (ram, qa, qb)
+}
+
+#[test]
+fn ram2_reads_two_ports_and_keeps_its_contents_across_edits() {
+    let mut app = app();
+    let (_, qa, qb) = ram2_circuit(&mut app);
+    set_input(&mut app, "RA", 1);
+    set_input(&mut app, "RB", 2);
+    run(&mut app, 1);
+    assert_eq!(
+        (input_value(&app, qa, 0), input_value(&app, qb, 0)),
+        (0x22, 0x33)
+    );
+
+    // Write 5 while reading 1 and 5 elsewhere.
+    set_input(&mut app, "WA", 5);
+    set_input(&mut app, "Data", 0xA5);
+    set_input(&mut app, "WE", 1);
+    set_input(&mut app, "RB", 5);
+    run(&mut app, 2);
+    set_input(&mut app, "WE", 0);
+    run(&mut app, 1);
+    assert_eq!(
+        (input_value(&app, qa, 0), input_value(&app, qb, 0)),
+        (0x22, 0xA5)
+    );
+
+    // An unrelated edit keeps the contents.
+    let extra = create_gate(&mut app, GateKind::Not { w: 8 }, "extra");
+    let data = gate(&mut app, "Data");
+    create_wire(&mut app, data, 0, extra, 0);
+    run(&mut app, 1);
+    assert_eq!(input_value(&app, qb, 0), 0xA5);
+    set_input(&mut app, "RA", 0);
+    run(&mut app, 1);
+    assert_eq!(input_value(&app, qa, 0), 0x11);
+}
+
+#[test]
+fn ram2_round_trips_through_version_5_and_version_6() {
+    let mut app = app();
+    ram2_circuit(&mut app);
+    let saved = read_back(&mut app);
+    let ram = saved
+        .root
+        .nodes
+        .iter()
+        .find(|n| matches!(n.kind, GateKind::Ram2 { .. }))
+        .unwrap();
+    assert_eq!(ram.kind.display_name(), "DUAL-PORT RAM");
+
+    // Version 5.
+    let dir = temp_dir();
+    save_workspace_in(&dir, "ram2", &saved).unwrap();
+    let text = std::fs::read_to_string(dir.join("ram2/manifest.json")).unwrap();
+    assert!(text.contains("\"type\": \"Ram2\""), "{text}");
+    assert_eq!(read_workspace_in(&dir, "ram2").unwrap(), saved);
+    std::fs::remove_dir_all(dir).ok();
+
+    // Version 6: named pins, hex initial contents, optional parameters.
+    let text = r#"{"format": "gatequest-workspace", "version": 6, "root": "c", "circuits": [
+        {"name": "c", "nodes": [
+            {"name": "a", "type": "Input", "w": 4, "at": [0, 0]},
+            {"name": "d", "type": "Input", "w": 16, "at": [0, 60]},
+            {"name": "m", "type": "Ram2", "addr_bits": 4, "w": 16, "reads": 3,
+             "mask": true, "init": ["0xBEEF", 7], "at": [200, 0]},
+            {"name": "k", "type": "DualPortRam", "addr_bits": 4, "w": 16, "reads": 1,
+             "at": [200, 200]},
+            {"name": "q", "type": "Output", "w": 16, "at": [400, 0]}],
+          "wires": [["a", "m.waddr", "m.raddr2", "k.raddr0"], ["d", "m.we", "m.wdata"],
+                    ["m.rdata2", "q"]]}]}"#;
+    let file = crate::sim::source::parse(text).unwrap();
+    let expanded =
+        crate::sim::source::expand(&file, "test", &crate::sim::source::Externals::default())
+            .unwrap();
+    let kinds: Vec<&GateKind> = expanded
+        .workspace
+        .root
+        .nodes
+        .iter()
+        .map(|n| &n.kind)
+        .collect();
+    assert!(kinds.contains(&&GateKind::Ram2 {
+        addr_bits: 4,
+        w: 16,
+        reads: 3,
+        mask: true,
+        init: vec![0xBEEF, 7],
+    }));
+    assert!(kinds.contains(&&GateKind::Ram2 {
+        addr_bits: 4,
+        w: 16,
+        reads: 1,
+        mask: false,
+        init: vec![],
+    }));
+    assert_eq!(expanded.workspace.root.wires.len(), 6);
+    let canonical = crate::sim::source::to_text(&file);
+    assert_eq!(crate::sim::source::parse(&canonical).unwrap(), file);
+
+    // Simulated: the masked write reaches only the bits set in `we`.
+    let mut app = self::app();
+    load(&mut app, expanded.workspace);
+    assert!(wires(&mut app).iter().all(|(_, _, s)| s.connected));
+    run(&mut app, 1);
+    assert_eq!(value_at(&mut app, "q"), 0xBEEF);
+    set_input(&mut app, "d", 0x00F0);
+    run(&mut app, 2);
+    assert_eq!(value_at(&mut app, "q"), 0xBEFF);
+
+    // Bad parameters are refused with the kind's own message.
+    let bad = text.replace("\"reads\": 3", "\"reads\": 9");
+    let err = crate::sim::source::expand(
+        &crate::sim::source::parse(&bad).unwrap(),
+        "test",
+        &crate::sim::source::Externals::default(),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("read ports must be 1..=8"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -544,67 +724,73 @@ fn threaded_engine_runs_the_same_path() {
 }
 
 #[test]
-fn counter_block_has_word_interface() {
-    let ws = fixtures::build_8bit_counter_block();
-    let (inputs, outputs) = ws.root.interface();
+fn counter_definition_has_word_interface() {
+    let counter = demos().get("counter").unwrap();
+    let def = &counter
+        .circuits
+        .iter()
+        .find(|(name, _)| name == "counter8")
+        .unwrap()
+        .1;
+    let (inputs, outputs) = def.interface();
     let names = |v: &[&DocNode]| {
         v.iter()
             .map(|n| n.label.clone().unwrap())
             .collect::<Vec<_>>()
     };
-    assert_eq!(names(&inputs), ["Increment", "Reset"]);
-    assert_eq!(names(&outputs), ["Bits", "Ripple"]);
+    assert_eq!(names(&inputs), ["Clk", "Enable", "Reset"]);
+    assert_eq!(names(&outputs), ["Q"]);
     assert_eq!(outputs[0].kind, GateKind::Output { w: 8 });
 }
 
-/// The counters use gate flip-flops with a Delay in each latch loop; they
-/// compile, start at 0 without a reset pulse, and count.
+/// The gate-built counter (flip-flops with a Delay in each latch loop)
+/// compiles, starts at 0 without a reset pulse, counts once per clock
+/// period in step with the word-level counter beside it, and resets.
 #[test]
-fn counter_examples_compile_start_at_zero_and_count() {
-    for (ws, ticks) in [
-        (fixtures::build_8bit_counter(), 40),
-        (fixtures::build_64bit_counter_subcircuits(), 40),
-        (fixtures::build_nested_64bit_counter(), 40),
-    ] {
-        let name = ws.root.name.clone();
-        let mut app = app();
-        load(&mut app, ws);
-        assert!(
-            wires(&mut app).iter().all(|(_, _, s)| s.connected),
-            "{name}: every wire simulated"
-        );
-        assert!(
-            app.world()
-                .resource::<SimDiagnostics>()
-                .compile_error
-                .is_none(),
-            "{name} compiles"
-        );
-        assert_eq!(display_value(&mut app), 0, "{name} powers up at 0");
-        let mut previous = 0;
-        for _ in 0..ticks {
-            run(&mut app, 1);
-            let v = display_value(&mut app);
-            assert!(
-                v == previous || v == previous + 1,
-                "{name}: {previous} -> {v}"
-            );
-            previous = v;
-        }
-        assert!(previous >= 8, "{name} counted to {previous}");
-
-        // Holding Reset clears it.
-        set_input(&mut app, "Reset", 1);
-        run(&mut app, 8);
-        assert_eq!(display_value(&mut app), 0, "{name} resets");
+fn counter_demo_compiles_starts_at_zero_and_counts() {
+    let mut app = app();
+    load(&mut app, demo("counter"));
+    assert!(
+        wires(&mut app).iter().all(|(_, _, s)| s.connected),
+        "every wire simulated"
+    );
+    assert!(
+        app.world()
+            .resource::<SimDiagnostics>()
+            .compile_error
+            .is_none(),
+        "compiles"
+    );
+    assert_eq!(value_at(&mut app, "Count"), 0, "powers up at 0");
+    set_input(&mut app, "Enable", 1);
+    let mut previous = 0;
+    for _ in 0..40 {
+        run(&mut app, 1);
+        let v = value_at(&mut app, "Count");
+        assert!(v == previous || v == previous + 1, "{previous} -> {v}");
+        assert_eq!(value_at(&mut app, "Count (Register)"), v, "same count");
+        previous = v;
     }
+    assert!((9..=10).contains(&previous), "counted to {previous}");
+
+    // Holding Reset clears it.
+    set_input(&mut app, "Reset", 1);
+    run(&mut app, 8);
+    assert_eq!(value_at(&mut app, "Count"), 0, "resets");
+    assert_eq!(value_at(&mut app, "Count (Register)"), 0);
+    set_input(&mut app, "Reset", 0);
+    run(&mut app, 8);
+    let again = value_at(&mut app, "Count");
+    assert!((1..=2).contains(&again), "counts again: {again}");
+    assert_eq!(value_at(&mut app, "Count (Register)"), again);
 }
 
 #[test]
-fn every_example_loads_and_compiles() {
-    for (name, ws) in fixtures::fixture_workspace_catalog() {
+fn every_demo_loads_and_compiles() {
+    for demo in &demos().demos {
+        let name = &demo.id;
         let mut app = app();
-        load(&mut app, (*ws).clone());
+        load(&mut app, (*demo.workspace).clone());
         assert!(
             app.world()
                 .resource::<SimDiagnostics>()
@@ -640,29 +826,31 @@ fn read_back(app: &mut App) -> WorkspaceDocument {
 fn save_and_load_round_trip() {
     let dir = temp_dir();
     let mut app = app();
-    load(&mut app, fixtures::build_8bit_counter_subcircuit());
+    load(&mut app, demo("register"));
     let saved = read_back(&mut app);
-    save_workspace_in(&dir, "counter", &saved).unwrap();
-    assert_eq!(list_workspaces_in(&dir).unwrap(), ["counter"]);
+    save_workspace_in(&dir, "register", &saved).unwrap();
+    assert_eq!(list_workspaces_in(&dir).unwrap(), ["register"]);
 
-    let loaded = read_workspace_in(&dir, "counter").unwrap();
+    let loaded = read_workspace_in(&dir, "register").unwrap();
     assert_eq!(loaded, saved);
+    // register8, mux2, dff, d_latch, sr_latch, and the not/and/or/nor
+    // gates: each stored once, however many instances there are.
     assert_eq!(
         loaded.definitions.len(),
-        1,
-        "the T flip-flop is stored once"
+        9,
+        "each definition is stored once"
     );
 
     // Load into a fresh app; it simulates the same.
     let mut app = self::app();
     load(&mut app, loaded);
     assert!(wires(&mut app).iter().all(|(_, _, s)| s.connected));
-    set_input(&mut app, "Increment", 1);
-    run(&mut app, 4);
-    set_input(&mut app, "Increment", 0);
-    run(&mut app, 4);
-    let count = gate(&mut app, "Count");
-    assert_eq!(input_value(&app, count, 0), 1);
+    set_input(&mut app, "D", 0x5A);
+    set_input(&mut app, "Load", 1);
+    run(&mut app, 3);
+    set_input(&mut app, "Clk", 1);
+    run(&mut app, 3);
+    assert_eq!(value_at(&mut app, "Q (gates)"), 0x5A);
 
     // An editor-made circuit also round-trips, port labels included.
     let mut app = self::app();
@@ -698,6 +886,26 @@ fn old_format_workspaces_are_refused_with_a_message() {
         assert!(message.contains(&format!("version {version}")), "{message}");
         assert!(message.contains("cannot open"), "{message}");
         assert!(message.contains("not converted"), "{message}");
+    }
+    // A manifest with no version, or a version from the future.
+    for (name, text) in [
+        (
+            "none",
+            r#"{"format":"gatequest-workspace","root":"x","circuits":[]}"#,
+        ),
+        (
+            "seven",
+            r#"{"format":"gatequest-workspace","version":7,"root":"x","circuits":[]}"#,
+        ),
+    ] {
+        std::fs::create_dir_all(dir.join(name)).unwrap();
+        std::fs::write(dir.join(name).join("manifest.json"), text).unwrap();
+        let err = read_workspace_in(&dir, name).unwrap_err();
+        assert!(
+            matches!(err, WorkspaceError::UnsupportedVersion { .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("versions 5 and 6"), "{err}");
     }
     std::fs::remove_dir_all(dir).ok();
 }

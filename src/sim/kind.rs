@@ -11,8 +11,24 @@ use logi_sim::netlist::{NodeKind, PinWidths};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Margin between a screen's picture and its tile edge, world units.
+pub const SCREEN_BEZEL: f32 = 12.0;
+
 /// Largest width the editor exposes for a word.
 pub const MAX_WIDTH: u8 = logi_sim::netlist::MAX_WIDTH;
+
+/// Most read ports of a [`GateKind::Ram2`].
+const RAM2_READS: usize = logi_sim::netlist::MAX_READ_PORTS as usize;
+
+/// Pin names of a [`GateKind::Ram2`] with the most read ports; fewer ports
+/// use a prefix.
+const RAM2_INPUTS: [&str; 3 + RAM2_READS] = [
+    "waddr", "we", "wdata", "raddr0", "raddr1", "raddr2", "raddr3", "raddr4", "raddr5", "raddr6",
+    "raddr7",
+];
+const RAM2_OUTPUTS: [&str; RAM2_READS] = [
+    "rdata0", "rdata1", "rdata2", "rdata3", "rdata4", "rdata5", "rdata6", "rdata7",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Reflect)]
 #[serde(tag = "type")]
@@ -120,11 +136,158 @@ pub enum GateKind {
         addr_bits: u8,
         w: u8,
     },
+    /// A dual-port memory (`logi_sim`'s `Ram2`): one write port and
+    /// `reads` read ports with their own addresses. `mask` makes the write
+    /// enable a per-bit mask as wide as the word; `init` holds initial
+    /// contents (missing words are 0). Both may be left out when saved.
+    #[serde(alias = "DualPortRam")]
+    Ram2 {
+        addr_bits: u8,
+        w: u8,
+        reads: u8,
+        #[serde(default)]
+        mask: bool,
+        #[serde(default)]
+        init: Vec<u64>,
+    },
+    /// A graphical screen: pixels drawn into its own video memory as
+    /// `mode` says, shown on the tile (see [`ScreenMode`]). `width` and
+    /// `height` are in pixels, or in characters for [`ScreenMode::Text`];
+    /// each is a power of two (see [`ScreenMode::sides`]). `scale` is the
+    /// size of one pixel on the canvas, in world units.
+    Screen {
+        mode: ScreenMode,
+        width: u16,
+        height: u16,
+        #[serde(default)]
+        palette: ScreenPalette,
+        #[serde(default = "default_screen_scale")]
+        scale: u8,
+    },
     /// An instance of a circuit definition in the [`super::CircuitLibrary`].
     SubCircuit {
         definition: Uuid,
     },
 }
+
+fn default_screen_scale() -> u8 {
+    4
+}
+
+/// How a [`GateKind::Screen`] is driven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Reflect)]
+pub enum ScreenMode {
+    /// Pins x, y, colour, draw, clear: each tick that `draw` is on paints
+    /// one pixel; the screen keeps what is drawn; `clear` blanks it.
+    #[default]
+    Pixel,
+    /// Pins addr, we, wdata: the screen shows its own video memory, written
+    /// like a RAM. Pixel `(x, y)` is at address `y * width + x`.
+    Framebuffer,
+    /// Pins colour, hsync, vsync: every tick the beam paints one pixel and
+    /// moves right; `hsync` starts the next line, `vsync` a new frame.
+    Scanline,
+    /// Pins addr, we, char: the memory holds one character code per cell
+    /// (`y * width + x`), drawn with the built-in 8x8 font; bit 7 shows
+    /// the character inverted.
+    Text,
+}
+
+impl ScreenMode {
+    pub const ALL: [ScreenMode; 4] = [
+        ScreenMode::Pixel,
+        ScreenMode::Framebuffer,
+        ScreenMode::Scanline,
+        ScreenMode::Text,
+    ];
+
+    /// The sides a screen in this mode may have: pixels, or characters for
+    /// text. Powers of two only, so the address of `(x, y)` is `y` and `x`
+    /// side by side.
+    pub fn sides(self) -> &'static [u16] {
+        match self {
+            ScreenMode::Text => &[4, 8, 16, 32, 64],
+            _ => &[8, 16, 32, 64, 128, 256],
+        }
+    }
+
+    /// The allowed side nearest to `side`.
+    pub fn fit(self, side: u16) -> u16 {
+        let sides = self.sides();
+        *sides
+            .iter()
+            .min_by_key(|&&s| (i32::from(s) - i32::from(side)).abs())
+            .unwrap_or(&sides[0])
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ScreenMode::Pixel => "Pixel port",
+            ScreenMode::Framebuffer => "Framebuffer",
+            ScreenMode::Scanline => "Scanline",
+            ScreenMode::Text => "Text",
+        }
+    }
+
+    /// The simulator mode it maps to.
+    fn netlist(self) -> logi_sim::netlist::ScreenMode {
+        use logi_sim::netlist::ScreenMode as S;
+        match self {
+            ScreenMode::Pixel => S::Pixel,
+            ScreenMode::Framebuffer | ScreenMode::Text => S::Memory,
+            ScreenMode::Scanline => S::Scan,
+        }
+    }
+}
+
+/// The colours of a [`GateKind::Screen`]: how many bits a pixel has and
+/// what each value looks like. Value 0 is always the dark screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Reflect)]
+pub enum ScreenPalette {
+    /// 1 bit: dark or lit (amber).
+    #[default]
+    Mono,
+    /// 2 bits: black, dark grey, light grey, white.
+    Gray,
+    /// 4 bits, IRGB: bit 0 blue, bit 1 green, bit 2 red, bit 3 bright.
+    Colors16,
+    /// 8 bits: red in bits 7-5, green in 4-2, blue in 1-0.
+    Rgb332,
+}
+
+impl ScreenPalette {
+    pub const ALL: [ScreenPalette; 4] = [
+        ScreenPalette::Mono,
+        ScreenPalette::Gray,
+        ScreenPalette::Colors16,
+        ScreenPalette::Rgb332,
+    ];
+
+    /// Bits per pixel.
+    pub fn bits(self) -> u8 {
+        match self {
+            ScreenPalette::Mono => 1,
+            ScreenPalette::Gray => 2,
+            ScreenPalette::Colors16 => 4,
+            ScreenPalette::Rgb332 => 8,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ScreenPalette::Mono => "Mono",
+            ScreenPalette::Gray => "4 greys",
+            ScreenPalette::Colors16 => "16 colours",
+            ScreenPalette::Rgb332 => "256 colours",
+        }
+    }
+}
+
+/// Largest pixel scale of a screen on the canvas.
+pub const MAX_SCREEN_SCALE: u8 = 16;
+
+/// Pixels per character side in [`ScreenMode::Text`].
+pub const TEXT_CELL: u16 = 8;
 
 impl GateKind {
     /// The simulator primitive this kind maps to (`None` for subcircuits).
@@ -192,6 +355,46 @@ impl GateKind {
                 w: *w,
                 init: Vec::new().into(),
             },
+            G::Ram2 {
+                addr_bits,
+                w,
+                reads,
+                mask,
+                init,
+            } => NodeKind::Ram2 {
+                addr_bits: *addr_bits,
+                w: *w,
+                reads: *reads,
+                mask: *mask,
+                init: init.as_slice().into(),
+            },
+            G::Screen {
+                mode,
+                width,
+                height,
+                palette,
+                ..
+            } => {
+                // A side that is not a power of two gives 0 address bits,
+                // which `check_params` refuses.
+                let bits = |side: u16| {
+                    if side.is_power_of_two() {
+                        side.trailing_zeros() as u8
+                    } else {
+                        0
+                    }
+                };
+                NodeKind::Screen {
+                    mode: mode.netlist(),
+                    x_bits: bits(*width),
+                    y_bits: bits(*height),
+                    w: if *mode == ScreenMode::Text {
+                        8
+                    } else {
+                        palette.bits()
+                    },
+                }
+            }
             G::SubCircuit { .. } => return None,
         })
     }
@@ -199,6 +402,33 @@ impl GateKind {
     /// Check the kind's parameters. Subcircuits are checked when the bridge
     /// builds their definition.
     pub fn check(&self) -> Result<(), String> {
+        if let GateKind::Screen {
+            mode,
+            width,
+            height,
+            scale,
+            ..
+        } = self
+        {
+            let sides = mode.sides();
+            let list = || {
+                sides
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            if !sides.contains(width) || !sides.contains(height) {
+                return Err(format!(
+                    "a {} screen's width and height must each be one of {}",
+                    mode.name().to_lowercase(),
+                    list()
+                ));
+            }
+            if !(1..=MAX_SCREEN_SCALE).contains(scale) {
+                return Err(format!("screen scale must be 1..={MAX_SCREEN_SCALE}"));
+            }
+        }
         match self.to_netlist() {
             Some(kind) => kind.check_params(),
             None => Ok(()),
@@ -244,6 +474,8 @@ impl GateKind {
             G::DLatch { .. } => "D-LATCH",
             G::SrLatch => "SR-LATCH",
             G::Ram { .. } => "RAM",
+            G::Ram2 { .. } => "DUAL-PORT RAM",
+            G::Screen { .. } => "SCREEN",
             G::SubCircuit { .. } => "SUBCIRCUIT",
         }
     }
@@ -270,6 +502,13 @@ impl GateKind {
             G::SrLatch => &["s", "r"],
             G::Rom { .. } => &["addr"],
             G::Ram { .. } => &["addr", "we", "wdata"],
+            G::Ram2 { reads, .. } => &RAM2_INPUTS[..3 + usize::from(*reads).min(RAM2_READS)],
+            G::Screen { mode, .. } => match mode {
+                ScreenMode::Pixel => &["x", "y", "colour", "draw", "clear"],
+                ScreenMode::Framebuffer => &["addr", "we", "wdata"],
+                ScreenMode::Scanline => &["colour", "hsync", "vsync"],
+                ScreenMode::Text => &["addr", "we", "char"],
+            },
             _ => &[],
         }
     }
@@ -279,9 +518,10 @@ impl GateKind {
         use GateKind as G;
         match self {
             G::Add { .. } => &["sum", "cout"],
-            G::Output { .. } | G::Display { .. } | G::SubCircuit { .. } => &[],
+            G::Output { .. } | G::Display { .. } | G::Screen { .. } | G::SubCircuit { .. } => &[],
             G::Delay { .. } | G::Register { .. } | G::DLatch { .. } | G::SrLatch => &["q"],
             G::Rom { .. } | G::Ram { .. } => &["data"],
+            G::Ram2 { reads, .. } => &RAM2_OUTPUTS[..usize::from(*reads).min(RAM2_READS)],
             _ => &["y"],
         }
     }
@@ -314,9 +554,14 @@ impl GateKind {
             | G::Delay { w }
             | G::Register { w }
             | G::DLatch { w }
-            | G::Ram { w, .. } => Some(*w),
+            | G::Ram { w, .. }
+            | G::Ram2 { w, .. } => Some(*w),
             G::Extend { to, .. } => Some(*to),
-            G::Merge { .. } | G::Clock { .. } | G::SrLatch | G::SubCircuit { .. } => None,
+            G::Merge { .. }
+            | G::Clock { .. }
+            | G::SrLatch
+            | G::Screen { .. }
+            | G::SubCircuit { .. } => None,
         }
     }
 
@@ -349,7 +594,8 @@ impl GateKind {
             | G::Delay { w: x }
             | G::Register { w: x }
             | G::DLatch { w: x }
-            | G::Ram { w: x, .. } => *x = w,
+            | G::Ram { w: x, .. }
+            | G::Ram2 { w: x, .. } => *x = w,
             G::Const { w: x, value } => {
                 *x = w;
                 *value &= logi_sim::netlist::mask(w);
@@ -363,9 +609,43 @@ impl GateKind {
                 *to = w;
                 *from = (*from).min(w);
             }
-            G::Merge { .. } | G::Clock { .. } | G::SrLatch | G::SubCircuit { .. } => {}
+            G::Merge { .. }
+            | G::Clock { .. }
+            | G::SrLatch
+            | G::Screen { .. }
+            | G::SubCircuit { .. } => {}
         }
         k
+    }
+
+    /// The pixels of a screen, `(width, height)`: its resolution, or the
+    /// characters times [`TEXT_CELL`] for text.
+    pub fn screen_pixels(&self) -> Option<(u32, u32)> {
+        match self {
+            GateKind::Screen {
+                mode,
+                width,
+                height,
+                ..
+            } => {
+                let cell = if *mode == ScreenMode::Text {
+                    u32::from(TEXT_CELL)
+                } else {
+                    1
+                };
+                Some((u32::from(*width) * cell, u32::from(*height) * cell))
+            }
+            _ => None,
+        }
+    }
+
+    /// Size of a screen's picture on the canvas: pixels times scale.
+    pub fn screen_face(&self) -> Option<Vec2> {
+        let GateKind::Screen { scale, .. } = self else {
+            return None;
+        };
+        let (w, h) = self.screen_pixels()?;
+        Some(Vec2::new(w as f32, h as f32) * f32::from((*scale).max(1)))
     }
 
     pub fn is_input(&self) -> bool {
@@ -392,6 +672,13 @@ impl GateKind {
                     G::Input { w },
                     G::Output { w },
                     G::Display { w },
+                    G::Screen {
+                        mode: ScreenMode::Pixel,
+                        width: 32,
+                        height: 32,
+                        palette: ScreenPalette::Mono,
+                        scale: 4,
+                    },
                     G::Const { w, value: 0 },
                     G::Clock {
                         period: 10,
@@ -447,6 +734,13 @@ impl GateKind {
                     G::DLatch { w },
                     G::SrLatch,
                     G::Ram { addr_bits: 4, w },
+                    G::Ram2 {
+                        addr_bits: 4,
+                        w,
+                        reads: 2,
+                        mask: false,
+                        init: Vec::new(),
+                    },
                     G::Rom {
                         addr_bits: 4,
                         w,
@@ -457,43 +751,25 @@ impl GateKind {
         ]
     }
 
-    /// Sprite colour for this kind.
-    pub fn color(&self) -> Color {
-        use GateKind as G;
-        match self {
-            G::And { .. } => Color::srgb(0.0, 0.6, 0.3),
-            G::Or { .. } => Color::srgb(0.8, 0.8, 0.0),
-            G::Not { .. } => Color::srgb(0.0, 0.1, 0.5),
-            G::Nand { .. } => Color::srgb(0.6, 0.2, 0.0),
-            G::Nor { .. } => Color::srgb(0.5, 0.5, 0.0),
-            G::Xor { .. } => Color::srgb(0.0, 0.5, 0.8),
-            G::Xnor { .. } => Color::srgb(0.2, 0.3, 0.8),
-            G::Mux { .. } => Color::srgb(0.6, 0.0, 0.6),
-            G::Switch { .. } => Color::srgb(0.3, 0.3, 0.6),
-            G::Clock { .. } => Color::srgb(0.5, 0.1, 0.3),
-            G::Input { .. } => Color::srgb(0.1, 0.1, 0.1),
-            G::Output { .. } => Color::srgb(0.15, 0.15, 0.15),
-            G::Display { .. } => Color::srgb(0.04, 0.09, 0.12),
-            G::Const { .. } => Color::srgb(0.3, 0.3, 0.3),
-            G::Split { .. } | G::Merge { .. } | G::Extend { .. } => Color::srgb(0.35, 0.35, 0.0),
-            G::Add { .. } | G::Eq { .. } | G::LtU { .. } => Color::srgb(0.1, 0.45, 0.65),
-            G::ReduceOr { .. } | G::ReduceAnd { .. } | G::ReduceXor { .. } => {
-                Color::srgb(0.75, 0.45, 0.0)
-            }
-            G::Delay { .. } | G::Register { .. } | G::DLatch { .. } | G::SrLatch => {
-                Color::srgb(0.45, 0.2, 0.55)
-            }
-            G::Ram { .. } | G::Rom { .. } => Color::srgb(0.25, 0.15, 0.45),
-            G::SubCircuit { .. } => Color::srgb(0.1, 0.5, 0.3),
-        }
-    }
-
-    /// Sprite size for this kind.
+    /// Tile size for this kind.
     pub fn size(&self) -> Vec2 {
         match self {
+            GateKind::Screen { .. } => {
+                let pins = self.input_pin_names().len() as f32;
+                let face = self.screen_face().unwrap_or(Vec2::splat(64.0));
+                let up = |v: f32| (v / 20.0).ceil() * 20.0;
+                Vec2::new(
+                    up(face.x + 2.0 * SCREEN_BEZEL),
+                    up((face.y + 2.0 * SCREEN_BEZEL).max(pins * 20.0 + 20.0)),
+                )
+            }
             GateKind::Display { w } => {
                 let hex_digits = usize::from(*w).div_ceil(4);
                 Vec2::new((hex_digits as f32 * 18.0 + 40.0).max(120.0), 70.0)
+            }
+            // Room for the write port and every read port.
+            GateKind::Ram2 { reads, .. } => {
+                Vec2::new(70.0, 50.0 + 20.0 * f32::from((*reads).clamp(1, 8) - 1))
             }
             _ => Vec2::new(50.0, 50.0),
         }

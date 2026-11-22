@@ -31,6 +31,9 @@ use super::view::{CircuitView, InstanceViewItem};
 pub struct ActiveCircuit {
     pub uuid: Uuid,
     pub name: String,
+    /// A built-in demo: edits are refused until it is copied to the
+    /// player's workspace (inputs can still be driven).
+    pub read_only: bool,
 }
 
 impl Default for ActiveCircuit {
@@ -38,7 +41,22 @@ impl Default for ActiveCircuit {
         Self {
             uuid: Uuid::new_v4(),
             name: "workspace".into(),
+            read_only: false,
         }
+    }
+}
+
+/// Message shown when an edit of a read-only demo is refused.
+pub const READ_ONLY_MESSAGE: &str =
+    "This demo is read-only. Use \"Copy to my workspace\" to make an editable copy.";
+
+impl ActiveCircuit {
+    /// Refuse an edit of a read-only circuit (returns whether it was refused).
+    pub(crate) fn refuse_edit(&self, feedback: &mut AuthoringFeedback) -> bool {
+        if self.read_only {
+            feedback.refuse(READ_ONLY_MESSAGE.into());
+        }
+        self.read_only
     }
 }
 
@@ -172,6 +190,8 @@ pub struct GateValues {
 pub struct GateProbes {
     pub inputs: Vec<Option<u32>>,
     pub outputs: Vec<Option<u32>>,
+    /// A screen's memory probe: its index in `ProbeFrame::mems`.
+    pub memory: Option<u32>,
 }
 
 #[derive(Component, Debug, Clone, Copy, Reflect)]
@@ -446,6 +466,22 @@ pub struct RegisterDefinitions {
     pub definitions: HashMap<Uuid, Arc<CircuitDocument>>,
 }
 
+impl RegisterDefinitions {
+    /// Everything needed to place workspace `ws` as a chip: its
+    /// definitions plus its root, keyed by the root's id. Returns the
+    /// registration and the chip's kind.
+    pub fn chip(ws: &WorkspaceDocument) -> (Self, GateKind) {
+        let mut definitions = ws.definitions.clone();
+        definitions.insert(ws.root.id, Arc::new(ws.root.clone()));
+        (
+            Self { definitions },
+            GateKind::SubCircuit {
+                definition: ws.root.id,
+            },
+        )
+    }
+}
+
 #[derive(Message)]
 pub struct GateLabelChanged {
     pub gate_uuid: Uuid,
@@ -477,6 +513,8 @@ pub struct EntityLayerChanged {
 pub struct LoadWorkspaceEvent {
     pub name: String,
     pub workspace: Arc<WorkspaceDocument>,
+    /// Open it read-only (a built-in demo).
+    pub read_only: bool,
 }
 
 #[derive(Message)]
@@ -522,6 +560,9 @@ pub fn apply_create_gate_system(
 ) {
     let mut taken: Vec<String> = Vec::new();
     for event in events.read() {
+        if active.refuse_edit(&mut feedback) {
+            continue;
+        }
         if let Err(reason) = event.kind.check() {
             feedback.refuse(format!(
                 "Cannot place {}: {reason}",
@@ -584,6 +625,9 @@ pub fn apply_create_wire_system(
     wires: Query<(Entity, &WireEndpoints)>,
 ) {
     for event in events.read() {
+        if active.refuse_edit(&mut feedback) {
+            continue;
+        }
         let find = |uuid: Uuid| gates.iter().find(|(id, _)| id.uuid == uuid).map(|(_, t)| t);
         let (Some(source), Some(sink)) = (find(event.source_gate), find(event.sink_gate)) else {
             feedback.refuse("Cannot create wire: gate not found".into());
@@ -637,14 +681,22 @@ pub fn apply_create_wire_system(
 }
 
 /// Delete gates (with their wires) and wires.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_delete_system(
     mut commands: Commands,
     mut gate_events: MessageReader<DeleteGate>,
     mut wire_events: MessageReader<DeleteWire>,
     mut revision: ResMut<WorkspaceRevision>,
+    active: Res<ActiveCircuit>,
+    mut feedback: ResMut<AuthoringFeedback>,
     gates: Query<&GateIdentity>,
     wires: Query<(Entity, &WireEndpoints)>,
 ) {
+    if (!gate_events.is_empty() || !wire_events.is_empty()) && active.refuse_edit(&mut feedback) {
+        gate_events.clear();
+        wire_events.clear();
+        return;
+    }
     for event in wire_events.read() {
         if let Ok((entity, _)) = wires.get(event.entity) {
             commands.entity(entity).despawn();
@@ -694,8 +746,12 @@ pub fn apply_set_kind_system(
     mut gates: Query<(&mut GateType, Option<&InputDrive>, Option<&DisplayConfig>)>,
     mut revision: ResMut<WorkspaceRevision>,
     mut feedback: ResMut<AuthoringFeedback>,
+    active: Res<ActiveCircuit>,
 ) {
     for event in events.read() {
+        if active.refuse_edit(&mut feedback) {
+            continue;
+        }
         let Ok((mut ty, drive, display)) = gates.get_mut(event.entity) else {
             continue;
         };
@@ -767,12 +823,22 @@ pub fn apply_authoring_messages_system(
     mut moves: MessageReader<GateMoved>,
     mut layers: MessageReader<EntityLayerChanged>,
     mut revision: ResMut<WorkspaceRevision>,
+    active: Res<ActiveCircuit>,
+    mut feedback: ResMut<AuthoringFeedback>,
     mut gate_labels: Query<(&GateIdentity, &mut GateLabel)>,
     mut display_configs: Query<(&GateIdentity, &mut DisplayConfig)>,
     mut gate_transforms: Query<(&GateIdentity, &mut Transform)>,
     mut gate_layers: Query<(&GateIdentity, &mut CircuitLayer)>,
     mut wire_layers: Query<(&WireIdentity, &mut CircuitLayer), Without<GateIdentity>>,
 ) {
+    // Display settings are presentation, allowed in a read-only demo.
+    if (!labels.is_empty() || !moves.is_empty() || !layers.is_empty())
+        && active.refuse_edit(&mut feedback)
+    {
+        labels.clear();
+        moves.clear();
+        layers.clear();
+    }
     for command in labels.read() {
         if command.label.trim().is_empty() {
             continue;
@@ -882,6 +948,7 @@ pub fn load_workspace_system(
     *active = ActiveCircuit {
         uuid: root.id,
         name: event.name.clone(),
+        read_only: event.read_only,
     };
     spawn_document(&mut commands, root, root.id);
     *revision = WorkspaceRevision::default();

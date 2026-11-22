@@ -26,7 +26,7 @@ use slotmap::SecondaryMap;
 use smallvec::{SmallVec, smallvec};
 
 use crate::netlist::{
-    CombDeps, DefId, Definition, Design, NetId, NodeId, NodeKind, ValidationError, mask,
+    CombDeps, DefId, Definition, Design, NetId, NodeId, NodeKind, ScreenMode, ValidationError, mask,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +60,12 @@ struct Inst {
     /// Next state, computed at the end of each settle.
     next: SecondaryMap<NodeId, u64>,
     mems: SecondaryMap<NodeId, Vec<u64>>,
-    /// Pending RAM write `(addr, data)`, applied at commit.
-    writes: SecondaryMap<NodeId, Option<(usize, u64)>>,
+    /// Pending RAM write `(addr, data, mask)`, applied at commit to the
+    /// bits set in `mask`.
+    writes: SecondaryMap<NodeId, Option<(usize, u64, u64)>>,
+    /// Pending screen clear (a Pixel screen's `clear`), applied at commit
+    /// before the write.
+    clears: SecondaryMap<NodeId, bool>,
     children: SecondaryMap<NodeId, Inst>,
     /// Inputs of the last settle this tick; a settle with the same inputs is
     /// a no-op. Cleared at commit.
@@ -78,6 +82,7 @@ impl Inst {
             next: SecondaryMap::new(),
             mems: SecondaryMap::new(),
             writes: SecondaryMap::new(),
+            clears: SecondaryMap::new(),
             children: SecondaryMap::new(),
             settled_with: None,
         };
@@ -90,13 +95,32 @@ impl Inst {
                     inst.state.insert(id, 0);
                     inst.next.insert(id, 0);
                 }
-                NodeKind::Ram { addr_bits, w, init } => {
+                NodeKind::Ram { addr_bits, w, init }
+                | NodeKind::Ram2 {
+                    addr_bits, w, init, ..
+                } => {
                     let mut mem = vec![0u64; 1usize << addr_bits];
                     for (slot, v) in mem.iter_mut().zip(init.iter()) {
                         *slot = v & mask(*w);
                     }
                     inst.mems.insert(id, mem);
                     inst.writes.insert(id, None);
+                }
+                NodeKind::Screen {
+                    mode,
+                    x_bits,
+                    y_bits,
+                    ..
+                } => {
+                    inst.mems
+                        .insert(id, vec![0u64; 1usize << (x_bits + y_bits)]);
+                    inst.writes.insert(id, None);
+                    inst.clears.insert(id, false);
+                    if *mode == ScreenMode::Scan {
+                        // The beam: x | y << (x_bits + 1).
+                        inst.state.insert(id, 0);
+                        inst.next.insert(id, 0);
+                    }
                 }
                 NodeKind::Instance(child) => {
                     inst.children.insert(id, Inst::new(design, *child));
@@ -115,9 +139,15 @@ impl Inst {
         for (id, s) in self.state.iter_mut() {
             *s = self.next[id];
         }
+        for (id, c) in self.clears.iter_mut() {
+            if std::mem::take(c) {
+                self.mems[id].fill(0);
+            }
+        }
         for (id, w) in self.writes.iter_mut() {
-            if let Some((addr, data)) = w.take() {
-                self.mems[id][addr] = data;
+            if let Some((addr, data, mask)) = w.take() {
+                let word = &mut self.mems[id][addr];
+                *word = (*word & !mask) | (data & mask);
             }
         }
         for (_, child) in self.children.iter_mut() {
@@ -243,12 +273,13 @@ impl Reference {
         self.inst(path)?.nets.get(net).copied()
     }
 
-    /// Committed state of a Delay/Register/DLatch/SrLatch.
+    /// Committed state of a Delay/Register/DLatch/SrLatch, or the beam of
+    /// a Scan screen (`x | y << (x_bits + 1)`).
     pub fn state(&self, path: &[NodeId], node: NodeId) -> Option<u64> {
         self.inst(path)?.state.get(node).copied()
     }
 
-    /// Committed contents of a RAM.
+    /// Committed contents of a RAM (`Ram` or `Ram2`) or screen.
     pub fn mem(&self, path: &[NodeId], node: NodeId) -> Option<&[u64]> {
         self.inst(path)?.mems.get(node).map(Vec::as_slice)
     }
@@ -390,6 +421,10 @@ fn eval(
         Delay { .. } | Register { .. } | SrLatch => smallvec![inst.state[id]],
         DLatch { .. } => smallvec![if i(0) != 0 { i(1) } else { inst.state[id] }],
         Ram { .. } => smallvec![inst.mems[id][i(0) as usize]],
+        Ram2 { reads, .. } => (0..*reads as usize)
+            .map(|k| inst.mems[id][i(3 + k) as usize])
+            .collect(),
+        Screen { .. } => smallvec![],
         Instance(child) => {
             let child_inputs: Vec<u64> = (0..node.inputs.len()).map(i).collect();
             let child_def = &ctx.design.defs[*child];
@@ -429,9 +464,55 @@ fn compute_next(def: &Definition, inst: &mut Inst) {
                 }
             }
             NodeKind::Ram { .. } => {
-                let write = (i(1) != 0).then(|| (i(0) as usize, i(2)));
+                let write = (i(1) != 0).then(|| (i(0) as usize, i(2), u64::MAX));
                 inst.writes[id] = write;
                 continue;
+            }
+            NodeKind::Ram2 { mask, .. } => {
+                let bits = match (*mask, i(1) != 0) {
+                    (true, _) => i(1),
+                    (false, true) => u64::MAX,
+                    (false, false) => 0,
+                };
+                inst.writes[id] = (bits != 0).then(|| (i(0) as usize, i(2), bits));
+                continue;
+            }
+            NodeKind::Screen {
+                mode,
+                x_bits,
+                y_bits,
+                ..
+            } => {
+                let (xb, yb) = (u32::from(*x_bits), u32::from(*y_bits));
+                let at = |x: u64, y: u64| (y << xb | x) as usize;
+                match mode {
+                    ScreenMode::Pixel => {
+                        let clear = i(4) != 0;
+                        let write = (i(3) != 0).then(|| (at(i(0), i(1)), i(2), u64::MAX));
+                        inst.clears[id] = clear;
+                        inst.writes[id] = write;
+                        continue;
+                    }
+                    ScreenMode::Memory => {
+                        inst.writes[id] = (i(1) != 0).then(|| (i(0) as usize, i(2), u64::MAX));
+                        continue;
+                    }
+                    ScreenMode::Scan => {
+                        let (w, h) = (1u64 << xb, 1u64 << yb);
+                        let beam = inst.state[id];
+                        let (x, y) = (beam & mask(*x_bits + 1), beam >> (xb + 1));
+                        let (x, y, write) = if i(2) != 0 {
+                            (0, 0, None)
+                        } else if i(1) != 0 {
+                            (0, (y + 1).min(h), None)
+                        } else {
+                            let write = (x < w && y < h).then(|| (at(x, y), i(0), u64::MAX));
+                            ((x + 1).min(w), y, write)
+                        };
+                        inst.writes[id] = write;
+                        x | y << (xb + 1)
+                    }
+                }
             }
             _ => continue,
         };
@@ -469,6 +550,7 @@ fn depends(
         CombDeps::All => true,
         CombDeps::None => false,
         CombDeps::Pins(pins) => pins.contains(&(p as u8)),
+        CombDeps::Diagonal { first } => p == first as usize + q,
         CombDeps::Instance(c) => paths[c][p][q],
     }
 }

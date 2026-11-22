@@ -5,13 +5,26 @@
 //! - [`kind`] – [`GateKind`], the single editor node-kind enum.
 //! - [`authoring`] – ECS authoring components (the source of truth) and the
 //!   commands that edit them.
-//! - [`document`] – portable circuit documents (examples, save format,
+//! - [`document`] – portable circuit documents (demos, save format,
 //!   subcircuit definitions) and the [`CircuitLibrary`].
+//! - [`source`] – save format version 6, the hand-editable authoring form
+//!   (names, arrays, bus wiring), and its expansion into documents.
+//! - [`demos`] – the built-in demos, loaded from `assets/demos/`.
+//! - [`rtl`] – RTL import: a Yosys JSON netlist becomes a workspace.
+//! - [`netlist`] – a workspace as a `logi_sim` design, for simulating it
+//!   without the app (tests, benchmarks).
+//! - [`layout`] – automatic layered layout of a circuit.
+//! - [`routing`] – orthogonal wire routing on the grid.
 //! - [`bridge`] – `SimBridge`: maps the ECS onto a `logi_sim` v2 `Design`,
-//!   sends revisions to the v2 engine and reads probes back.
+//!   sends revisions to the engine and reads probes back.
 //! - [`view`] – instance views: opening a subcircuit shows its definition
 //!   with live values probed from the running root simulation.
 //! - [`visuals`] – change-driven gate and wire visuals, loop highlight.
+//! - [`art`] – the Workshop art kit: theme-driven materials, cached tile,
+//!   pin and glyph meshes, fonts, the dot-grid bench.
+//! - [`screen`] – drawing a screen part: palettes, the text font, the
+//!   rasterizer.
+//! - [`shapes`] – triangle-list shapes (rounded rectangles, strokes).
 //! - [`systems`] – Bevy systems for picking, dragging and egui panels.
 //! - [`plugin`] – plugins that wire everything into Bevy.
 //! - [`spatial_grid`] – spatial acceleration for entity picking.
@@ -21,11 +34,19 @@ mod plugin;
 #[cfg(test)]
 mod tests;
 
+pub mod art;
 pub mod authoring;
 pub mod bridge;
+pub mod demos;
 pub mod document;
-pub mod fixtures;
 pub mod kind;
+pub mod layout;
+pub mod netlist;
+pub mod routing;
+pub mod rtl;
+pub mod screen;
+pub mod shapes;
+pub mod source;
 pub mod spatial_grid;
 pub mod systems;
 pub mod view;
@@ -33,16 +54,17 @@ pub mod visuals;
 
 pub use authoring::*;
 pub use bridge::{CompileFailure, LoopNode, SimBridge, SimDiagnostics, SimRuntime};
+pub use demos::{Demo, DemoCatalog};
 pub use document::{
     CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, PinAddr,
     WorkspaceDocument,
 };
-pub use kind::GateKind;
+pub use kind::{GateKind, MAX_SCREEN_SCALE, SCREEN_BEZEL, ScreenMode, ScreenPalette, TEXT_CELL};
 pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin};
 pub use view::{
     CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame,
 };
-pub use visuals::{EntityWorkCounter, LoopHighlight, SimulationVisualsPlugin};
+pub use visuals::{EntityWorkCounter, LoopHighlight, ON_TOP_Z, OnTop, SimulationVisualsPlugin};
 
 use bevy::prelude::*;
 use bevy::reflect::Reflect;
@@ -56,7 +78,7 @@ pub const DEFAULT_TICK_RATE: f64 = 1000.0;
 pub struct LogicDisplay;
 
 /// Tracks which gate entity is currently selected in the editor.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectedGate(pub Option<Entity>);
 
 /// Simulation tick-rate configuration (ticks per second).
@@ -107,15 +129,6 @@ impl TickRateMeter {
         });
         self.last_tick_count = tick_count;
         self.sample_window_secs = 0.0;
-    }
-}
-
-/// Returns the base [`Sprite`] for a gate kind.
-pub fn get_gate_sprite(kind: &GateKind) -> Sprite {
-    Sprite {
-        color: kind.color(),
-        custom_size: Some(kind.size()),
-        ..Default::default()
     }
 }
 

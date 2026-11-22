@@ -19,13 +19,13 @@ use crate::sim::{
     },
     bridge::{
         collect_engine_events_system, drive_local_engine_system, project_probes_system,
-        sync_design_system, update_tickrate_system,
+        request_screens_system, sync_design_system, update_tickrate_system,
     },
     systems::{
         drag_selected_system, draw_sim_background_system, fit_camera_to_circuit_system,
         gate_selection_system, save_on_exit_system, simulation_config_ui_system,
-        ui_for_selected_gate, update_inputs_on_left_click, update_selected_gate,
-        update_spatial_grid_system, workspace_io_system,
+        sync_bench_theme_system, ui_for_selected_gate, update_inputs_on_left_click,
+        update_selected_gate, update_spatial_grid_system, workspace_io_system,
     },
     view::{
         CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView,
@@ -34,7 +34,7 @@ use crate::sim::{
     visuals::SimulationVisualsPlugin,
 };
 
-use super::fixtures;
+use super::demos;
 use super::spatial_grid::SpatialGrid;
 
 /// Everything: runtime plus view, entering `state` loads the default example.
@@ -112,6 +112,7 @@ impl Plugin for SimulationRuntimePlugin {
             .add_systems(
                 PreUpdate,
                 (
+                    request_screens_system,
                     drive_local_engine_system,
                     collect_engine_events_system,
                     project_probes_system,
@@ -147,6 +148,7 @@ impl Plugin for SimulationViewPlugin {
 
         app.add_plugins(SimulationVisualsPlugin)
             .init_resource::<SelectedGate>()
+            .add_message::<crate::camera::FitView>()
             .insert_resource(SpatialGrid::new(100.0))
             .register_type::<crate::sim::LogicDisplay>()
             .register_type::<crate::sim::GateKind>()
@@ -167,6 +169,7 @@ impl Plugin for SimulationViewPlugin {
             .register_type::<crate::sim::WireEndpoints>()
             .register_type::<crate::sim::WireState>()
             .register_type::<InstanceViewItem>()
+            .init_resource::<RunOnReturn>()
             .add_systems(Startup, pause_bridge_system)
             .add_systems(
                 OnEnter(state.clone()),
@@ -179,7 +182,7 @@ impl Plugin for SimulationViewPlugin {
             )
             .add_systems(
                 OnExit(state.clone()),
-                (pause_bridge_system, hide_circuit_system),
+                (leave_bridge_system, hide_circuit_system),
             )
             .add_systems(
                 Update,
@@ -188,6 +191,7 @@ impl Plugin for SimulationViewPlugin {
                         .after(load_workspace_system)
                         .after(view_navigation_system),
                     workspace_io_system,
+                    sync_bench_theme_system,
                 ),
             )
             .add_systems(
@@ -209,25 +213,65 @@ impl Plugin for SimulationViewPlugin {
     }
 }
 
-/// Load the default example the first time the simulation state is entered.
+/// Demo opened the first time the simulation state is entered.
+pub const DEFAULT_DEMO: &str = "counter";
+
+/// Open the default demo (read-only) the first time the simulation state is
+/// entered, unless something else is being opened (a demo picked on the
+/// demo map).
 fn load_default_circuit_system(
     mut loaded: Local<bool>,
     gates: Query<(), With<GateIdentity>>,
-    mut load: MessageWriter<LoadWorkspaceEvent>,
+    // Reading and writing the same message in one system needs a
+    // `ParamSet`: Bevy refuses the two as conflicting parameters.
+    mut messages: ParamSet<(
+        MessageReader<LoadWorkspaceEvent>,
+        MessageWriter<LoadWorkspaceEvent>,
+    )>,
 ) {
     if *loaded || !gates.is_empty() {
         return;
     }
     *loaded = true;
-    let workspace = fixtures::build_64bit_counter_subcircuits();
-    load.write(LoadWorkspaceEvent {
-        name: workspace.root.name.clone(),
-        workspace: Arc::new(workspace),
-    });
+    if !messages.p0().is_empty() {
+        messages.p0().clear();
+        return;
+    }
+    match demos::catalog() {
+        Ok(catalog) => {
+            if let Some(demo) = catalog.get(DEFAULT_DEMO) {
+                messages.p1().write(LoadWorkspaceEvent {
+                    name: demo.title.clone(),
+                    workspace: Arc::clone(&demo.workspace),
+                    read_only: true,
+                });
+            }
+        }
+        Err(e) => error!("Cannot load the built-in demos: {e}"),
+    }
 }
 
-fn resume_bridge_system(mut bridge: ResMut<SimBridge>) {
-    bridge.resume();
+/// Whether the simulation was running when the simulation state was left
+/// (for the demo map, the title menu), so coming back keeps a paused
+/// circuit paused.
+#[derive(Resource)]
+struct RunOnReturn(bool);
+
+impl Default for RunOnReturn {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+fn resume_bridge_system(mut bridge: ResMut<SimBridge>, run: Res<RunOnReturn>) {
+    if run.0 {
+        bridge.resume();
+    }
+}
+
+fn leave_bridge_system(mut bridge: ResMut<SimBridge>, mut run: ResMut<RunOnReturn>) {
+    run.0 = bridge.is_running();
+    bridge.pause();
 }
 
 fn pause_bridge_system(mut bridge: ResMut<SimBridge>) {
@@ -248,5 +292,58 @@ fn hide_circuit_system(mut items: Query<&mut Visibility, CircuitItem>) {
 fn show_circuit_system(mut items: Query<&mut Visibility, CircuitItem>) {
     for mut visibility in &mut items {
         *visibility = Visibility::Visible;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_message::<LoadWorkspaceEvent>()
+            .add_systems(Update, load_default_circuit_system);
+        app
+    }
+
+    fn loads(app: &App) -> Vec<String> {
+        let messages = app.world().resource::<Messages<LoadWorkspaceEvent>>();
+        messages
+            .iter_current_update_messages()
+            .map(|m| m.name.clone())
+            .collect()
+    }
+
+    /// The system's parameters are valid (Bevy panics on its first run if
+    /// they conflict), and with nothing pending it opens the default demo.
+    #[test]
+    fn default_circuit_loads_when_nothing_is_pending() {
+        let mut app = app();
+        app.update();
+        let title = demos::catalog()
+            .unwrap()
+            .get(DEFAULT_DEMO)
+            .unwrap()
+            .title
+            .clone();
+        assert_eq!(loads(&app), vec![title]);
+        app.update();
+        assert!(loads(&app).is_empty(), "only the first time");
+    }
+
+    /// A demo picked on the map is already on its way: no default demo.
+    #[test]
+    fn a_pending_load_wins_over_the_default_circuit() {
+        let mut app = app();
+        let workspace = Arc::clone(&demos::catalog().unwrap().get("gates").unwrap().workspace);
+        app.world_mut().write_message(LoadWorkspaceEvent {
+            name: "picked".into(),
+            workspace,
+            read_only: true,
+        });
+        app.update();
+        // The picked load was written before this update; the system wrote
+        // nothing of its own.
+        assert!(loads(&app).is_empty(), "{:?}", loads(&app));
     }
 }

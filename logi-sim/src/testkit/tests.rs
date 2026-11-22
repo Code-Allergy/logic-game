@@ -269,6 +269,33 @@ fn word_and_bitblasted_fixtures_agree() {
     assert_equivalent(&counter(64), &counter_bitblasted(64), 6, 200);
 }
 
+/// Port of the legacy `test_recursive_16bit_adder_all_runners`: four levels
+/// of nested definitions add like the `Add` primitive.
+#[test]
+fn nested_adder_matches_the_add_primitive() {
+    let d = nested_adder16();
+    assert_eq!(d.defs.len(), 4);
+    let mut r = Reference::new(&d).unwrap();
+    for (a, b, c) in [
+        (1, 1, 0),
+        (0xFFFF, 1, 0),
+        (0xFFFF, 0xFFFF, 1),
+        (0x1234, 0x4321, 1),
+    ] {
+        r.set("a", a);
+        r.set("b", b);
+        r.set("cin", c);
+        r.tick().unwrap();
+        let t = a + b + c;
+        assert_eq!(
+            (r.get("sum"), r.get("cout")),
+            (t & 0xFFFF, t >> 16),
+            "{a}+{b}+{c}"
+        );
+    }
+    assert_equivalent(&adder(16), &d, 7, 300);
+}
+
 #[test]
 fn mux_tree_selects() {
     let d = mux_tree(2, 8);
@@ -440,7 +467,7 @@ fn many_generated_designs_validate_and_run() {
     }
 }
 
-// ── Bit-blasting and legacy conversion ───────────────────────────────────
+// ── Bit-blasting ─────────────────────────────────────────────────────────
 
 /// Same random inputs by port index; outputs must agree every tick.
 fn assert_equivalent_by_index(a: &Design, b: &Design, seed: u64, ticks: u64) {
@@ -485,6 +512,7 @@ fn bitblasted_designs_are_equivalent() {
                         NodeKind::Split { .. }
                             | NodeKind::Merge { .. }
                             | NodeKind::Ram { .. }
+                            | NodeKind::Ram2 { .. }
                             | NodeKind::Rom { .. }
                             | NodeKind::Input { .. }
                             | NodeKind::Output { .. }
@@ -494,6 +522,46 @@ fn bitblasted_designs_are_equivalent() {
                 }
             }
             assert_equivalent_by_index(&d, &bb, seed, 20);
+        }
+    }
+}
+
+#[test]
+fn ram2_register_file_matches_the_register_one() {
+    for (addr_bits, w) in [(1, 1), (3, 8), (5, 64)] {
+        assert_equivalent(
+            &register_file(addr_bits, w),
+            &register_file_ram2(addr_bits, w, &[]),
+            addr_bits as u64,
+            300,
+        );
+    }
+}
+
+#[test]
+fn fifo_matches_a_queue() {
+    let d = fifo(3, 8);
+    let mut r = Reference::new(&d).unwrap();
+    let mut model = std::collections::VecDeque::new();
+    let mut rng = Rng::new(9);
+    for t in 0..2000 {
+        let (push, pop, data) = (rng.coin(), rng.coin(), rng.next_u64() & 0xFF);
+        r.set("push", push as u64);
+        r.set("pop", pop as u64);
+        r.set("data", data);
+        r.tick().unwrap();
+        // The inputs reach state at the next commit; the outputs show the
+        // queue before them.
+        assert_eq!(r.get("count"), model.len() as u64, "tick {t}");
+        if let Some(&head) = model.front() {
+            assert_eq!(r.get("head"), head, "tick {t}");
+        }
+        let (was_full, was_empty) = (model.len() == 8, model.is_empty());
+        if pop && !was_empty {
+            model.pop_front();
+        }
+        if push && !was_full {
+            model.push_back(data);
         }
     }
 }
@@ -513,35 +581,65 @@ fn bitblasted_cpu_runs_the_program() {
     assert!(bb.root_def().nodes.len() > 5 * d.root_def().nodes.len());
 }
 
+/// With `screens`, the generator draws screens of every mode, and the
+/// differential check sees their memories: the sweep compares them with
+/// the reference (`diff::standard_configs` has such a config).
 #[test]
-fn legacy_conversion_matches_sim() {
-    use crate::circuit::BitPackedCircuit;
-    use crate::compile::{Options, compile};
-    use crate::prelude::{Runner, SimdRunner};
-    use crate::sim::Sim;
-    use std::sync::Arc;
-
-    for seed in 0..5 {
-        let d = generate(&GenConfig::gates(seed, 2000, 1)).design;
-        let legacy = super::legacy::to_legacy(&d);
-        let mut simd = SimdRunner::new(BitPackedCircuit::compile(&legacy.circuit));
-        let mut sim = Sim::new(Arc::new(compile(&d, &Options::default()).unwrap()));
-        let mut rng = Rng::new(seed);
-        for t in 0..50 {
-            for (port, &node) in legacy.inputs.iter().enumerate() {
-                let v = rng.coin();
-                simd.set_input(node, 0, v);
-                sim.set_input(port, v as u64);
-            }
-            simd.tick();
-            sim.tick();
-            for (port, &node) in legacy.outputs.iter().enumerate() {
-                assert_eq!(
-                    simd.output(node, 0) as u64,
-                    sim.output(port),
-                    "seed {seed} tick {t} out {port}"
-                );
+fn generated_screens_are_covered() {
+    let mut modes = std::collections::HashSet::new();
+    let mut screens = 0;
+    for seed in 0..40 {
+        let cfg = GenConfig {
+            seed,
+            state_percent: 40,
+            screens: true,
+            ..Default::default()
+        };
+        let d = generate(&cfg).design;
+        for def in d.defs.values() {
+            for n in def.nodes.values() {
+                if let NodeKind::Screen { mode, .. } = n.kind {
+                    modes.insert(format!("{mode:?}"));
+                    screens += 1;
+                }
             }
         }
+        diff::check_generated(&cfg, 25, &crate::compile::Options::default()).unwrap();
+    }
+    assert!(screens > 40, "{screens} screens");
+    assert_eq!(modes.len(), 3, "{modes:?}");
+    // Without `screens`, none.
+    let d = generate(&GenConfig::default()).design;
+    assert!(d.defs.values().all(|def| {
+        def.nodes
+            .values()
+            .all(|n| !matches!(n.kind, NodeKind::Screen { .. }))
+    }));
+}
+
+/// A flat design's screens survive bit-blasting with the same memory.
+#[test]
+fn bitblasted_screens_match() {
+    for seed in 0..10 {
+        let cfg = GenConfig {
+            seed,
+            max_depth: 1,
+            child_defs: 0,
+            state_percent: 40,
+            screens: true,
+            ..Default::default()
+        };
+        let d = generate(&cfg).design;
+        let bb = super::bitblast::bitblast(&d);
+        bb.validate().unwrap();
+        let count = |d: &Design| {
+            d.root_def()
+                .nodes
+                .values()
+                .filter(|n| matches!(n.kind, NodeKind::Screen { .. }))
+                .count()
+        };
+        assert_eq!(count(&d), count(&bb));
+        assert_equivalent_by_index(&d, &bb, seed, 20);
     }
 }

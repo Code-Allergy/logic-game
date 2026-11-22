@@ -183,9 +183,83 @@ fn fixtures_match_the_reference() {
         counter(8),
         counter_bitblasted(8),
         register_file(3, 16),
+        register_file_ram2(3, 16, &[1, 2, 3]),
+        fifo(3, 8),
         sr_latch_nor_delayed(),
     ] {
         differential(&d, 7, 100);
+    }
+}
+
+#[test]
+fn ram2_loops_follow_each_read_port() {
+    let ram2 = || NodeKind::Ram2 {
+        addr_bits: 2,
+        w: 2,
+        reads: 2,
+        mask: true,
+        init: Arc::from(vec![]),
+    };
+    // rdata0 -> raddr1 and rdata1 -> the write port compile.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let a = b.input("a", 2);
+    let (ram, _) = b.state_placeholder(ram2());
+    let q0 = b.out(ram, 0);
+    let q1 = b.out(ram, 1);
+    b.connect(a, (ram, 3));
+    b.connect(q0, (ram, 4));
+    for pin in 0..3 {
+        b.connect(q1, (ram, pin));
+    }
+    b.output("q1", q1);
+    differential(&d, 3, 50);
+
+    // rdata0 -> raddr0 is a loop.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let (ram, _) = b.state_placeholder(ram2());
+    let q0 = b.out(ram, 0);
+    b.connect(q0, (ram, 3));
+    assert_eq!(loops_of(&d), vec![vec![at(&[], ram)]]);
+}
+
+#[test]
+fn ram2_lowers_to_one_memory_and_one_commit() {
+    for mask in [false, true] {
+        let mut d = Design::new("top");
+        let r = d.root;
+        let mut b = d.builder(r);
+        let waddr = b.input("waddr", 4);
+        let we = b.input("we", if mask { 8 } else { 1 });
+        let wdata = b.input("wdata", 8);
+        let ra: Vec<_> = (0..3).map(|k| b.input(format!("r{k}"), 4)).collect();
+        let q = b.ram2(waddr, we, wdata, &ra, &[9; 16]);
+        for (k, &q) in q.iter().enumerate() {
+            b.output(format!("q{k}"), q);
+        }
+        let p = compile_ok(&d);
+        check_program_invariants(&p);
+        assert_eq!(p.mems.len(), 1);
+        assert!(p.mems[0].writable);
+        assert_eq!(p.commits.len(), 1);
+        assert_eq!(
+            matches!(p.commits[0], Commit::RamWriteMasked { .. }),
+            mask,
+            "{:?}",
+            p.commits[0]
+        );
+        let reads = p
+            .blocks
+            .iter()
+            .filter(|b| b.op == Op::MemRead)
+            .map(|b| b.len)
+            .sum::<u32>();
+        assert_eq!(reads, 3);
+        assert_eq!(p.state_keys.len(), 1);
+        differential(&d, mask as u64, 100);
     }
 }
 
@@ -646,7 +720,7 @@ fn each_pass_alone_and_together_matches_the_reference() {
     use crate::testkit::diff;
     for (name, opts) in pass_variants() {
         let n = diff::sweep(&diff::standard_configs(), 25, 15, &opts);
-        assert_eq!(n, 150, "{name}");
+        assert_eq!(n, 175, "{name}");
         // Bit-blasted designs are full of constants and duplicate logic.
         for d in [
             crate::testkit::bitblast::bitblast(&fixtures::cpu(&fixtures::MULTIPLY_PROGRAM)),
@@ -714,6 +788,32 @@ fn constant_folding_and_identities() {
     assert!(count(&d, &Options::unoptimized()) >= 8);
 }
 
+/// Immediates are not slots: a concatenation whose shift is past the slot
+/// count (a small design with a constant in the high bits) compiles, with
+/// every pass on its own and with all of them.
+#[test]
+fn immediates_past_the_slot_count_are_not_read_as_slots() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let k = b.zero(3);
+    let y = b.merge(&[x, k, x]);
+    b.output("y", y);
+    let s = b.split(x, 5, 3);
+    let z = b.merge(&[k, s]);
+    b.output("z", z);
+    for (name, opts) in pass_variants() {
+        let p = compile(&d, &opts).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let mut s = sim(p);
+        s.set("x", 0xA7);
+        s.tick();
+        assert_eq!(s.get("y"), 0xA7 << 11 | 0xA7, "{name}");
+        assert_eq!(s.get("z"), 0b101 << 3, "{name}");
+    }
+    differential(&d, 7, 10);
+}
+
 #[test]
 fn cse_merges_identical_and_commuted_instructions() {
     let mut d = Design::new("top");
@@ -735,6 +835,51 @@ fn cse_merges_identical_and_commuted_instructions() {
     assert_eq!(count(&d, &only_cse), 3, "and, xor, or");
     assert_eq!(count(&d, &Options::default()), 2, "and, xor");
     differential(&d, 1, 20);
+}
+
+/// Port of the legacy `common_cells_are_merged_without_losing_wire_observability`
+/// and `common_cell_pass_recurses_into_subcircuits`: CSE merges commuted
+/// instructions inside an instance and across two instances, and every
+/// merged net stays readable at its own instance path.
+#[test]
+fn cse_inside_and_across_instances_keeps_merged_nets_readable() {
+    let mut d = Design::new("top");
+    let c = d.add_definition("c");
+    let mut b = Builder::new(&mut d, c);
+    let x = b.input("x", 8);
+    let y = b.input("y", 8);
+    let p = b.and(x, y);
+    let q = b.and(y, x);
+    b.output("p", p);
+    b.output("q", q);
+    let r = d.root;
+    let mut b = d.builder(r);
+    let rx = b.input("x", 8);
+    let ry = b.input("y", 8);
+    let o1 = b.instance(c, &[Some(rx), Some(ry)]);
+    let o2 = b.instance(c, &[Some(ry), Some(rx)]);
+    for (i, &o) in o1.iter().chain(&o2).enumerate() {
+        b.output(format!("o{i}"), o);
+    }
+    let i1 = d.root_def().nets[o1[0]].driver.0;
+    let i2 = d.root_def().nets[o2[0]].driver.0;
+    assert_eq!(count(&d, &Options::unoptimized()), 4);
+    assert_eq!(
+        count(&d, &Options::default()),
+        1,
+        "four ands merge into one"
+    );
+    differential(&d, 2, 20);
+
+    let mut s = sim(compile_ok(&d));
+    s.set("x", 0b1100_1010);
+    s.set("y", 0b1010_0110);
+    s.tick();
+    for inst in [i1, i2] {
+        for net in [p, q] {
+            assert_eq!(s.read_net(&[inst], net), Some(0b1000_0010));
+        }
+    }
 }
 
 #[test]
@@ -830,4 +975,23 @@ fn bitblasted_fixtures_shrink() {
         );
         assert!(after < before, "{}: {before} -> {after}", d.root_def().name);
     }
+}
+
+/// The constant-identity pass reads only slot operands: a literal (here
+/// the shift of a `Split` from bit 15) may be past the end of the slot
+/// table of a small design. This used to index out of bounds.
+#[test]
+fn literal_operands_past_the_slot_table_are_not_read_as_slots() {
+    use crate::netlist::Design;
+    let mut d = Design::new("small");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let a = b.input("a", 16);
+    let hi = b.split(a, 15, 1);
+    b.output("hi", hi);
+    let p = compile(&d, &Options::default()).unwrap();
+    let mut s = crate::sim::Sim::new(std::sync::Arc::new(p));
+    s.set("a", 0x8000);
+    s.tick();
+    assert_eq!(s.get("hi"), 1);
 }

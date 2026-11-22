@@ -20,7 +20,10 @@ mod validate;
 mod tests;
 
 pub use builder::Builder;
-pub use kind::{CombDeps, MAX_ADDR_BITS, MAX_WIDTH, NodeKind, PinWidths, mask};
+pub use kind::{
+    CombDeps, MAX_ADDR_BITS, MAX_READ_PORTS, MAX_SCREEN_BITS, MAX_WIDTH, NodeKind, PinWidths,
+    ScreenMode, mask,
+};
 pub use validate::ValidationError;
 
 use slotmap::{SecondaryMap, SlotMap, new_key_type};

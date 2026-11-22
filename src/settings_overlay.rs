@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
-use crate::{GameSettings, HOVERED_BUTTON, NORMAL_BUTTON};
+use crate::GameSettings;
+use crate::theme::Theme;
 /* Settings menu */
 #[derive(Resource, Default)]
 pub struct SettingsMenuOpen(pub bool);
@@ -13,7 +14,9 @@ pub fn show_settings_menu(
     settings_open: Res<SettingsMenuOpen>,
     settings: Res<GameSettings>,
     query: Query<Entity, With<SettingsMenu>>,
+    theme: Res<Theme>,
 ) {
+    let palette = theme.palette;
     // Remove menu if closed
     if !settings_open.0 {
         for entity in &query {
@@ -39,7 +42,7 @@ pub fn show_settings_menu(
                 position_type: PositionType::Absolute,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.9)),
+            BackgroundColor(palette.screen.with_alpha(0.92)),
             SettingsMenu,
         ))
         .with_children(|parent| {
@@ -68,17 +71,19 @@ pub fn settings_menu_button_system(
         Changed<Interaction>,
     >,
     mut settings_open: ResMut<SettingsMenuOpen>,
+    theme: Res<Theme>,
 ) {
+    let palette = theme.palette;
     for (interaction, mut color, _) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => {
                 settings_open.0 = false;
             }
             Interaction::Hovered => {
-                *color = HOVERED_BUTTON.into();
+                *color = palette.hover.into();
             }
             Interaction::None => {
-                *color = NORMAL_BUTTON.into();
+                *color = palette.raised.into();
             }
         }
     }

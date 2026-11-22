@@ -1,0 +1,20 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "half_adder",
+  "circuits": [
+    {
+      "name": "half_adder",
+      "title": "Half adder",
+      "nodes": [
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "xor", "use": "gates/xor", "at": [140, 40]},
+        {"name": "and", "use": "gates/and", "at": [140, -40]},
+        {"name": "Sum", "type": "Output", "at": [280, 40]},
+        {"name": "Carry", "type": "Output", "at": [280, -40]}
+      ],
+      "wires": [["A", "xor.A", "and.A"], ["B", "xor.B", "and.B"], ["xor", "Sum"], ["and", "Carry"]]
+    }
+  ]
+}

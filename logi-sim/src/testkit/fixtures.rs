@@ -1,4 +1,4 @@
-//! Hand-built v2 fixtures, ported from the legacy `crate::fixtures` and
+//! Hand-built v2 fixtures, ported from the deleted legacy fixtures and
 //! extended. Word-level fixtures come with bit-blasted variants (same
 //! function and port names, built from 1-bit gates) for benchmarks and
 //! cross-checks. Ports are named; use `Reference::set`/`get`.
@@ -57,6 +57,85 @@ pub fn ripple_adder(w: u8) -> Design {
         let o = b.instance(fa, &[Some(ab[i]), Some(bb[i]), Some(carry)]);
         sums.push(o[0]);
         carry = o[1];
+    }
+    let sum = b.bus_collect(&sums);
+    b.output("sum", sum);
+    b.output("cout", carry);
+    d
+}
+
+/// Number of floating `And -> Or` pairs in each half adder of
+/// [`nested_adder16`].
+pub const NESTED_ADDER_DEAD_PAIRS: usize = 10;
+
+/// 16-bit adder in four levels of shared definitions, ported from the legacy
+/// `recursive_16bit_adder`: a half adder (XOR/AND, plus
+/// [`NESTED_ADDER_DEAD_PAIRS`] floating gate pairs that nothing reads), a
+/// full adder from two half adders and an OR, a 4-bit adder from four full
+/// adders, and a root of four 4-bit adders. Same ports as [`adder`]`(16)`.
+pub fn nested_adder16() -> Design {
+    let mut d = Design::new("nested_adder16");
+
+    let ha = d.add_definition("half_adder");
+    let mut b = Builder::new(&mut d, ha);
+    let a = b.input("a", 1);
+    let x = b.input("b", 1);
+    let sum = b.xor(a, x);
+    let carry = b.and(a, x);
+    b.output("sum", sum);
+    b.output("carry", carry);
+    for _ in 0..NESTED_ADDER_DEAD_PAIRS {
+        let g = b.node(NodeKind::And { w: 1 }, &[None, None]);
+        let y = b.out(g, 0);
+        b.node(NodeKind::Or { w: 1 }, &[Some(y), None]);
+    }
+
+    let fa = d.add_definition("full_adder");
+    let mut b = Builder::new(&mut d, fa);
+    let a = b.input("a", 1);
+    let x = b.input("b", 1);
+    let cin = b.input("cin", 1);
+    let h1 = b.instance(ha, &[Some(a), Some(x)]);
+    let h2 = b.instance(ha, &[Some(h1[0]), Some(cin)]);
+    let cout = b.or(h1[1], h2[1]);
+    b.output("sum", h2[0]);
+    b.output("cout", cout);
+
+    let add4 = d.add_definition("adder4");
+    let mut b = Builder::new(&mut d, add4);
+    let a: Vec<NetId> = (0..4).map(|i| b.input(format!("a{i}"), 1)).collect();
+    let x: Vec<NetId> = (0..4).map(|i| b.input(format!("b{i}"), 1)).collect();
+    let mut carry = b.input("cin", 1);
+    let mut sums = Vec::with_capacity(4);
+    for i in 0..4 {
+        let o = b.instance(fa, &[Some(a[i]), Some(x[i]), Some(carry)]);
+        sums.push(o[0]);
+        carry = o[1];
+    }
+    for (i, &s) in sums.iter().enumerate() {
+        b.output(format!("s{i}"), s);
+    }
+    b.output("cout", carry);
+
+    let r = d.root;
+    let mut b = d.builder(r);
+    let a = b.input("a", 16);
+    let x = b.input("b", 16);
+    let mut carry = b.input("cin", 1);
+    let ab = b.bus_expand(a);
+    let bb = b.bus_expand(x);
+    let mut sums = Vec::with_capacity(16);
+    for block in 0..4 {
+        let lane = block * 4..block * 4 + 4;
+        let ins: Vec<Option<NetId>> = ab[lane.clone()]
+            .iter()
+            .chain(&bb[lane])
+            .map(|&n| Some(n))
+            .chain([Some(carry)])
+            .collect();
+        let o = b.instance(add4, &ins);
+        sums.extend_from_slice(&o[..4]);
+        carry = o[4];
     }
     let sum = b.bus_collect(&sums);
     b.output("sum", sum);
@@ -195,6 +274,63 @@ pub fn register_file(addr_bits: u8, w: u8) -> Design {
     let qb = b.mux_n(rb, &regs);
     b.output("qa", qa);
     b.output("qb", qb);
+    d
+}
+
+/// [`register_file`] as one [`NodeKind::Ram2`] with two read ports: the
+/// same ports and the same behaviour, with `init` as initial contents.
+pub fn register_file_ram2(addr_bits: u8, w: u8, init: &[u64]) -> Design {
+    let mut d = Design::new(format!("regfile_ram2_{addr_bits}x{w}"));
+    let r = d.root;
+    let mut b = d.builder(r);
+    let we = b.input("we", 1);
+    let waddr = b.input("waddr", addr_bits);
+    let wdata = b.input("wdata", w);
+    let ra = b.input("ra", addr_bits);
+    let rb = b.input("rb", addr_bits);
+    let q = b.ram2(waddr, we, wdata, &[ra, rb], init);
+    b.output("qa", q[0]);
+    b.output("qb", q[1]);
+    d
+}
+
+/// A FIFO of `2^addr_bits` words of `w` bits on one [`NodeKind::Ram2`]:
+/// ports `push, pop, data -> head, count`. A push writes at the tail and a
+/// pop advances the head (each ignored when full or empty); `head` is the
+/// word at the head, read combinationally at the head address while the
+/// tail is written.
+pub fn fifo(addr_bits: u8, w: u8) -> Design {
+    let mut d = Design::new(format!("fifo{addr_bits}x{w}"));
+    let r = d.root;
+    let mut b = d.builder(r);
+    let push = b.input("push", 1);
+    let pop = b.input("pop", 1);
+    let data = b.input("data", w);
+    let (head_reg, head) = b.state_placeholder(NodeKind::Register { w: addr_bits });
+    let (tail_reg, tail) = b.state_placeholder(NodeKind::Register { w: addr_bits });
+    let (count_reg, count) = b.state_placeholder(NodeKind::Register { w: addr_bits + 1 });
+    let full = b.bit(count, addr_bits);
+    let empty_n = b.reduce_or(count);
+    let not_full = b.not(full);
+    let do_push = b.and(push, not_full);
+    let do_pop = b.and(pop, empty_n);
+    let q = b.ram2(tail, do_push, data, &[head], &[]);
+    // head += pop, tail += push, count += push - pop.
+    let head_next = b.inc(head);
+    b.connect(do_pop, (head_reg, 0));
+    b.connect(head_next, (head_reg, 1));
+    let tail_next = b.inc(tail);
+    b.connect(do_push, (tail_reg, 0));
+    b.connect(tail_next, (tail_reg, 1));
+    let up = b.inc(count);
+    let ones = b.konst(addr_bits + 1, u64::MAX);
+    let down = b.add(count, ones, None).0;
+    let moved = b.xor(do_push, do_pop);
+    let next = b.mux(do_push, down, up);
+    b.connect(moved, (count_reg, 0));
+    b.connect(next, (count_reg, 1));
+    b.output("head", q[0]);
+    b.output("count", count);
     d
 }
 

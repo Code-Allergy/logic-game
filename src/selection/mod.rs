@@ -67,6 +67,7 @@ pub fn draw_selection_box(
     mut commands: Commands,
     sel: Res<SelectionState>,
     selection_box_query: Query<Entity, With<SelectionBox>>,
+    theme: Res<crate::theme::Theme>,
 ) {
     // Clear any existing selection box
     for entity in selection_box_query.iter() {
@@ -84,7 +85,7 @@ pub fn draw_selection_box(
         if size.length() > 5.0 {
             commands.spawn((
                 Sprite {
-                    color: Color::srgba(0.3, 0.5, 1.0, 0.4),
+                    color: theme.palette.io.with_alpha(0.3),
                     custom_size: Some(size),
                     ..Default::default()
                 },

@@ -1,0 +1,66 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "bcd2bin",
+      "title": "BCD to binary",
+      "nodes": [
+        {"name": "z8", "type": "Const", "value": 0, "at": [0, 240]},
+        {"name": "Tens", "type": "Input", "w": 4, "at": [0, 120]},
+        {"name": "z2", "type": "Const", "value": 0, "at": [0, 0]},
+        {"name": "Ones", "type": "Input", "w": 4, "at": [0, -120]},
+        {
+          "name": "x8",
+          "type": "Merge",
+          "widths": [1, 1, 1, 4, 1],
+          "label": "Tens x 8",
+          "at": [180, 180]
+        },
+        {
+          "name": "x2",
+          "type": "Merge",
+          "widths": [1, 4, 1, 1, 1],
+          "label": "Tens x 2",
+          "at": [180, 60]
+        },
+        {
+          "name": "ones",
+          "type": "Extend",
+          "from": 4,
+          "to": 8,
+          "signed": false,
+          "label": "Ones (8 bits)",
+          "at": [180, -120]
+        },
+        {"name": "tens10", "use": "ripple_adder/adder8", "label": "Tens x 10", "at": [360, 120]},
+        {"name": "sum", "use": "ripple_adder/adder8", "label": "+ Ones", "at": [540, 0]},
+        {"name": "Y", "type": "Output", "w": 8, "at": [700, 0]}
+      ],
+      "wires": [
+        ["z8", "x8.a0", "x8.a1", "x8.a2", "x8.a4"],
+        ["Tens", "x8.a3", "x2.a1"],
+        ["z2", "x2.a0", "x2.a2", "x2.a3", "x2.a4"],
+        ["Ones", "ones"],
+        ["x8", "tens10.A"],
+        ["x2", "tens10.B"],
+        ["tens10.Sum", "sum.A"],
+        ["ones", "sum.B"],
+        ["sum.Sum", "Y"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "BCD to binary",
+      "nodes": [
+        {"name": "Tens", "type": "Input", "w": 4, "at": [0, 80]},
+        {"name": "Ones", "type": "Input", "w": 4, "at": [0, -80]},
+        {"name": "conv", "use": "bcd2bin", "label": "BCD to binary", "at": [200, 0]},
+        {"name": "Y", "type": "Output", "w": 8, "label": "Binary", "at": [400, 80]},
+        {"name": "show", "type": "Display", "w": 8, "label": "Value", "at": [420, -80]}
+      ],
+      "wires": [["Tens", "conv.Tens"], ["Ones", "conv.Ones"], ["conv", "Y", "show"]]
+    }
+  ]
+}

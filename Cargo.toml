@@ -28,7 +28,7 @@ bevy_egui = "0.40"
 bevy-inspector-egui = { version = "0.37", optional = true }
 
 serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 
 [build-dependencies]
 embed-resource = "1"
@@ -57,7 +57,7 @@ lto = true
 codegen-units = 1
 strip = true
 
-# The simulator is the hot path; "s" measured ~1.65x slower on the Flat runner.
+# The simulator is the hot path; "s" measured ~1.65x slower (on the old Flat runner).
 [profile.release.package.logi-sim]
 opt-level = 3
 

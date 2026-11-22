@@ -1,0 +1,100 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "cpu",
+  "circuits": [
+    {
+      "name": "cpu",
+      "title": "A small CPU",
+      "nodes": [
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Clock",
+          "at": [0, -200]
+        },
+        {"name": "one", "type": "Const", "value": 1, "at": [0, 40]},
+        {"name": "zero", "type": "Const", "w": 8, "value": 0, "at": [0, -120]},
+        {"name": "pc", "use": "register/register8", "label": "program counter", "at": [140, 80]},
+        {"name": "next", "use": "ripple_adder/adder8", "label": "pc + 1", "at": [280, -120]},
+        {
+          "name": "rom",
+          "type": "Rom",
+          "w": 16,
+          "addr_bits": 8,
+          "contents": [
+            "0x1005", "0x1407", "0x1800", "0x1C01", "0x3008", "0x4A01", "0x5003", "0x2004",
+            "0x8200", "0xF000"
+          ],
+          "label": "program",
+          "at": [280, -320]
+        },
+        {
+          "name": "control",
+          "type": "Rom",
+          "w": 8,
+          "addr_bits": 4,
+          "contents": [0, 3, 4, 8, 1, 1, 1, 1, 16, 0, 0, 0, 0, 0, 0, 32],
+          "label": "decoder (microcode)",
+          "at": [560, 40]
+        },
+        {
+          "name": "regs",
+          "use": "register_file/regfile4x8",
+          "label": "registers r0-r3",
+          "at": [840, -320]
+        },
+        {"name": "alu", "use": "alu/alu8", "label": "ALU", "at": [980, -400]},
+        {"name": "wdata", "use": "mux/mux2x8", "label": "ALU or immediate", "at": [1260, -400]},
+        {"name": "any", "type": "ReduceOr", "w": 8, "at": [980, -520]},
+        {"name": "is_zero", "use": "gates/not", "at": [1120, -480]},
+        {"name": "taken", "use": "gates/and", "label": "JZ taken", "at": [1260, -240]},
+        {"name": "jump", "use": "gates/or", "label": "jump", "at": [1400, -200]},
+        {"name": "target", "use": "mux/mux2x8", "label": "pc + 1 or target", "at": [1540, -80]},
+        {"name": "hold", "use": "mux/mux2x8", "label": "stay on HLT", "at": [1680, 80]},
+        {
+          "name": "out",
+          "use": "register/register8",
+          "label": "output register",
+          "at": [1400, -280]
+        },
+        {"name": "Out", "type": "Output", "w": 8, "at": [1960, -280]},
+        {"name": "PC", "type": "Output", "w": 8, "at": [1960, 160]},
+        {"name": "Halted", "type": "Output", "at": [1960, -80]}
+      ],
+      "wires": [
+        ["clock", "pc.Clk", "regs.Clk", "out.Clk"],
+        ["one", "pc.Load", "next.Cin"],
+        ["zero", "next.B"],
+        ["pc", "next.A", "rom", "hold.B", "PC"],
+        ["rom:12..16", "control"],
+        ["rom:12..14", "alu.Op"],
+        ["control:0", "regs.WE"],
+        ["rom:10..12", "regs.WAddr"],
+        ["rom:8..10", "regs.RA"],
+        ["rom:0..2", "regs.RB"],
+        ["regs.QA", "alu.A", "any", "out.D"],
+        ["regs.QB", "alu.B"],
+        ["alu.Y", "wdata.A"],
+        ["rom:0..8", "wdata.B", "target.B"],
+        ["control:1", "wdata.Sel"],
+        ["wdata", "regs.WData"],
+        ["any", "is_zero"],
+        ["control:3", "taken.A"],
+        ["is_zero", "taken.B"],
+        ["control:2", "jump.A"],
+        ["taken", "jump.B"],
+        ["next.Sum", "target.A"],
+        ["jump", "target.Sel"],
+        ["target", "hold.A"],
+        ["control:5", "hold.Sel", "Halted"],
+        ["hold", "pc.D"],
+        ["control:4", "out.Load"],
+        ["out", "Out"]
+      ]
+    }
+  ]
+}

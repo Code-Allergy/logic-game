@@ -3,17 +3,20 @@
 //! Exposes all public modules and shared constants used by `main.rs`.
 
 use bevy::{
-    camera::ScalingMode, input::mouse::MouseWheel, platform::collections::HashMap, prelude::*,
-    window::PrimaryWindow,
+    camera::ScalingMode, platform::collections::HashMap, prelude::*, window::PrimaryWindow,
 };
 use bevy_egui::EguiContexts;
 
+pub mod camera;
 pub mod editor;
+pub mod fonts;
 pub mod selection;
 pub mod settings;
 pub mod settings_overlay;
 pub mod sim;
+pub mod theme;
 pub mod title;
+pub mod ui_style;
 
 pub mod temp {
     use bevy::prelude::*;
@@ -29,9 +32,6 @@ pub mod temp {
 
 pub const WORKSPACE_DIR: &str = "./workspaces";
 pub const DEFAULT_WORKSPACE_EXT: &str = ".json";
-pub const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.15);
-pub const HOVERED_BUTTON: Color = Color::srgb(0.25, 0.25, 0.25);
-pub const PRESSED_BUTTON: Color = Color::srgb(0.35, 0.75, 0.35);
 pub const SIMULATION_TICK_RATE: f64 = 10.0;
 pub const GAME_TITLE: &str = "GateQuest";
 pub const GAME_WEB_TAG: &str = "#gatequest-canvas";
@@ -50,6 +50,9 @@ pub enum GameState {
     MainMenu,
     Loading,
     Simulating,
+    /// The demo map: the curriculum road, a level's demos and the gallery
+    /// (`editor::demo_map`). The circuit stays loaded, hidden and paused.
+    DemoMap,
     Paused,
     Settings,
 }
@@ -99,15 +102,4 @@ pub fn configure_camera_scaling(
     Ok(())
 }
 
-pub fn zoom_camera(
-    mut scroll_evr: MessageReader<MouseWheel>,
-    mut cameras: Query<&mut Projection, With<MainCamera>>,
-) -> Result {
-    let mut proj = cameras.single_mut()?;
-    if let Projection::Orthographic(ortho) = proj.as_mut() {
-        for ev in scroll_evr.read() {
-            ortho.scale = (ortho.scale * (1.0 - ev.y * 0.1)).clamp(0.1, 10.0);
-        }
-    }
-    Ok(())
-}
+pub use camera::{pan_camera, zoom_camera};

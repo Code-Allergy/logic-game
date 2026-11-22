@@ -10,7 +10,8 @@
 //! `tick()` is:
 //! 1. **Commit.** Apply every [`Commit`] in order. A commit only reads
 //!    `next`/snapshot slots, which no commit writes, so the order is
-//!    irrelevant.
+//!    irrelevant, except that a [`Commit::MemClear`] comes before the
+//!    write to the same memory that follows it.
 //! 2. **Advance** the tick count, then apply staged root-input writes to
 //!    their port slots.
 //! 3. **Settle.** Run the blocks in order. Instructions in a block share one
@@ -225,6 +226,68 @@ pub enum Commit {
         addr: u32,
         data: u32,
     },
+    /// `m = &mut mems[mem][slots[addr]]; *m = (*m & !slots[mask]) |
+    /// (slots[data] & slots[mask])`: a write of the bits set in `mask` (a
+    /// `Ram2` with a per-bit write enable). The slots are snapshots, as for
+    /// `RamWrite`.
+    RamWriteMasked {
+        mem: u32,
+        mask: u32,
+        addr: u32,
+        data: u32,
+    },
+    /// `if slots[en] != 0 { mems[mem].fill(0) }` (a Pixel screen's
+    /// `clear`; `en` is a snapshot). Emitted just before the screen's
+    /// `RamWrite`, and applied first: the one order that matters.
+    MemClear { mem: u32, en: u32 },
+}
+
+impl Commit {
+    /// The slots this commit reads (`Copy` reads only `next`; the rest are
+    /// the zero slot).
+    pub fn reads(&self) -> [u32; 3] {
+        match *self {
+            Commit::Copy { next, .. } => [next, ZERO_SLOT, ZERO_SLOT],
+            Commit::RamWrite { we, addr, data, .. } => [we, addr, data],
+            Commit::RamWriteMasked {
+                mask, addr, data, ..
+            } => [mask, addr, data],
+            Commit::MemClear { en, .. } => [en, ZERO_SLOT, ZERO_SLOT],
+        }
+    }
+
+    /// This commit with every slot it reads passed through `f`.
+    pub fn map_reads(self, mut f: impl FnMut(u32) -> u32) -> Commit {
+        match self {
+            Commit::Copy { state, next } => Commit::Copy {
+                state,
+                next: f(next),
+            },
+            Commit::RamWrite {
+                mem,
+                we,
+                addr,
+                data,
+            } => Commit::RamWrite {
+                mem,
+                we: f(we),
+                addr: f(addr),
+                data: f(data),
+            },
+            Commit::RamWriteMasked {
+                mem,
+                mask,
+                addr,
+                data,
+            } => Commit::RamWriteMasked {
+                mem,
+                mask: f(mask),
+                addr: f(addr),
+                data: f(data),
+            },
+            Commit::MemClear { mem, en } => Commit::MemClear { mem, en: f(en) },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

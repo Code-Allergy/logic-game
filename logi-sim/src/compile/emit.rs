@@ -11,7 +11,7 @@ use super::elaborate::Elab;
 use super::pack;
 use super::program::*;
 use super::simplify::simplify;
-use crate::netlist::{NetId, NodeKind, mask};
+use crate::netlist::{NetId, NodeKind, ScreenMode, mask};
 
 const UNASSIGNED: u32 = u32::MAX;
 
@@ -449,10 +449,7 @@ fn partition(
 
 /// Slots read by commits.
 fn commit_reads(commits: &[Commit]) -> impl Iterator<Item = u32> + '_ {
-    commits.iter().flat_map(|c| match *c {
-        Commit::Copy { next, .. } => [next, ZERO_SLOT, ZERO_SLOT],
-        Commit::RamWrite { we, addr, data, .. } => [we, addr, data],
-    })
+    commits.iter().flat_map(Commit::reads)
 }
 
 /// Destination slots in execution order: scalar instructions (from
@@ -604,7 +601,8 @@ fn locality_order(
                 .map(|p| p.slot)
                 .chain(commits.iter().flat_map(|c| match *c {
                     Commit::Copy { next, .. } => vec![next],
-                    Commit::RamWrite { we, addr, data, .. } => vec![we, addr, data],
+                    Commit::MemClear { en, .. } => vec![en],
+                    _ => c.reads().to_vec(),
                 }))
                 .filter_map(|s| {
                     let p = r.producer[s as usize];
@@ -708,17 +706,7 @@ fn renumber(p: &mut Program, ops: &[Op], dsts: &[u32], lane_of: &[u32]) {
                 state: m(state),
                 next: m(next),
             },
-            Commit::RamWrite {
-                mem,
-                we,
-                addr,
-                data,
-            } => Commit::RamWrite {
-                mem,
-                we: m(we),
-                addr: m(addr),
-                data: m(data),
-            },
+            other => other.map_reads(m),
         };
     }
     for port in p.ports.inputs.iter_mut().chain(p.ports.outputs.iter_mut()) {
@@ -876,7 +864,139 @@ fn lower(
             });
             em.state_keys.push(key(StateLoc::Mem(m), *w));
         }
+        K::Ram2 {
+            addr_bits,
+            w,
+            reads,
+            mask,
+            init,
+        } => {
+            let m = em.mem(*addr_bits, *w, init, true);
+            for k in 0..*reads as usize {
+                em.push(Op::MemRead, o(k), i(3 + k), m, z, 0);
+            }
+            let we = em.temp(if *mask { *w } else { 1 });
+            let addr = em.temp(*addr_bits);
+            let data = em.temp(*w);
+            em.push(Op::Copy, we, i(1), z, z, 0);
+            em.push(Op::Copy, addr, i(0), z, z, 0);
+            em.push(Op::Copy, data, i(2), z, z, 0);
+            em.commits.push(if *mask {
+                Commit::RamWriteMasked {
+                    mem: m,
+                    mask: we,
+                    addr,
+                    data,
+                }
+            } else {
+                Commit::RamWrite {
+                    mem: m,
+                    we,
+                    addr,
+                    data,
+                }
+            });
+            em.state_keys.push(key(StateLoc::Mem(m), *w));
+        }
+        K::Screen {
+            mode,
+            x_bits,
+            y_bits,
+            w,
+        } => lower_screen(em, *mode, *x_bits, *y_bits, *w, i, key),
     }
+}
+
+/// A screen: a write-only memory and, for `Scan`, a beam register, built
+/// from ordinary instructions and commits (one `RamWrite`, plus a
+/// `MemClear` for `Pixel` and a `Copy` of the beam for `Scan`).
+fn lower_screen(
+    em: &mut Emitter,
+    mode: ScreenMode,
+    xb: u8,
+    yb: u8,
+    w: u8,
+    i: &dyn Fn(usize) -> u32,
+    key: impl Fn(StateLoc, u8) -> StateKey,
+) {
+    let z = ZERO_SLOT;
+    let ab = xb + yb;
+    let m = em.mem(ab, w, &[], true);
+    let snapshot = |em: &mut Emitter, src: u32, width: u8| {
+        let s = em.temp(width);
+        em.push(Op::Copy, s, src, z, z, 0);
+        s
+    };
+    let (we, addr, data) = match mode {
+        ScreenMode::Pixel => {
+            let en = snapshot(em, i(4), 1);
+            em.commits.push(Commit::MemClear { mem: m, en });
+            let addr = em.temp(ab);
+            em.push(Op::Concat, addr, i(0), i(1), xb as u32, 0);
+            (snapshot(em, i(3), 1), addr, snapshot(em, i(2), w))
+        }
+        ScreenMode::Memory => (
+            snapshot(em, i(1), 1),
+            snapshot(em, i(0), ab),
+            snapshot(em, i(2), w),
+        ),
+        ScreenMode::Scan => {
+            // Beam state: x in the low xb + 1 bits, y above it; each stops
+            // one past its edge (bit xb of x, bit yb of y).
+            let (bx, by) = (xb + 1, yb + 1);
+            let beam = em.temp(bx + by);
+            let field = |em: &mut Emitter, lo: u8, len: u8| {
+                let s = em.temp(len);
+                em.push(Op::Shr, s, beam, lo as u32, z, mask(len));
+                s
+            };
+            let x = field(em, 0, bx);
+            let y = field(em, bx, by);
+            let x_end = field(em, xb, 1);
+            let y_end = field(em, bx + yb, 1);
+            let x_pix = field(em, 0, xb);
+            let y_pix = field(em, bx, yb);
+            let (hs, vs) = (i(1), i(2));
+            let sync = em.temp(1);
+            em.push(Op::Or, sync, hs, vs, z, 0);
+            let edge = em.temp(1);
+            em.push(Op::Or, edge, x_end, y_end, z, 0);
+            let off = em.temp(1);
+            em.push(Op::Or, off, sync, edge, z, 0);
+            let we = em.temp(1);
+            em.push(Op::Not, we, off, z, z, 1);
+            let addr = em.temp(ab);
+            em.push(Op::Concat, addr, x_pix, y_pix, xb as u32, 0);
+            // x + 1 short of the end; 0 on a sync.
+            let x_more = em.temp(1);
+            em.push(Op::Not, x_more, x_end, z, z, 1);
+            let x_inc = em.temp(bx);
+            em.push(Op::AddSum, x_inc, x, z, x_more, mask(bx));
+            let x_next = em.temp(bx);
+            em.push(Op::Mux, x_next, sync, x_inc, z, 0);
+            // y + 1 short of the end on hsync; 0 on vsync.
+            let y_more = em.temp(1);
+            em.push(Op::Not, y_more, y_end, z, z, 1);
+            let y_inc = em.temp(by);
+            em.push(Op::AddSum, y_inc, y, z, y_more, mask(by));
+            let y_hs = em.temp(by);
+            em.push(Op::Mux, y_hs, hs, y, y_inc, 0);
+            let y_next = em.temp(by);
+            em.push(Op::Mux, y_next, vs, y_hs, z, 0);
+            let next = em.temp(bx + by);
+            em.push(Op::Concat, next, x_next, y_next, bx as u32, 0);
+            em.commits.push(Commit::Copy { state: beam, next });
+            em.state_keys.push(key(StateLoc::Slot(beam), bx + by));
+            (we, addr, snapshot(em, i(0), w))
+        }
+    };
+    em.commits.push(Commit::RamWrite {
+        mem: m,
+        we,
+        addr,
+        data,
+    });
+    em.state_keys.push(key(StateLoc::Mem(m), w));
 }
 
 /// Rank of every instruction (1 + max rank of the instructions producing

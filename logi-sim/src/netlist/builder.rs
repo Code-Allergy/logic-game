@@ -432,6 +432,57 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// A [`NodeKind::Ram2`] with one read port per entry of `raddrs`; returns
+    /// the read data nets in that order. `we` is either 1 bit or as wide as
+    /// `wdata` (a per-bit write enable).
+    #[track_caller]
+    pub fn ram2(
+        &mut self,
+        waddr: NetId,
+        we: NetId,
+        wdata: NetId,
+        raddrs: &[NetId],
+        init: &[u64],
+    ) -> Vec<NetId> {
+        let addr_bits = self.width(waddr);
+        let w = self.width(wdata);
+        let mask = self.width(we) != 1;
+        let mut inputs = vec![Some(waddr), Some(we), Some(wdata)];
+        inputs.extend(raddrs.iter().map(|&a| Some(a)));
+        let id = self.node(
+            NodeKind::Ram2 {
+                addr_bits,
+                w,
+                reads: raddrs.len() as u8,
+                mask,
+                init: Arc::from(init),
+            },
+            &inputs,
+        );
+        self.design.defs[self.def].nodes[id].outputs.to_vec()
+    }
+
+    /// A screen; `inputs` are its pins in order (see
+    /// [`super::ScreenMode`]), `None` for unconnected. Returns the node.
+    pub fn screen(
+        &mut self,
+        mode: super::ScreenMode,
+        x_bits: u8,
+        y_bits: u8,
+        w: u8,
+        inputs: &[Option<NetId>],
+    ) -> NodeId {
+        self.node(
+            NodeKind::Screen {
+                mode,
+                x_bits,
+                y_bits,
+                w,
+            },
+            inputs,
+        )
+    }
+
     /// Add a state element with its inputs unconnected, for building
     /// feedback: use its output, then [`Self::connect`] its inputs later.
     /// Returns `(node, q)`.

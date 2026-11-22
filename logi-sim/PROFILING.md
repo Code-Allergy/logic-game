@@ -1,9 +1,27 @@
-# Tick profiling
+# Profiling the simulator
 
-`profile_tick` can run either the selected compiled representation's tick loop
-or the real background engine. The representation-only mode avoids Bevy, the
-worker scheduler, channels, snapshots, and Criterion. Prefix the runner with
-`engine-` to include command polling, batching, atomics, and snapshot publishing.
+The hot path is `Sim::tick` (`logi-sim/src/sim/`): one commit, then one
+settle that runs the program's blocks in order. Two entry points exercise
+it without Bevy, the engine thread or channels:
+
+- `cargo run -p logi-sim --release --bin sim_report` prints throughput for
+  every benchmark case (random DAGs, the CPU fixture, the generated
+  datapath and their bit-blasted versions), the effect of each compile and
+  runtime option, compile times and engine overhead. `-- --quick` runs a
+  smaller set; `-- --runs N` sets how many runs the per-step table takes the
+  median of.
+- `cargo bench -p logi-sim --bench sim` runs the same cases under Criterion
+  (`sim/dag32`, `sim/gates1`, `sim/sequential`, `sim/compile`). Pass a
+  filter to run one group, for example `cargo bench -p logi-sim --bench sim
+  -- sim/gates1/1000000`.
+
+Both count throughput in work items: scalar instructions plus packed lanes
+(`Program::work`), so cases compiled with different options stay
+comparable. Throughput cases compile with `Options::unoptimized()` plus the
+default slot order and packing, so every instruction counted is work done;
+the report's simplify section shows what the simplify passes remove.
+
+## Flamegraphs
 
 Install the frontend once if `cargo flamegraph` is unavailable:
 
@@ -11,73 +29,41 @@ Install the frontend once if `cargo flamegraph` is unavailable:
 cargo install flamegraph
 ```
 
-The repository's Nix development shell also provides it. When not already in
-that shell, prefix a command with `nix develop -c`, for example
-`nix develop -c cargo flamegraph ...`.
+The repository's Nix development shell also provides it. When not already
+in that shell, prefix a command with `nix develop -c`.
 
-For a flamegraph-optimized build with normal inlining, use the dedicated profile
-(debug symbols + predictable symbolization):
+The workspace defines two profiles for this:
 
-```sh
-nix develop -c cargo flamegraph --profile flamegraph -p logi-sim --features simd-profile --bin profile_tick -- \
-  simd dense-fast-input
-```
+- `flamegraph`: release optimizations, no LTO, debug symbols kept.
+- `flamegraph-noinline`: the same with more codegen units, for use with
+  `RUSTFLAGS='-Cllvm-args=--inline-threshold=0 -Cforce-frame-pointers=yes'`
+  when inlining hides the function you care about.
 
-If you want less aggressive inlining boundaries for profiling *only*, use the
-`flamegraph-noinline` profile. You can still keep a small workload and full
-symbols:
+Profile the report (use `--quick` to keep the capture small):
 
 ```sh
-RUSTFLAGS='-Cllvm-args=--inline-threshold=0 -Cforce-frame-pointers=yes' \
-  nix develop -c cargo flamegraph --profile flamegraph-noinline -p logi-sim --features simd-profile --bin profile_tick -- \
-  simd dense-fast-input
+cargo flamegraph --profile flamegraph -p logi-sim --bin sim_report \
+  -o flamegraph-sim.svg -- --quick
 ```
 
-From the workspace root, profile an optimized representation and fixture:
+Or one Criterion benchmark, in profiling mode so Criterion does not
+analyse the samples:
 
 ```sh
-cargo flamegraph --profile flamegraph -p logi-sim --bin profile_tick -- \
-  engine-simd cpu 100000000
+cargo flamegraph --profile flamegraph -p logi-sim --bench sim \
+  -o flamegraph-gates1.svg -- --bench --profile-time 10 sim/gates1/1000000
 ```
 
-The runner may be `naive`, `flat`, `event`, or `simd`. Append `-raw` to bypass
-the optimization pipeline, for example `flat-raw`. Prefix it with `engine-` to
-profile the complete worker, for example `engine-flat` or `engine-simd-raw`.
-Fixtures are `and`,
-`adder`, `adder8`, `quiescent500`, `recursive16`, `cpu`, and `dense`. `dense-fast-input`
-mirrors the SIMD fast-input throughput update path used by
-`SimdRunner-optimized/large_dense_fast_input_throughput_tick`.
-The final argument is the number of ticks. `dense-fast-input` defaults to
-`2,000,000` ticks (instead of `100,000,000`) to keep profiles practical.
-
-Useful comparisons:
+To capture with `perf` directly, for example at a lower sample rate:
 
 ```sh
-cargo flamegraph --profile flamegraph -p logi-sim --bin profile_tick \
-  -o flamegraph-flat.svg -- flat cpu 100000000
-cargo flamegraph --profile flamegraph -p logi-sim --bin profile_tick \
-  -o flamegraph-event.svg -- event cpu 100000000
-cargo flamegraph --profile flamegraph -p logi-sim --bin profile_tick \
-  -o flamegraph-simd.svg -- simd cpu 100000000
-cargo flamegraph --profile flamegraph -p logi-sim --bin profile_tick \
-  -o flamegraph-simd-dense.svg -- simd dense 100000000
-cargo flamegraph --profile flamegraph -p logi-sim --bin profile_tick \
-  -o flamegraph-simd-dense-fast-input.svg -- simd dense-fast-input 100000000
-
-# If the default flamegraph capture is too large, run a smaller sample window first:
-cargo flamegraph --profile flamegraph -p logi-sim --bin profile_tick \
-  -o flamegraph-simd-dense-fast-input-short.svg -- simd dense-fast-input 2000000
-
-# If you need a custom sampling frequency, capture with perf directly:
-# (example: lower sample rate to reduce data volume)
-# perf record -F 79 -g -m 1024 -o /tmp/perf.data -- target/release/profile_tick simd dense-fast-input 2000000
-# perf script -i /tmp/perf.data | /tmp/stackcollapse-perf.pl | /tmp/flamegraph.pl > flamegraph-simd-dense-fast-input.svg
-
-cargo flamegraph --profile flamegraph -p logi-sim --bin profile_tick \
-  -o flamegraph-simd-dense-tick-only.svg -- simd-raw dense 100000000
-cargo flamegraph --profile flamegraph -p logi-sim --bin profile_tick \
-  -o flamegraph-engine-simd.svg -- engine-simd cpu 100000000
+cargo build --profile flamegraph -p logi-sim --bin sim_report
+perf record -F 99 -g -o /tmp/perf.data -- target/flamegraph/sim_report --quick
+perf report -i /tmp/perf.data
 ```
+
+Settles that use the worker pool (`SimOptions::threads > 1`) spend their
+waiting time spinning in `sim/pool.rs`; profile with one thread first.
 
 On Linux, `cargo flamegraph` uses `perf`. If sampling is denied, temporarily
 adjust the machine's `kernel.perf_event_paranoid` setting according to local

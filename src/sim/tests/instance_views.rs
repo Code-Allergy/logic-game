@@ -778,15 +778,15 @@ fn saving_in_a_view_saves_the_workspace_and_loading_closes_the_view() {
         "save reads the parked root and the definition table"
     );
 
-    load(&mut app, fixtures::build_half_adder());
+    load(&mut app, demo("half_adder"));
     assert!(view(&app).is_root());
     assert_eq!(count_entities::<With<InstanceViewItem>>(&mut app), 0);
     assert_eq!(count_entities::<With<Disabled>>(&mut app), 0);
     assert_eq!(root_node_count(&app), 6, "only the half adder is simulated");
     assert_eq!(
         app.world().resource::<SimBridge>().design().defs.len(),
-        1,
-        "unused definitions dropped"
+        3,
+        "the cell definition is dropped: the root and its XOR and AND remain"
     );
     set_input(&mut app, "A", 1);
     run(&mut app, 1);

@@ -7,11 +7,15 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
+use crate::sim::art::PinLayout;
 use crate::sim::bridge::loop_message;
-use crate::sim::visuals::{DisplayedValue, LoopOutline, WireValueLabel};
+use crate::sim::visuals::{
+    DisplayedValue, LoopOutline, WireCore, WirePath, WireRouting, WireStyle, WireValueLabel,
+};
 use crate::sim::{
     CircuitLibrary, CloseView, EntityWorkCounter, GateMoved, GateProbes, InstanceViewItem,
-    LogicDisplay, LoopHighlight, OpenInstanceView, RegisterDefinitions, SimulationVisualsPlugin,
+    LogicDisplay, LoopHighlight, OnTop, OpenInstanceView, RegisterDefinitions, Selected,
+    SimulationVisualsPlugin,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -28,6 +32,8 @@ struct Changes {
     values: HashSet<Entity>,
     wire_states: HashSet<Entity>,
     probes: HashSet<Entity>,
+    paths: HashSet<Entity>,
+    styles: HashSet<Entity>,
 }
 
 impl Changes {
@@ -38,6 +44,8 @@ impl Changes {
             + self.values.len()
             + self.wire_states.len()
             + self.probes.len()
+            + self.paths.len()
+            + self.styles.len()
     }
 }
 
@@ -50,6 +58,8 @@ fn record_changes(
     values: Query<Entity, Changed<GateValues>>,
     wire_states: Query<Entity, Changed<WireState>>,
     probes: Query<Entity, Changed<GateProbes>>,
+    paths: Query<Entity, Changed<WirePath>>,
+    styles: Query<Entity, Changed<WireStyle>>,
 ) {
     let c = changes.bypass_change_detection();
     c.sprites.extend(sprites.iter());
@@ -58,6 +68,8 @@ fn record_changes(
     c.values.extend(values.iter());
     c.wire_states.extend(wire_states.iter());
     c.probes.extend(probes.iter());
+    c.paths.extend(paths.iter());
+    c.styles.extend(styles.iter());
 }
 
 fn visual_app_with(runtime: SimRuntime) -> App {
@@ -130,6 +142,16 @@ fn wire_label(app: &App, wire: Entity) -> Option<(Entity, String)> {
         .map(|c| (c, app.world().get::<Text2d>(c).unwrap().0.clone()))
 }
 
+/// The colour of a wire's core.
+fn wire_colour(app: &App, wire: Entity) -> Color {
+    let palette = app.world().resource::<crate::theme::Theme>().palette;
+    app.world()
+        .get::<WireStyle>(wire)
+        .expect("wire style")
+        .paint
+        .color(&palette)
+}
+
 fn highlighted(app: &App, entity: Entity) -> bool {
     app.world().get::<LoopHighlight>(entity).is_some()
 }
@@ -188,21 +210,28 @@ fn assert_idle_does_no_work(app: &mut App, what: &str) {
 #[test]
 fn paused_idle_circuit_does_no_per_entity_work() {
     let mut app = visual_app();
-    load(&mut app, fixtures::build_64bit_counter_subcircuits());
+    load(&mut app, demo("counter"));
     assert!(
         !app.world().resource::<SimBridge>().is_running(),
         "the bridge starts paused"
     );
+    set_input(&mut app, "Enable", 1);
     run(&mut app, 12);
-    assert!(display_value(&mut app) > 0, "the counter ran");
+    assert!(value_at(&mut app, "Count") > 0, "the counter ran");
     // The visuals exist, so the idle check below is meaningful.
-    let display = gate_of_kind(&mut app, |k| matches!(k, GateKind::Display { .. }));
+    let display = gate(&mut app, "Count");
     assert_ne!(text_of_display(&mut app, display).1, "");
-    assert!(
-        wires(&mut app)
-            .iter()
-            .all(|(e, ..)| app.world().get::<Sprite>(*e).is_some())
-    );
+    assert!(wires(&mut app).iter().all(|(e, ..)| {
+        let routed = app
+            .world()
+            .get::<WirePath>(*e)
+            .is_some_and(|p| p.points.len() >= 2);
+        let core = app
+            .world()
+            .get::<Children>(*e)
+            .is_some_and(|c| c.iter().any(|c| app.world().get::<WireCore>(c).is_some()));
+        routed && core
+    }));
 
     assert_idle_does_no_work(&mut app, "root view");
 
@@ -220,7 +249,7 @@ fn paused_idle_circuit_does_no_per_entity_work() {
 fn paused_idle_instance_view_and_threaded_engine_do_no_per_entity_work() {
     for runtime in [SimRuntime::Threadless, SimRuntime::Threaded] {
         let mut app = visual_app_with(runtime);
-        load(&mut app, fixtures::build_8bit_counter_subcircuit());
+        load(&mut app, demo("counter"));
         app.world_mut()
             .resource_mut::<SimBridge>()
             .wait_until_current(Duration::from_secs(5));
@@ -282,7 +311,17 @@ fn dragging_a_gate_moves_only_its_wires_and_does_not_recompile() {
         running,
         "no recompile"
     );
-    let moved: HashSet<Entity> = changes(&app).transforms.iter().copied().collect();
+    // Only the gate moves; only its wires are routed again.
+    let moved: HashSet<Entity> = changes(&app)
+        .transforms
+        .iter()
+        .copied()
+        .filter(|e| {
+            app.world().get::<GateIdentity>(*e).is_some()
+                || app.world().get::<WireEndpoints>(*e).is_some()
+        })
+        .collect();
+    let rerouted: HashSet<Entity> = changes(&app).paths.iter().copied().collect();
     let and_wires = [
         wire_between(&mut app, a, and),
         wire_between(&mut app, b, and),
@@ -290,30 +329,54 @@ fn dragging_a_gate_moves_only_its_wires_and_does_not_recompile() {
     ];
     for wire in and_wires {
         assert!(
-            moved.contains(&wire),
+            rerouted.contains(&wire),
             "a wire of the dragged gate follows it"
         );
     }
-    assert!(!moved.contains(&into_z), "an unrelated wire is not touched");
-    assert_eq!(
-        moved,
-        HashSet::from([and, and_wires[0], and_wires[1], and_wires[2]])
+    assert!(
+        !rerouted.contains(&into_z),
+        "an unrelated wire is not touched"
     );
+    assert_eq!(rerouted, HashSet::from(and_wires));
+    assert_eq!(moved, HashSet::from([and]));
     assert!(changes(&app).values.is_empty() && changes(&app).probes.is_empty());
 
-    // The wire sits between its gates.
-    let to = app.world().get::<Transform>(y).unwrap().translation;
-    let from = app.world().get::<Transform>(and).unwrap().translation;
-    let wire = app.world().get::<Transform>(into_y).unwrap().translation;
-    assert_eq!(wire.truncate(), ((from + to) / 2.0).truncate());
-    let length = app
-        .world()
-        .get::<Sprite>(into_y)
-        .unwrap()
-        .custom_size
-        .unwrap()
-        .x;
-    assert!((length - (to - from).length()).abs() < 1e-3);
+    // The wire runs from the driver's output pin to the sink's input pin,
+    // in horizontal and vertical runs, leaving and entering horizontally.
+    let pin = |app: &App, gate: Entity, output: bool| {
+        let layout = app.world().get::<PinLayout>(gate).expect("pin layout");
+        let offset = if output {
+            layout.output(0)
+        } else {
+            layout.input(0)
+        };
+        app.world().get::<Transform>(gate).unwrap().translation + offset.extend(0.0)
+    };
+    let to = pin(&app, y, false);
+    let from = pin(&app, and, true);
+    assert_eq!(
+        to.x,
+        app.world().get::<Transform>(y).unwrap().translation.x - 25.0
+    );
+    assert_eq!(
+        from.x,
+        app.world().get::<Transform>(and).unwrap().translation.x + 25.0
+    );
+    let path = &app.world().get::<WirePath>(into_y).unwrap().points;
+    assert_eq!(path.first().copied(), Some(from.truncate()));
+    assert_eq!(path.last().copied(), Some(to.truncate()));
+    for w in path.windows(2) {
+        assert!(w[0].x == w[1].x || w[0].y == w[1].y, "{path:?}");
+    }
+    let n = path.len();
+    assert_eq!(path[0].y, path[1].y, "leaves the output to the right");
+    assert!(path[1].x > path[0].x);
+    assert_eq!(
+        path[n - 2].y,
+        path[n - 1].y,
+        "enters the input from the left"
+    );
+    assert!(path[n - 2].x < path[n - 1].x);
 
     // A move command is a drag too.
     let gate_uuid = uuid(&app, a);
@@ -325,6 +388,203 @@ fn dragging_a_gate_moves_only_its_wires_and_does_not_recompile() {
         },
     );
     assert_eq!(app.world().resource::<SimBridge>().revision(), revision);
+}
+
+/// Highest and lowest z at which `entity` or any of its descendants draws
+/// (the transform chain, without the propagation plugins).
+fn z_span(app: &App, entity: Entity, parent_z: f32) -> (f32, f32) {
+    let z = parent_z + app.world().get::<Transform>(entity).unwrap().translation.z;
+    let mut span = (z, z);
+    if let Some(children) = app.world().get::<Children>(entity) {
+        for &child in children {
+            let (lo, hi) = z_span(app, child, z);
+            span = (span.0.min(lo), span.1.max(hi));
+        }
+    }
+    span
+}
+
+/// Right-drag `gate` one step, as `gate_selection_system` and
+/// `drag_selected_system` do.
+fn drag(app: &mut App, gate: Entity, to: Vec2) {
+    let selected: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(app.world())
+        .collect();
+    for e in selected {
+        app.world_mut().entity_mut(e).remove::<Selected>();
+    }
+    app.world_mut()
+        .entity_mut(gate)
+        .insert(Selected { offset: Vec2::ZERO });
+    let mut t = app.world_mut().get_mut::<Transform>(gate).unwrap();
+    t.translation.x = to.x;
+    t.translation.y = to.y;
+    app.update();
+}
+
+/// The dragged gate, with its pins, labels and caption, draws above every
+/// other tile, and its wires above the other wires; it stays in front
+/// after the drop until another gate is dragged.
+#[test]
+fn the_dragged_gate_draws_on_top() {
+    let mut app = visual_app();
+    let a = create_gate(&mut app, GateKind::Input { w: 8 }, "A");
+    let b = create_gate(&mut app, GateKind::Input { w: 1 }, "B");
+    let reg = create_gate(&mut app, GateKind::Register { w: 8 }, "R");
+    let y = create_gate(&mut app, GateKind::Output { w: 8 }, "Y");
+    create_wire(&mut app, b, 0, reg, 0);
+    create_wire(&mut app, a, 0, reg, 1);
+    create_wire(&mut app, reg, 0, y, 0);
+    idle_frames(&mut app, 2);
+    let gates = [a, b, reg, y];
+    let in_front = |app: &App, top: Entity| {
+        let (top_lo, _) = z_span(app, top, 0.0);
+        gates
+            .iter()
+            .filter(|g| **g != top)
+            .all(|g| z_span(app, *g, 0.0).1 < top_lo)
+    };
+    let wire_z = |app: &mut App, w: Entity| app.world().get::<Transform>(w).unwrap().translation.z;
+
+    // Drag the register over A: it and all its art are in front.
+    drag(&mut app, reg, Vec2::ZERO);
+    assert!(in_front(&app, reg), "the dragged tile is above every other");
+    let into_y = wire_into(&mut app, y);
+    let a_reg = wire_between(&mut app, a, reg);
+    let b_reg = wire_between(&mut app, b, reg);
+    // A wire of another net, for comparison: a new input to a new output.
+    // (Routed wires take their depth per net, so it must not share a net
+    // with the register's wires: A also drives the register.)
+    let c = create_gate(&mut app, GateKind::Input { w: 8 }, "C");
+    let z = create_gate(&mut app, GateKind::Output { w: 8 }, "Z");
+    create_wire(&mut app, c, 0, z, 0);
+    idle_frames(&mut app, 2);
+    let a_z = wire_into(&mut app, z);
+    for w in [into_y, a_reg, b_reg] {
+        assert!(
+            wire_z(&mut app, w) > wire_z(&mut app, a_z),
+            "its wires are on top"
+        );
+    }
+
+    // Dropped (Selected stays until the next press): still in front.
+    idle_frames(&mut app, 2);
+    assert!(in_front(&app, reg));
+
+    // Drag B: B comes to the front, the register goes back.
+    drag(&mut app, b, Vec2::new(10.0, 0.0));
+    assert!(in_front(&app, b));
+    assert!(!in_front(&app, reg));
+    assert!(app.world().get::<OnTop>(reg).is_none());
+    assert_eq!(
+        app.world().get::<Transform>(reg).unwrap().translation.z,
+        0.0
+    );
+    assert!(wire_z(&mut app, into_y) < wire_z(&mut app, b_reg));
+    assert!(wire_z(&mut app, into_y) < crate::temp::CONNECTION_Z_LEVEL + 1e-6);
+}
+
+#[test]
+fn dragging_in_a_large_circuit_routes_only_the_dragged_gates_wires() {
+    // 12 columns of 25 gates, each fed by two gates of the column before.
+    let (cols, rows) = (12, 25);
+    let mut doc = CircuitDocument::new("Big");
+    let mut ids = Vec::new();
+    for c in 0..cols {
+        for r in 0..rows {
+            let kind = if c == 0 {
+                GateKind::Input { w: 1 }
+            } else {
+                GateKind::And { w: 1 }
+            };
+            let at = Vec2::new(c as f32 * 160.0, -(r as f32) * 120.0);
+            ids.push(doc.add(DocNode::labeled(kind, at, format!("g{c}_{r}"))));
+        }
+    }
+    for c in 1..cols {
+        for r in 0..rows {
+            let to = ids[c * rows + r];
+            doc.connect(ids[(c - 1) * rows + r], 0, to, 0);
+            doc.connect(ids[(c - 1) * rows + (r + 1) % rows], 0, to, 1);
+        }
+    }
+    let mut app = visual_app();
+    load(&mut app, WorkspaceDocument::new(doc));
+    idle_frames(&mut app, 3);
+    let stats = app.world().resource::<WireRouting>().stats;
+    assert_eq!(stats.fallbacks, 0, "{stats:?}");
+    assert_eq!(
+        stats.searched,
+        (cols - 1) * rows * 2,
+        "every wire routed once"
+    );
+    assert!(
+        wires(&mut app)
+            .iter()
+            .all(|(e, ..)| app.world().get::<WirePath>(*e).unwrap().points.len() >= 2)
+    );
+
+    let dragged = gate(&mut app, "g6_12");
+    let id = uuid(&app, dragged);
+    let its_wires: HashSet<Entity> = wires(&mut app)
+        .into_iter()
+        .filter(|(_, ep, _)| ep.source_gate == id || ep.sink_gate == id)
+        .map(|(e, ..)| e)
+        .collect();
+    assert_eq!(its_wires.len(), 4);
+    // The nets the gate is on: its wires and their siblings (a sibling
+    // that branches off one of its wires follows it).
+    let nets: HashSet<(Uuid, u8)> = wires(&mut app)
+        .into_iter()
+        .filter(|(e, ..)| its_wires.contains(e))
+        .map(|(_, ep, _)| (ep.source_gate, ep.source_pin))
+        .collect();
+    let related: HashSet<Entity> = wires(&mut app)
+        .into_iter()
+        .filter(|(_, ep, _)| nets.contains(&(ep.source_gate, ep.source_pin)))
+        .map(|(e, ..)| e)
+        .collect();
+    assert!(related.len() < 10);
+    let revision = app.world().resource::<SimBridge>().revision();
+    clear_changes(&mut app);
+    let start = Instant::now();
+    for step in 1..=5 {
+        app.world_mut()
+            .get_mut::<Transform>(dragged)
+            .unwrap()
+            .translation
+            .y += 7.0 * step as f32;
+        app.update();
+        let stats = app.world().resource::<WireRouting>().stats;
+        assert!(
+            stats.searched <= related.len(),
+            "a drag frame searches only the wires of the dragged gate's nets: {stats:?}"
+        );
+    }
+    let took = start.elapsed();
+    eprintln!(
+        "5 drag frames over {} wires: {took:?}",
+        (cols - 1) * rows * 2
+    );
+    let rerouted: HashSet<Entity> = changes(&app).paths.iter().copied().collect();
+    assert!(
+        rerouted.is_superset(&its_wires),
+        "the dragged gate's wires follow it"
+    );
+    assert!(
+        rerouted.is_subset(&related),
+        "only the wires of its nets change"
+    );
+    assert_eq!(app.world().resource::<SimBridge>().revision(), revision);
+
+    // The first quiet frame checks the kept paths against the new place.
+    let passes = app.world().resource::<WireRouting>().passes;
+    app.update();
+    assert_eq!(app.world().resource::<WireRouting>().passes, passes + 1);
+    assert_eq!(app.world().resource::<WireRouting>().stats.fallbacks, 0);
+    assert_idle_does_no_work(&mut app, "after the drag");
 }
 
 #[test]
@@ -471,21 +731,17 @@ fn multi_bit_wires_are_thicker_and_show_their_value() {
     create_wire(&mut app, b, 0, z, 0);
     run(&mut app, 1);
     let (bus, bit) = (wire_into(&mut app, y), wire_into(&mut app, z));
-    let thickness =
-        |app: &App, e: Entity| app.world().get::<Sprite>(e).unwrap().custom_size.unwrap().y;
+    let thickness = |app: &App, e: Entity| app.world().get::<WireStyle>(e).unwrap().core;
     assert!(thickness(&app, bus) > thickness(&app, bit));
-    assert_ne!(
-        app.world().get::<Sprite>(bus).unwrap().color,
-        app.world().get::<Sprite>(bit).unwrap().color
-    );
+    assert_ne!(wire_colour(&app, bus), wire_colour(&app, bit));
     let (label, text) = wire_label(&app, bus).expect("bus label");
-    assert_eq!(text, "0x000");
+    assert_eq!(text, "000");
     assert!(wire_label(&app, bit).is_none(), "1-bit wires have no label");
 
     set_input(&mut app, "A", 0xABC);
     clear_changes(&mut app);
     run(&mut app, 1);
-    assert_eq!(wire_label(&app, bus).unwrap().1, "0xABC");
+    assert_eq!(wire_label(&app, bus).unwrap().1, "ABC");
     assert_eq!(
         changed_texts::<WireValueLabel>(&app),
         HashSet::from([label])
@@ -510,7 +766,7 @@ fn loop_message_names_the_gates_and_the_state_elements() {
     assert_eq!(
         one,
         "Combinational loop through 1 gate: NOT \"n\". A feedback loop needs a state element: \
-         put a Delay (or a Register, DLatch, SrLatch or Ram) on the loop."
+         put a Delay (or a Register, D latch, SR latch or RAM) on the loop."
     );
     let many: Vec<String> = (0..10).map(|i| format!("And \"g{i}\"")).collect();
     let text = loop_message(&many);
@@ -545,7 +801,7 @@ fn loop_highlights_its_gates_and_wires_and_clears_when_fixed() {
     );
     assert!(message.contains("Delay"), "{message}");
     assert!(
-        message.contains("Register, DLatch, SrLatch or Ram"),
+        message.contains("Register, D latch, SR latch or RAM"),
         "{message}"
     );
 
@@ -562,9 +818,9 @@ fn loop_highlights_its_gates_and_wires_and_clears_when_fixed() {
         assert!(!highlighted(&app, e), "not on the loop");
     }
     assert_eq!(outline_count(&mut app), 2, "one outline per loop gate");
-    let loop_colour = crate::sim::visuals::LOOP_COLOR;
-    assert_eq!(app.world().get::<Sprite>(nx).unwrap().color, loop_colour);
-    assert_ne!(app.world().get::<Sprite>(ax).unwrap().color, loop_colour);
+    let loop_colour = app.world().resource::<crate::theme::Theme>().palette.fault;
+    assert_eq!(wire_colour(&app, nx), loop_colour);
+    assert_ne!(wire_colour(&app, ax), loop_colour);
 
     // The previous program keeps running meanwhile.
     set_input(&mut app, "A", 1);
@@ -581,11 +837,7 @@ fn loop_highlights_its_gates_and_wires_and_clears_when_fixed() {
     );
     assert_eq!(highlighted_count(&mut app), 0);
     assert_eq!(outline_count(&mut app), 0);
-    assert_ne!(
-        app.world().get::<Sprite>(xn).unwrap().color,
-        loop_colour,
-        "wire colour restored"
-    );
+    assert_ne!(wire_colour(&app, xn), loop_colour, "wire colour restored");
 }
 
 /// `Loopy`: `A -> xor -> not -> Y`, with `not` fed back into `xor`.
