@@ -46,9 +46,16 @@ fn measure(budget: Duration, mut step: impl FnMut(u64)) -> f64 {
     }
 }
 
+/// Throughput cases compile unoptimized, so every instruction counted is
+/// work done and the legacy baseline runs identical logic. The simplify
+/// section reports what the passes remove.
 fn compile_timed(d: &Design) -> (Arc<Program>, f64) {
+    compile_with(d, &Options::unoptimized())
+}
+
+fn compile_with(d: &Design, opts: &Options) -> (Arc<Program>, f64) {
     let t = Instant::now();
-    let p = compile(d, &Options::default()).expect("compile");
+    let p = compile(d, opts).expect("compile");
     (Arc::new(p), t.elapsed().as_secs_f64())
 }
 
@@ -153,7 +160,27 @@ fn main() {
         row(label, p.instrs.len(), "instr", time_sim(&p, budget));
     }
 
-    println!("\n== Compile time ==");
+    println!("\n== Simplify passes: instruction count and throughput, unoptimized -> optimized ==");
+    for (label, d) in [
+        ("cpu word", fixtures::cpu(&fixtures::LOOP_PROGRAM)),
+        ("cpu bit-blasted", bitblast(&fixtures::cpu(&fixtures::LOOP_PROGRAM))),
+        ("counter32 bit-blasted", fixtures::counter_bitblasted(32)),
+        ("datapath bit-blasted", bitblast(&dp)),
+    ] {
+        let (p0, _) = compile_timed(&d);
+        let (p1, _) = compile_with(&d, &Options::default());
+        let (t0, t1) = (time_sim(&p0, budget), time_sim(&p1, budget));
+        println!(
+            "{label:<34} {:>9} -> {:>9} instr ({:>5.1}% fewer)  {:>10.0} -> {:>10.0} ticks/s",
+            p0.instrs.len(),
+            p1.instrs.len(),
+            100.0 * (1.0 - p1.instrs.len() as f64 / p0.instrs.len() as f64),
+            1.0 / t0,
+            1.0 / t1
+        );
+    }
+
+    println!("\n== Compile time (all passes) ==");
     let compile_sizes: &[usize] = if quick { &[100_000] } else { &[100_000, 1_000_000] };
     for &n in compile_sizes {
         for (label, d) in [
@@ -161,7 +188,7 @@ fn main() {
             ("dag32", generate(&GenConfig::dag(4, n, 32)).design),
         ] {
             let nodes: usize = d.defs.values().map(|x| x.nodes.len()).sum();
-            let (p, secs) = compile_timed(&d);
+            let (p, secs) = compile_with(&d, &Options::default());
             println!(
                 "compile {label} {n:<9} {nodes:>9} nodes -> {:>9} instr  {:>8.1} ms",
                 p.instrs.len(),

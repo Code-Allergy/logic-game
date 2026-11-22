@@ -407,3 +407,20 @@ ambiguous. Each is small and can be revisited.
       constants, state, then destinations in execution order.
     - **Effect.** Together these took the 1M-gate DAG from 2.7× to about 4×
       the legacy SIMD runner.
+17. **Simplify passes (#26).**
+    - **Where they run.** One pass in topological order over the lowered
+      instructions: constant folding and constant identities, then aliases,
+      then CSE, then DCE. Each is switchable in `Options`.
+    - **Defaults.** `Options::default()` enables all of them;
+      `Options::unoptimized()` and `Options::debug()` (DCE off) are presets.
+    - **Probes.** `Options::probes` lists `(instance path, NetId)` pairs that
+      DCE must keep.
+    - **Commit safety.** A slot read by a commit is never aliased to a slot
+      written by a commit; such an instruction stays as a copy. Commits run
+      in sequence, so without this a shift register would read
+      already-committed state.
+    - **Folding scope.** ROM reads at a constant address fold. Clocks and RAM
+      reads never fold.
+    - **Benchmarks.** Throughput benchmarks compile with
+      `Options::unoptimized()`, so the legacy comparison runs identical
+      logic. The report's simplify section shows the reduction.

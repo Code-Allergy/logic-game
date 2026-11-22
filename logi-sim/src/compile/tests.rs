@@ -475,3 +475,189 @@ fn differential_many() {
         }
     }
 }
+
+// ── Simplify passes ──────────────────────────────────────────────────────
+
+fn pass_variants() -> Vec<(&'static str, Options)> {
+    let none = Options { debug: false, ..Options::unoptimized() };
+    vec![
+        ("unoptimized", Options::unoptimized()),
+        ("const_fold", Options { const_fold: true, ..none.clone() }),
+        ("alias", Options { alias: true, ..none.clone() }),
+        ("cse", Options { cse: true, ..none.clone() }),
+        ("dce", Options { dce: true, ..none.clone() }),
+        ("all", Options::default()),
+        ("debug", Options::debug()),
+    ]
+}
+
+#[test]
+fn each_pass_alone_and_together_matches_the_reference() {
+    use crate::testkit::diff;
+    for (name, opts) in pass_variants() {
+        let n = diff::sweep(&diff::standard_configs(), 25, 15, &opts);
+        assert_eq!(n, 150, "{name}");
+        // Bit-blasted designs are full of constants and duplicate logic.
+        for d in [
+            crate::testkit::bitblast::bitblast(&fixtures::cpu(&fixtures::MULTIPLY_PROGRAM)),
+            crate::testkit::bitblast::bitblast(&fixtures::counter(16)),
+            fixtures::ripple_adder(16),
+            fixtures::register_file(2, 8),
+        ] {
+            diff::check_design(&d, 3, 80, &opts).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+}
+
+/// Larger sweep per pass: `cargo test -p logi-sim --release --lib -- --ignored simplify_many`.
+#[test]
+#[ignore]
+fn simplify_many() {
+    use crate::testkit::diff;
+    for (_, opts) in pass_variants() {
+        diff::sweep(&diff::standard_configs(), 400, 20, &opts);
+    }
+}
+
+fn count(d: &Design, opts: &Options) -> usize {
+    compile(d, opts).unwrap().instrs.len()
+}
+
+#[test]
+fn constant_folding_and_identities() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let k3 = b.konst(8, 3);
+    let k4 = b.konst(8, 4);
+    let (sum, _) = b.add(k3, k4, None); // 7, folded
+    let zero = b.zero(8);
+    let ones = b.konst(8, 0xFF);
+    let a0 = b.and(x, zero); // 0
+    let a1 = b.and(x, ones); // x
+    let o0 = b.or(x, zero); // x
+    let x0 = b.xor(x, x); // 0
+    let one = b.one();
+    let m = b.mux(one, a0, sum); // sum = 7
+    let rom = b.rom(k3, 8, &[10, 11, 12, 13]); // ROM[3] = 13, folded
+    let all = b.merge(&[m, rom]); // 16 bits, constant 13 << 8 | 7
+    b.output("all", all);
+    b.output("a1", a1);
+    b.output("o0", o0);
+    b.output("x0", x0);
+    let p = compile_ok(&d);
+    assert!(p.instrs.is_empty(), "everything folds or aliases: {:?}", p.instrs);
+    let mut s = sim(p.clone());
+    s.set("x", 0x5A);
+    s.tick();
+    assert_eq!(s.get("all"), 13 << 8 | 7);
+    assert_eq!((s.get("a1"), s.get("o0"), s.get("x0")), (0x5A, 0x5A, 0));
+    assert_eq!(p.ports.outputs[1].slot, p.ports.inputs[0].slot, "x & 0xFF aliases x");
+    assert!(count(&d, &Options::unoptimized()) >= 8);
+}
+
+#[test]
+fn cse_merges_identical_and_commuted_instructions() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let y = b.input("y", 8);
+    let a = b.and(x, y);
+    let a2 = b.and(y, x);
+    let s1 = b.xor(a, x);
+    let s2 = b.xor(a2, x);
+    let out = b.or(s1, s2); // == s1 after CSE, then alias x|x
+    b.output("out", out);
+    let only_cse = Options { cse: true, ..Options::unoptimized() };
+    // The second xor merges too once the ands merge, leaving or(s1, s1).
+    assert_eq!(count(&d, &only_cse), 3, "and, xor, or");
+    assert_eq!(count(&d, &Options::default()), 2, "and, xor");
+    differential(&d, 1, 20);
+}
+
+#[test]
+fn dce_keeps_outputs_state_and_probes() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let used = b.not(x);
+    let dead = b.inc(x);
+    let dead2 = b.xor(dead, x);
+    let st = b.delay(dead2); // state keeps dead2 live
+    let probe_only = b.reduce_xor(x);
+    let gone = b.reduce_or(x);
+    b.output("y", used);
+    let _ = (st, gone);
+    let all = Options::default();
+    let p = compile(&d, &all).unwrap();
+    // not, inc's sum, xor. inc's carry and the two reductions are dead, and
+    // the delay's next-state copy aliases the xor.
+    assert_eq!(p.instrs.len(), 3);
+    assert_eq!(p.debug.slot(&[], gone), None, "dead nets leave the debug map");
+    assert!(p.debug.slot(&[], dead2).is_some());
+
+    let with_probe = Options { probes: vec![(vec![], probe_only)], ..all };
+    let p = compile(&d, &with_probe).unwrap();
+    assert_eq!(p.instrs.len(), 4);
+    let mut s = sim(p);
+    s.set("x", 0b0111);
+    s.tick();
+    assert_eq!(s.read_net(&[], probe_only), Some(1));
+
+    // Debug keeps everything observable.
+    let p = compile(&d, &Options::debug()).unwrap();
+    assert!(p.debug.slot(&[], gone).is_some());
+    assert_eq!(p.instrs.len(), 6);
+}
+
+#[test]
+fn aliasing_never_lets_a_commit_read_state_written_by_another_commit() {
+    // Shift register from enabled registers (en = 1 makes next == d), a
+    // delay chain, and a DLatch with en = 1 fed by a register. Folding turns
+    // each next-state into an alias of another state slot, which commits
+    // would then read after it had already been overwritten.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let one = b.one();
+    let q1 = b.register(one, x);
+    let q2 = b.register(one, q1);
+    let q3 = b.register(one, q2);
+    let d1 = b.delay(q3);
+    let d2 = b.delay(d1);
+    let l = b.dlatch(one, d2);
+    let l2 = b.delay(l);
+    b.output("q3", q3);
+    b.output("d2", d2);
+    b.output("l2", l2);
+    for (_, opts) in pass_variants() {
+        let mut s = Sim::new(Arc::new(compile(&d, &opts).unwrap()));
+        let mut seen = Vec::new();
+        for t in 1..=12u64 {
+            s.set("x", t);
+            s.tick();
+            seen.push((s.get("q3"), s.get("d2"), s.get("l2")));
+        }
+        // x set before tick t is in q1 after tick t+1 (one commit later), so
+        // after tick t each stage holds t minus its depth.
+        assert_eq!(seen[11], (12 - 3, 12 - 5, 12 - 6), "{opts:?}");
+        differential(&d, 0, 20);
+    }
+}
+
+#[test]
+fn bitblasted_fixtures_shrink() {
+    use crate::testkit::bitblast::bitblast;
+    for d in [
+        bitblast(&fixtures::cpu(&fixtures::MULTIPLY_PROGRAM)),
+        bitblast(&fixtures::counter(32)),
+        fixtures::counter_bitblasted(32),
+    ] {
+        let (before, after) = (count(&d, &Options::unoptimized()), count(&d, &Options::default()));
+        assert!(after < before, "{}: {before} -> {after}", d.root_def().name);
+    }
+}
