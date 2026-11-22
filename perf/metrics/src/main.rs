@@ -290,6 +290,8 @@ fn breakdown(name: &str, options: &str) {
     for (inst, map) in p.debug.net_slots.iter().enumerate() {
         let def = &d.defs[p.debug.instances[inst].def];
         for (_, &s) in map {
+            // A view (a lifted net) counts for the word holding it.
+            let s = p.resolve(s).map_or(s, |(real, _, _)| real);
             def_of_slot.entry(s).or_insert(def.name.as_str());
         }
     }
