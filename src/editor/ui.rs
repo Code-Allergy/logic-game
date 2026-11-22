@@ -228,10 +228,7 @@ pub fn file_card(
             1 => 1,
             _ => 2,
         };
-        let back_w: f32 = ["←", "⇤"][..back]
-            .iter()
-            .map(|label| chunky_button_width(ui, *label))
-            .sum();
+        let back_w = back as f32 * ICON_BUTTON_WIDTH;
         let buttons = back + 3; // back, map, library, day/night
         let fixed = FILE_BADGE
             + 2.0 * FILE_TEXT_GAP
@@ -308,12 +305,12 @@ pub fn file_card(
             });
             ui.spacing_mut().item_spacing.x = FILE_BUTTON_GAP;
             if back >= 1 {
-                clicks.back = chunky_button(ui, palette, "←", false)
+                clicks.back = chunky_icon_button(ui, palette, HudIcon::Back, false)
                     .on_hover_text("Back to the parent circuit")
                     .clicked();
             }
             if back >= 2 {
-                clicks.root = chunky_button(ui, palette, "⇤", false)
+                clicks.root = chunky_icon_button(ui, palette, HudIcon::BackToRoot, false)
                     .on_hover_text("Back to the root circuit")
                     .clicked();
             }
@@ -517,10 +514,10 @@ pub fn editor_ui_system(
                 ui.label(format!("View: {breadcrumb}"));
                 ui.colored_label(info, note);
                 ui.horizontal(|ui| {
-                    if ui.button("← Back to parent circuit").clicked() {
+                    if ui.button("‹ Back to parent circuit").clicked() {
                         close_requested = Some(false);
                     }
-                    if views.view.frames().len() > 1 && ui.button("⇤ Back to root").clicked() {
+                    if views.view.frames().len() > 1 && ui.button("« Back to root").clicked() {
                         close_requested = Some(true);
                     }
                 });

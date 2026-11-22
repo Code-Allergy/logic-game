@@ -217,6 +217,10 @@ pub enum HudIcon {
     Moon,
     /// A folded map (the demo map).
     Map,
+    /// An arrow pointing left (back to the parent circuit).
+    Back,
+    /// An arrow pointing left to a bar (back to the root circuit).
+    BackToRoot,
 }
 
 /// A square chunky button with a painted icon.
@@ -288,6 +292,24 @@ pub fn paint_icon(
             painter.add(egui::Shape::closed_line(outline, stroke(2.0, colour)));
             painter.line_segment([p(-3.0, -9.0), p(-3.0, 6.0)], stroke(2.0, colour));
             painter.line_segment([p(3.0, -6.0), p(3.0, 9.0)], stroke(2.0, colour));
+        }
+        HudIcon::Back | HudIcon::BackToRoot => {
+            // A bold arrow; the root arrow is shifted right of its bar.
+            let dx = if icon == HudIcon::BackToRoot {
+                2.5
+            } else {
+                0.0
+            };
+            let p = |x: f32, y: f32| c + EVec2::new(x + dx, y);
+            let line = stroke(2.5, colour);
+            painter.line_segment([p(-6.5, 0.0), p(7.0, 0.0)], line);
+            painter.add(egui::Shape::line(
+                vec![p(-1.0, -6.0), p(-7.0, 0.0), p(-1.0, 6.0)],
+                line,
+            ));
+            if icon == HudIcon::BackToRoot {
+                painter.line_segment([p(-10.5, -7.0), p(-10.5, 7.0)], line);
+            }
         }
     }
 }
@@ -973,5 +995,82 @@ mod tests {
         let library = l.library_rect();
         assert!(library.height() > 250.0, "library at {w}x{h}{what}");
         assert_eq!(l.compact, w < 1600.0 || h < 900.0);
+    }
+
+    /// The non-ASCII characters in the string literals of the app's
+    /// source (not tests or comments): what the HUD may draw.
+    fn non_ascii_in_ui_strings() -> std::collections::BTreeMap<char, String> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n != "tests") {
+                        walk(&path, out);
+                    }
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut found = std::collections::BTreeMap::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            // Stop at the unit tests.
+            let code = text.split("#[cfg(test)]").next().unwrap_or_default();
+            for (n, line) in code.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for (i, literal) in line.split('"').enumerate() {
+                    if i % 2 == 1 {
+                        for c in literal.chars().filter(|c| !c.is_ascii()) {
+                            found
+                                .entry(c)
+                                .or_insert_with(|| format!("{}:{}", file.display(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Every non-ASCII character the UI writes is in the bundled fonts or
+    /// egui's fallbacks for the family it is drawn in (a missing glyph is
+    /// drawn as an empty box). Arrows are only in the monospace fonts, so
+    /// proportional text uses painted [`HudIcon`]s or `‹` `«` instead.
+    #[test]
+    fn ui_glyphs_are_in_the_fonts() {
+        let ctx = test_ui::ctx(&Theme::day());
+        // Only written in monospace text (the inspector's wire list).
+        let mono_only = ['←', '→'];
+        let families = [
+            FontId::proportional(14.0),
+            heavy(14.0),
+            FontId::monospace(13.0),
+        ];
+        // The check can fail: the back arrow was an empty box.
+        assert!(!ctx.fonts_mut(|f| f.has_glyph(&families[1], '←')));
+        let found = non_ascii_in_ui_strings();
+        assert!(found.contains_key(&'·') && found.contains_key(&'›'));
+        for (c, place) in found {
+            let fonts: &[FontId] = if mono_only.contains(&c) {
+                &families[2..]
+            } else {
+                &families[..2]
+            };
+            for font in fonts {
+                assert!(
+                    ctx.fonts_mut(|f| f.has_glyph(font, c)),
+                    "{c:?} ({place}) is not in {:?}",
+                    font.family
+                );
+            }
+        }
     }
 }
