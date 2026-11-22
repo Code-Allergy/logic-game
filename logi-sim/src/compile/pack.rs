@@ -116,7 +116,7 @@ impl Plan {
                 .find(|&x| x != NONE)
                 .map(|x| (x >> 6, (x & 63) as u8))
         };
-        let mut count = std::collections::HashMap::<u32, usize>::new();
+        let mut count = super::FastMap::<u32, usize>::default();
         let prefs: Vec<Option<(u32, u8)>> = run.iter().map(|&k| pref(k)).collect();
         for p in prefs.iter().flatten() {
             *count.entry(p.0).or_default() += 1;
@@ -128,7 +128,7 @@ impl Plan {
         let n_words = run.len().div_ceil(64);
         let mut words: Vec<(u64, Vec<(u8, u32)>)> = vec![(0, Vec::new()); n_words];
         let mut buckets: Vec<(u32, Vec<(u8, u32)>)> = Vec::new();
-        let mut bucket_of = std::collections::HashMap::<u32, usize>::new();
+        let mut bucket_of = super::FastMap::<u32, usize>::default();
         let mut free = Vec::new();
         for (&k, p) in run.iter().zip(&prefs) {
             match p {
@@ -159,7 +159,7 @@ impl Plan {
             }
         }
         // Fill free lanes in execution order.
-        let pos: std::collections::HashMap<u32, usize> =
+        let pos: super::FastMap<u32, usize> =
             run.iter().enumerate().map(|(i, &k)| (k, i)).collect();
         free.sort_by_key(|k| pos[k]);
         let mut free = free.into_iter();
@@ -232,7 +232,7 @@ impl Plan {
         instrs: &[Instr],
         pick: fn(&Instr) -> u32,
     ) -> (PackOperand, Vec<Gather>) {
-        use std::collections::HashMap;
+        use super::FastMap as HashMap;
         let srcs: Vec<(u8, (u32, u8))> = members
             .iter()
             .map(|&(lane, k)| (lane, self.source(pick(&instrs[k as usize]))))
@@ -240,7 +240,7 @@ impl Plan {
             .collect();
         let mut o = PackOperand::default();
         // Base: the word covering the most lanes in place.
-        let mut in_place = HashMap::<u32, u64>::new();
+        let mut in_place = HashMap::<u32, u64>::default();
         for &(lane, (s, bit)) in &srcs {
             if bit == lane && self.is_word(s) {
                 *in_place.entry(s).or_default() |= 1 << lane;
@@ -258,7 +258,7 @@ impl Plan {
             .filter(|&(lane, (s, bit))| !(o.keep != 0 && s == o.base && bit == lane))
             .collect();
         // Splat: the bit read by the most remaining lanes (at least two).
-        let mut by_src = HashMap::<(u32, u8), u64>::new();
+        let mut by_src = HashMap::<(u32, u8), u64>::default();
         for &(lane, src) in &rest {
             *by_src.entry(src).or_default() |= 1 << lane;
         }

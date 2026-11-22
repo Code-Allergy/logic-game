@@ -1,7 +1,8 @@
 //! Compiler for simulation v2 (design doc section 5): `Design -> Program`.
 //!
 //! Passes: validate, elaborate (flatten with port unification by
-//! union-find), loop check (iterative Tarjan), lower, simplify (constant
+//! union-find), loop check (iterative Tarjan), function matching of
+//! definitions (see [`func`]), lower, simplify (constant
 //! folding, alias elimination, CSE, dead-code elimination; see
 //! `simplify.rs`), word lifting (bit-sliced logic back to word ops; see
 //! `lift.rs`), levelize, emit.
@@ -11,6 +12,7 @@
 
 mod elaborate;
 mod emit;
+pub mod func;
 mod lift;
 mod loops;
 mod pack;
@@ -23,6 +25,13 @@ pub(crate) mod tests;
 pub use program::*;
 
 use std::fmt;
+
+/// Hash map with `foldhash`'s fast hasher and a fixed seed: deterministic
+/// iteration for a given insertion history, and no SipHash on the
+/// compiler's hot paths.
+pub type FastMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::FixedState>;
+/// Hash set counterpart of [`FastMap`].
+pub type FastSet<K> = std::collections::HashSet<K, foldhash::fast::FixedState>;
 
 use crate::netlist::{Design, NetId, NodeId, ValidationError};
 
@@ -51,6 +60,12 @@ pub struct Options {
     /// state word. Lifted nets stay observable through views in the debug
     /// map ([`Program::views`]).
     pub lift: bool,
+    /// Function matching (issue #117, stage 2): a subcircuit definition
+    /// proven equal to a catalogue word function (an adder, a mux, a
+    /// register built from gate latches ...) compiles as that function.
+    /// Its internal nets stay readable through shadow slots
+    /// ([`Program::shadows`]). See [`func`].
+    pub func_match: bool,
     /// Nets to keep observable under dead-code elimination:
     /// `(instance path, NetId)`.
     pub probes: Vec<(Vec<NodeId>, NetId)>,
@@ -127,6 +142,7 @@ impl Default for Options {
             cse: true,
             dce: true,
             lift: true,
+            func_match: true,
             probes: Vec::new(),
             slot_order: SlotOrder::default(),
             pack: PackMode::Auto,
@@ -147,6 +163,7 @@ impl Options {
             cse: false,
             dce: false,
             lift: false,
+            func_match: false,
             probes: Vec::new(),
             slot_order: SlotOrder::Production,
             pack: PackMode::Off,
@@ -211,6 +228,8 @@ pub enum Pass {
     Elaborate,
     /// The combinational-loop check.
     LoopCheck,
+    /// Function matching of definitions (cached analysis).
+    Match,
     /// Slot assignment and lowering to instructions.
     Lower,
     /// Constant folding, alias elimination, CSE, dead-code elimination.
@@ -226,10 +245,11 @@ pub enum Pass {
 }
 
 impl Pass {
-    pub const ALL: [Pass; 9] = [
+    pub const ALL: [Pass; 10] = [
         Pass::Validate,
         Pass::Elaborate,
         Pass::LoopCheck,
+        Pass::Match,
         Pass::Lower,
         Pass::Simplify,
         Pass::Lift,
@@ -244,6 +264,7 @@ impl Pass {
             Pass::Validate => "validate",
             Pass::Elaborate => "elaborate",
             Pass::LoopCheck => "loop_check",
+            Pass::Match => "match",
             Pass::Lower => "lower",
             Pass::Simplify => "simplify",
             Pass::Lift => "lift",
@@ -266,6 +287,18 @@ pub fn compile(design: &Design, options: &Options) -> Result<Program, Vec<Compil
 pub fn compile_observed(
     design: &Design,
     options: &Options,
+    pass_done: impl FnMut(Pass),
+) -> Result<Program, Vec<CompileError>> {
+    compile_cached(design, options, &mut func::MatchCache::new(), pass_done)
+}
+
+/// [`compile_observed`] with a [`func::MatchCache`] kept across compiles:
+/// definitions analysed for function matching by an earlier compile with
+/// the same cache, and unchanged since, are not analysed again.
+pub fn compile_cached(
+    design: &Design,
+    options: &Options,
+    cache: &mut func::MatchCache,
     mut pass_done: impl FnMut(Pass),
 ) -> Result<Program, Vec<CompileError>> {
     design.validate().map_err(|errs| {
@@ -284,5 +317,11 @@ pub fn compile_observed(
             .collect());
     }
     pass_done(Pass::LoopCheck);
-    Ok(emit::emit(elab, options, pass_done))
+    let analysis = if options.func_match {
+        func::analyze(design, cache)
+    } else {
+        Default::default()
+    };
+    pass_done(Pass::Match);
+    Ok(emit::emit(elab, options, &analysis, pass_done))
 }

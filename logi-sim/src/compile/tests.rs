@@ -131,7 +131,12 @@ pub(crate) fn check_program_invariants(p: &Program) {
     }
     for map in &p.debug.net_slots {
         for (_, &s) in map {
-            assert!(p.resolve(s).is_some(), "debug slot {s} out of range");
+            // A plain, lane or view slot, or the shadow slot of a net
+            // inside a substituted instance (function matching).
+            assert!(
+                p.resolve(s).is_some() || p.shadow(s).is_some(),
+                "debug slot {s} out of range"
+            );
         }
     }
     for k in &p.state_keys {

@@ -65,15 +65,25 @@ primitives. Names live in a side table.
 3. **Loop check** (`loops.rs`): iterative Tarjan SCC over combinational
    edges; each strongly connected component is one
    `CompileError::CombinationalLoop`.
-4. **Lower and simplify** (`simplify.rs`): constant folding, alias
+4. **Function matching** (`func/`, `Options::func_match`): each
+   subcircuit definition is fingerprinted by random simulation, matched
+   against a catalogue of word functions (mux, add/sub with carries,
+   compare, bitwise, constants, registers built from gate latches) and
+   proven (exhaustively, per bit slice, or as a carry chain of proven
+   adders). Instances of a proven definition lower to the word
+   implementation; their internal nets stay readable through shadow slots
+   (`Program::shadows`), evaluated from the instance's inputs and state on
+   read. Results are cached by a BLAKE3 content key (`func::MatchCache`,
+   held by the engine), so an edit re-analyses only what it changed.
+5. **Lower and simplify** (`simplify.rs`): constant folding, alias
    elimination, CSE and dead-code elimination, each switchable in
    `Options`. DCE keeps root ports, state and `Options::probes`;
    `Options::debug()` turns it off so every net stays observable.
-5. **Levelize and emit** (`emit.rs`): rank every instruction, sort by
+6. **Levelize and emit** (`emit.rs`): rank every instruction, sort by
    `(rank, op)` into blocks, and number slots (`Options::slot_order`).
-6. **Pack** (`pack.rs`, `Options::pack`): optionally pack runs of 1-bit
+7. **Pack** (`pack.rs`, `Options::pack`): optionally pack runs of 1-bit
    instructions into the 64 lanes of a word.
-7. **Partition** (`Options::partitions`): optionally lay blocks out per
+8. **Partition** (`Options::partitions`): optionally lay blocks out per
    thread.
 
 `Program` (`program.rs`, which documents the execution model in full) holds
