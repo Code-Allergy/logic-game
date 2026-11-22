@@ -9,6 +9,7 @@ use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use gate_quest::configure_camera_scaling;
 use gate_quest::editor::EditorPlugin;
 use gate_quest::selection::SelectionPlugin;
+use gate_quest::settings::SettingsPlugin;
 use gate_quest::settings_overlay::{
     SettingsMenuOpen, settings_menu_button_system, show_settings_menu,
 };
@@ -56,7 +57,7 @@ fn main() {
         app = app.add_plugins(WorldInspectorPlugin::new());
     }
 
-    app.add_plugins(ThemePlugin)
+    app.add_plugins((ThemePlugin, SettingsPlugin))
         .add_plugins(MainMenuPlugin {
             state: GameState::MainMenu,
         })

@@ -99,6 +99,7 @@ pub fn fit_camera_to_circuit_system(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<(&mut Projection, &mut Transform), With<MainCamera>>,
     gates: Query<(&Transform, &GateType), FitGate>,
+    settings: Option<Res<crate::settings::Settings>>,
 ) {
     let requested = requests.read().count() > 0;
     if !active.is_changed() && !view.is_changed() && !requested {
@@ -117,7 +118,8 @@ pub fn fit_camera_to_circuit_system(
         return;
     };
     let screen = window.size();
-    let free = HudLayout::new(screen).free_area();
+    let scale = crate::ui_style::ui_scale_for(settings.as_deref(), screen);
+    let free = HudLayout::scaled(screen, scale).free_area_in_window(scale);
     let (centre, wpp) = fit_view(content, screen, free, FIT_PADDING);
     if let Projection::Orthographic(ortho) = projection.as_mut() {
         ortho.scale = scale_for_wpp(ortho, screen.y, wpp);

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use egui::{
     Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Response, Sense,
@@ -13,6 +14,7 @@ use egui::{
 };
 
 use crate::fonts;
+use crate::settings::{Settings, effective_ui_scale};
 use crate::theme::{Palette, Theme, ThemeMode};
 
 /// The heavy face (Nunito ExtraBold), for titles, names and buttons.
@@ -344,20 +346,39 @@ pub fn caption(palette: &Palette, text: &str) -> egui::RichText {
         .color(egui_color(palette.text_secondary))
 }
 
-/// Install the fonts once, and the style whenever the theme changes. egui
-/// takes new fonts at the start of the next pass, so the style (whose text
-/// styles name the heavy family) is applied from the frame after.
+/// The UI scale in effect for a window of `window` logical pixels: the
+/// player's [`Settings`] limited to what the HUD layout has room for
+/// ([`effective_ui_scale`]), 100% without settings (tools, tests).
+pub fn ui_scale_for(settings: Option<&Settings>, window: Vec2) -> f32 {
+    settings.map_or(1.0, |s| effective_ui_scale(s.ui_scale, window))
+}
+
+/// Install the fonts once, the style whenever the theme changes, and the
+/// UI scale (egui's zoom factor, so every card, text and the
+/// [`HudLayout`], which is laid out in egui points, scale together). egui
+/// takes new fonts at the start of the next pass, so the style (whose
+/// text styles name the heavy family) is applied from the frame after.
 pub fn apply_workshop_ui_system(
     mut contexts: EguiContexts,
     theme: Res<Theme>,
+    settings: Option<Res<Settings>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut fonts_set: Local<bool>,
     mut applied: Local<Option<ThemeMode>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     if !*fonts_set {
         ctx.set_fonts(workshop_fonts());
+        // The scale is a setting: keep Ctrl +/- from changing it.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         *fonts_set = true;
         return Ok(());
+    }
+    if let Ok(window) = windows.single() {
+        let scale = ui_scale_for(settings.as_deref(), window.size());
+        if (ctx.zoom_factor() - scale).abs() > 1e-4 {
+            ctx.set_zoom_factor(scale);
+        }
     }
     if *applied != Some(theme.mode) || theme.is_changed() {
         let style = workshop_style(&theme);
@@ -689,6 +710,19 @@ impl HudLayout {
         .fold(f32::INFINITY, f32::min)
     }
 
+    /// The layout of a window `window` logical pixels large at UI scale
+    /// `scale`: the cards are laid out in egui points, `window / scale`.
+    pub fn scaled(window: Vec2, scale: f32) -> Self {
+        Self::new(window / scale.max(0.1))
+    }
+
+    /// [`Self::free_area`] in the window's logical pixels (the canvas
+    /// camera's units) at UI scale `scale`.
+    pub fn free_area_in_window(&self, scale: f32) -> Rect {
+        let free = self.free_area();
+        Rect::from_corners(free.min * scale, free.max * scale)
+    }
+
     /// The canvas area no card covers: between the top and bottom rows,
     /// left of the inspector column. The camera fits circuits into it.
     pub fn free_area(&self) -> Rect {
@@ -840,70 +874,104 @@ mod tests {
     #[test]
     fn hud_cards_fit_and_do_not_overlap_from_720p_to_1440p() {
         for (w, h) in hud_test_sizes() {
-            let screen = Vec2::new(w, h);
-            let l = HudLayout::new(screen);
-            let window = Rect::from_corners(Vec2::ZERO, screen);
-            let top = [
-                ("file", l.file_rect()),
-                ("transport", l.transport_rect()),
-                ("status", l.status_rect()),
-            ];
-            let bottom = [
-                ("minimap", l.minimap_rect()),
-                ("zoom", l.zoom_rect()),
-                ("parts", l.parts_rect()),
-                ("signals", l.signals_rect()),
-            ];
-            let side = [
-                ("inspector", l.inspector_rect()),
-                ("library", l.library_rect()),
-                ("build details", l.build_details_rect()),
-                ("exact rate", l.transport_more_rect()),
-            ];
-            let all: Vec<_> = top.iter().chain(&bottom).chain(&side).collect();
-            for (name, r) in &all {
-                assert!(
-                    window.contains(r.min) && window.contains(r.max),
-                    "{name} at {w}x{h}"
-                );
-            }
-            for (i, (a, ra)) in all.iter().enumerate() {
-                for (b, rb) in &all[i + 1..] {
-                    assert!(!overlaps(*ra, *rb), "{a} overlaps {b} at {w}x{h}");
-                }
-            }
-            assert!(
-                l.file_rect().width() >= FILE_MIN_WIDTH,
-                "file card room at {w}x{h}"
-            );
-            assert!(
-                l.status_rect().width() >= STATUS_WIDTH,
-                "status room at {w}x{h}"
-            );
-            let details = l.build_details_rect();
-            assert!(
-                details.width() >= 250.0 && details.height() >= 200.0,
-                "build details at {w}x{h}: {details:?}"
-            );
-            let free = l.free_area();
-            assert!(
-                free.width() > 0.45 * w && free.height() > 0.5 * h,
-                "free area at {w}x{h}"
-            );
-            assert!(free.min.y >= l.top_band() && free.max.y < l.bottom_band());
-            for (name, r) in bottom.iter().chain([&("inspector", l.inspector_rect())]) {
-                assert!(!overlaps(free, *r), "free area overlaps {name} at {w}x{h}");
-            }
-            let inspector = l.inspector_rect();
-            assert!(inspector.height() > 300.0, "inspector at {w}x{h}");
-            let library = l.library_rect();
-            assert!(library.height() > 250.0, "library at {w}x{h}");
-            assert_eq!(l.compact, w < 1600.0 || h < 900.0);
+            assert_hud_fits(HudLayout::new(Vec2::new(w, h)), "");
         }
         // The full-size layout keeps the mockup's sizes.
         let l = HudLayout::new(Vec2::new(1920.0, 1080.0));
         assert_eq!((l.margin, l.inspector_width, l.slot), (24.0, 320.0, 64.0));
         assert!(l.zoom_beside_minimap);
         assert!(l.signals.x > 500.0);
+    }
+
+    /// At every UI scale (and Auto) the cards, laid out in egui points,
+    /// still fit and do not overlap, and the free canvas area maps back
+    /// into the window.
+    #[test]
+    fn hud_cards_fit_at_every_ui_scale() {
+        use crate::settings::{UiScale, effective_ui_scale};
+        for (w, h) in hud_test_sizes() {
+            let window = Vec2::new(w, h);
+            for choice in UiScale::choices() {
+                let scale = effective_ui_scale(choice, window);
+                let l = HudLayout::scaled(window, scale);
+                assert_hud_fits(l, &format!(" ({} = {scale})", choice.label()));
+                let free = l.free_area_in_window(scale);
+                let whole = Rect::from_corners(Vec2::ZERO, window);
+                assert!(
+                    whole.contains(free.min) && whole.contains(free.max),
+                    "free area at {w}x{h}, {scale}"
+                );
+            }
+        }
+        // 130% really is larger where there is room for it.
+        let l = HudLayout::scaled(Vec2::new(1920.0, 1080.0), 1.3);
+        assert!(l.screen.x < 1480.0 && l.compact);
+    }
+
+    /// The cards of `l` are inside its screen, apart, and leave the free
+    /// area its share. `what` names the case in failures.
+    fn assert_hud_fits(l: HudLayout, what: &str) {
+        let screen = l.screen;
+        let (w, h) = (screen.x, screen.y);
+        let window = Rect::from_corners(Vec2::ZERO, screen);
+        let top = [
+            ("file", l.file_rect()),
+            ("transport", l.transport_rect()),
+            ("status", l.status_rect()),
+        ];
+        let bottom = [
+            ("minimap", l.minimap_rect()),
+            ("zoom", l.zoom_rect()),
+            ("parts", l.parts_rect()),
+            ("signals", l.signals_rect()),
+        ];
+        let side = [
+            ("inspector", l.inspector_rect()),
+            ("library", l.library_rect()),
+            ("build details", l.build_details_rect()),
+            ("exact rate", l.transport_more_rect()),
+        ];
+        let all: Vec<_> = top.iter().chain(&bottom).chain(&side).collect();
+        for (name, r) in &all {
+            assert!(
+                window.contains(r.min) && window.contains(r.max),
+                "{name} at {w}x{h}{what}"
+            );
+        }
+        for (i, (a, ra)) in all.iter().enumerate() {
+            for (b, rb) in &all[i + 1..] {
+                assert!(!overlaps(*ra, *rb), "{a} overlaps {b} at {w}x{h}{what}");
+            }
+        }
+        assert!(
+            l.file_rect().width() >= FILE_MIN_WIDTH,
+            "file card room at {w}x{h}{what}"
+        );
+        assert!(
+            l.status_rect().width() >= STATUS_WIDTH,
+            "status room at {w}x{h}{what}"
+        );
+        let details = l.build_details_rect();
+        assert!(
+            details.width() >= 250.0 && details.height() >= 200.0,
+            "build details at {w}x{h}{what}: {details:?}"
+        );
+        let free = l.free_area();
+        assert!(
+            free.width() > 0.45 * w && free.height() > 0.5 * h,
+            "free area at {w}x{h}{what}"
+        );
+        assert!(free.min.y >= l.top_band() && free.max.y < l.bottom_band());
+        for (name, r) in bottom.iter().chain([&("inspector", l.inspector_rect())]) {
+            assert!(
+                !overlaps(free, *r),
+                "free area overlaps {name} at {w}x{h}{what}"
+            );
+        }
+        let inspector = l.inspector_rect();
+        assert!(inspector.height() > 300.0, "inspector at {w}x{h}{what}");
+        let library = l.library_rect();
+        assert!(library.height() > 250.0, "library at {w}x{h}{what}");
+        assert_eq!(l.compact, w < 1600.0 || h < 900.0);
     }
 }

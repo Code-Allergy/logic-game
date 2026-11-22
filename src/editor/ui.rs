@@ -1010,7 +1010,7 @@ mod tests {
     /// The file card stays within its room, beside the transport card,
     /// with a long demo title and path, in nested views (both back
     /// buttons), with the library open or closed, at the named sizes of
-    /// the layout test.
+    /// the layout test and every UI scale.
     #[test]
     fn file_card_fits_its_room() {
         let theme = Theme::day();
@@ -1031,8 +1031,15 @@ mod tests {
             true,
             false,
         );
-        for (w, h) in sizes {
-            let layout = HudLayout::new(Vec2::new(w, h));
+        // Each window at every UI scale: the card is laid out in points.
+        let layouts = sizes.into_iter().flat_map(|(w, h)| {
+            crate::settings::UiScale::choices().map(move |choice| {
+                let window = Vec2::new(w, h);
+                let scale = crate::settings::effective_ui_scale(choice, window);
+                (w, h, HudLayout::scaled(window, scale))
+            })
+        });
+        for (w, h, layout) in layouts {
             let room = layout.file_rect();
             for depth in 0..=3 {
                 for library_open in [false, true] {

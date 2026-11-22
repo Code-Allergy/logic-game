@@ -28,6 +28,9 @@
 //! `empty` and `loop` are a new empty workspace and a small editable
 //! circuit with a combinational loop.
 //!
+//! `--ui-scale auto|90|100|115|130` sets the UI scale setting (default
+//! `auto`, as for a new player; the settings stay in memory).
+//!
 //! `--map` shows the demo map instead of a demo (the id is ignored), with
 //! the demos listed by `--opened ID,ID,...` (the last one last) as the
 //! progress, kept in memory only; `--level N` picks a stop.
@@ -42,6 +45,7 @@ use bevy_egui::EguiPlugin;
 
 use gate_quest::editor::demo_map::{DemoMapState, progress::DemoProgress};
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
+use gate_quest::settings::{Settings, SettingsPlugin, UiScale};
 use gate_quest::sim::{
     ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel,
     LoadWorkspaceEvent, OpenDefinitionView, SelectedGate, SetInputValue, SimBridge,
@@ -139,6 +143,7 @@ fn main() {
     let (mut map, mut opened, mut level) = (false, String::new(), None);
     let (mut definition, mut fit) = (None, false);
     let mut editable = false;
+    let mut settings = Settings::in_memory();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--night" => night = true,
@@ -172,12 +177,21 @@ fn main() {
             "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "--definition" => definition = args.next(),
             "--fit" => fit = true,
+            "--ui-scale" => {
+                let spec = args.next().unwrap_or_default();
+                settings.ui_scale = UiScale::choices()
+                    .find(|c| c.label().trim_end_matches('%').eq_ignore_ascii_case(&spec))
+                    .unwrap_or_else(|| {
+                        panic!("--ui-scale wants auto, 90, 100, 115 or 130, got {spec}")
+                    });
+            }
             other => panic!("unknown argument {other}"),
         }
     }
     let progress = DemoProgress::with_opened(opened.split(',').filter(|id| !id.is_empty()));
     App::new()
         .insert_resource(progress)
+        .insert_resource(settings)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 resolution: WindowResolution::new(size.0, size.1),
@@ -185,7 +199,12 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins((EguiPlugin::default(), WorkshopUiPlugin, ThemePlugin))
+        .add_plugins((
+            EguiPlugin::default(),
+            WorkshopUiPlugin,
+            ThemePlugin,
+            SettingsPlugin,
+        ))
         .add_plugins(SimulationPlugin::new(GameState::Simulating))
         .add_plugins(EditorPlugin)
         .insert_state(if map {
