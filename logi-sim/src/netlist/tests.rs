@@ -540,8 +540,8 @@ fn flat_primitives_expands_instances_and_skips_ports() {
     d.add_node(child, NodeKind::Input { w: 1 }).unwrap();
     let r = d.root;
     and1(&mut d, r);
-    d.add_node(r, NodeKind::Instance(child)).unwrap();
-    d.add_node(r, NodeKind::Instance(child)).unwrap();
+    d.add_instance(r, child).unwrap();
+    d.add_instance(r, child).unwrap();
     d.add_node(r, NodeKind::Output { w: 1 }).unwrap();
     assert_eq!(d.flat_primitives(child), 2);
     assert_eq!(d.flat_primitives(r), 5);
