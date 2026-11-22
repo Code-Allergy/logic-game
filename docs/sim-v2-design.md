@@ -804,3 +804,38 @@ ambiguous. Each is small and can be revisited.
     instance-view and idle-visuals tests load the half adder and counter
     demos. `src/sim/tests/demos.rs` adds the file, format, pyramid and
     per-demo behaviour tests.
+44. **RTL import (#42).** The format is the Yosys JSON netlist
+    (`write_json`), read with serde_json, so there is no new dependency;
+    BLIF and a direct Verilog subset are not read. `src/sim/rtl.rs` maps
+    each module reachable from the top to a circuit (instances become
+    `use` instances) and the cells listed in `docs/rtl-import.md` to
+    primitives, keeping widths; any other cell type, an `inout` port, a
+    word wider than 64 bits, a black box or a net with two drivers is an
+    error that names the module and cell. Flip-flops (`$dff`, `$dffe` and
+    the gate-level `$_DFF_*`) become `Delay`/`Register` clocked by the
+    global tick: the clock pin and its polarity are ignored (a warning
+    says so), because the simulator has one implicit clock (D2). `x`, `z`
+    and undriven bits read as 0, also with a warning. Bit-level wiring is
+    turned into whole-pin wires with explicit `Split`, `Const` and `Merge`
+    nodes that the layout places, instead of relying on the version 6
+    expander's fixed-offset adapters (deviation 39). The importer builds
+    a version 6 `SourceFile` and expands it with the key
+    `workspaces/<name>`, so the in-memory workspace is the same as loading
+    that file from a workspace folder.
+45. **Auto-layout (#42).** `src/sim/layout.rs` is a simple Sugiyama-style
+    layered layout: feedback cut at the outputs of `Delay`, `Register` and
+    `SrLatch` (then any remaining cycle broken by DFS back edges), ranks by
+    longest path from the inputs with constants pulled next to their
+    consumer and outputs in the last column, six rounds of barycenter
+    sweeps keeping the order with the fewest adjacent-rank crossings, and
+    columns on the 20-unit grid with no overlapping boxes. It does not use
+    the compiler's levelized ranks (the compiler works on the flattened
+    `Design`, while the layout works per definition on documents, before
+    anything is compiled); the ranking rule is the same. Long edges get no
+    dummy nodes and wires are not routed. The clustering, chunk regions and
+    incremental re-layout asked for in the issue's follow-up comment (#59)
+    are not done: module boundaries are the only blocks. Version 6 still
+    requires `at`; the layout is not yet applied to files that omit it.
+    The editor's "Import RTL…" field is native only (no file system on
+    wasm). `save_workspace_in` now uses the new `workspace_to_json`, which
+    the `rtl_import` example also uses for `--v5`.

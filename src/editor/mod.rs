@@ -41,6 +41,8 @@ pub struct EditorState {
     pub saved_workspaces: Option<Vec<String>>,
     /// Last workspace load/save message (e.g. an unsupported old format).
     pub status: Option<String>,
+    /// Path typed into "Import RTL…" (a Yosys JSON netlist).
+    pub rtl_import_path: String,
     /// First gate picked in connection mode.
     pub connection_source: Option<Entity>,
     /// Output pin on the source gate.
@@ -63,6 +65,7 @@ impl Default for EditorState {
             workspace_file_name: "workspace".to_string(),
             saved_workspaces: None,
             status: None,
+            rtl_import_path: String::new(),
             connection_source: None,
             connection_source_pin: 0,
             connection_sink: None,

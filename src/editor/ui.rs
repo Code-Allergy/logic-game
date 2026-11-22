@@ -17,6 +17,7 @@ use crate::{
         ActiveCircuit, CircuitLibrary, CircuitView, CloseView, CreateGate, CreateWire,
         GateIdentity, GateKind, GateLabel, GateType, InstanceViewItem, OpenDefinitionView,
         RegisterDefinitions, WorkspaceDocument, demos,
+        rtl::{ImportOptions, import_yosys_json},
     },
 };
 
@@ -174,6 +175,7 @@ pub fn editor_ui_system(
     let mut open_catalog: Option<usize> = None;
     let mut copy_demo = false;
     let mut new_workspace = false;
+    let mut import_rtl = false;
     let mut load_saved: Option<String> = None;
     let mut place_saved: Option<String> = None;
     let mut close_requested: Option<bool> = None;
@@ -245,6 +247,17 @@ pub fn editor_ui_system(
                     new_workspace = true;
                 }
             });
+            // Import RTL… (native only: the web build has no file system).
+            if cfg!(not(target_arch = "wasm32")) {
+                ui.horizontal(|ui| {
+                    ui.label("Import RTL…")
+                        .on_hover_text("Path of a Yosys JSON netlist (write_json); see docs/rtl-import.md");
+                    ui.text_edit_singleline(&mut editor_state.rtl_import_path);
+                    if ui.button("Import").clicked() && !editor_state.rtl_import_path.trim().is_empty() {
+                        import_rtl = true;
+                    }
+                });
+            }
             if let Some(status) = &editor_state.status {
                 ui.colored_label(egui::Color32::from_rgb(255, 200, 90), status);
             }
@@ -455,6 +468,35 @@ pub fn editor_ui_system(
             Arc::clone(&demo.workspace),
             true,
         );
+    }
+
+    // An imported netlist opens as an unsaved, editable workspace.
+    if import_rtl {
+        let path = editor_state.rtl_import_path.trim().to_string();
+        let result = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| {
+                import_yosys_json(&text, &ImportOptions::default()).map_err(|e| e.to_string())
+            });
+        match result {
+            Ok(import) => {
+                editor_state.status = Some(if import.warnings.is_empty() {
+                    format!("Imported {path}. Save the workspace to keep it.")
+                } else {
+                    format!("Imported {path}: {}", import.warnings.join("; "))
+                });
+                open(
+                    &mut editor_state,
+                    import.name,
+                    Arc::new(import.workspace),
+                    false,
+                );
+            }
+            Err(err) => {
+                warn!("Cannot import {path}: {err}");
+                editor_state.status = Some(format!("Cannot import {path}: {err}"));
+            }
+        }
     }
 
     if new_workspace {
