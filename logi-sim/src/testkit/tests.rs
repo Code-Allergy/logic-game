@@ -580,3 +580,66 @@ fn bitblasted_cpu_runs_the_program() {
     assert_eq!(r.get("acc"), MULTIPLY_RESULT);
     assert!(bb.root_def().nodes.len() > 5 * d.root_def().nodes.len());
 }
+
+/// With `screens`, the generator draws screens of every mode, and the
+/// differential check sees their memories: the sweep compares them with
+/// the reference (`diff::standard_configs` has such a config).
+#[test]
+fn generated_screens_are_covered() {
+    let mut modes = std::collections::HashSet::new();
+    let mut screens = 0;
+    for seed in 0..40 {
+        let cfg = GenConfig {
+            seed,
+            state_percent: 40,
+            screens: true,
+            ..Default::default()
+        };
+        let d = generate(&cfg).design;
+        for def in d.defs.values() {
+            for n in def.nodes.values() {
+                if let NodeKind::Screen { mode, .. } = n.kind {
+                    modes.insert(format!("{mode:?}"));
+                    screens += 1;
+                }
+            }
+        }
+        diff::check_generated(&cfg, 25, &crate::compile::Options::default()).unwrap();
+    }
+    assert!(screens > 40, "{screens} screens");
+    assert_eq!(modes.len(), 3, "{modes:?}");
+    // Without `screens`, none.
+    let d = generate(&GenConfig::default()).design;
+    assert!(d.defs.values().all(|def| {
+        def.nodes
+            .values()
+            .all(|n| !matches!(n.kind, NodeKind::Screen { .. }))
+    }));
+}
+
+/// A flat design's screens survive bit-blasting with the same memory.
+#[test]
+fn bitblasted_screens_match() {
+    for seed in 0..10 {
+        let cfg = GenConfig {
+            seed,
+            max_depth: 1,
+            child_defs: 0,
+            state_percent: 40,
+            screens: true,
+            ..Default::default()
+        };
+        let d = generate(&cfg).design;
+        let bb = super::bitblast::bitblast(&d);
+        bb.validate().unwrap();
+        let count = |d: &Design| {
+            d.root_def()
+                .nodes
+                .values()
+                .filter(|n| matches!(n.kind, NodeKind::Screen { .. }))
+                .count()
+        };
+        assert_eq!(count(&d), count(&bb));
+        assert_equivalent_by_index(&d, &bb, seed, 20);
+    }
+}

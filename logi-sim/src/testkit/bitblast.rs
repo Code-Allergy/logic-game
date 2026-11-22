@@ -43,13 +43,19 @@ pub fn bitblast(src: &Design) -> Design {
             NodeKind::Delay { w } => per_bit(&mut b, *w, NodeKind::Delay { w: 1 }),
             NodeKind::Register { w } => per_bit(&mut b, *w, NodeKind::Register { w: 1 }),
             NodeKind::DLatch { w } => per_bit(&mut b, *w, NodeKind::DLatch { w: 1 }),
-            NodeKind::SrLatch | NodeKind::Ram { .. } | NodeKind::Ram2 { .. } => {
+            NodeKind::SrLatch
+            | NodeKind::Ram { .. }
+            | NodeKind::Ram2 { .. }
+            | NodeKind::Screen { .. } => {
                 vec![b.node(node.kind.clone(), &[])]
             }
             NodeKind::Instance(_) => panic!("bitblast: instances are not supported"),
             _ => continue,
         };
-        if matches!(node.kind, NodeKind::Ram { .. } | NodeKind::Ram2 { .. }) {
+        if matches!(
+            node.kind,
+            NodeKind::Ram { .. } | NodeKind::Ram2 { .. } | NodeKind::Screen { .. }
+        ) {
             for (k, &net) in node.outputs.iter().enumerate() {
                 let word = b.out(nodes[0], k as u8);
                 let q = b.bus_expand(word);
@@ -142,7 +148,7 @@ pub fn bitblast(src: &Design) -> Design {
                     }
                 }
             }
-            NodeKind::Ram { .. } | NodeKind::Ram2 { .. } => {
+            NodeKind::Ram { .. } | NodeKind::Ram2 { .. } | NodeKind::Screen { .. } => {
                 for k in 0..node.inputs.len() {
                     if let Some(src) = pin(k) {
                         let word = b.bus_collect(&src);

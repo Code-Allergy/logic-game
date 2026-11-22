@@ -15,7 +15,7 @@ fn sim_of(d: &Design) -> Sim {
 #[test]
 fn differential_random_designs() {
     let n = diff::sweep(&diff::standard_configs(), 170, 20, &Options::default());
-    assert_eq!(n, 1020);
+    assert_eq!(n, 1190);
 }
 
 /// Acceptance sweep (10,000+ designs):
@@ -713,7 +713,7 @@ fn perf_switches_match_the_reference() {
     let designs = perf_designs();
     for (name, opts, so) in perf_variants() {
         let n = diff::sweep_with(&diff::standard_configs(), 20, 15, &opts, &so);
-        assert_eq!(n, 120, "{name}");
+        assert_eq!(n, 140, "{name}");
         for (i, d) in designs.iter().enumerate() {
             crate::compile::tests::check_program_invariants(&compile(d, &opts).unwrap());
             diff::check_design_with(d, i as u64, 40, &opts, &so)
@@ -896,4 +896,173 @@ fn one_thread_spawns_nothing_and_matches_threads() {
             }
         }
     }
+}
+
+// ── Screens ──────────────────────────────────────────────────────────────
+
+/// A root design with one screen whose pins are all root inputs, named
+/// after the pins.
+fn screen_design(mode: crate::netlist::ScreenMode, x_bits: u8, y_bits: u8, w: u8) -> Design {
+    let kind = NodeKind::Screen {
+        mode,
+        x_bits,
+        y_bits,
+        w,
+    };
+    let names: &[&str] = match mode {
+        crate::netlist::ScreenMode::Pixel => &["x", "y", "colour", "draw", "clear"],
+        crate::netlist::ScreenMode::Memory => &["addr", "we", "wdata"],
+        crate::netlist::ScreenMode::Scan => &["colour", "hsync", "vsync"],
+    };
+    let (widths, _) = kind.pins().unwrap();
+    let mut d = Design::new("screen");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let ins: Vec<_> = names
+        .iter()
+        .zip(&widths)
+        .map(|(n, &w)| Some(b.input(*n, w)))
+        .collect();
+    b.screen(mode, x_bits, y_bits, w, &ins);
+    d
+}
+
+/// Drive `steps` (input values in pin order, one tick each) into the
+/// compiled sim under every layout and runtime switch and into the
+/// reference; check they agree on the screen memory after every tick, and
+/// return the final memory.
+fn run_screen(d: &Design, steps: &[&[u64]]) -> Vec<u64> {
+    let mut reference = Reference::new(d).unwrap();
+    let screen = d
+        .root_def()
+        .nodes
+        .iter()
+        .find(|(_, n)| matches!(n.kind, NodeKind::Screen { .. }))
+        .unwrap()
+        .0;
+    let path = NodePath {
+        instances: Vec::new(),
+        node: screen,
+    };
+    let mut sims: Vec<(String, Sim)> = perf_variants()
+        .into_iter()
+        .map(|(name, o, so)| {
+            (
+                name,
+                Sim::with_options(Arc::new(compile(d, &o).unwrap()), so),
+            )
+        })
+        .collect();
+    for (t, step) in steps.iter().enumerate() {
+        for (port, &v) in step.iter().enumerate() {
+            reference.set_input(port, v);
+            for (_, s) in &mut sims {
+                s.set_input(port, v);
+            }
+        }
+        reference.tick().unwrap();
+        let want = reference.mem(&[], screen).unwrap();
+        for (name, s) in &mut sims {
+            s.tick();
+            let m = s.mem_index(&path).expect("the screen has a memory");
+            assert_eq!(s.mem(m), want, "{name}, tick {}", t + 1);
+        }
+    }
+    reference.mem(&[], screen).unwrap().to_vec()
+}
+
+#[test]
+fn pixel_screen_draws_and_clears() {
+    use crate::netlist::ScreenMode;
+    let d = screen_design(ScreenMode::Pixel, 3, 2, 4);
+    // x, y, colour, draw, clear. A pin change reaches the memory at the
+    // second tick (staged input, then commit).
+    let m = run_screen(
+        &d,
+        &[
+            &[1, 2, 7, 1, 0],
+            &[5, 3, 9, 1, 0],
+            &[6, 0, 3, 0, 0],
+            &[0, 0, 0, 0, 0],
+        ],
+    );
+    let mut want = vec![0; 32];
+    want[2 << 3 | 1] = 7;
+    want[3 << 3 | 5] = 9;
+    assert_eq!(m, want);
+    // Clear wins over everything drawn before it, then the same tick's
+    // pixel is drawn on the clean screen.
+    let m = run_screen(&d, &[&[1, 1, 5, 1, 0], &[2, 2, 6, 1, 1], &[0, 0, 0, 0, 0]]);
+    let mut want = vec![0; 32];
+    want[2 << 3 | 2] = 6;
+    assert_eq!(m, want);
+}
+
+#[test]
+fn memory_screen_is_a_write_only_ram() {
+    use crate::netlist::ScreenMode;
+    let d = screen_design(ScreenMode::Memory, 2, 2, 8);
+    let m = run_screen(
+        &d,
+        &[&[3, 1, 0x41], &[15, 1, 0x48], &[4, 0, 0x99], &[0, 0, 0]],
+    );
+    let mut want = vec![0; 16];
+    want[3] = 0x41;
+    want[15] = 0x48;
+    assert_eq!(m, want);
+}
+
+#[test]
+fn scan_screen_follows_the_beam() {
+    use crate::netlist::ScreenMode;
+    // 4 x 2 pixels. colour, hsync, vsync.
+    let d = screen_design(ScreenMode::Scan, 2, 1, 4);
+    let px = |c: u64| -> [u64; 3] { [c, 0, 0] };
+    let hs = [0, 1, 0];
+    let vs = [0, 0, 1];
+    let mut steps: Vec<[u64; 3]> = vec![vs];
+    // Line 0: five pixels; the fifth is past the right edge and dropped.
+    steps.extend([1, 2, 3, 4, 5].map(px));
+    steps.push(hs);
+    // Line 1: two pixels, then two hsyncs: the beam stops below the
+    // bottom, and pixels there are dropped.
+    steps.extend([6, 7].map(px));
+    steps.extend([hs, hs, px(8), px(9)]);
+    // A new frame overwrites from the top left.
+    steps.extend([vs, px(10)]);
+    steps.push([0, 0, 0]);
+    let refs: Vec<&[u64]> = steps.iter().map(|s| &s[..]).collect();
+    let m = run_screen(&d, &refs);
+    assert_eq!(m, vec![10, 2, 3, 4, 6, 7, 0, 0]);
+}
+
+#[test]
+fn memory_versions_change_only_on_writes() {
+    use crate::netlist::ScreenMode;
+    let d = screen_design(ScreenMode::Memory, 2, 2, 8);
+    let mut s = sim_of(&d);
+    let node = d.root_def().nodes.keys().last().unwrap();
+    let m = s
+        .mem_index(&NodePath {
+            instances: Vec::new(),
+            node,
+        })
+        .unwrap();
+    let v0 = s.mem_version(m);
+    s.run(5);
+    assert_eq!(s.mem_version(m), v0, "no writes, same version");
+    s.set("we", 1);
+    s.run(2);
+    assert_ne!(s.mem_version(m), v0);
+    let v1 = s.mem_version(m);
+    s.set("we", 0);
+    s.run(1);
+    let v2 = s.mem_version(m);
+    s.run(3);
+    assert_eq!(s.mem_version(m), v2);
+    assert!(v2 >= v1);
+    // An import (a program swap) counts as a change.
+    let snap = s.export_state();
+    s.import_state(&snap);
+    assert_ne!(s.mem_version(m), v2);
 }

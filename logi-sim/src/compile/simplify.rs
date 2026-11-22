@@ -52,6 +52,7 @@ pub(super) fn simplify(
                 commit_written[state as usize] = true;
                 commit_read[next as usize] = true;
             }
+            Commit::MemClear { en, .. } => commit_read[en as usize] = true,
             _ => {
                 for s in c.reads() {
                     commit_read[s as usize] = true;
@@ -197,6 +198,7 @@ pub(super) fn simplify(
         for c in &em.commits {
             match *c {
                 Commit::Copy { next, .. } => mark(next, &mut live_slot, &mut stack),
+                Commit::MemClear { en, .. } => mark(en, &mut live_slot, &mut stack),
                 _ => {
                     for s in c.reads() {
                         mark(s, &mut live_slot, &mut stack);

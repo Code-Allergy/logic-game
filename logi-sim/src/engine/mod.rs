@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::compile::{CompileError, Options, Program, compile};
+use crate::compile::{CompileError, NodePath, Options, Program, compile};
 use crate::netlist::{Design, NetId, NodeId};
 use crate::sim::{Sim, SimOptions};
 
@@ -52,6 +52,14 @@ pub struct Probe {
     pub net: NetId,
 }
 
+/// A memory to read back whole (a RAM or a screen): the node at `node`
+/// in the instance at `path` from the root.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemProbe {
+    pub path: Vec<NodeId>,
+    pub node: NodeId,
+}
+
 /// Probe values after a batch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbeFrame {
@@ -63,6 +71,12 @@ pub struct ProbeFrame {
     pub values: Vec<u64>,
     /// Whether each probe resolved to a net in the running program.
     pub present: Vec<bool>,
+    /// One copy per registered [`MemProbe`], in registration order; `None`
+    /// where it does not resolve. Copies are taken only when asked for
+    /// ([`EngineCore::request_mems`]; once per video frame) and only when
+    /// the memory changed, so an unchanged memory keeps the same `Arc`
+    /// from frame to frame: compare with `Arc::ptr_eq` to skip redrawing.
+    pub mems: Vec<Option<Arc<[u64]>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +120,14 @@ pub struct EngineCore {
     chunk: u64,
     probes: Vec<Probe>,
     probe_slots: Vec<Option<u32>>,
+    mem_probes: Vec<MemProbe>,
+    /// Memory index of each mem probe in the running program.
+    mem_index: Vec<Option<u32>>,
+    /// The last copy of each mem probe, with the `Sim::mem_version` it was
+    /// taken at. Cleared when the program changes.
+    mem_copies: Vec<Option<(u64, Arc<[u64]>)>>,
+    /// The reader asked for fresh memory copies.
+    mem_requested: bool,
     /// Something observable changed since the last publish.
     dirty: bool,
 }
@@ -126,6 +148,10 @@ impl EngineCore {
             chunk: 1,
             probes: Vec::new(),
             probe_slots: Vec::new(),
+            mem_probes: Vec::new(),
+            mem_index: Vec::new(),
+            mem_copies: Vec::new(),
+            mem_requested: false,
             dirty: true,
         }
     }
@@ -182,6 +208,9 @@ impl EngineCore {
             sim.reset();
             self.pending_steps = 0;
             self.anchor = None;
+            // Memories went back to their initial contents: publish fresh
+            // copies (`Sim::reset` moved their versions on).
+            self.mem_requested = true;
             self.dirty = true;
         }
     }
@@ -203,6 +232,36 @@ impl EngineCore {
         self.dirty = true;
     }
 
+    /// Memories to read back (see [`ProbeFrame::mems`]).
+    pub fn set_mem_probes(&mut self, probes: Vec<MemProbe>) {
+        self.mem_probes = probes;
+        self.resolve_probes();
+        self.mem_requested = true;
+        self.dirty = true;
+    }
+
+    /// Ask for fresh copies of the probed memories at the next publish.
+    /// A reader calls this once per frame it draws.
+    pub fn request_mems(&mut self) {
+        self.mem_requested = true;
+    }
+
+    /// Fresh memory copies were asked for and some probed memory changed
+    /// since its last copy: worth a publish even if nothing else changed.
+    pub fn mems_stale(&self) -> bool {
+        self.mem_requested
+            && self.sim.as_ref().is_some_and(|sim| {
+                self.mem_index
+                    .iter()
+                    .zip(&self.mem_copies)
+                    .any(|(m, copy)| match (m, copy) {
+                        (Some(m), Some((v, _))) => sim.mem_version(*m) != *v,
+                        (Some(_), None) => true,
+                        (None, _) => false,
+                    })
+            })
+    }
+
     fn resolve_probes(&mut self) {
         self.probe_slots = match &self.sim {
             Some(sim) => {
@@ -214,6 +273,18 @@ impl EngineCore {
             }
             None => vec![None; self.probes.len()],
         };
+        self.mem_index = self
+            .mem_probes
+            .iter()
+            .map(|p| {
+                let sim = self.sim.as_ref()?;
+                sim.mem_index(&NodePath {
+                    instances: p.path.clone(),
+                    node: p.node,
+                })
+            })
+            .collect();
+        self.mem_copies = vec![None; self.mem_probes.len()];
     }
 
     /// Swap in a compiled program for `revision`, carrying state, inputs and
@@ -242,6 +313,7 @@ impl EngineCore {
         self.sim = Some(sim);
         self.revision = revision;
         self.resolve_probes();
+        self.mem_requested = true;
         self.dirty = true;
         event
     }
@@ -359,6 +431,24 @@ impl EngineCore {
             frame.values.push(v);
             frame.present.push(slot.is_some());
         }
+        if self.mem_requested
+            && let Some(sim) = &self.sim
+        {
+            for (m, copy) in self.mem_index.iter().zip(&mut self.mem_copies) {
+                let Some(m) = *m else { continue };
+                let version = sim.mem_version(m);
+                if copy.as_ref().is_none_or(|(v, _)| *v != version) {
+                    *copy = Some((version, Arc::from(sim.mem(m))));
+                }
+            }
+            self.mem_requested = false;
+        }
+        frame.mems.clear();
+        frame.mems.extend(
+            self.mem_copies
+                .iter()
+                .map(|c| c.as_ref().map(|(_, data)| Arc::clone(data))),
+        );
         self.dirty = false;
     }
 }
@@ -391,9 +481,11 @@ impl LocalEngine {
 
     /// Run for at most `budget` (e.g. a few ms per frame) and refresh the
     /// probe frame. Returns ticks run.
+    /// Memories are copied at most once per call, when they changed.
     pub fn run_frame(&mut self, budget: Duration, clock: Clock<'_>) -> u64 {
         let n = self.core.run(budget, clock);
-        if self.core.dirty() {
+        self.core.request_mems();
+        if self.core.dirty() || self.core.mems_stale() {
             self.core.publish(&mut self.frame);
         }
         n
@@ -434,6 +526,8 @@ mod threaded {
         Step(u64),
         Reset,
         SetProbes(Vec<Probe>),
+        SetMemProbes(Vec<MemProbe>),
+        RequestMems,
         Load(Arc<Design>, u64),
         Compiled(u64, Result<Arc<Program>, Vec<CompileError>>),
         Sync(Sender<()>),
@@ -521,6 +615,15 @@ mod threaded {
         pub fn set_probes(&self, probes: Vec<Probe>) {
             let _ = self.tx.send(Msg::SetProbes(probes));
         }
+        pub fn set_mem_probes(&self, probes: Vec<MemProbe>) {
+            let _ = self.tx.send(Msg::SetMemProbes(probes));
+        }
+        /// Ask for fresh copies of the probed memories (once per drawn
+        /// frame); they are in a frame published soon after, also while
+        /// paused.
+        pub fn request_mems(&self) {
+            let _ = self.tx.send(Msg::RequestMems);
+        }
         /// Latest probe frame (a cheap `Arc` clone).
         pub fn frame(&self) -> Arc<ProbeFrame> {
             Arc::clone(&self.shared.frame.lock().expect("frame lock"))
@@ -595,6 +698,8 @@ mod threaded {
                 Msg::Step(n) => core.step(n),
                 Msg::Reset => core.reset(),
                 Msg::SetProbes(p) => core.set_probes(p),
+                Msg::SetMemProbes(p) => core.set_mem_probes(p),
+                Msg::RequestMems => core.request_mems(),
                 Msg::Load(d, rev) => {
                     let _ = compile_tx.send((d, rev));
                 }
@@ -604,7 +709,10 @@ mod threaded {
                 Msg::Compiled(revision, Err(errors)) => {
                     let _ = events.send(EngineEvent::CompileFailed { revision, errors });
                 }
-                Msg::Sync(tx) => syncs.push(tx),
+                Msg::Sync(tx) => {
+                    core.request_mems();
+                    syncs.push(tx);
+                }
                 Msg::Shutdown => return false,
             }
             true
@@ -618,7 +726,7 @@ mod threaded {
                 }
             }
             core.run(BATCH, &clock);
-            if core.dirty() || !syncs.is_empty() {
+            if core.dirty() || core.mems_stale() || !syncs.is_empty() {
                 publish(&mut core, &mut spare);
             }
             for s in syncs.drain(..) {

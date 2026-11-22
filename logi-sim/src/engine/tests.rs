@@ -166,6 +166,103 @@ fn reset_returns_to_tick_zero_and_keeps_inputs_and_rate() {
     assert_eq!((e.frame().tick, e.frame().values[0]), (5, 5));
 }
 
+/// A reset clears a screen's memory, and the memory probe's copy follows
+/// at the next frame even though no write was committed since.
+#[test]
+fn reset_clears_screen_memory_probes() {
+    use crate::netlist::ScreenMode;
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let addr = b.input("addr", 4);
+    let we = b.input("we", 1);
+    let data = b.input("data", 4);
+    let screen = b.screen(
+        ScreenMode::Memory,
+        2,
+        2,
+        4,
+        &[Some(addr), Some(we), Some(data)],
+    );
+    let node = |net: NetId| d.root_def().nets[net].driver.0;
+    let (addr, we, data) = (node(addr), node(we), node(data));
+    let clock = FakeClock::new();
+    let c = || clock.read();
+    let mut e = LocalEngine::new(Options::debug());
+    e.load(&d, 1);
+    e.core.set_mem_probes(vec![MemProbe {
+        path: Vec::new(),
+        node: screen,
+    }]);
+    e.core.set_input(addr, 5);
+    e.core.set_input(data, 9);
+    e.core.set_input(we, 1);
+    e.core.step(2); // the inputs are staged for a tick
+    e.run_frame(Duration::from_secs(1), &c);
+    let drawn = e.frame().mems[0].clone().expect("resolved");
+    assert_eq!(drawn[5], 9);
+    e.core.set_input(we, 0);
+    e.core.reset();
+    assert!(e.core.dirty());
+    e.run_frame(Duration::from_secs(1), &c);
+    let cleared = e.frame().mems[0].clone().expect("resolved");
+    assert!(!Arc::ptr_eq(&drawn, &cleared));
+    assert_eq!(&cleared[..], &[0; 16]);
+}
+
+fn ram_node(d: &Design) -> NodeId {
+    d.root_def()
+        .nodes
+        .iter()
+        .find(|(_, n)| matches!(n.kind, NodeKind::Ram { .. }))
+        .unwrap()
+        .0
+}
+
+/// Memory probes copy a whole memory into the frame once per frame, and
+/// only when it changed (the `Arc` stays the same otherwise).
+#[test]
+fn mem_probes_copy_changed_memories_once_per_frame() {
+    let (d, en, ..) = counter_design(false);
+    let ram = ram_node(&d);
+    let clock = FakeClock::new();
+    let c = || clock.read();
+    let mut e = LocalEngine::new(Options::debug());
+    e.load(&d, 1);
+    e.core.set_input(en, 1);
+    e.core.set_mem_probes(vec![
+        MemProbe {
+            path: Vec::new(),
+            node: ram,
+        },
+        MemProbe {
+            path: vec![ram],
+            node: ram,
+        }, // no such instance
+    ]);
+    e.core.step(6);
+    e.run_frame(Duration::from_secs(1), &c);
+    let first = e.frame().mems[0].clone().expect("resolved");
+    assert_eq!(e.frame().mems[1], None);
+    // The count is written at address count: 0..=4 by now (en is staged
+    // for a tick).
+    assert_eq!(&first[..6], &[0, 1, 2, 3, 4, 0]);
+    assert_eq!(first.len(), 16);
+    // Paused: nothing changes, the frame keeps the same copy.
+    e.run_frame(Duration::from_secs(1), &c);
+    assert!(Arc::ptr_eq(e.frame().mems[0].as_ref().unwrap(), &first));
+    e.core.step(1);
+    e.run_frame(Duration::from_secs(1), &c);
+    let next = e.frame().mems[0].clone().unwrap();
+    assert!(!Arc::ptr_eq(&next, &first));
+    assert_eq!(next[5], 5);
+    // An edit keeps the probe (and the memory).
+    let (d2, ..) = counter_design(true);
+    e.load(&d2, 2);
+    e.run_frame(Duration::from_secs(1), &c);
+    assert_eq!(e.frame().mems[0].as_deref().map(|m| m[5]), Some(5));
+}
+
 /// Probes on nets that live only in a packed lane (lane slots) and a
 /// threaded `Sim` read the same values as an unpacked, single-threaded
 /// engine (#41).
@@ -366,6 +463,27 @@ mod threaded {
         e.step(3);
         e.sync();
         assert_eq!((e.tick_count(), e.frame().values[0]), (3, 3));
+    }
+
+    #[test]
+    fn mem_probes_on_the_worker() {
+        let (d, en, ..) = counter_design(false);
+        let e = loaded(&d);
+        e.set_input(en, 1);
+        e.set_mem_probes(vec![MemProbe {
+            path: Vec::new(),
+            node: ram_node(&d),
+        }]);
+        e.step(4);
+        e.sync();
+        let m = e.frame().mems[0].clone().unwrap();
+        assert_eq!(&m[..4], &[0, 1, 2, 0]);
+        // A request while paused still gets an answer.
+        e.step(1);
+        e.sync();
+        e.request_mems();
+        e.sync();
+        assert_eq!(e.frame().mems[0].as_ref().unwrap()[3], 3);
     }
 
     #[test]

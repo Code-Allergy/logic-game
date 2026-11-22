@@ -109,6 +109,17 @@ State (output depends on committed state; next state is computed at settle):
 | `SrLatch` | s, r → q | `r ? 0 : s ? 1 : state` | state |
 | `Ram{addr_bits, w}` | addr, we(1), wdata → rdata | write at commit | `mem[addr]` (combinational read) |
 | `Ram2{addr_bits, w, reads, mask}` | waddr, we(1 or w), wdata, raddr0.. → rdata0.. | write at commit (`mask`: the bits set in `we`) | `rdata_k = mem[raddr_k]` (combinational read) |
+| `Screen{mode, x_bits, y_bits, w}` | per `mode`, below → (none) | write (and clear, beam) at commit | none; the host reads the memory |
+
+A `Screen` (item 80) is a write-only memory of `2^(x_bits + y_bits)`
+words, pixel `(x, y)` at `y << x_bits | x`, starting all zero. `Pixel`:
+x, y, colour, draw(1), clear(1); at commit `clear` zeroes it, then `draw`
+writes `colour` at `(x, y)`. `Memory`: addr, we(1), wdata; a RAM without a
+read port. `Scan`: colour, hsync(1), vsync(1) and a beam `(x, y)` as
+state; at commit `vsync` sends the beam to `(0, 0)`, else `hsync` to
+`(0, y + 1)`, else `colour` is written at the beam if it is on the screen
+and the beam moves right. `x` stops one past the right edge and `y` one
+past the bottom; nothing is written there.
 
 Combinational dependency edges for loop detection and ranking are: every
 input→output of a combinational node, `DLatch` en/d→q, `Ram`/`Rom`
@@ -884,7 +895,6 @@ ambiguous. Each is small and can be revisited.
     overlapping boxes and wires drawn through boxes. It is a development
     tool only; the app does not use it. `layout.rs` is unchanged: the
     gallery is placed by hand, not by `layout_circuit`.
-
 50. **A 16-bit CPU of gates and its word twin.** The gallery gains
     `cpu16`, a multi-cycle 16-bit CPU whose state is all curriculum
     flip-flops (about 14 700 primitives after flattening, the largest
@@ -985,3 +995,66 @@ ambiguous. Each is small and can be revisited.
     write ports are still built from a `Register` per word (up to 64
     words, a later port winning at the same address); larger ones are
     refused.
+80. **Screens.** One primitive, `NodeKind::Screen { mode, x_bits, y_bits,
+    w }` (section 3.3), for the editor's graphical display. It has no
+    outputs: its memory is what the host draws, read back once per video
+    frame (item 81), never per tick. Sides are powers of two (1 to 8
+    address bits each, so at most 256 x 256), which makes the address of
+    `(x, y)` just `y` and `x` side by side: a `Merge` in the editor.
+    - **Framebuffer binding.** The display owns its video memory and has
+      a RAM-style write port (`Memory` mode: addr, we, wdata), rather than
+      linking to a `Ram` node elsewhere. A link would be a second kind of
+      connection besides wires, would need a node reference in the save
+      format that breaks when one side is copied, deleted or sits in
+      another subcircuit, and would let two displays or two writers
+      share a memory in ways that are hard to see. With an owned memory
+      the display is one part wired like any other, and the simulator
+      knows exactly which memory to read back. A circuit that also needs
+      to read its pixels keeps a `Ram` on the same three wires (both are
+      written alike).
+    - **Lowering.** The compiler builds every mode from existing
+      instructions and commits: one `RamWrite` (snapshots of we, addr,
+      data, as for `Ram`); for `Pixel` a `Concat` for the address and a
+      new `Commit::MemClear { mem, en }` emitted just before the write
+      (the one commit whose order matters: clear, then that tick's
+      pixel); for `Scan` the beam is one state slot (`x` in the low
+      `x_bits + 1` bits, `y` above) with a `Commit::Copy`, its next value
+      and the write enable computed by about 15 scalar instructions. So a
+      screen costs a tick about what a RAM write costs, and packing,
+      threads and the simplify passes need no change. The beam is a
+      `StateLoc::Slot` and the memory a `StateLoc::Mem` under the same
+      node path, so state carries over edits like a register and a RAM.
+    - **Reference and tests.** The reference interpreter implements the
+      three modes directly. The random generator draws screens with
+      `GenConfig::screens` (off by default so the designs of existing
+      seeds stay the same; `diff::standard_configs` gains a config with
+      it, so the sweep counts in the tests grew from 1020/150/120 to
+      1190/175/140), and the differential check now also compares every
+      state element and every memory with the reference after each tick
+      (screens have no outputs to compare).
+81. **Memory probes.** `EngineCore::set_mem_probes(Vec<MemProbe>)` names
+    whole memories (a RAM or a screen, by instance path and node) to read
+    back; `ProbeFrame::mems` holds one `Arc<[u64]>` copy per probe. A
+    copy is taken only when the reader asked for one
+    (`request_mems`, once per drawn frame; the threaded `Engine` sends a
+    message, which also wakes a paused worker; `LocalEngine::run_frame`
+    asks itself; `sync` asks too) and only when the memory changed:
+    `Sim::mem_version` counts the commits that wrote it (one increment
+    per actual write or clear; an import counts too). An unchanged memory
+    keeps the same `Arc`, so the app redraws a screen's texture only when
+    `Arc::ptr_eq` says it changed. The worker's 1 ms batches therefore
+    copy a large screen at most once per video frame.
+82. **The screen part (app).** `GateKind::Screen { mode, width, height,
+    palette, scale }` (`docs/save-format.md`) maps to one `Screen` node:
+    `Pixel` and `Scanline` to the same simulator modes, `Framebuffer` and
+    `Text` both to `Memory` (text is a framebuffer of 8-bit character
+    codes; the font is applied when drawing). The font is built in: printable
+    ASCII in 5x7 glyphs in 8x8 cells (`src/sim/screen.rs`), bit 7 inverts
+    a cell; a font ROM supplied by the circuit was left out to keep the
+    part one memory and the text mode one wire bundle. Value 0 is the dark
+    screen in every palette. The bridge registers a memory probe per
+    screen of the open view; each frame the app asks for copies and the
+    visuals redraw a screen's `Image` (nearest sampling, one texel per
+    pixel) only when its copy is a new `Arc`. The gallery gained a fourth
+    category, `displays`, with one item per mode, so its tests now expect
+    four categories and 20 to 35 items (was three and 20 to 30).

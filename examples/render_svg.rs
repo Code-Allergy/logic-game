@@ -166,6 +166,12 @@ fn inner_text(kind: &GateKind, library: &CircuitLibrary) -> String {
         GateKind::SubCircuit { definition } => library
             .get(*definition)
             .map_or("?".into(), |d| d.name.clone()),
+        GateKind::Screen {
+            mode,
+            width,
+            height,
+            ..
+        } => format!("{} {width}x{height}", mode.name()),
         GateKind::Input { w } | GateKind::Output { w } | GateKind::Display { w } if *w > 1 => {
             format!("{} {w}b", kind.display_name())
         }

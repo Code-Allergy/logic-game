@@ -44,7 +44,7 @@ const SWEEPS: usize = 6;
 pub enum Role {
     /// An input port: first column.
     Input,
-    /// An output port or display: last column.
+    /// An output port, readout or screen: last column.
     Output,
     /// A state element: its outgoing edges do not count for ranking.
     State,
@@ -56,7 +56,9 @@ impl Role {
     pub fn of(kind: &GateKind) -> Role {
         match kind {
             GateKind::Input { .. } => Role::Input,
-            GateKind::Output { .. } | GateKind::Display { .. } => Role::Output,
+            GateKind::Output { .. } | GateKind::Display { .. } | GateKind::Screen { .. } => {
+                Role::Output
+            }
             GateKind::Delay { .. } | GateKind::Register { .. } | GateKind::SrLatch => Role::State,
             _ => Role::Logic,
         }

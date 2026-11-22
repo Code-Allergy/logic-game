@@ -1,0 +1,116 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "plotter",
+  "circuits": [
+    {
+      "name": "plotter",
+      "title": "Bouncing plotter",
+      "nodes": [
+        {"name": "one", "type": "Const", "value": 1, "at": [0, 100]},
+        {"name": "p", "type": "Register", "w": 4, "label": "prescaler", "at": [160, 300]},
+        {"name": "pinc", "type": "Add", "w": 4, "label": "+1", "at": [320, 300]},
+        {"name": "step", "type": "ReduceAnd", "w": 4, "label": "every 16", "at": [320, 180]},
+        {"name": "c", "type": "Register", "w": 10, "label": "step count", "at": [480, 100]},
+        {"name": "cinc", "type": "Add", "w": 10, "label": "+1", "at": [480, -40]},
+        {
+          "name": "xs",
+          "type": "Split",
+          "w": 10,
+          "lo": 0,
+          "len": 5,
+          "label": "c[0:4]",
+          "at": [640, 300]
+        },
+        {
+          "name": "xd",
+          "type": "Split",
+          "w": 10,
+          "lo": 5,
+          "len": 1,
+          "label": "c[5]",
+          "at": [640, 200]
+        },
+        {
+          "name": "ys",
+          "type": "Split",
+          "w": 10,
+          "lo": 0,
+          "len": 4,
+          "label": "c[0:3]",
+          "at": [640, 0]
+        },
+        {
+          "name": "yd",
+          "type": "Split",
+          "w": 10,
+          "lo": 4,
+          "len": 1,
+          "label": "c[4]",
+          "at": [640, -100]
+        },
+        {
+          "name": "col",
+          "type": "Split",
+          "w": 10,
+          "lo": 6,
+          "len": 4,
+          "label": "c[6:9]",
+          "at": [640, -200]
+        },
+        {
+          "name": "xm",
+          "type": "Extend",
+          "from": 1,
+          "to": 5,
+          "signed": true,
+          "label": "0 or 31",
+          "at": [800, 200]
+        },
+        {
+          "name": "ym",
+          "type": "Extend",
+          "from": 1,
+          "to": 4,
+          "signed": true,
+          "label": "0 or 15",
+          "at": [800, -100]
+        },
+        {"name": "x", "type": "Xor", "w": 5, "label": "x: 0 to 31 and back", "at": [960, 260]},
+        {"name": "y", "type": "Xor", "w": 4, "label": "y: 0 to 15 and back", "at": [960, -40]},
+        {"name": "pen", "type": "Const", "value": 1, "label": "pen down", "at": [1080, -180]},
+        {"name": "Clear", "type": "Input", "at": [1120, -320]},
+        {
+          "name": "screen",
+          "type": "Screen",
+          "mode": "Pixel",
+          "width": 32,
+          "height": 16,
+          "palette": "Colors16",
+          "scale": 8,
+          "label": "Plotter",
+          "at": [1300, 0]
+        }
+      ],
+      "wires": [
+        ["one", "p.en", "pinc.cin", "cinc.cin"],
+        ["pen", "screen.draw"],
+        ["p", "pinc.a", "step"],
+        ["pinc.sum", "p.d"],
+        ["step", "c.en"],
+        ["c", "cinc.a", "xs", "xd", "ys", "yd", "col"],
+        ["cinc.sum", "c.d"],
+        ["xd", "xm"],
+        ["yd", "ym"],
+        ["xs", "x.a"],
+        ["xm", "x.b"],
+        ["ys", "y.a"],
+        ["ym", "y.b"],
+        ["x", "screen.x"],
+        ["y", "screen.y"],
+        ["col", "screen.colour"],
+        ["Clear", "screen.clear"]
+      ]
+    }
+  ]
+}

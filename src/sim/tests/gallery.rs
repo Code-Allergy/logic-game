@@ -72,19 +72,22 @@ fn gallery_files_are_canonical_and_expand_deterministically() {
     }
 }
 
-/// Between 20 and 30 items in three groups, simple to complex; each uses
+/// Between 20 and 35 items in four groups, simple to complex; each uses
 /// only curriculum demos and items listed before it, and has a title and
 /// a description.
 #[test]
 fn gallery_builds_on_the_curriculum_and_earlier_items() {
     let catalog = demos();
     assert!(
-        (20..=30).contains(&catalog.gallery.len()),
+        (20..=35).contains(&catalog.gallery.len()),
         "{} items",
         catalog.gallery.len()
     );
     let categories: Vec<&str> = catalog.categories.iter().map(|c| c.id.as_str()).collect();
-    assert_eq!(categories, ["combinational", "sequential", "systems"]);
+    assert_eq!(
+        categories,
+        ["combinational", "sequential", "systems", "displays"]
+    );
     let mut last = 0;
     for (i, item) in catalog.gallery.iter().enumerate() {
         assert_eq!(item.level, 0);
@@ -1468,4 +1471,127 @@ fn cpu16_wires_do_not_pass_through_boxes() {
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Displays
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The video memory of the screen labelled `label`, as the app reads it
+/// back (the probe frame's copy), one word per pixel or cell.
+fn screen_memory(app: &mut App, label: &str) -> Vec<u64> {
+    let e = gate(app, label);
+    let probe = app
+        .world()
+        .get::<crate::sim::GateProbes>(e)
+        .unwrap()
+        .memory
+        .expect("a screen has a memory probe");
+    app.world()
+        .resource::<SimBridge>()
+        .with_frame(|f| f.mems[probe as usize].as_deref().map(<[u64]>::to_vec))
+        .expect("the screen memory is read back")
+}
+
+/// The pen bounces: x = c[0:5] folded at c[5], y = c[0:4] folded at c[4],
+/// colour c[6:10], one step every 16 ticks; every pixel drawn holds the
+/// colour of the last lap through it.
+#[test]
+fn screen_plotter_bounces() {
+    let mut app = open("screen_plotter");
+    // Just short of 64 steps: lap 0.
+    run(&mut app, 16 * 64 - 8);
+    let m = screen_memory(&mut app, "Plotter");
+    assert_eq!(m.len(), 32 * 16);
+    let pen = |c: u64| {
+        let x = (c & 31) ^ if c >> 5 & 1 == 1 { 31 } else { 0 };
+        let y = (c & 15) ^ if c >> 4 & 1 == 1 { 15 } else { 0 };
+        (x as usize, y as usize)
+    };
+    // Lap 0 draws colour 0 (dark): nothing lit yet.
+    assert!(m.iter().all(|&v| v == 0), "lap 0 draws in colour 0");
+    // Lap 1 (steps 64 to 127) paints in colour 1.
+    run(&mut app, 16 * 64);
+    let m = screen_memory(&mut app, "Plotter");
+    let lit: Vec<usize> = (0..m.len()).filter(|&i| m[i] != 0).collect();
+    assert!(lit.len() >= 32, "{} pixels lit", lit.len());
+    for c in 0..63u64 {
+        let (x, y) = pen(c);
+        assert_eq!(m[y * 32 + x], 1, "lap 1 paints colour 1 at ({x}, {y})");
+    }
+    assert!(lit.iter().all(|&i| m[i] == 1));
+    // Clear blanks it.
+    set_input(&mut app, "Clear", 1);
+    run(&mut app, 3);
+    set_input(&mut app, "Clear", 0);
+    run(&mut app, 1);
+    let m = screen_memory(&mut app, "Plotter");
+    assert!(m.iter().filter(|&&v| v != 0).count() <= 2, "cleared");
+}
+
+#[test]
+fn screen_xor_fills_the_framebuffer() {
+    let mut app = open("screen_xor");
+    run(&mut app, 1024 + 4);
+    let m = screen_memory(&mut app, "Framebuffer");
+    assert_eq!(m.len(), 1024);
+    // (The sweep is a few ticks into frame 1: addresses 0 to 3 are newer.)
+    for (x, y) in [(3, 5), (31, 0), (17, 30), (31, 31)] {
+        assert_eq!(
+            m[y * 32 + x],
+            ((x ^ y) & 15) as u64,
+            "({x}, {y}) in frame 0"
+        );
+    }
+    run(&mut app, 1024);
+    let m = screen_memory(&mut app, "Framebuffer");
+    assert_eq!(m[5 * 32 + 3], ((3 ^ 5) + 1) & 15, "frame 1 adds one");
+}
+
+#[test]
+fn screen_bars_paint_a_test_pattern() {
+    let mut app = open("screen_bars");
+    // One whole frame (1024 ticks) after the first vsync.
+    run(&mut app, 2 * 1024 + 4);
+    let m = screen_memory(&mut app, "Scanline");
+    assert_eq!(m.len(), 32 * 16);
+    // Frame 1: bar k (4 pixels wide) has colour k + 1 (mod 8), bright (+8)
+    // in lines 8 to 15. Line 0 is the first line after vsync.
+    // (Line 0 of frame 2 has begun.)
+    for y in [1usize, 7, 8, 15] {
+        for x in [0usize, 5, 13, 31] {
+            let bar = (x / 4) as u64;
+            let want = (bar + 1) % 8 + if y >= 8 { 8 } else { 0 };
+            assert_eq!(m[y * 32 + x], want, "({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn screen_text_shows_the_message_and_typing() {
+    let mut app = open("screen_text");
+    run(&mut app, 130);
+    let m = screen_memory(&mut app, "Text");
+    assert_eq!(m.len(), 128);
+    let row = |r: usize| -> String {
+        m[r * 32..r * 32 + 32]
+            .iter()
+            .map(|&c| (c as u8 & 0x7F) as char)
+            .collect()
+    };
+    assert_eq!(row(2).trim_end(), "  HELLO, GATE QUEST!");
+    assert!(row(0).contains("GATE QUEST"));
+    assert!(
+        m[..32].iter().all(|&c| c & 0x80 != 0),
+        "the title row is inverted"
+    );
+    // Type a '#' into row 1, column 5.
+    set_input(&mut app, "Cell", 32 + 5);
+    set_input(&mut app, "Char", u64::from(b'#'));
+    set_input(&mut app, "Write", 1);
+    run(&mut app, 3);
+    set_input(&mut app, "Write", 0);
+    run(&mut app, 2);
+    let m = screen_memory(&mut app, "Text");
+    assert_eq!(m[32 + 5], u64::from(b'#'));
 }
