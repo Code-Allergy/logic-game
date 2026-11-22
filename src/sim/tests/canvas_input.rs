@@ -452,6 +452,82 @@ fn a_drag_from_an_input_back_to_an_output_makes_the_wire_too() {
     assert_eq!(position(&app, and), Vec2::ZERO);
 }
 
+/// No mesh asset is without vertices. The renderer cannot upload such a
+/// mesh: each time one is added or changed it logs "Use-after-free:
+/// attempted to copy element data for an unallocated key" (per vertex and
+/// index buffer). A headless app has no renderer, so check the store.
+#[track_caller]
+fn assert_meshes_have_vertices(app: &App) {
+    let empty: Vec<AssetId<Mesh>> = app
+        .world()
+        .resource::<Assets<Mesh>>()
+        .iter()
+        .filter(|(_, mesh)| mesh.count_vertices() == 0)
+        .map(|(id, _)| id)
+        .collect();
+    assert!(empty.is_empty(), "meshes without vertices: {empty:?}");
+}
+
+#[test]
+fn the_drag_marks_never_make_a_mesh_without_vertices() {
+    let mut app = wire_app();
+    let a = place(
+        &mut app,
+        GateKind::Input { w: 1 },
+        "A",
+        Vec2::new(-200.0, 0.0),
+    );
+    let y = place(
+        &mut app,
+        GateKind::Output { w: 1 },
+        "Y",
+        Vec2::new(200.0, 40.0),
+    );
+    // The marks are spawned hidden, with nothing to draw yet.
+    app.update();
+    assert!(
+        app.world_mut()
+            .query::<&DragMark>()
+            .iter(app.world())
+            .count()
+            > 0
+    );
+    assert_meshes_have_vertices(&app);
+
+    // Hover a pin, then leave it.
+    let a_out0 = pin(&app, a, true, 0);
+    move_to(&mut app, a_out0);
+    assert_meshes_have_vertices(&app);
+    move_to(&mut app, Vec2::ZERO);
+    assert_meshes_have_vertices(&app);
+
+    // The only other pin, Y's input, fits A's output: the veils are
+    // shown but have nothing to cover.
+    press(&mut app, MouseButton::Left, a_out0);
+    move_to(&mut app, Vec2::new(-100.0, 0.0));
+    assert!(mark_shown(&mut app, DragMark::Veils));
+    assert_meshes_have_vertices(&app);
+    let y_in0 = pin(&app, y, false, 0);
+    move_to(&mut app, y_in0);
+    release(&mut app, MouseButton::Left, y_in0);
+    assert_meshes_have_vertices(&app);
+
+    // No pin fits an 8-bit bus: the rings have nothing to circle.
+    let bus = place(
+        &mut app,
+        GateKind::Input { w: 8 },
+        "Bus",
+        Vec2::new(0.0, 200.0),
+    );
+    let bus_out0 = pin(&app, bus, true, 0);
+    press(&mut app, MouseButton::Left, bus_out0);
+    move_to(&mut app, Vec2::ZERO);
+    assert!(mark_shown(&mut app, DragMark::RingCore));
+    assert_meshes_have_vertices(&app);
+    release(&mut app, MouseButton::Left, Vec2::ZERO);
+    assert_meshes_have_vertices(&app);
+}
+
 #[test]
 fn a_width_mismatch_or_a_drop_on_nothing_is_refused_with_a_toast() {
     let mut app = wire_app();

@@ -305,7 +305,19 @@ pub fn quad_bezier(p0: Vec2, control: Vec2, p1: Vec2, segments: usize) -> Vec<Ve
 impl Shape {
     /// A `Mesh2d` mesh: positions at z = 0, normals facing the camera, and
     /// UVs across the bounding box.
-    pub fn into_mesh(self) -> Mesh {
+    ///
+    /// A shape with no triangles becomes one degenerate triangle at the
+    /// origin (it draws nothing): the renderer's mesh allocator skips a
+    /// mesh with no vertices but still tries to upload it, logging "Use-after-free:
+    /// attempted to copy element data for an unallocated key" twice
+    /// (vertices and indices) each time such a mesh is added or changed.
+    pub fn into_mesh(mut self) -> Mesh {
+        if self.positions.is_empty() || self.indices.is_empty() {
+            self = Shape {
+                positions: vec![Vec2::ZERO; 3],
+                indices: vec![0, 1, 2],
+            };
+        }
         let (lo, hi) = self.bounds().unwrap_or((Vec2::ZERO, Vec2::ONE));
         let span = (hi - lo).max(Vec2::splat(1e-6));
         let uvs: Vec<[f32; 2]> = self
@@ -509,5 +521,24 @@ mod tests {
         assert_eq!(mesh.count_vertices(), count);
         assert!(mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_some());
         assert!(mesh.attribute(Mesh::ATTRIBUTE_NORMAL).is_some());
+    }
+
+    /// The renderer cannot upload a mesh with no vertices (it logs a
+    /// "Use-after-free" error per upload), so an empty shape (a hidden
+    /// drag mark, a drag with no veils) still makes a mesh with vertices
+    /// and indices: one degenerate triangle.
+    #[test]
+    fn an_empty_shape_still_makes_a_mesh_with_vertices() {
+        for shape in [
+            Shape::default(),
+            Shape {
+                positions: vec![Vec2::ONE; 4],
+                indices: Vec::new(),
+            },
+        ] {
+            let mesh = shape.into_mesh();
+            assert_eq!(mesh.count_vertices(), 3);
+            assert_eq!(mesh.indices().map(|i| i.len()), Some(3));
+        }
     }
 }
