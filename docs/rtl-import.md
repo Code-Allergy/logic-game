@@ -52,8 +52,8 @@ cargo run --example rtl_import -- in.json out.json --v5                   # vers
 cargo run --example rtl_import -- in.json out.json --top cpu --name "CPU"
 ```
 
-Copy the output to `workspaces/<name>/manifest.json` to open it in the
-editor. From Rust: `gate_quest::sim::rtl::import_yosys_json(text,
+Copy the output to `workspaces/<name>/manifest.json` in the player's data
+folder (see "Saving" in the README) to open it in the editor. From Rust: `gate_quest::sim::rtl::import_yosys_json(text,
 &ImportOptions)` returns the version 6 [`SourceFile`], the expanded
 `WorkspaceDocument` and a list of warnings.
 
