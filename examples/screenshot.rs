@@ -28,6 +28,12 @@
 //! `empty` and `loop` are a new empty workspace and a small editable
 //! circuit with a combinational loop.
 //!
+//! `--confirm` shows the unsaved-changes question (as when opening
+//! another workspace over unsaved edits).
+//!
+//! Set `GATEQUEST_DATA_DIR` to a scratch folder so that nothing touches the
+//! player's saved workspaces.
+//!
 //! `--map` shows the demo map instead of a demo (the id is ignored), with
 //! the demos listed by `--opened ID,ID,...` (the last one last) as the
 //! progress, kept in memory only; `--level N` picks a stop.
@@ -41,6 +47,7 @@ use bevy::window::WindowResolution;
 use bevy_egui::EguiPlugin;
 
 use gate_quest::editor::demo_map::{DemoMapState, progress::DemoProgress};
+use gate_quest::editor::files::{OpenRequest, PendingOpen};
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
 use gate_quest::sim::{
     ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel,
@@ -71,6 +78,7 @@ struct Shot {
     definition: Option<String>,
     fit: bool,
     editable: bool,
+    confirm: bool,
     frame: u32,
 }
 
@@ -138,7 +146,7 @@ fn main() {
     let mut tab = None;
     let (mut map, mut opened, mut level) = (false, String::new(), None);
     let (mut definition, mut fit) = (None, false);
-    let mut editable = false;
+    let (mut editable, mut confirm) = (false, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--night" => night = true,
@@ -147,6 +155,7 @@ fn main() {
             "--level" => level = args.next().and_then(|l| l.parse().ok()),
             "--library" => library = true,
             "--editable" => editable = true,
+            "--confirm" => confirm = true,
             "--select" => select = args.next(),
             "--tab" => {
                 let name = args.next().unwrap_or_default().to_lowercase();
@@ -211,6 +220,7 @@ fn main() {
             definition,
             fit,
             editable,
+            confirm,
             frame: 0,
         })
         .add_systems(
@@ -272,6 +282,7 @@ fn drive(
                 name,
                 workspace,
                 read_only: !(fixture || shot.editable),
+                unsaved: false,
             });
             if shot.night {
                 theme.set(ThemeMode::Night);
@@ -296,6 +307,13 @@ fn drive(
                 selected.0 = Some(found.expect("a part with that label").0);
             }
             editor.library_open = shot.library;
+            if shot.confirm {
+                editor.pending_open = Some(PendingOpen {
+                    request: OpenRequest::New,
+                    awaiting_save: false,
+                    error: None,
+                });
+            }
             if let Some(tab) = shot.tab {
                 editor.part_tab = tab;
             }

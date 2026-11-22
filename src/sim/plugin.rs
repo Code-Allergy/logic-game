@@ -209,7 +209,7 @@ impl Plugin for SimulationViewPlugin {
                 bevy_egui::EguiPrimaryContextPass,
                 (simulation_config_ui_system, ui_for_selected_gate),
             )
-            .add_systems(Update, save_on_exit_system);
+            .add_systems(Last, save_on_exit_system.after(bevy::window::ExitSystems));
     }
 }
 
@@ -244,6 +244,7 @@ fn load_default_circuit_system(
                     name: demo.title.clone(),
                     workspace: Arc::clone(&demo.workspace),
                     read_only: true,
+                    unsaved: false,
                 });
             }
         }
@@ -340,6 +341,7 @@ mod tests {
             name: "picked".into(),
             workspace,
             read_only: true,
+            unsaved: false,
         });
         app.update();
         // The picked load was written before this update; the system wrote
