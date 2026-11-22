@@ -327,6 +327,7 @@ fn load_read_only(app: &mut App, id: &str) {
         name: demo.title.clone(),
         workspace: Arc::clone(&demo.workspace),
         read_only: true,
+        unsaved: false,
     });
     settle(app);
 }

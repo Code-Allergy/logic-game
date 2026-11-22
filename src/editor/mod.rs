@@ -18,8 +18,12 @@
 //! - `hud`: the parts bar, minimap, zoom, build pill, signals and toasts.
 //! - `parts`: the parts bar's catalogue (tabs, number keys, names).
 //! - `systems`: wire-building selection.
-//! - `workspace`: on-disk workspace helpers.
 //! - `challenge`: the open build-it challenge, its card and Check.
+//! - `undo`: the undo shortcuts and the file card's Undo and Redo buttons.
+//! - `workspace`: on-disk workspace helpers (the player's data folder,
+//!   safe names, Save As, atomic writes).
+//! - `files`: replacing the open circuit, behind the unsaved-changes
+//!   guard.
 //! - `demo_map`: the full-screen demo map ([`crate::GameState::DemoMap`])
 //!   and the record of opened demos.
 //!
@@ -28,10 +32,12 @@
 
 pub mod challenge;
 pub mod demo_map;
+pub mod files;
 pub mod hud;
 pub mod parts;
 mod systems;
 mod ui;
+pub mod undo;
 
 pub mod workspace;
 
@@ -85,6 +91,11 @@ pub struct EditorState {
     pub dragging_part: Option<(GateKind, Option<String>)>,
     /// Gates (by id) pinned to the top of the Signals card.
     pub watched: Vec<Uuid>,
+    /// A workspace, demo or copy waiting to replace the open circuit until
+    /// the player answers the unsaved-changes question.
+    pub pending_open: Option<files::PendingOpen>,
+    /// The outcome of the last save (set by the save system).
+    pub last_save: Option<Result<String, String>>,
 }
 
 impl Default for EditorState {
@@ -108,6 +119,8 @@ impl Default for EditorState {
             part_tab: PartTab::default(),
             dragging_part: None,
             watched: Vec::new(),
+            pending_open: None,
+            last_save: None,
         }
     }
 }
@@ -162,6 +175,7 @@ impl Plugin for EditorPlugin {
                     hud::signals_card_system,
                     hud::toast_system,
                     hud::editor_keys_system,
+                    undo::undo_keys_system,
                 ),
             );
     }

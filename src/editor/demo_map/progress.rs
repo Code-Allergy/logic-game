@@ -2,9 +2,13 @@
 //! completed, for the demo map.
 //!
 //! On native builds the record is a small JSON file next to the saved
-//! workspaces, `workspaces/.demo-progress.json` (the leading dot keeps it
-//! out of the workspace list), written atomically like a workspace
-//! manifest (to `.demo-progress.json.tmp`, then renamed):
+//! workspaces, `<workspaces>/.demo-progress.json` (the leading dot keeps it
+//! out of the workspace list; the folder is
+//! [`crate::editor::workspace::WorkspaceStore::player`]'s), written
+//! atomically like a workspace manifest (to `.demo-progress.json.tmp`,
+//! then renamed, the previous file kept as `.demo-progress.json.bak`). A
+//! file that cannot be read is kept as `.demo-progress.json.corrupt`
+//! before the record starts over:
 //!
 //! ```json
 //! { "format": "gatequest-progress", "version": 2,
@@ -29,7 +33,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// The progress file, inside [`crate::WORKSPACE_DIR`].
+/// The progress file, inside the workspaces folder.
 pub const PROGRESS_FILE: &str = ".demo-progress.json";
 pub const PROGRESS_FORMAT: &str = "gatequest-progress";
 pub const PROGRESS_VERSION: u32 = 2;
@@ -75,24 +79,42 @@ impl DemoProgress {
         progress
     }
 
-    /// The player's record: on native from [`PROGRESS_FILE`] in
-    /// [`crate::WORKSPACE_DIR`], in memory on the web.
+    /// The player's record: on native from [`PROGRESS_FILE`] in the
+    /// player's workspaces folder (read from the old `./workspaces` when
+    /// only that one has it), in memory on the web.
     pub fn for_player() -> Self {
-        if cfg!(target_arch = "wasm32") {
-            Self::in_memory()
-        } else {
-            Self::load_in(Path::new(crate::WORKSPACE_DIR))
+        match crate::editor::workspace::WorkspaceStore::player() {
+            Some(store) => match store.legacy() {
+                Some(old) if !store.dir().join(PROGRESS_FILE).exists() => {
+                    Self::load_from(&old.join(PROGRESS_FILE), store.dir())
+                }
+                _ => Self::load_in(store.dir()),
+            },
+            None => Self::in_memory(),
         }
     }
 
     /// The record in `dir`, saved back there on change. A missing file is
-    /// an empty record; an unreadable one is logged and starts empty (it is
-    /// replaced on the next change).
+    /// an empty record; an unreadable one is logged, kept as
+    /// `<file>.corrupt` and starts empty (the file is replaced on the next
+    /// change).
     pub fn load_in(dir: &Path) -> Self {
-        let path = dir.join(PROGRESS_FILE);
-        let mut progress = match std::fs::read_to_string(&path) {
+        Self::load_from(&dir.join(PROGRESS_FILE), dir)
+    }
+
+    /// The record read from `source`, saved to [`PROGRESS_FILE`] in `dir`.
+    fn load_from(source: &Path, dir: &Path) -> Self {
+        let path = source;
+        let mut progress = match std::fs::read_to_string(path) {
             Ok(text) => Self::from_json(&text).unwrap_or_else(|e| {
                 warn!("Ignoring {}: {e}", path.display());
+                if source.parent() == Some(dir) {
+                    let mut corrupt = path.as_os_str().to_os_string();
+                    corrupt.push(".corrupt");
+                    if let Err(e) = std::fs::copy(path, &corrupt) {
+                        warn!("Cannot back up {}: {e}", path.display());
+                    }
+                }
                 Self::default()
             }),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Self::default(),
@@ -101,7 +123,7 @@ impl DemoProgress {
                 Self::default()
             }
         };
-        progress.file = Some(path);
+        progress.file = Some(dir.join(PROGRESS_FILE));
         progress
     }
 
@@ -147,9 +169,7 @@ impl DemoProgress {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, self.to_json())?;
-        std::fs::rename(tmp, path)
+        crate::editor::workspace::write_atomic(path, self.to_json().as_bytes())
     }
 
     pub fn is_opened(&self, id: &str) -> bool {
@@ -392,9 +412,21 @@ mod tests {
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(PROGRESS_FILE), "not json").unwrap();
-        let p = DemoProgress::load_in(&dir);
+        let mut p = DemoProgress::load_in(&dir);
         assert!(p.is_empty());
         assert!(p.file().is_some(), "still saved there on change");
+        // The unreadable file is kept before the record starts over, and
+        // survives the next saves.
+        let corrupt = dir.join(format!("{PROGRESS_FILE}.corrupt"));
+        assert_eq!(std::fs::read_to_string(&corrupt).unwrap(), "not json");
+        p.mark_opened("gates");
+        p.save().unwrap();
+        p.mark_opened("counter");
+        p.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&corrupt).unwrap(), "not json");
+        // The save before the last one is the backup.
+        let bak = std::fs::read_to_string(dir.join(format!("{PROGRESS_FILE}.bak"))).unwrap();
+        assert_eq!(DemoProgress::from_json(&bak).unwrap().last(), Some("gates"));
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(DemoProgress::in_memory().file(), None);

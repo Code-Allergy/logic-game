@@ -30,6 +30,7 @@ use crate::ui_style::{caption, card, chunky_button, egui_color, heavy, stroke};
 
 use super::EditorState;
 use super::demo_map::progress::DemoProgress;
+use super::files::{OpenRequest, open_now};
 use super::hud::hud_layout;
 
 /// The challenge the open workspace is, and its last check.
@@ -96,36 +97,45 @@ pub fn challenge_workspace(challenge: &Challenge, fresh: bool) -> (Arc<Workspace
     )
 }
 
-/// Open `challenge` in the editor (from the road or the Library); with
-/// `fresh`, the starter even when there is saved work.
+/// Opening `challenge` (from the road or the Library), as a request for
+/// [`super::files::request_open`], which asks first when that would lose
+/// unsaved changes; with `fresh`, the starter even when there is saved
+/// work.
+pub fn challenge_request(challenge: &Challenge, fresh: bool) -> OpenRequest {
+    let name = challenge.workspace_name();
+    let (workspace, resumed) = challenge_workspace(challenge, fresh);
+    let status = if resumed {
+        format!("Back to \"{}\": your saved work.", challenge.title)
+    } else {
+        format!(
+            "Challenge: {}. Build it, then press Check.",
+            challenge.title
+        )
+    };
+    OpenRequest::Workspace {
+        name,
+        workspace,
+        read_only: false,
+        // A fresh starter is not saved anywhere yet, but there is nothing
+        // in it to lose: it counts as unsaved only once edited.
+        unsaved: false,
+        status: Some(status),
+    }
+}
+
+/// Open `challenge` now, without the unsaved-changes question (for "Start
+/// over", which the player already confirmed by clicking twice).
 pub fn open_challenge(
     challenge: &Challenge,
     fresh: bool,
     editor: Option<&mut EditorState>,
     load: &mut MessageWriter<LoadWorkspaceEvent>,
 ) {
-    let name = challenge.workspace_name();
-    let (workspace, resumed) = challenge_workspace(challenge, fresh);
-    if let Some(editor) = editor {
-        editor.current_workspace = Some(name.clone());
-        editor.workspace_file_name = name.clone();
-        editor.selected_gate_type = None;
+    let editor = editor.map(|editor| {
         editor.library_open = false;
-        editor.clear_connection();
-        editor.status = Some(if resumed {
-            format!("Back to \"{}\": your saved work.", challenge.title)
-        } else {
-            format!(
-                "Challenge: {}. Build it, then press Check.",
-                challenge.title
-            )
-        });
-    }
-    load.write(LoadWorkspaceEvent {
-        name,
-        workspace,
-        read_only: false,
+        editor
     });
+    open_now(editor, load, challenge_request(challenge, fresh));
 }
 
 /// The challenge card (left, below the file card) while a challenge is
@@ -154,7 +164,11 @@ pub fn challenge_card_system(
     }
     let palette = theme.palette;
     let layout = hud_layout(ctx);
-    let room = layout.library_rect();
+    let mut room = layout.library_rect();
+    // Below the Undo and Redo card when those do not fit in the file card.
+    if !super::undo::fits_in_file_card(super::ui::file_card_room(&layout)) {
+        room.min.y += super::undo::UNDO_CARD_HEIGHT + layout.gap;
+    }
     let completed = progress.is_completed(&current.id);
     let (mut check, mut restart, mut fold) = (false, false, false);
     egui::Area::new(egui::Id::new("hud_challenge"))
@@ -473,6 +487,28 @@ mod tests {
         );
         assert!(challenge_of(&c.workspace_name(), true).is_none());
         assert!(challenge_of("Half adder", false).is_none());
+    }
+
+    /// Opening a challenge is an ordinary open request, so it goes behind
+    /// the unsaved-changes question like any other.
+    #[test]
+    fn a_challenge_opens_as_an_editable_workspace_request() {
+        let catalog = demos::catalog().unwrap();
+        let c = catalog.challenge("half_adder").unwrap();
+        let OpenRequest::Workspace {
+            name,
+            workspace,
+            read_only,
+            unsaved,
+            status,
+        } = challenge_request(c, true)
+        else {
+            panic!("a workspace request");
+        };
+        assert_eq!(name, c.workspace_name());
+        assert_eq!(workspace.root.name, name);
+        assert!(!read_only && !unsaved);
+        assert!(status.is_some_and(|s| s.contains(&c.title)));
     }
 
     #[test]

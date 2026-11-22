@@ -23,10 +23,16 @@ version 6 file or as a copy of a demo (see [Round trips](#round-trips)).
 
 ## Layout
 
-A workspace named `<name>` is a folder `workspaces/<name>/` (characters
-`/ \ : * ? " < > |` in the name are replaced by `_`) containing one file,
-`manifest.json`. The file is pretty-printed JSON, written atomically (to
-`manifest.json.tmp`, then renamed).
+A workspace named `<name>` is a folder `workspaces/<name>/` in the
+player's data folder (see "Saving" in the README) containing
+`manifest.json`. The folder name is the name made safe: characters
+`/ \ : * ? " < > |` and control characters become `_`, a leading dot
+becomes `_` (so `..` cannot leave the folder), trailing dots and spaces
+are dropped, Windows device names (`CON`, `NUL`, `COM1`, ...) get a `_`
+prefix, and it is at most 80 characters. Names that differ only in case
+are the same workspace. The file is pretty-printed JSON, written
+atomically (to `manifest.json.tmp`, flushed to disk, then renamed); the
+previous file is kept as `manifest.json.bak`.
 
 ## `manifest.json`
 
@@ -166,11 +172,15 @@ Loading fails with a message shown in the editor when:
 
 - `manifest.json` has a `version` other than 5 or 6 (including the pre-v2
   bundle format, version 4, and anything without a version), or `format` is
-  not `"gatequest-workspace"`. Old workspaces are **not migrated**.
+  not `"gatequest-workspace"`. Old workspaces are **not migrated**; a file
+  from a newer version says so (update the game), and is never overwritten
+  by a save.
 - The folder has no `manifest.json` but a legacy single-file save
   `workspaces/<name>.json` exists (format version 1).
 - The root circuit is missing, two circuits share an id, a `SubCircuit`
-  refers to a definition that is not in the file, or a port is unlabelled.
+  refers to a definition that is not in the file, or a port is unlabelled
+  (the editor names unlabelled ports `in0`, `out0`, `display0`, ... when it
+  saves, so only hand-made files hit this).
 - A definition contains itself, directly or through other definitions
   (`subcircuit "A" (…) contains itself`).
 
