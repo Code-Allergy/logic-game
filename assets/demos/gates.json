@@ -7,9 +7,9 @@
       "name": "not",
       "title": "NOT",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-150, 0]},
-        {"name": "gate", "type": "Not", "at": [0, 0]},
-        {"name": "Y", "type": "Output", "at": [150, 0]}
+        {"name": "A", "type": "Input", "at": [0, 0]},
+        {"name": "gate", "type": "Not", "at": [140, 0]},
+        {"name": "Y", "type": "Output", "at": [280, 0]}
       ],
       "wires": [["A", "gate"], ["gate", "Y"]]
     },
@@ -17,10 +17,10 @@
       "name": "and",
       "title": "AND",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-150, 50]},
-        {"name": "B", "type": "Input", "at": [-150, -50]},
-        {"name": "gate", "type": "And", "at": [0, 0]},
-        {"name": "Y", "type": "Output", "at": [150, 0]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "gate", "type": "And", "at": [140, 0]},
+        {"name": "Y", "type": "Output", "at": [280, 0]}
       ],
       "wires": [["A", "gate.a"], ["B", "gate.b"], ["gate", "Y"]]
     },
@@ -28,10 +28,10 @@
       "name": "or",
       "title": "OR",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-150, 50]},
-        {"name": "B", "type": "Input", "at": [-150, -50]},
-        {"name": "gate", "type": "Or", "at": [0, 0]},
-        {"name": "Y", "type": "Output", "at": [150, 0]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "gate", "type": "Or", "at": [140, 0]},
+        {"name": "Y", "type": "Output", "at": [280, 0]}
       ],
       "wires": [["A", "gate.a"], ["B", "gate.b"], ["gate", "Y"]]
     },
@@ -39,10 +39,10 @@
       "name": "xor",
       "title": "XOR",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-150, 50]},
-        {"name": "B", "type": "Input", "at": [-150, -50]},
-        {"name": "gate", "type": "Xor", "at": [0, 0]},
-        {"name": "Y", "type": "Output", "at": [150, 0]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "gate", "type": "Xor", "at": [140, 0]},
+        {"name": "Y", "type": "Output", "at": [280, 0]}
       ],
       "wires": [["A", "gate.a"], ["B", "gate.b"], ["gate", "Y"]]
     },
@@ -50,10 +50,10 @@
       "name": "nand",
       "title": "NAND",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-150, 50]},
-        {"name": "B", "type": "Input", "at": [-150, -50]},
-        {"name": "gate", "type": "Nand", "at": [0, 0]},
-        {"name": "Y", "type": "Output", "at": [150, 0]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "gate", "type": "Nand", "at": [140, 0]},
+        {"name": "Y", "type": "Output", "at": [280, 0]}
       ],
       "wires": [["A", "gate.a"], ["B", "gate.b"], ["gate", "Y"]]
     },
@@ -61,10 +61,10 @@
       "name": "nor",
       "title": "NOR",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-150, 50]},
-        {"name": "B", "type": "Input", "at": [-150, -50]},
-        {"name": "gate", "type": "Nor", "at": [0, 0]},
-        {"name": "Y", "type": "Output", "at": [150, 0]}
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "gate", "type": "Nor", "at": [140, 0]},
+        {"name": "Y", "type": "Output", "at": [280, 0]}
       ],
       "wires": [["A", "gate.a"], ["B", "gate.b"], ["gate", "Y"]]
     },
@@ -72,20 +72,20 @@
       "name": "gates",
       "title": "Logic gates",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-300, 100]},
-        {"name": "B", "type": "Input", "at": [-300, -100]},
-        {"name": "not_a", "use": "not", "label": "NOT", "at": [0, 250]},
-        {"name": "and_ab", "use": "and", "label": "AND", "at": [0, 150]},
-        {"name": "or_ab", "use": "or", "label": "OR", "at": [0, 50]},
-        {"name": "xor_ab", "use": "xor", "label": "XOR", "at": [0, -50]},
-        {"name": "nand_ab", "use": "nand", "label": "NAND", "at": [0, -150]},
-        {"name": "nor_ab", "use": "nor", "label": "NOR", "at": [0, -250]},
-        {"name": "y_not", "type": "Output", "label": "NOT A", "at": [250, 250]},
-        {"name": "y_and", "type": "Output", "label": "A AND B", "at": [250, 150]},
-        {"name": "y_or", "type": "Output", "label": "A OR B", "at": [250, 50]},
-        {"name": "y_xor", "type": "Output", "label": "A XOR B", "at": [250, -50]},
-        {"name": "y_nand", "type": "Output", "label": "A NAND B", "at": [250, -150]},
-        {"name": "y_nor", "type": "Output", "label": "A NOR B", "at": [250, -250]}
+        {"name": "A", "type": "Input", "at": [0, 80]},
+        {"name": "B", "type": "Input", "at": [0, -80]},
+        {"name": "not_a", "use": "not", "label": "NOT", "at": [280, 200]},
+        {"name": "and_ab", "use": "and", "label": "AND", "at": [280, 120]},
+        {"name": "or_ab", "use": "or", "label": "OR", "at": [280, 40]},
+        {"name": "xor_ab", "use": "xor", "label": "XOR", "at": [280, -40]},
+        {"name": "nand_ab", "use": "nand", "label": "NAND", "at": [280, -120]},
+        {"name": "nor_ab", "use": "nor", "label": "NOR", "at": [280, -200]},
+        {"name": "y_not", "type": "Output", "label": "NOT A", "at": [420, 200]},
+        {"name": "y_and", "type": "Output", "label": "A AND B", "at": [420, 120]},
+        {"name": "y_or", "type": "Output", "label": "A OR B", "at": [420, 40]},
+        {"name": "y_xor", "type": "Output", "label": "A XOR B", "at": [420, -40]},
+        {"name": "y_nand", "type": "Output", "label": "A NAND B", "at": [420, -120]},
+        {"name": "y_nor", "type": "Output", "label": "A NOR B", "at": [420, -200]}
       ],
       "wires": [
         ["A", "not_a.A", "and_ab.A", "or_ab.A", "xor_ab.A", "nand_ab.A", "nor_ab.A"],

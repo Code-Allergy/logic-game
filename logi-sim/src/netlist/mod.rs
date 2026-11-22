@@ -21,7 +21,8 @@ mod tests;
 
 pub use builder::Builder;
 pub use kind::{
-    CombDeps, MAX_ADDR_BITS, MAX_SCREEN_BITS, MAX_WIDTH, NodeKind, PinWidths, ScreenMode, mask,
+    CombDeps, MAX_ADDR_BITS, MAX_READ_PORTS, MAX_SCREEN_BITS, MAX_WIDTH, NodeKind, PinWidths,
+    ScreenMode, mask,
 };
 pub use validate::ValidationError;
 

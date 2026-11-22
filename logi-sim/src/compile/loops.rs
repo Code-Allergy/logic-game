@@ -4,9 +4,9 @@
 //! Vertices are global nets (before unification, so port crossings keep
 //! their direction). Edges are every combinational input->output pin pair of
 //! a primitive (section 3.3: everything except Delay/Register/SrLatch inputs
-//! and RAM we/wdata), plus port-crossing edges. A strongly connected
-//! component with more than one net, or a net with an edge to itself, is a
-//! loop.
+//! and RAM we/wdata; a `Ram2` read address feeds only its own read data),
+//! plus port-crossing edges. A strongly connected component with more than
+//! one net, or a net with an edge to itself, is a loop.
 
 use super::elaborate::Elab;
 use super::program::NodePath;
@@ -30,15 +30,16 @@ pub(super) fn find_loops(e: &Elab<'_>) -> Vec<Vec<NodePath>> {
             let deps = node.kind.comb_deps();
             for (pin, net_in) in node.inputs.iter().enumerate() {
                 let Some(net_in) = *net_in else { continue };
-                let comb = match deps {
+                let comb = |q: usize| match deps {
                     CombDeps::All => true,
                     CombDeps::None => false,
                     CombDeps::Pins(pins) => pins.contains(&(pin as u8)),
+                    CombDeps::Diagonal { first } => pin == first as usize + q,
                     CombDeps::Instance(_) => unreachable!(),
                 };
-                if comb {
-                    let from = e.global(inst, net_in);
-                    for &out in &node.outputs {
+                let from = e.global(inst, net_in);
+                for (q, &out) in node.outputs.iter().enumerate() {
+                    if comb(q) {
                         edges.push((from, e.global(inst, out)));
                     }
                 }

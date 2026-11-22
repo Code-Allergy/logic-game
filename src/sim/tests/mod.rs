@@ -5,7 +5,9 @@ mod demos;
 mod gallery;
 pub mod geometry_tests;
 mod instance_views;
+mod routing;
 mod rtl;
+mod rtl_cells;
 mod screens;
 mod visuals;
 
@@ -439,6 +441,154 @@ fn ram_contents_survive_edits() {
     set_input(&mut app, "Addr", 1);
     run(&mut app, 1);
     assert_eq!(input_value(&app, q, 0), 0x5A);
+}
+
+/// A dual-port RAM with initial contents: written at `WA`, read at `RA`
+/// and `RB`.
+fn ram2_circuit(app: &mut App) -> (Entity, Entity, Entity) {
+    let wa = create_gate(app, GateKind::Input { w: 3 }, "WA");
+    let we = create_gate(app, GateKind::Input { w: 1 }, "WE");
+    let data = create_gate(app, GateKind::Input { w: 8 }, "Data");
+    let ra = create_gate(app, GateKind::Input { w: 3 }, "RA");
+    let rb = create_gate(app, GateKind::Input { w: 3 }, "RB");
+    let kind = GateKind::Ram2 {
+        addr_bits: 3,
+        w: 8,
+        reads: 2,
+        mask: false,
+        init: vec![0x11, 0x22, 0x33],
+    };
+    let ram = create_gate(app, kind, "ram");
+    let qa = create_gate(app, GateKind::Output { w: 8 }, "QA");
+    let qb = create_gate(app, GateKind::Output { w: 8 }, "QB");
+    for (k, src) in [wa, we, data, ra, rb].into_iter().enumerate() {
+        create_wire(app, src, 0, ram, k as u8);
+    }
+    create_wire(app, ram, 0, qa, 0);
+    create_wire(app, ram, 1, qb, 0);
+    (ram, qa, qb)
+}
+
+#[test]
+fn ram2_reads_two_ports_and_keeps_its_contents_across_edits() {
+    let mut app = app();
+    let (_, qa, qb) = ram2_circuit(&mut app);
+    set_input(&mut app, "RA", 1);
+    set_input(&mut app, "RB", 2);
+    run(&mut app, 1);
+    assert_eq!(
+        (input_value(&app, qa, 0), input_value(&app, qb, 0)),
+        (0x22, 0x33)
+    );
+
+    // Write 5 while reading 1 and 5 elsewhere.
+    set_input(&mut app, "WA", 5);
+    set_input(&mut app, "Data", 0xA5);
+    set_input(&mut app, "WE", 1);
+    set_input(&mut app, "RB", 5);
+    run(&mut app, 2);
+    set_input(&mut app, "WE", 0);
+    run(&mut app, 1);
+    assert_eq!(
+        (input_value(&app, qa, 0), input_value(&app, qb, 0)),
+        (0x22, 0xA5)
+    );
+
+    // An unrelated edit keeps the contents.
+    let extra = create_gate(&mut app, GateKind::Not { w: 8 }, "extra");
+    let data = gate(&mut app, "Data");
+    create_wire(&mut app, data, 0, extra, 0);
+    run(&mut app, 1);
+    assert_eq!(input_value(&app, qb, 0), 0xA5);
+    set_input(&mut app, "RA", 0);
+    run(&mut app, 1);
+    assert_eq!(input_value(&app, qa, 0), 0x11);
+}
+
+#[test]
+fn ram2_round_trips_through_version_5_and_version_6() {
+    let mut app = app();
+    ram2_circuit(&mut app);
+    let saved = read_back(&mut app);
+    let ram = saved
+        .root
+        .nodes
+        .iter()
+        .find(|n| matches!(n.kind, GateKind::Ram2 { .. }))
+        .unwrap();
+    assert_eq!(ram.kind.display_name(), "DUAL-PORT RAM");
+
+    // Version 5.
+    let dir = temp_dir();
+    save_workspace_in(&dir, "ram2", &saved).unwrap();
+    let text = std::fs::read_to_string(dir.join("ram2/manifest.json")).unwrap();
+    assert!(text.contains("\"type\": \"Ram2\""), "{text}");
+    assert_eq!(read_workspace_in(&dir, "ram2").unwrap(), saved);
+    std::fs::remove_dir_all(dir).ok();
+
+    // Version 6: named pins, hex initial contents, optional parameters.
+    let text = r#"{"format": "gatequest-workspace", "version": 6, "root": "c", "circuits": [
+        {"name": "c", "nodes": [
+            {"name": "a", "type": "Input", "w": 4, "at": [0, 0]},
+            {"name": "d", "type": "Input", "w": 16, "at": [0, 60]},
+            {"name": "m", "type": "Ram2", "addr_bits": 4, "w": 16, "reads": 3,
+             "mask": true, "init": ["0xBEEF", 7], "at": [200, 0]},
+            {"name": "k", "type": "DualPortRam", "addr_bits": 4, "w": 16, "reads": 1,
+             "at": [200, 200]},
+            {"name": "q", "type": "Output", "w": 16, "at": [400, 0]}],
+          "wires": [["a", "m.waddr", "m.raddr2", "k.raddr0"], ["d", "m.we", "m.wdata"],
+                    ["m.rdata2", "q"]]}]}"#;
+    let file = crate::sim::source::parse(text).unwrap();
+    let expanded =
+        crate::sim::source::expand(&file, "test", &crate::sim::source::Externals::default())
+            .unwrap();
+    let kinds: Vec<&GateKind> = expanded
+        .workspace
+        .root
+        .nodes
+        .iter()
+        .map(|n| &n.kind)
+        .collect();
+    assert!(kinds.contains(&&GateKind::Ram2 {
+        addr_bits: 4,
+        w: 16,
+        reads: 3,
+        mask: true,
+        init: vec![0xBEEF, 7],
+    }));
+    assert!(kinds.contains(&&GateKind::Ram2 {
+        addr_bits: 4,
+        w: 16,
+        reads: 1,
+        mask: false,
+        init: vec![],
+    }));
+    assert_eq!(expanded.workspace.root.wires.len(), 6);
+    let canonical = crate::sim::source::to_text(&file);
+    assert_eq!(crate::sim::source::parse(&canonical).unwrap(), file);
+
+    // Simulated: the masked write reaches only the bits set in `we`.
+    let mut app = self::app();
+    load(&mut app, expanded.workspace);
+    assert!(wires(&mut app).iter().all(|(_, _, s)| s.connected));
+    run(&mut app, 1);
+    assert_eq!(value_at(&mut app, "q"), 0xBEEF);
+    set_input(&mut app, "d", 0x00F0);
+    run(&mut app, 2);
+    assert_eq!(value_at(&mut app, "q"), 0xBEFF);
+
+    // Bad parameters are refused with the kind's own message.
+    let bad = text.replace("\"reads\": 3", "\"reads\": 9");
+    let err = crate::sim::source::expand(
+        &crate::sim::source::parse(&bad).unwrap(),
+        "test",
+        &crate::sim::source::Externals::default(),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("read ports must be 1..=8"),
+        "{err}"
+    );
 }
 
 #[test]

@@ -141,6 +141,75 @@ fn steps_run_while_paused_and_probes_read_back() {
     assert_eq!(f.values.len(), 3, "readback is exactly the probes");
 }
 
+#[test]
+fn reset_returns_to_tick_zero_and_keeps_inputs_and_rate() {
+    let (d, en, q, mem) = counter_design(false);
+    let clock = FakeClock::new();
+    let c = || clock.read();
+    let mut e = LocalEngine::new(Options::debug());
+    e.core.reset(); // before any load: no-op
+    e.load(&d, 1);
+    e.core.set_input(en, 1);
+    e.core.set_probes(probes(q, mem));
+    e.core.step(9);
+    e.run_frame(Duration::from_secs(1), &c);
+    assert_eq!((e.frame().tick, e.frame().values[0]), (9, 8));
+    e.core.step(100); // queued steps are dropped by the reset
+    e.core.reset();
+    assert_eq!(e.core.tick_count(), 0);
+    assert_eq!(e.run_frame(Duration::from_secs(1), &c), 0);
+    assert_eq!((e.frame().tick, e.frame().values[0]), (0, 0));
+    assert_eq!(e.core.rate(), Rate::Paused);
+    // `en` is still driven: the counter runs again from 0.
+    e.core.step(5);
+    e.run_frame(Duration::from_secs(1), &c);
+    assert_eq!((e.frame().tick, e.frame().values[0]), (5, 5));
+}
+
+/// A reset clears a screen's memory, and the memory probe's copy follows
+/// at the next frame even though no write was committed since.
+#[test]
+fn reset_clears_screen_memory_probes() {
+    use crate::netlist::ScreenMode;
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let addr = b.input("addr", 4);
+    let we = b.input("we", 1);
+    let data = b.input("data", 4);
+    let screen = b.screen(
+        ScreenMode::Memory,
+        2,
+        2,
+        4,
+        &[Some(addr), Some(we), Some(data)],
+    );
+    let node = |net: NetId| d.root_def().nets[net].driver.0;
+    let (addr, we, data) = (node(addr), node(we), node(data));
+    let clock = FakeClock::new();
+    let c = || clock.read();
+    let mut e = LocalEngine::new(Options::debug());
+    e.load(&d, 1);
+    e.core.set_mem_probes(vec![MemProbe {
+        path: Vec::new(),
+        node: screen,
+    }]);
+    e.core.set_input(addr, 5);
+    e.core.set_input(data, 9);
+    e.core.set_input(we, 1);
+    e.core.step(2); // the inputs are staged for a tick
+    e.run_frame(Duration::from_secs(1), &c);
+    let drawn = e.frame().mems[0].clone().expect("resolved");
+    assert_eq!(drawn[5], 9);
+    e.core.set_input(we, 0);
+    e.core.reset();
+    assert!(e.core.dirty());
+    e.run_frame(Duration::from_secs(1), &c);
+    let cleared = e.frame().mems[0].clone().expect("resolved");
+    assert!(!Arc::ptr_eq(&drawn, &cleared));
+    assert_eq!(&cleared[..], &[0; 16]);
+}
+
 fn ram_node(d: &Design) -> NodeId {
     d.root_def()
         .nodes
@@ -379,6 +448,21 @@ mod threaded {
         let f = e.frame();
         assert_eq!((f.tick, f.values[0], f.revision), (10, 9, 1));
         assert_eq!(e.tick_count(), 10);
+    }
+
+    #[test]
+    fn reset_on_the_worker() {
+        let (d, en, q, mem) = counter_design(false);
+        let e = loaded(&d);
+        e.set_input(en, 1);
+        e.set_probes(probes(q, mem));
+        e.step(10);
+        e.reset();
+        e.sync();
+        assert_eq!((e.tick_count(), e.frame().values[0]), (0, 0));
+        e.step(3);
+        e.sync();
+        assert_eq!((e.tick_count(), e.frame().values[0]), (3, 3));
     }
 
     #[test]

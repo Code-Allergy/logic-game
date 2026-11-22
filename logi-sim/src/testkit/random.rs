@@ -5,7 +5,8 @@
 //! construction: combinational pins are only ever connected to nets that
 //! already exist, and the only pins wired afterwards (possibly to later nets,
 //! forming feedback) are non-combinational state inputs (`Delay` d,
-//! `Register` en/d, `SrLatch` s/r, `Ram` we/wdata, every `Screen` pin). Optionally a loop is
+//! `Register` en/d, `SrLatch` s/r, `Ram` we/wdata, `Ram2` waddr/we/wdata,
+//! every `Screen` pin). Optionally a loop is
 //! injected for diagnostics tests.
 
 use std::sync::Arc;
@@ -331,7 +332,8 @@ impl<'a> DefGen<'a> {
     fn state_node(&mut self) {
         let w = self.width();
         let addr_bits = self.rng.range(1, 6) as u8;
-        let kinds = if self.cfg.screens { 6 } else { 5 };
+        // Screens come last so that designs without them are unchanged.
+        let kinds = if self.cfg.screens { 7 } else { 6 };
         match self.rng.below(kinds) {
             0 => self.deferred_node(NodeKind::Delay { w }),
             1 => self.deferred_node(NodeKind::Register { w }),
@@ -340,23 +342,7 @@ impl<'a> DefGen<'a> {
             3 => {
                 self.comb(NodeKind::DLatch { w });
             }
-            // A screen has no outputs and no combinational inputs.
-            5 => {
-                let mode = match self.rng.below(3) {
-                    0 => ScreenMode::Pixel,
-                    1 => ScreenMode::Memory,
-                    _ => ScreenMode::Scan,
-                };
-                let x_bits = self.rng.range(1, 3) as u8;
-                let y_bits = self.rng.range(1, 3) as u8;
-                self.deferred_node(NodeKind::Screen {
-                    mode,
-                    x_bits,
-                    y_bits,
-                    w,
-                });
-            }
-            _ => {
+            4 => {
                 let init: Vec<u64> = (0..self.rng.below(1 << addr_bits))
                     .map(|_| self.rng.next_u64())
                     .collect();
@@ -371,6 +357,45 @@ impl<'a> DefGen<'a> {
                 self.connect(src, id, 0);
                 self.deferred.push((id, 1, 1));
                 self.deferred.push((id, 2, w));
+            }
+            5 => {
+                let reads = self.rng.range(1, 3) as u8;
+                let mask = self.rng.coin();
+                let init: Vec<u64> = (0..self.rng.below(1 << addr_bits))
+                    .map(|_| self.rng.next_u64())
+                    .collect();
+                // Read addresses are combinational (drawn before the node
+                // exists); the write port is deferred.
+                let srcs: Vec<_> = (0..reads).map(|_| self.source(addr_bits)).collect();
+                let id = self.add(NodeKind::Ram2 {
+                    addr_bits,
+                    w,
+                    reads,
+                    mask,
+                    init: Arc::from(init),
+                });
+                for (k, src) in srcs.into_iter().enumerate() {
+                    self.connect(src, id, 3 + k as u8);
+                }
+                self.deferred.push((id, 0, addr_bits));
+                self.deferred.push((id, 1, if mask { w } else { 1 }));
+                self.deferred.push((id, 2, w));
+            }
+            // A screen has no outputs and no combinational inputs.
+            _ => {
+                let mode = match self.rng.below(3) {
+                    0 => ScreenMode::Pixel,
+                    1 => ScreenMode::Memory,
+                    _ => ScreenMode::Scan,
+                };
+                let x_bits = self.rng.range(1, 3) as u8;
+                let y_bits = self.rng.range(1, 3) as u8;
+                self.deferred_node(NodeKind::Screen {
+                    mode,
+                    x_bits,
+                    y_bits,
+                    w,
+                });
             }
         }
     }

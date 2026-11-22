@@ -83,6 +83,7 @@ pub fn family(kind: &GateKind) -> Family {
         | G::DLatch { .. }
         | G::SrLatch
         | G::Ram { .. }
+        | G::Ram2 { .. }
         | G::Rom { .. } => Family::State,
         _ => Family::Logic,
     }
@@ -168,10 +169,14 @@ pub enum Paint {
     Fault,
     Screen,
     Halo,
+    /// The bench, for the gap a wire cuts in the one it passes over.
+    Bench,
+    /// A wire the simulator did not accept.
+    FaultText,
 }
 
 impl Paint {
-    pub const ALL: [Paint; 19] = [
+    pub const ALL: [Paint; 21] = [
         Paint::Ink,
         Paint::Tile,
         Paint::StateTint,
@@ -191,6 +196,8 @@ impl Paint {
         Paint::Fault,
         Paint::Screen,
         Paint::Halo,
+        Paint::Bench,
+        Paint::FaultText,
     ];
 
     pub fn color(self, p: &Palette) -> Color {
@@ -214,6 +221,8 @@ impl Paint {
             Paint::Fault => p.fault,
             Paint::Screen => p.screen,
             Paint::Halo => p.halo,
+            Paint::Bench => p.bench,
+            Paint::FaultText => p.fault_text,
         }
     }
 
@@ -450,6 +459,7 @@ pub fn tile_caption(kind: &GateKind) -> Option<String> {
         G::DLatch { .. } => "D-L".into(),
         G::SrLatch => "SR".into(),
         G::Ram { .. } => "RAM".into(),
+        G::Ram2 { .. } => "RAM2".into(),
         G::Rom { .. } => "ROM".into(),
         G::Const { w, value } if *w > 4 => format!("{value:X}"),
         G::Const { value, .. } => format!("{value}"),

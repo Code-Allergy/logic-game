@@ -277,6 +277,63 @@ pub fn register_file(addr_bits: u8, w: u8) -> Design {
     d
 }
 
+/// [`register_file`] as one [`NodeKind::Ram2`] with two read ports: the
+/// same ports and the same behaviour, with `init` as initial contents.
+pub fn register_file_ram2(addr_bits: u8, w: u8, init: &[u64]) -> Design {
+    let mut d = Design::new(format!("regfile_ram2_{addr_bits}x{w}"));
+    let r = d.root;
+    let mut b = d.builder(r);
+    let we = b.input("we", 1);
+    let waddr = b.input("waddr", addr_bits);
+    let wdata = b.input("wdata", w);
+    let ra = b.input("ra", addr_bits);
+    let rb = b.input("rb", addr_bits);
+    let q = b.ram2(waddr, we, wdata, &[ra, rb], init);
+    b.output("qa", q[0]);
+    b.output("qb", q[1]);
+    d
+}
+
+/// A FIFO of `2^addr_bits` words of `w` bits on one [`NodeKind::Ram2`]:
+/// ports `push, pop, data -> head, count`. A push writes at the tail and a
+/// pop advances the head (each ignored when full or empty); `head` is the
+/// word at the head, read combinationally at the head address while the
+/// tail is written.
+pub fn fifo(addr_bits: u8, w: u8) -> Design {
+    let mut d = Design::new(format!("fifo{addr_bits}x{w}"));
+    let r = d.root;
+    let mut b = d.builder(r);
+    let push = b.input("push", 1);
+    let pop = b.input("pop", 1);
+    let data = b.input("data", w);
+    let (head_reg, head) = b.state_placeholder(NodeKind::Register { w: addr_bits });
+    let (tail_reg, tail) = b.state_placeholder(NodeKind::Register { w: addr_bits });
+    let (count_reg, count) = b.state_placeholder(NodeKind::Register { w: addr_bits + 1 });
+    let full = b.bit(count, addr_bits);
+    let empty_n = b.reduce_or(count);
+    let not_full = b.not(full);
+    let do_push = b.and(push, not_full);
+    let do_pop = b.and(pop, empty_n);
+    let q = b.ram2(tail, do_push, data, &[head], &[]);
+    // head += pop, tail += push, count += push - pop.
+    let head_next = b.inc(head);
+    b.connect(do_pop, (head_reg, 0));
+    b.connect(head_next, (head_reg, 1));
+    let tail_next = b.inc(tail);
+    b.connect(do_push, (tail_reg, 0));
+    b.connect(tail_next, (tail_reg, 1));
+    let up = b.inc(count);
+    let ones = b.konst(addr_bits + 1, u64::MAX);
+    let down = b.add(count, ones, None).0;
+    let moved = b.xor(do_push, do_pop);
+    let next = b.mux(do_push, down, up);
+    b.connect(moved, (count_reg, 0));
+    b.connect(next, (count_reg, 1));
+    b.output("head", q[0]);
+    b.output("count", count);
+    d
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // A small CPU
 // ─────────────────────────────────────────────────────────────────────────────

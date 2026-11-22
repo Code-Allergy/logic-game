@@ -11,23 +11,29 @@
 //!   materials;
 //! - display text is re-formatted only when the shown value, width or
 //!   [`DisplayConfig`] change ([`DisplayedValue`]);
-//! - wire geometry is recomputed only for wires whose endpoints changed or
-//!   whose endpoint gate moved (a drag moves only that gate's wires); wires
-//!   run from pin to pin;
+//! - wires are routed on the grid ([`super::routing`]) by
+//!   [`route_wires_system`] only when gates or wires come or go, a pin
+//!   layout or the view changes, or a gate moves; a move keeps every sink
+//!   path whose pins stayed put, so a drag re-routes only that gate's wires;
 //! - a wire is cased: an ink casing under a coloured core (thicker for
-//!   buses), with a value pill on buses; colour, thickness and pill follow
-//!   [`WireState`] and the loop highlight;
+//!   buses), meshes along the routed path with rounded corners, a junction
+//!   dot where it branches off its net, a gap where another wire passes
+//!   over it, and a value pill on a bus; a value change only swaps the
+//!   core's shared material;
 //! - a combinational-loop compile error highlights the gates and wires on
 //!   the loop in the open view ([`LoopHighlight`]) until a later compile
 //!   succeeds;
 //! - a [`Theme`] change recolours the shared materials, wires and texts
-//!   once.
+//!   once;
+//! - the gate being dragged comes to the front, with its wires above the
+//!   other wires, and stays there after the drop until another gate is
+//!   dragged ([`OnTop`]).
 //!
 //! [`SimulationVisualsPlugin`] has no rendering, window or egui
 //! dependencies (it creates the mesh and material stores when they are
 //! missing), so headless tests run the same systems.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -40,13 +46,14 @@ use super::art::{
     casing_for, family, pill_size, shorten, tile_caption, tile_radius,
 };
 use super::bridge::sync_design_system;
+use super::routing::{self, NetRoute, NetSpec, RouteProblem, RouteStats, SinkPath};
+use super::shapes::{Shape, corner_radius, round_corners};
 use super::view::CircuitView;
 use super::{
     CircuitLibrary, DisplayConfig, GateIdentity, GateKind, GateLabel, GateType, GateValues,
-    LogicDisplay, SelectedGate, SimDiagnostics, WireEndpoints, WireState,
-    calculate_connection_geometry, format_value,
+    LogicDisplay, Selected, SelectedGate, SimDiagnostics, WireEndpoints, WireState, format_value,
 };
-use crate::theme::{Palette, Theme};
+use crate::theme::Theme;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Work counter
@@ -148,9 +155,53 @@ pub struct NameTag;
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct SelectionHalo;
 
-/// The ink casing under a wire's core (a child of the wire).
+/// The ink casing under a wire's core (a child of the wire, with a mesh
+/// of its own).
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct WireCasing;
+
+/// The coloured core of a wire (a child of the wire, with a mesh of its
+/// own).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct WireCore;
+
+/// A piece of the junction dot where a wire branches off its net (a child
+/// of the wire): the ink ring, or the core-coloured face.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct WireJunction {
+    pub core: bool,
+}
+
+/// The gaps wires cut in the casings of the wires they pass over: one
+/// entity for the open view, one mesh.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct WireGaps;
+
+/// The routed shape of a wire: its own part of its net's tree, in world
+/// coordinates. Written by [`route_wires_system`] only when it changes.
+#[derive(Component, Debug, Clone, PartialEq, Default)]
+pub struct WirePath {
+    /// Corner points, horizontal and vertical runs, ending at the sink
+    /// pin; the first wire of a net starts at the driver pin, the others
+    /// at their junction.
+    pub points: Vec<Vec2>,
+    /// The junction dot, for a branch.
+    pub junction: Option<Vec2>,
+    /// Where the net's value pill sits (on the longest horizontal run of a
+    /// bus; one wire of the net carries it).
+    pub pill: Option<Vec2>,
+}
+
+/// How a wire is drawn: the core's paint and width.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct WireStyle {
+    pub paint: Paint,
+    pub core: f32,
+}
+
+/// The core width a wire's meshes were built for.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+pub struct WireBuilt(pub f32);
 
 /// What a tile was built from; a library change rebuilds a subcircuit's
 /// tile only when this changes.
@@ -167,27 +218,45 @@ pub struct TileSpec {
 
 const LOOP_OUTLINE_MARGIN: f32 = 6.0;
 const HALO_MARGIN: f32 = 6.0;
-/// Local z of a wire's value label (above every wire, below the gates).
-const WIRE_LABEL_Z: f32 = 4.5;
 /// Knob travel of an input switch.
 const KNOB_TRAVEL: f32 = 6.0;
-/// Wires are staggered in depth, so where two cross, the upper one's
-/// casing cuts a gap in the lower one (an overpass), not a join.
-const WIRE_STAGGER: f32 = 0.004;
+/// Corner radius of a wire (one grid step, less on short runs).
+pub const WIRE_CORNER: f32 = 20.0;
+/// Bench showing on each side of a wire where it passes over another.
+const GAP: f32 = 4.0;
+/// Outer radius of a junction dot (ink ring included): the design's r 9
+/// dot with a 2.5 ring, a little wider than the casing on a bus.
+fn junction_radius(core: f32) -> f32 {
+    (9.0 + OUTLINE * 0.5).max(casing_for(core) * 0.5 + 4.0)
+}
+/// Depth slots for nets, and the depth between two slots.
+const NET_SLOTS: u32 = 2048;
+const NET_STAGGER: f32 = 0.1;
+/// Depths within a net's slot: casing, core, junction ring and face; a
+/// crossing gap sits just below the upper net's casing.
+const CASING_Z: f32 = 0.0;
+const CORE_Z: f32 = 0.02;
+const JUNCTION_INK_Z: f32 = 0.04;
+const JUNCTION_CORE_Z: f32 = 0.06;
+const GAP_BELOW: f32 = 0.02;
+/// Depth of the value pills: above every wire, below the gates.
+const PILL_Z: f32 = -5.0;
 
-/// Core colour and core thickness of a wire. The casing is
-/// [`casing_for`] the thickness.
-pub fn wire_style(state: &WireState, on_loop: bool, palette: &Palette) -> (Color, f32) {
+/// The paint and core width of a wire: tomato on a loop, the fault colour
+/// when the simulator refused it, else by value and width; buses are
+/// thicker. The casing is [`casing_for`] the core.
+pub fn wire_look(state: &WireState, on_loop: bool) -> WireStyle {
     let bus = state.width > 1;
-    let thickness = if bus { BUS_CORE } else { BIT_CORE };
-    let color = if on_loop {
-        palette.fault
-    } else if !state.connected {
-        palette.fault_text
-    } else {
-        palette.signal(state.width, state.value)
-    };
-    (color, thickness)
+    WireStyle {
+        paint: if on_loop {
+            Paint::Fault
+        } else if !state.connected {
+            Paint::FaultText
+        } else {
+            Paint::signal(state.width, state.value)
+        },
+        core: if bus { BUS_CORE } else { BIT_CORE },
+    }
 }
 
 /// One hex digit per 4 bits, as written in a bus's value pill.
@@ -198,9 +267,15 @@ pub fn wire_label_text(value: u64, width: u8) -> String {
     )
 }
 
-fn wire_depth(entity: Entity) -> f32 {
-    crate::temp::CONNECTION_Z_LEVEL - (entity.to_bits() % 997) as f32 * WIRE_STAGGER
-}
+/// z of the [`OnTop`] gate. Every other gate sits at 0, and a tile's art
+/// spans local z -0.7 (the selection halo) to 0.5 (texts), so the lifted
+/// tile with all its pins, labels and caption draws above every other.
+pub const ON_TOP_Z: f32 = 2.0;
+
+/// The gate last dragged: drawn in front of the others (z [`ON_TOP_Z`]),
+/// its wires above the other wires. At most one gate has it.
+#[derive(Component, Debug)]
+pub struct OnTop;
 
 /// Value of a gate's main signal: the output of an input, the input of
 /// anything else.
@@ -629,37 +704,53 @@ pub fn update_screen_pictures_system(
     });
 }
 
-/// Give new wires a core sprite and an ink casing;
-/// [`update_wire_geometry_system`] places them and
-/// [`update_wire_style_system`] colours them.
+/// Give new wires their pieces: an ink casing and a coloured core, each a
+/// mesh of their own (rebuilt when the route changes) with a shared
+/// material (swapped when the value changes). [`route_wires_system`] routes
+/// them and [`update_wire_visuals_system`] draws them.
 pub fn attach_wire_visuals_system(
     mut commands: Commands,
     wires: Query<Entity, Added<WireEndpoints>>,
-    theme: Res<Theme>,
+    art: Res<CanvasArt>,
+    mut meshes: ResMut<Assets<Mesh>>,
     work: Option<Res<EntityWorkCounter>>,
 ) {
     for entity in &wires {
         EntityWorkCounter::add(&work, 1);
         commands.entity(entity).try_insert((
-            Sprite {
-                color: theme.palette.off,
-                custom_size: Some(Vec2::new(1.0, BIT_CORE)),
-                ..default()
+            WirePath::default(),
+            WireStyle {
+                paint: Paint::Off,
+                core: BIT_CORE,
             },
-            Transform::from_xyz(0.0, 0.0, wire_depth(entity)),
+            WireBuilt::default(),
+            Transform::from_xyz(0.0, 0.0, crate::temp::CONNECTION_Z_LEVEL),
             Visibility::Visible,
         ));
         commands.spawn((
-            Sprite {
-                color: theme.palette.ink,
-                custom_size: Some(Vec2::new(1.0, casing_for(BIT_CORE))),
-                ..default()
-            },
-            Transform::from_xyz(0.0, 0.0, -WIRE_STAGGER * 0.5),
+            Mesh2d(meshes.add(empty_mesh())),
+            MeshMaterial2d(art.material(Paint::Ink)),
+            Transform::from_xyz(0.0, 0.0, CASING_Z),
             WireCasing,
             ChildOf(entity),
         ));
+        commands.spawn((
+            Mesh2d(meshes.add(empty_mesh())),
+            MeshMaterial2d(art.material(Paint::Off)),
+            Transform::from_xyz(0.0, 0.0, CORE_Z),
+            WireCore,
+            ChildOf(entity),
+        ));
     }
+}
+
+/// A mesh with nothing to draw (one degenerate triangle).
+fn empty_mesh() -> Mesh {
+    Shape {
+        positions: vec![Vec2::ZERO; 3],
+        indices: vec![0, 1, 2],
+    }
+    .into_mesh()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -777,6 +868,84 @@ pub fn apply_loop_highlight_system(
             commands.entity(entity).insert(LoopHighlight);
         } else if !wanted && marked {
             commands.entity(entity).remove::<LoopHighlight>();
+        }
+    }
+}
+
+/// A gate being dragged: it has [`Selected`] and moved.
+type BeingDragged = (With<Selected>, Changed<Transform>);
+/// The gate in front, when it is not the one being dragged.
+type InFrontNotDragged = (With<OnTop>, Without<Selected>);
+
+/// Bring the gate being dragged (it has [`Selected`] and moved) to the
+/// front: z [`ON_TOP_Z`] and [`OnTop`]; the gate that was in front goes
+/// back to z 0. The order holds after the drop ("last dragged on top").
+pub fn bring_dragged_gate_to_front_system(
+    mut commands: Commands,
+    mut dragged: Query<(Entity, &mut Transform), BeingDragged>,
+    mut on_top: Query<(Entity, &mut Transform), InFrontNotDragged>,
+) {
+    let mut lifted = false;
+    for (entity, mut transform) in &mut dragged {
+        if transform.translation.z != ON_TOP_Z {
+            transform.translation.z = ON_TOP_Z;
+            commands.entity(entity).try_insert(OnTop);
+            lifted = true;
+        }
+    }
+    if !lifted {
+        return;
+    }
+    for (entity, mut transform) in &mut on_top {
+        transform.translation.z = 0.0;
+        commands.entity(entity).try_remove::<OnTop>();
+    }
+}
+
+/// Lift the wires of the [`OnTop`] gate above the other wires, and put
+/// those of a gate that left the front back. Runs only when the front
+/// gate changes.
+pub fn lift_front_wires_system(
+    added: Query<&GateIdentity, Added<OnTop>>,
+    mut removed: RemovedComponents<OnTop>,
+    identities: Query<&GateIdentity>,
+    front: Query<&GateIdentity, With<OnTop>>,
+    routing: Res<WireRouting>,
+    mut wires: Query<(Entity, &WireEndpoints, &mut Transform), Without<GateIdentity>>,
+) {
+    let dropped: HashSet<Uuid> = removed
+        .read()
+        .filter_map(|e| identities.get(e).ok().map(|id| id.uuid))
+        .collect();
+    if added.is_empty() && dropped.is_empty() {
+        return;
+    }
+    let lifted: HashSet<Uuid> = front.iter().map(|id| id.uuid).collect();
+    let touched: HashSet<NetKey> = wires
+        .iter()
+        .filter(|(_, ep, _)| {
+            [ep.source_gate, ep.sink_gate]
+                .iter()
+                .any(|id| lifted.contains(id) || dropped.contains(id))
+        })
+        .map(|(_, ep, _)| (ep.source_gate, ep.source_pin))
+        .collect();
+    for key in touched {
+        let Some(net) = routing.nets.get(&key) else {
+            continue;
+        };
+        let sinks: Vec<(SinkKey, Entity)> = wires
+            .iter()
+            .filter(|(_, ep, _)| (ep.source_gate, ep.source_pin) == key)
+            .map(|(e, ep, _)| ((ep.sink_gate, ep.sink_pin), e))
+            .collect();
+        let z = depth_of(&key, &sinks, &lifted)(net.slot);
+        for (_, entity) in &sinks {
+            if let Ok((_, _, mut transform)) = wires.get_mut(*entity)
+                && transform.translation.z != z
+            {
+                transform.translation.z = z;
+            }
         }
     }
 }
@@ -934,148 +1103,362 @@ pub fn update_name_tags_system(
 // Wires
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Gate entities by id and wire entities by endpoint gate, for the open
-/// view. Rebuilt only after structural changes.
-#[derive(Default)]
-pub struct WireIndex {
-    gates: HashMap<Uuid, Entity>,
-    wires_of: HashMap<Uuid, Vec<Entity>>,
+/// A net of the open view: its driver pin.
+type NetKey = (Uuid, u8);
+/// A sink of a net: its gate and input pin.
+type SinkKey = (Uuid, u8);
+
+/// One routed net of the open view.
+#[derive(Debug, Clone)]
+struct RoutedNet {
+    /// Depth slot (see [`net_depth`]).
+    slot: u32,
+    driver: Vec2,
+    sinks: Vec<(SinkKey, Vec2)>,
+    route: NetRoute,
 }
 
-/// World positions of a wire's two pins (driver output, sink input), or
-/// gate centres where a gate has no pin layout yet.
-pub fn wire_ends(
-    ep: &WireEndpoints,
-    source: (Vec3, Option<&PinLayout>),
-    sink: (Vec3, Option<&PinLayout>),
-) -> (Vec3, Vec3) {
-    let from = source.0
-        + source
-            .1
-            .map_or(Vec2::ZERO, |l| l.output(ep.source_pin))
-            .extend(0.0);
-    let to = sink.0
-        + sink
-            .1
-            .map_or(Vec2::ZERO, |l| l.input(ep.sink_pin))
-            .extend(0.0);
-    (from, to)
+/// The routes of the open view's wires, by net, and the state of the
+/// incremental routing (see [`route_wires_system`]).
+#[derive(Resource, Debug, Default)]
+pub struct WireRouting {
+    nets: HashMap<NetKey, RoutedNet>,
+    /// Kept paths may run through boxes after a drag: route strictly on
+    /// the next quiet frame.
+    repair: bool,
+    /// Counters of the last routing pass.
+    pub stats: RouteStats,
+    /// Routing passes so far.
+    pub passes: u64,
 }
 
-/// Place wire sprites between their pins: only wires whose endpoints
-/// changed, and the wires of gates whose `Transform` or pin layout
-/// changed.
+impl WireRouting {
+    /// The routed tree of the net driven by `pin` of gate `driver`.
+    pub fn net(&self, driver: Uuid, pin: u8) -> Option<&NetRoute> {
+        self.nets.get(&(driver, pin)).map(|n| &n.route)
+    }
+}
+
+/// Depth of a net's wires. Nets get distinct depth slots, so where two
+/// cross, one is cleanly above the other.
+fn net_depth(slot: u32) -> f32 {
+    crate::temp::CONNECTION_Z_LEVEL - slot as f32 * NET_STAGGER
+}
+
+/// Depth of a net with an end on the [`OnTop`] gate: above every other
+/// net (still distinct per slot), below the value pills and the tiles.
+fn lifted_net_depth(slot: u32) -> f32 {
+    crate::temp::CONNECTION_Z_LEVEL + 2.0 - slot as f32 * (1.0 / NET_SLOTS as f32)
+}
+
+/// The depth of a net's wires, lifted when it touches a front gate.
+fn depth_of(
+    key: &NetKey,
+    sinks: &[(SinkKey, Entity)],
+    front: &HashSet<Uuid>,
+) -> impl Fn(u32) -> f32 {
+    let lifted = front.contains(&key.0) || sinks.iter().any(|((g, _), _)| front.contains(g));
+    move |slot| {
+        if lifted {
+            lifted_net_depth(slot)
+        } else {
+            net_depth(slot)
+        }
+    }
+}
+
+/// A free depth slot for a net, starting from a hash of its key so a net
+/// keeps its depth while others come and go.
+fn free_slot(key: &NetKey, used: &HashSet<u32>) -> u32 {
+    let bits = key.0.as_u128();
+    let mixed = ((bits as u64) ^ ((bits >> 64) as u64) ^ u64::from(key.1))
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let start = ((mixed >> 32) % u64::from(NET_SLOTS)) as u32;
+    (0..NET_SLOTS)
+        .map(|i| (start + i) % NET_SLOTS)
+        .find(|s| !used.contains(s))
+        .unwrap_or(start)
+}
+
+/// What wire `sink` of a routed net draws: its own part of the tree (and
+/// the net's pill when `pill` names it).
+pub fn wire_path(net: &NetRoute, sink: usize, pill: Option<(usize, Vec2)>) -> WirePath {
+    let own = &net.sinks[sink];
+    let mut points = own.points.clone();
+    // A branch leaving the tree at a corner: the corner is rounded, so the
+    // branch carries on the leg it continues up to where the curve starts.
+    if let (Some(at), Some(parent)) = (own.junction(), own.parent)
+        && points.len() >= 2
+        && let Some(parent) = net.sinks.get(parent)
+    {
+        let pp = &parent.points;
+        if let Some(i) = (1..pp.len().saturating_sub(1)).find(|&i| pp[i].distance(at) < 1e-3) {
+            let r = corner_radius(pp, i, WIRE_CORNER);
+            let d = (points[1] - points[0]).normalize_or_zero();
+            if r > 0.0 && d != Vec2::ZERO {
+                points.insert(0, at - d * r);
+            }
+        }
+    }
+    WirePath {
+        points,
+        junction: own.junction(),
+        pill: pill.filter(|p| p.0 == sink).map(|p| p.1),
+    }
+}
+
+/// Route the wires of the open view and give each wire its [`WirePath`].
+///
+/// Runs only when something changed: gates or wires added or removed, a
+/// pin layout, the view, or a gate's position. It keeps the path of every
+/// sink whose two pins stayed put ([`routing::route`] with kept paths), so
+/// dragging a gate re-routes only that gate's wires (and the branches
+/// hanging off them) and never touches the `Design`. While a gate moves,
+/// kept paths it now covers stay as they are; on the first frame without
+/// movement they are routed around it. A wire's [`WirePath`] is written
+/// only when it changed.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn update_wire_geometry_system(
-    mut index: Local<WireIndex>,
+pub fn route_wires_system(
+    mut commands: Commands,
+    mut routing: ResMut<WireRouting>,
     view: Res<CircuitView>,
+    art: Res<CanvasArt>,
+    mut meshes: ResMut<Assets<Mesh>>,
     new_gates: Query<(), Added<GateIdentity>>,
     mut removed_gates: RemovedComponents<GateIdentity>,
     mut removed_wires: RemovedComponents<WireEndpoints>,
-    moved: Query<&GateIdentity, Or<(Changed<Transform>, Changed<PinLayout>)>>,
-    rewired: Query<Entity, Changed<WireEndpoints>>,
-    all_gates: Query<(Entity, &GateIdentity)>,
-    all_wires: Query<(Entity, &WireEndpoints)>,
-    positions: Query<
-        (&Transform, Option<&PinLayout>),
-        (With<GateIdentity>, Without<WireEndpoints>),
+    moved: Query<Ref<GateIdentity>, (Changed<Transform>, Without<WireEndpoints>)>,
+    relaid: Query<(), (With<GateIdentity>, Changed<PinLayout>)>,
+    rewired: Query<(), Changed<WireEndpoints>>,
+    gates: Query<
+        (
+            &GateIdentity,
+            &Transform,
+            &GateType,
+            Option<&PinLayout>,
+            Option<&TileSpec>,
+        ),
+        Without<WireEndpoints>,
     >,
     mut wires: Query<
-        (
-            &WireEndpoints,
-            &mut Transform,
-            &mut Sprite,
-            Option<&Children>,
-        ),
+        (Entity, &WireEndpoints, &mut WirePath, &mut Transform),
         Without<GateIdentity>,
     >,
-    mut labels: Query<
-        &mut Transform,
-        (
-            With<WireValueLabel>,
-            Without<WireEndpoints>,
-            Without<GateIdentity>,
-        ),
-    >,
-    mut casings: Query<&mut Sprite, (With<WireCasing>, Without<WireEndpoints>)>,
-    work: Option<Res<EntityWorkCounter>>,
+    gaps: Query<&Mesh2d, With<WireGaps>>,
+    (work, front): (
+        Option<Res<EntityWorkCounter>>,
+        Query<&GateIdentity, With<OnTop>>,
+    ),
 ) {
+    let front: HashSet<Uuid> = front.iter().map(|id| id.uuid).collect();
     let removed = removed_gates.read().count() + removed_wires.read().count() > 0;
-    if view.is_changed() || removed || !new_gates.is_empty() || !rewired.is_empty() {
-        EntityWorkCounter::add(&work, all_gates.iter().len() + all_wires.iter().len());
-        index.gates = all_gates.iter().map(|(e, id)| (id.uuid, e)).collect();
-        index.wires_of.clear();
-        for (entity, ep) in &all_wires {
-            index
-                .wires_of
-                .entry(ep.source_gate)
-                .or_default()
-                .push(entity);
-            if ep.sink_gate != ep.source_gate {
-                index.wires_of.entry(ep.sink_gate).or_default().push(entity);
-            }
-        }
-    }
-
-    let mut dirty: Vec<Entity> = rewired.iter().collect();
-    for id in &moved {
-        if let Some(list) = index.wires_of.get(&id.uuid) {
-            dirty.extend_from_slice(list);
-        }
-    }
-    if dirty.is_empty() {
+    let moving = moved.iter().any(|id| !id.is_added());
+    let structural = view.is_changed()
+        || removed
+        || !new_gates.is_empty()
+        || !relaid.is_empty()
+        || !rewired.is_empty();
+    if !structural && !moving && !routing.repair {
         return;
     }
-    dirty.sort_unstable();
-    dirty.dedup();
-    let gate = |uuid: &Uuid| {
-        index
-            .gates
-            .get(uuid)
-            .and_then(|e| positions.get(*e).ok())
-            .map(|(t, l)| (t.translation, l))
+    let strict = !moving;
+
+    // The problem: a box per gate, a net per driven output pin, ordered by
+    // driver and sink ids as `routing::document_nets` orders a document.
+    let mut problem = RouteProblem::default();
+    let mut pins: HashMap<Uuid, (Vec2, Option<&PinLayout>, Option<&TileSpec>)> = HashMap::new();
+    for (id, transform, ty, layout, spec) in &gates {
+        let at = transform.translation.truncate();
+        problem.boxes.push(routing::gate_box(&ty.kind, at));
+        pins.insert(id.uuid, (at, layout, spec));
+    }
+    let mut grouped: BTreeMap<NetKey, Vec<(SinkKey, Entity)>> = BTreeMap::new();
+    for (entity, ep, ..) in &wires {
+        if pins.contains_key(&ep.source_gate) && pins.contains_key(&ep.sink_gate) {
+            grouped
+                .entry((ep.source_gate, ep.source_pin))
+                .or_default()
+                .push(((ep.sink_gate, ep.sink_pin), entity));
+        }
+    }
+    let pin_at = |gate: &Uuid, pin: u8, output: bool| {
+        let (at, layout, _) = pins[gate];
+        at + layout.map_or(Vec2::ZERO, |l| {
+            if output { l.output(pin) } else { l.input(pin) }
+        })
     };
-    for entity in dirty {
-        let Ok((ep, mut transform, mut sprite, children)) = wires.get_mut(entity) else {
-            continue;
-        };
-        EntityWorkCounter::add(&work, 1);
-        let (Some(source), Some(sink)) = (gate(&ep.source_gate), gate(&ep.sink_gate)) else {
-            continue;
-        };
-        let (from, to) = wire_ends(ep, source, sink);
-        let (mid, rot, dist) = calculate_connection_geometry(&from, &to);
-        let translation = mid.with_z(transform.translation.z);
-        if transform.translation != translation || transform.rotation != rot {
-            transform.translation = translation;
-            transform.rotation = rot;
-        }
-        let thickness = sprite.custom_size.map_or(BIT_CORE, |s| s.y);
-        let size = Some(Vec2::new(dist, thickness));
-        if sprite.custom_size != size {
-            sprite.custom_size = size;
-        }
-        for &child in children.into_iter().flatten() {
-            // Keep value labels upright.
-            if let Ok(mut label) = labels.get_mut(child) {
-                let upright = rot.inverse();
-                if label.rotation != upright {
-                    label.rotation = upright;
+    let mut keep: Vec<Vec<Option<SinkPath>>> = Vec::with_capacity(grouped.len());
+    let mut buses: Vec<bool> = Vec::with_capacity(grouped.len());
+    let mut dirty = 0;
+    for (key, sinks) in grouped.iter_mut() {
+        sinks.sort_by_key(|s| s.0);
+        let driver = pin_at(&key.0, key.1, true);
+        let at: Vec<Vec2> = sinks
+            .iter()
+            .map(|(s, _)| pin_at(&s.0, s.1, false))
+            .collect();
+        // A net whose driver moved or whose sinks changed is routed afresh
+        // (a tree depends on its sink order); otherwise sinks whose pins
+        // stayed put keep their paths.
+        let old = routing.nets.get(key).filter(|old| {
+            old.driver == driver
+                && old.sinks.len() == sinks.len()
+                && old.sinks.iter().zip(sinks.iter()).all(|(o, n)| o.0 == n.0)
+        });
+        let kept: Vec<Option<SinkPath>> = sinks
+            .iter()
+            .zip(&at)
+            .map(|((sink, _), pos)| {
+                let old = old?;
+                let index = |k: &SinkKey| sinks.iter().position(|(s, _)| s == k);
+                let i = old.sinks.iter().position(|(s, p)| s == sink && p == pos)?;
+                let mut path = old.route.sinks[i].clone();
+                if let Some(parent) = path.parent {
+                    path.parent = Some(index(&old.sinks[parent].0)?);
                 }
+                Some(path)
+            })
+            .collect();
+        dirty += kept.iter().filter(|k| k.is_none()).count();
+        keep.push(kept);
+        buses.push(
+            pins[&key.0]
+                .2
+                .and_then(|s| s.outputs.get(usize::from(key.1)))
+                .is_some_and(|&w| w > 1),
+        );
+        problem.nets.push(NetSpec { driver, sinks: at });
+    }
+    if !strict && dirty == 0 && !structural {
+        // A gate without wires moved: nothing to route until it settles.
+        routing.repair = true;
+        return;
+    }
+    let result = routing::route(&problem, &keep, strict);
+    routing.repair = !strict;
+    routing.stats = result.stats;
+    routing.passes += 1;
+
+    // Depth slots: kept for nets that stay, new ones for new nets.
+    let mut used: HashSet<u32> = grouped
+        .keys()
+        .filter_map(|k| routing.nets.get(k).map(|n| n.slot))
+        .collect();
+    let mut nets: HashMap<NetKey, RoutedNet> = HashMap::with_capacity(grouped.len());
+    let mut depths: Vec<f32> = Vec::with_capacity(grouped.len());
+    let mut written = 0;
+    for (ni, ((key, sinks), route)) in grouped.iter().zip(result.nets).enumerate() {
+        let slot = match routing.nets.get(key) {
+            Some(old) => old.slot,
+            None => {
+                let slot = free_slot(key, &used);
+                used.insert(slot);
+                slot
             }
-            if let Ok(mut casing) = casings.get_mut(child) {
-                let size = Some(Vec2::new(dist, casing_for(thickness)));
-                if casing.custom_size != size {
-                    casing.custom_size = size;
-                }
+        };
+        let z = depth_of(key, sinks, &front)(slot);
+        depths.push(z);
+        let pill = buses[ni]
+            .then(|| route.longest_horizontal())
+            .flatten()
+            .map(|(s, a, b)| (s, (a + b) * 0.5));
+        for (k, (_, entity)) in sinks.iter().enumerate() {
+            let Ok((_, _, mut path, mut transform)) = wires.get_mut(*entity) else {
+                continue;
+            };
+            let want = wire_path(&route, k, pill);
+            if *path != want {
+                *path = want;
+                written += 1;
             }
+            let at = Vec3::new(0.0, 0.0, z);
+            if transform.translation != at {
+                transform.translation = at;
+            }
+        }
+        nets.insert(
+            *key,
+            RoutedNet {
+                slot,
+                driver: problem.nets[ni].driver,
+                sinks: sinks
+                    .iter()
+                    .zip(&problem.nets[ni].sinks)
+                    .map(|((s, _), p)| (*s, *p))
+                    .collect(),
+                route,
+            },
+        );
+    }
+    routing.nets = nets;
+    EntityWorkCounter::add(&work, written);
+
+    // Crossing gaps: one mesh for the view, each gap at the depth just
+    // below the upper wire.
+    let casing = |net: usize| casing_for(if buses[net] { BUS_CORE } else { BIT_CORE });
+    let rects: Vec<(Vec2, Vec2, f32)> = result
+        .crossings
+        .iter()
+        .map(|c| {
+            let (h, v) = (c.horizontal.0, c.vertical.0);
+            let h_on_top = depths[h] >= depths[v];
+            let (upper, lower) = if h_on_top { (h, v) } else { (v, h) };
+            let across = casing(upper) * 0.5 + GAP;
+            let along = casing(lower) * 0.5 + 1.0;
+            let half = if h_on_top {
+                Vec2::new(along, across)
+            } else {
+                Vec2::new(across, along)
+            };
+            (c.at, half, depths[upper] - GAP_BELOW)
+        })
+        .collect();
+    let mesh = gap_mesh(&rects);
+    match gaps.single() {
+        Ok(handle) => {
+            let _ = meshes.insert(handle.id(), mesh);
+        }
+        Err(_) => {
+            commands.spawn((
+                Mesh2d(meshes.add(mesh)),
+                MeshMaterial2d(art.material(Paint::Bench)),
+                Transform::IDENTITY,
+                Visibility::Visible,
+                WireGaps,
+            ));
         }
     }
 }
 
-type WireStyleChanged = (
+/// The mesh of the crossing gaps: a rectangle per `(centre, half size,
+/// depth)`.
+fn gap_mesh(rects: &[(Vec2, Vec2, f32)]) -> Mesh {
+    if rects.is_empty() {
+        return empty_mesh();
+    }
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(rects.len() * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(rects.len() * 6);
+    for (c, h, z) in rects {
+        let base = positions.len() as u32;
+        for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            positions.push([c.x + sx * h.x, c.y + sy * h.y, *z]);
+        }
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let n = positions.len();
+    Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; n])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; n])
+    .with_inserted_indices(bevy::mesh::Indices::U32(indices))
+}
+
+type WireLookChanged = (
     With<WireEndpoints>,
-    Or<(Changed<WireState>, Added<LoopHighlight>)>,
+    Or<(Changed<WireState>, Changed<WirePath>, Added<LoopHighlight>)>,
 );
 
 fn label_paint(value: u64) -> Paint {
@@ -1086,13 +1469,13 @@ fn label_paint(value: u64) -> Paint {
     }
 }
 
-/// Spawn a bus's value label on its pill.
+/// Spawn a bus's value label on its pill, at `at` (local to the wire).
 fn spawn_value_label(
     commands: &mut Commands,
     art: &mut CanvasArt,
     meshes: &mut Assets<Mesh>,
     wire: Entity,
-    rotation: Quat,
+    at: Vec3,
     want: WireValueLabel,
 ) {
     let digits = usize::from(want.width.max(1)).div_ceil(4);
@@ -1115,11 +1498,7 @@ fn spawn_value_label(
             art.fonts.mono(13.0),
             TextColor(Color::WHITE),
             Tone(label_paint(want.value)),
-            Transform {
-                translation: Vec3::new(0.0, 0.0, WIRE_LABEL_Z),
-                rotation: rotation.inverse(),
-                ..default()
-            },
+            Transform::from_translation(at),
             want,
             ChildOf(wire),
         ))
@@ -1129,26 +1508,49 @@ fn spawn_value_label(
         });
 }
 
-/// Colour wires by value and width, draw loop wires in tomato, and keep the
-/// value pill of multi-bit wires (its text changes only when the value
-/// does).
+/// Draw wires: rebuild a wire's casing and core meshes (rounded corners)
+/// and its junction dot when its [`WirePath`] or thickness changed; on a
+/// value change only swap the core's shared material (marigold, slate,
+/// teal, tomato on a loop) and update the bus's value pill, whose text
+/// changes only when the value does.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-pub fn update_wire_style_system(
+pub fn update_wire_visuals_system(
     mut commands: Commands,
     theme: Res<Theme>,
     mut art: ResMut<CanvasArt>,
     mut meshes: ResMut<Assets<Mesh>>,
-    changed: Query<Entity, WireStyleChanged>,
+    changed: Query<Entity, WireLookChanged>,
     mut unmarked: RemovedComponents<LoopHighlight>,
-    mut wires: Query<(
-        &WireState,
-        Has<LoopHighlight>,
-        &Transform,
-        &mut Sprite,
-        Option<&Children>,
-    )>,
-    mut casings: Query<&mut Sprite, (With<WireCasing>, Without<WireState>)>,
-    mut labels: Query<(&mut WireValueLabel, &mut Text2d, &mut Tone, &mut TextColor)>,
+    mut wires: Query<
+        (
+            Option<&WireState>,
+            Has<LoopHighlight>,
+            Ref<WirePath>,
+            &mut WireStyle,
+            &mut WireBuilt,
+            &Transform,
+            Option<&Children>,
+        ),
+        With<WireEndpoints>,
+    >,
+    mut pieces: Query<
+        (&Mesh2d, &mut MeshMaterial2d<ColorMaterial>, Has<WireCore>),
+        (
+            Or<(With<WireCasing>, With<WireCore>)>,
+            Without<WireJunction>,
+        ),
+    >,
+    mut junctions: Query<(&WireJunction, &mut MeshMaterial2d<ColorMaterial>), Without<WireCasing>>,
+    mut labels: Query<
+        (
+            &mut WireValueLabel,
+            &mut Text2d,
+            &mut Tone,
+            &mut TextColor,
+            &mut Transform,
+        ),
+        Without<WireEndpoints>,
+    >,
     work: Option<Res<EntityWorkCounter>>,
 ) {
     let mut dirty: Vec<Entity> = changed.iter().chain(unmarked.read()).collect();
@@ -1159,40 +1561,86 @@ pub fn update_wire_style_system(
     dirty.dedup();
     let palette = theme.palette;
     for entity in dirty {
-        let Ok((state, on_loop, transform, mut sprite, children)) = wires.get_mut(entity) else {
+        let Ok((state, on_loop, path, mut style, mut built, transform, children)) =
+            wires.get_mut(entity)
+        else {
             continue;
         };
         EntityWorkCounter::add(&work, 1);
-        let (color, thickness) = wire_style(state, on_loop, &palette);
-        if sprite.color != color {
-            sprite.color = color;
+        let state = state.copied().unwrap_or_default();
+        let look = wire_look(&state, on_loop);
+        if *style != look {
+            *style = look;
         }
-        let length = sprite.custom_size.map_or(1.0, |s| s.x);
-        let size = Some(Vec2::new(length, thickness));
-        if sprite.custom_size != size {
-            sprite.custom_size = size;
-        }
-        for &child in children.into_iter().flatten() {
-            if let Ok(mut casing) = casings.get_mut(child) {
-                let size = Some(Vec2::new(length, casing_for(thickness)));
-                if casing.custom_size != size {
-                    casing.custom_size = size;
+        let children: Vec<Entity> = children.into_iter().flatten().copied().collect();
+
+        // Geometry.
+        if path.is_changed() || built.0 != look.core {
+            if built.0 != look.core {
+                built.0 = look.core;
+            }
+            let round = round_corners(&path.points, WIRE_CORNER);
+            let stroke = |width: f32| {
+                if round.len() >= 2 {
+                    Shape::path_stroke(&round, width).into_mesh()
+                } else {
+                    empty_mesh()
+                }
+            };
+            let (casing_mesh, core_mesh) = (stroke(casing_for(look.core)), stroke(look.core));
+            for &child in &children {
+                if let Ok((mesh, _, core)) = pieces.get(child) {
+                    let m = if core {
+                        core_mesh.clone()
+                    } else {
+                        casing_mesh.clone()
+                    };
+                    let _ = meshes.insert(mesh.id(), m);
+                }
+                if junctions.contains(child) {
+                    commands.entity(child).despawn();
+                }
+            }
+            if let Some(at) = path.junction {
+                let outer = junction_radius(look.core);
+                for (core, radius, z, paint) in [
+                    (false, outer, JUNCTION_INK_Z, Paint::Ink),
+                    (true, outer - OUTLINE, JUNCTION_CORE_Z, look.paint),
+                ] {
+                    let piece = art.piece(&mut meshes, MeshKey::dot(radius), paint, at.extend(z));
+                    commands.spawn((piece, WireJunction { core }, ChildOf(entity)));
                 }
             }
         }
 
-        let wanted = (state.width > 1 && state.connected).then_some(WireValueLabel {
-            value: state.value,
-            width: state.width,
-        });
-        let existing = children
-            .into_iter()
-            .flatten()
-            .copied()
-            .find(|c| labels.contains(*c));
+        // Colour: shared materials.
+        let handle = art.material(look.paint);
+        for &child in &children {
+            if let Ok((_, mut material, true)) = pieces.get_mut(child)
+                && material.0 != handle
+            {
+                material.0 = handle.clone();
+            }
+            if let Ok((junction, mut material)) = junctions.get_mut(child)
+                && junction.core
+                && material.0 != handle
+            {
+                material.0 = handle.clone();
+            }
+        }
+
+        // The value pill of a bus.
+        let wanted = (state.width > 1 && state.connected)
+            .then_some(WireValueLabel {
+                value: state.value,
+                width: state.width,
+            })
+            .zip(path.pill);
+        let existing = children.iter().copied().find(|c| labels.contains(*c));
+        let local = |at: Vec2| at.extend(PILL_Z - transform.translation.z);
         match (wanted, existing) {
-            (Some(want), Some(label)) => {
-                let (mut shown, mut text, mut tone, mut text_colour) =
+            (Some((want, at)), Some(label)) => {
+                let (mut shown, mut text, mut tone, mut text_colour, mut label_transform) =
                     labels.get_mut(label).expect("label");
                 if shown.width != want.width {
                     // The pill's size depends on the width.
@@ -1202,27 +1650,34 @@ pub fn update_wire_style_system(
                         &mut art,
                         &mut meshes,
                         entity,
-                        transform.rotation,
+                        local(at),
                         want,
                     );
-                } else if *shown != want {
-                    *shown = want;
-                    text.0 = wire_label_text(want.value, want.width);
-                    let paint = label_paint(want.value);
-                    if tone.0 != paint {
-                        tone.0 = paint;
-                        text_colour.0 = paint.color(&palette);
+                } else {
+                    if *shown != want {
+                        *shown = want;
+                        text.0 = wire_label_text(want.value, want.width);
+                        let paint = label_paint(want.value);
+                        if tone.0 != paint {
+                            tone.0 = paint;
+                            text_colour.0 = paint.color(&palette);
+                        }
+                    }
+                    if label_transform.translation != local(at) {
+                        label_transform.translation = local(at);
                     }
                 }
             }
-            (Some(want), None) => spawn_value_label(
-                &mut commands,
-                &mut art,
-                &mut meshes,
-                entity,
-                transform.rotation,
-                want,
-            ),
+            (Some((want, at)), None) => {
+                spawn_value_label(
+                    &mut commands,
+                    &mut art,
+                    &mut meshes,
+                    entity,
+                    local(at),
+                    want,
+                );
+            }
             (None, Some(label)) => {
                 commands.entity(label).despawn();
             }
@@ -1248,15 +1703,13 @@ pub fn colour_new_texts_system(
     }
 }
 
-/// On a theme change: recolour the shared materials, every wire and every
-/// theme-following text. Nothing runs while the theme stays put.
-#[allow(clippy::type_complexity)]
+/// On a theme change: recolour the shared materials (tiles, pins and
+/// wires) and every theme-following text. Nothing runs while the theme
+/// stays put.
 pub fn apply_theme_to_canvas_system(
     theme: Res<Theme>,
     art: Res<CanvasArt>,
     materials: Option<ResMut<Assets<ColorMaterial>>>,
-    mut wires: Query<(&WireState, Has<LoopHighlight>, &mut Sprite), With<WireEndpoints>>,
-    mut casings: Query<&mut Sprite, (With<WireCasing>, Without<WireEndpoints>)>,
     mut texts: Query<(&Tone, &mut TextColor)>,
 ) {
     if !theme.is_changed() {
@@ -1265,17 +1718,6 @@ pub fn apply_theme_to_canvas_system(
     let palette = theme.palette;
     if let Some(mut materials) = materials {
         art.apply_palette(&palette, &mut materials);
-    }
-    for (state, on_loop, mut sprite) in &mut wires {
-        let (color, _) = wire_style(state, on_loop, &palette);
-        if sprite.color != color {
-            sprite.color = color;
-        }
-    }
-    for mut casing in &mut casings {
-        if casing.color != palette.ink {
-            casing.color = palette.ink;
-        }
     }
     for (tone, mut colour) in &mut texts {
         let c = tone.0.color(&palette);
@@ -1308,6 +1750,7 @@ impl Plugin for SimulationVisualsPlugin {
         }
         app.init_resource::<Theme>()
             .init_resource::<CanvasArt>()
+            .init_resource::<WireRouting>()
             .register_type::<LoopHighlight>()
             .add_systems(
                 PostUpdate,
@@ -1316,13 +1759,15 @@ impl Plugin for SimulationVisualsPlugin {
                     (attach_screen_pictures_system, update_screen_pictures_system).chain(),
                     apply_loop_highlight_system,
                     update_selection_halo_system,
+                    bring_dragged_gate_to_front_system,
+                    lift_front_wires_system,
                     (
                         update_gate_state_system,
                         update_logic_displays_system,
                         update_name_tags_system,
                     ),
-                    update_wire_geometry_system,
-                    update_wire_style_system,
+                    route_wires_system,
+                    update_wire_visuals_system,
                     (colour_new_texts_system, apply_theme_to_canvas_system).chain(),
                 )
                     .chain()

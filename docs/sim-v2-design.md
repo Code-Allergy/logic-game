@@ -108,9 +108,10 @@ State (output depends on committed state; next state is computed at settle):
 | `DLatch{w}` | en(1), d → q | `en ? d : state` | `en ? d : state` (transparent) |
 | `SrLatch` | s, r → q | `r ? 0 : s ? 1 : state` | state |
 | `Ram{addr_bits, w}` | addr, we(1), wdata → rdata | write at commit | `mem[addr]` (combinational read) |
+| `Ram2{addr_bits, w, reads, mask}` | waddr, we(1 or w), wdata, raddr0.. → rdata0.. | write at commit (`mask`: the bits set in `we`) | `rdata_k = mem[raddr_k]` (combinational read) |
 | `Screen{mode, x_bits, y_bits, w}` | per `mode`, below → (none) | write (and clear, beam) at commit | none; the host reads the memory |
 
-A `Screen` (item 50) is a write-only memory of `2^(x_bits + y_bits)`
+A `Screen` (item 80) is a write-only memory of `2^(x_bits + y_bits)`
 words, pixel `(x, y)` at `y << x_bits | x`, starting all zero. `Pixel`:
 x, y, colour, draw(1), clear(1); at commit `clear` zeroes it, then `draw`
 writes `colour` at `(x, y)`. `Memory`: addr, we(1), wdata; a RAM without a
@@ -121,14 +122,16 @@ and the beam moves right. `x` stops one past the right edge and `y` one
 past the bottom; nothing is written there.
 
 Combinational dependency edges for loop detection and ranking are: every
-input→output of a combinational node, `DLatch` en/d→q, and `Ram`/`Rom`
-addr→data. `Delay`, `Register` and `SrLatch` outputs have no combinational
-dependency on their inputs.
+input→output of a combinational node, `DLatch` en/d→q, `Ram`/`Rom`
+addr→data, and `Ram2` raddr_k→rdata_k (each read address feeds only its
+own read data). `Delay`, `Register` and `SrLatch` outputs have no
+combinational dependency on their inputs.
 
 `Counter8`/`Counter64`/`BusExpand`/`BusReduceOr`/`Demux` are not primitives;
 the builder provides them as helpers composed from the table above.
-Later additions (`Sub`, shifts, `Mul`, n-way mux, dual-port RAM, bus-conflict
-detection for `Switch`) are additive and do not change the model.
+Later additions (`Sub`, shifts, `Mul`, n-way mux, bus-conflict detection
+for `Switch`) are additive and do not change the model; the dual-port RAM
+was added this way (`Ram2`, section 13 item 70).
 
 ## 4. Authoring IR (`logi_sim::netlist`)
 
@@ -573,8 +576,8 @@ ambiguous. Each is small and can be revisited.
     cycle (the compiler reports components, not single cycles). The marks
     follow `SimDiagnostics`, so they clear when a later revision loads.
     The message names up to 8 gates (`cell1 / NOT "inv"`), then "and N
-    more", and says the loop needs a Delay (or a Register, DLatch, SrLatch
-    or Ram); the editor adds that the previous circuit keeps running.
+    more", and says the loop needs a Delay (or a Register, D latch, SR
+    latch or RAM); the editor adds that the previous circuit keeps running.
 30. **Cargo features (#30).** The default build has neither
     `bevy/dynamic_linking` nor the world inspector. `dev` enables both
     (`inspector` alone enables the inspector); `cargo dev` is an alias for
@@ -878,19 +881,124 @@ ambiguous. Each is small and can be revisited.
     rounded up to the grid for wider ones such as a `Display`), 60 apart,
     splits right and merges left with separate stacks. Only generated
     positions change: ids, wiring and behaviour are the same, so existing
-    files load the same circuits. Some curriculum demos still have
-    overlapping boxes (two word inputs whose split columns meet in
+    files load the same circuits. The curriculum demos that still had
+    overlapping boxes (two word inputs whose split columns met in
     `ripple_adder/adder8` and `mux/mux2x8`, and the AND/OR arrays spaced 40
-    apart in `alu/alu8`); the no-overlap test covers the gallery only.
+    apart in `alu/alu8`) were re-laid out by hand, as were the other
+    demos (positions only: ids, wiring and behaviour are unchanged), and
+    the no-overlap and on-grid test now covers the curriculum as well as
+    the gallery. A wire from a word input to its own generated split
+    column still passes over the splits above its own; that follows from
+    the fixed adapter placement and cannot be avoided by moving nodes.
 49. **Preview renderer.** `examples/render_svg.rs` writes SVG previews of
     circuits (see `docs/save-format.md`, "Previews") and reports
     overlapping boxes and wires drawn through boxes. It is a development
     tool only; the app does not use it. `layout.rs` is unchanged: the
     gallery is placed by hand, not by `layout_circuit`.
-50. **Screens.** One primitive, `NodeKind::Screen { mode, x_bits, y_bits,
+50. **A 16-bit CPU of gates and its word twin.** The gallery gains
+    `cpu16`, a multi-cycle 16-bit CPU whose state is all curriculum
+    flip-flops (about 14 700 primitives after flattening, the largest
+    hand-made design so far), and `cpu16_rtl`, the same instruction set of
+    word primitives; both run the same prime-number program (see
+    `docs/save-format.md`, "The 16-bit CPUs"). To simulate a workspace
+    without the app, `gate_quest::sim::netlist::design_of` builds the
+    `Design` the bridge would build (ports in interface order, root
+    `Display`s as outputs named by their labels); the CPU tests and
+    `examples/cpu_bench.rs` use it with `logi_sim::sim::Sim` directly,
+    which is far faster than stepping the app. The gallery stays within
+    its 20 to 30 items (29). The CPU files were laid out with the help of
+    a script that checked every candidate position against the two
+    `render_svg` checks; a test now also checks that no wire of either CPU
+    passes through a box (the other items are only checked for
+    overlapping boxes, as before).
+60. **More RTL cells, by composition.** The importer (`src/sim/rtl.rs`
+    and `src/sim/rtl/`) maps arithmetic (`$mul`, `$div`, `$mod`, `$neg`,
+    `$alu`), every shift, the ordered comparisons, `$pmux`/`$bmux`/
+    `$demux`, `$lut`, flip-flops with synchronous and asynchronous
+    resets, sets, clears and loads (word and gate level), latches and
+    memories (`docs/rtl-import.md` has the table). No primitive was added
+    to `logi_sim`: a multiplier is shift and add (`Switch`, `Add`), a
+    divider restoring division (`Add`, `Or`, `Mux`), a variable shift a
+    barrel of `Mux` stages, `$lt` an `LtU` with the sign bits inverted
+    when signed. A `Mul` or `Shift` primitive would need the IR, the
+    reference interpreter, the compiler's lowering and simplification,
+    the runtime, the editor's `GateKind`, the palette and the save format
+    to agree, for cells that composition already computes exactly; the
+    cost is node count (a 32-bit multiplier is 63 primitives plus
+    adapters). Asynchronous controls cannot act between ticks (D2): the
+    output shows the reset value at once through a `Mux` (or `Or`/`And`
+    for set and clear) after the state element, and the state element
+    stores it at the next tick, with a warning; a design whose
+    asynchronous reset depends on its own outputs within a tick becomes
+    a combinational loop. Undefined results (`$pmux` with several selects,
+    division by 0, `$shiftx` out of range) take a fixed value. `inout`
+    ports stay refused rather than read as outputs. Generated adapters
+    gain `Extend` for a repeated bit (sign extension), and helper nodes
+    nobody reads are dropped.
+61. **RTL memories.** (Superseded by item 71: a memory with one write
+    port is now a `Ram2`.) `$mem_v2` and `$mem` (one write port at most)
+    became a `Rom` per read port when nothing writes them, a `Ram` when
+    every read port reads at the write address, and otherwise a
+    `Register` per word (up to 64 words) with a `Mux` tree per read port,
+    because the `Ram` primitive has a single address. The editor's `Ram`
+    has no initial contents (`GateKind::Ram` drops the netlist's `init`),
+    so initial contents are kept without changing the save format: the
+    state element holds `word ^ init[addr]`, with the initial word from a
+    `Rom` at the same address (or a constant per register), which is exact
+    and powers up reading `init`. A clocked read port is a `Delay` or
+    `Register` after the read, reading the old word or, when transparent,
+    the word being written. Building this exposed a compiler bug, fixed in
+    `logi_sim::compile::simplify`: constant identities looked up
+    immediates (a concatenation's shift) as slots, which panicked when a
+    shift was past the slot count (a small design with a constant in the
+    high bits of a `Merge`).
+70. **Dual-port RAM (`Ram2`).** `NodeKind::Ram2 { addr_bits, w, reads,
+    mask, init }` is a memory with one write port and `reads` independent
+    read ports (1 to `MAX_READ_PORTS` = 8). Pins: `waddr(addr_bits)`,
+    `we`, `wdata(w)`, then `raddr0 .. raddr{reads-1}` (each
+    `addr_bits`); outputs `rdata0 .. rdata{reads-1}` (each `w`). With
+    `mask` false `we` is 1 bit; with `mask` true it is `w` bits, a per-bit
+    write enable: the commit stores `(old & !we) | (wdata & we)`. The
+    timing is `Ram`'s exactly: every read is combinational from committed
+    memory, the write port is sampled at the end of the settle and
+    applied at the next commit, so a read at the address being written
+    returns the old word during that tick and the new one after the next
+    (a `Ram2` with one read port at the write address behaves as a `Ram`,
+    which a test checks tick by tick). Only `raddr_k → rdata_k` is
+    combinational (`CombDeps::Diagonal`), so a read port may be addressed
+    by another port's data (pointer chasing) and any read data may feed
+    the write port. In every layer it is a `Ram` with more read ports: the
+    interpreter keeps the pending write as `(addr, data, mask)` (a `Ram`'s
+    mask is all ones); the compiler emits one memory, one `MemRead` per
+    read port, snapshot copies of the write port and one commit
+    (`Commit::RamWrite`, or the new `Commit::RamWriteMasked`); the runtime
+    checks and applies it like `RamWrite`. `MemRead` is never packed, so
+    lane packing needs nothing. State carry-over is the `Ram`'s: one
+    `StateKey` with `StateLoc::Mem` per node, contents kept across edits
+    while the geometry `(addr_bits, w)` is unchanged; a new read port
+    count or `mask` keeps them, and so does a new `init` (the contents
+    are state; `init` is only the reset value), while a new geometry
+    resets them to `init`. The random generator draws it (one to three read ports, with
+    or without a mask; its write port is wired late, like other state
+    inputs), and bit-blasting keeps it whole. In the editor it is
+    `GateKind::Ram2` ("DUAL-PORT RAM" in the State group of the palette,
+    a violet tile taller per read port), saved as `"type": "Ram2"` in
+    versions 5 and 6 (`"DualPortRam"` is accepted when reading), with
+    `mask` and `init` optional.
+71. **RTL memories on `Ram2`.** `$mem_v2`/`$mem` with one write port (at
+    any size up to 2^20 words, any read addresses) become one `Ram2`
+    holding `INIT` directly, with a read port per memory read port (a
+    memory with more than eight becomes several copies written alike).
+    Byte enables use the per-bit write enable. This replaces the `Ram`
+    with an `Xor`-ed `Rom` of initial contents and the register file of
+    item 61, which was limited to 64 words. Only memories with several
+    write ports are still built from a `Register` per word (up to 64
+    words, a later port winning at the same address); larger ones are
+    refused.
+80. **Screens.** One primitive, `NodeKind::Screen { mode, x_bits, y_bits,
     w }` (section 3.3), for the editor's graphical display. It has no
     outputs: its memory is what the host draws, read back once per video
-    frame (item 51), never per tick. Sides are powers of two (1 to 8
+    frame (item 81), never per tick. Sides are powers of two (1 to 8
     address bits each, so at most 256 x 256), which makes the address of
     `(x, y)` just `y` and `x` side by side: a `Merge` in the editor.
     - **Framebuffer binding.** The display owns its video memory and has
@@ -924,7 +1032,7 @@ ambiguous. Each is small and can be revisited.
       1190/175/140), and the differential check now also compares every
       state element and every memory with the reference after each tick
       (screens have no outputs to compare).
-51. **Memory probes.** `EngineCore::set_mem_probes(Vec<MemProbe>)` names
+81. **Memory probes.** `EngineCore::set_mem_probes(Vec<MemProbe>)` names
     whole memories (a RAM or a screen, by instance path and node) to read
     back; `ProbeFrame::mems` holds one `Arc<[u64]>` copy per probe. A
     copy is taken only when the reader asked for one
@@ -936,7 +1044,7 @@ ambiguous. Each is small and can be revisited.
     keeps the same `Arc`, so the app redraws a screen's texture only when
     `Arc::ptr_eq` says it changed. The worker's 1 ms batches therefore
     copy a large screen at most once per video frame.
-52. **The screen part (app).** `GateKind::Screen { mode, width, height,
+82. **The screen part (app).** `GateKind::Screen { mode, width, height,
     palette, scale }` (`docs/save-format.md`) maps to one `Screen` node:
     `Pixel` and `Scanline` to the same simulator modes, `Framebuffer` and
     `Text` both to `Memory` (text is a framebuffer of 8-bit character
@@ -950,4 +1058,3 @@ ambiguous. Each is small and can be revisited.
     pixel) only when its copy is a new `Arc`. The gallery gained a fourth
     category, `displays`, with one item per mode, so its tests now expect
     four categories and 20 to 35 items (was three and 20 to 30).
-

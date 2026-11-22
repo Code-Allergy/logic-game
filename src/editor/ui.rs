@@ -547,11 +547,13 @@ pub fn editor_ui_system(
                 .show(ui, |ui| {
             for tip in [
                 "1–9: pick a part from the open tab; click or drag it onto the canvas",
-                "Left-click: select a part (inspector: toggle inputs, edit, delete)",
+                "Left-click: select a part (inspector: toggle inputs, edit, delete); \
+                 empty canvas: deselect",
                 "Right-drag: move a part · Middle-drag: pan · Wheel: zoom",
                 "Delete: delete the selected part",
                 "W: wire tool (click source, then sink, choose pins)",
-                "F: fit the circuit · Esc: drop the armed part",
+                "F: fit the circuit · R: reset to tick 0",
+                "Esc: drop the armed part or wire tool, else deselect",
                 "T: day or night workshop",
             ] {
                 ui.label(egui::RichText::new(tip).size(12.0));
@@ -582,17 +584,9 @@ pub fn editor_ui_system(
     // Place a workspace as a cell: its root becomes a definition, keyed by
     // the root's id (definitions already in the library are kept).
     let mut place = |editor_state: &mut EditorState, name: String, ws: &WorkspaceDocument| {
-        let mut definitions: HashMap<_, _> = ws.definitions.clone();
-        definitions.insert(ws.root.id, Arc::new(ws.root.clone()));
-        writers
-            .register_definitions
-            .write(RegisterDefinitions { definitions });
-        editor_state.arm(
-            GateKind::SubCircuit {
-                definition: ws.root.id,
-            },
-            Some(name),
-        );
+        let (registration, kind) = RegisterDefinitions::chip(ws);
+        writers.register_definitions.write(registration);
+        editor_state.arm(kind, Some(name));
     };
     if let Some(demo) = place_catalog {
         place(&mut editor_state, demo.title.clone(), &demo.workspace);

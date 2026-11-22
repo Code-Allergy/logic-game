@@ -344,6 +344,21 @@ impl Sim {
                         *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
                     }
                 },
+                Commit::RamWriteMasked {
+                    mem,
+                    mask,
+                    addr,
+                    data,
+                } => unsafe {
+                    let bits = *self.slots.get_unchecked(mask as usize);
+                    if bits != 0 {
+                        let m = self.mems.get_unchecked_mut(mem as usize);
+                        let a = *self.slots.get_unchecked(addr as usize) as usize & (m.len() - 1);
+                        let word = m.get_unchecked_mut(a);
+                        *word = (*word & !bits) | (*self.slots.get_unchecked(data as usize) & bits);
+                        *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
+                    }
+                },
             }
         }
     }
@@ -372,6 +387,27 @@ impl Sim {
             unsafe { code::exec(&env, b, 0, b.len, s) };
         }
         debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+    }
+
+    /// Return to power-on: every state element (registers, latches,
+    /// delays, RAM, screens) back to its initial value, ROM and RAM `init`
+    /// contents restored, tick 0, then the tick-0 settle. Root inputs keep
+    /// their current values, so that settle sees them.
+    pub fn reset(&mut self) {
+        self.slots.fill(0);
+        for &(s, v) in &self.program.consts {
+            self.slots[s as usize] = v;
+        }
+        for (mem, d) in self.mems.iter_mut().zip(&self.program.mems) {
+            mem.fill(0);
+            mem[..d.init.len()].copy_from_slice(&d.init);
+        }
+        // Every memory may have changed (see `mem_version`).
+        for v in &mut self.mem_writes {
+            *v += 1;
+        }
+        self.tick = 0;
+        self.settle();
     }
 
     // ── State carry-over ──────────────────────────────────────────────────
@@ -547,17 +583,10 @@ fn check(p: &Program) -> Result<(), BadProgram> {
     for c in &p.commits {
         let ok = match *c {
             Commit::Copy { state, next } => slot_ok(state) && slot_ok(next) && state != ZERO_SLOT,
-            Commit::RamWrite {
-                mem,
-                we,
-                addr,
-                data,
-            } => {
+            Commit::RamWrite { mem, .. } | Commit::RamWriteMasked { mem, .. } => {
                 (mem as usize) < p.mems.len()
                     && p.mems[mem as usize].writable
-                    && slot_ok(we)
-                    && slot_ok(addr)
-                    && slot_ok(data)
+                    && c.reads().into_iter().all(slot_ok)
             }
             Commit::MemClear { mem, en } => {
                 (mem as usize) < p.mems.len() && p.mems[mem as usize].writable && slot_ok(en)

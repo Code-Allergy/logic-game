@@ -17,6 +17,19 @@ pub const SCREEN_BEZEL: f32 = 12.0;
 /// Largest width the editor exposes for a word.
 pub const MAX_WIDTH: u8 = logi_sim::netlist::MAX_WIDTH;
 
+/// Most read ports of a [`GateKind::Ram2`].
+const RAM2_READS: usize = logi_sim::netlist::MAX_READ_PORTS as usize;
+
+/// Pin names of a [`GateKind::Ram2`] with the most read ports; fewer ports
+/// use a prefix.
+const RAM2_INPUTS: [&str; 3 + RAM2_READS] = [
+    "waddr", "we", "wdata", "raddr0", "raddr1", "raddr2", "raddr3", "raddr4", "raddr5", "raddr6",
+    "raddr7",
+];
+const RAM2_OUTPUTS: [&str; RAM2_READS] = [
+    "rdata0", "rdata1", "rdata2", "rdata3", "rdata4", "rdata5", "rdata6", "rdata7",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Reflect)]
 #[serde(tag = "type")]
 pub enum GateKind {
@@ -122,6 +135,20 @@ pub enum GateKind {
     Ram {
         addr_bits: u8,
         w: u8,
+    },
+    /// A dual-port memory (`logi_sim`'s `Ram2`): one write port and
+    /// `reads` read ports with their own addresses. `mask` makes the write
+    /// enable a per-bit mask as wide as the word; `init` holds initial
+    /// contents (missing words are 0). Both may be left out when saved.
+    #[serde(alias = "DualPortRam")]
+    Ram2 {
+        addr_bits: u8,
+        w: u8,
+        reads: u8,
+        #[serde(default)]
+        mask: bool,
+        #[serde(default)]
+        init: Vec<u64>,
     },
     /// A graphical screen: pixels drawn into its own video memory as
     /// `mode` says, shown on the tile (see [`ScreenMode`]). `width` and
@@ -328,6 +355,19 @@ impl GateKind {
                 w: *w,
                 init: Vec::new().into(),
             },
+            G::Ram2 {
+                addr_bits,
+                w,
+                reads,
+                mask,
+                init,
+            } => NodeKind::Ram2 {
+                addr_bits: *addr_bits,
+                w: *w,
+                reads: *reads,
+                mask: *mask,
+                init: init.as_slice().into(),
+            },
             G::Screen {
                 mode,
                 width,
@@ -434,6 +474,7 @@ impl GateKind {
             G::DLatch { .. } => "D-LATCH",
             G::SrLatch => "SR-LATCH",
             G::Ram { .. } => "RAM",
+            G::Ram2 { .. } => "DUAL-PORT RAM",
             G::Screen { .. } => "SCREEN",
             G::SubCircuit { .. } => "SUBCIRCUIT",
         }
@@ -461,6 +502,7 @@ impl GateKind {
             G::SrLatch => &["s", "r"],
             G::Rom { .. } => &["addr"],
             G::Ram { .. } => &["addr", "we", "wdata"],
+            G::Ram2 { reads, .. } => &RAM2_INPUTS[..3 + usize::from(*reads).min(RAM2_READS)],
             G::Screen { mode, .. } => match mode {
                 ScreenMode::Pixel => &["x", "y", "colour", "draw", "clear"],
                 ScreenMode::Framebuffer => &["addr", "we", "wdata"],
@@ -479,6 +521,7 @@ impl GateKind {
             G::Output { .. } | G::Display { .. } | G::Screen { .. } | G::SubCircuit { .. } => &[],
             G::Delay { .. } | G::Register { .. } | G::DLatch { .. } | G::SrLatch => &["q"],
             G::Rom { .. } | G::Ram { .. } => &["data"],
+            G::Ram2 { reads, .. } => &RAM2_OUTPUTS[..usize::from(*reads).min(RAM2_READS)],
             _ => &["y"],
         }
     }
@@ -511,7 +554,8 @@ impl GateKind {
             | G::Delay { w }
             | G::Register { w }
             | G::DLatch { w }
-            | G::Ram { w, .. } => Some(*w),
+            | G::Ram { w, .. }
+            | G::Ram2 { w, .. } => Some(*w),
             G::Extend { to, .. } => Some(*to),
             G::Merge { .. }
             | G::Clock { .. }
@@ -550,7 +594,8 @@ impl GateKind {
             | G::Delay { w: x }
             | G::Register { w: x }
             | G::DLatch { w: x }
-            | G::Ram { w: x, .. } => *x = w,
+            | G::Ram { w: x, .. }
+            | G::Ram2 { w: x, .. } => *x = w,
             G::Const { w: x, value } => {
                 *x = w;
                 *value &= logi_sim::netlist::mask(w);
@@ -689,6 +734,13 @@ impl GateKind {
                     G::DLatch { w },
                     G::SrLatch,
                     G::Ram { addr_bits: 4, w },
+                    G::Ram2 {
+                        addr_bits: 4,
+                        w,
+                        reads: 2,
+                        mask: false,
+                        init: Vec::new(),
+                    },
                     G::Rom {
                         addr_bits: 4,
                         w,
@@ -714,6 +766,10 @@ impl GateKind {
             GateKind::Display { w } => {
                 let hex_digits = usize::from(*w).div_ceil(4);
                 Vec2::new((hex_digits as f32 * 18.0 + 40.0).max(120.0), 70.0)
+            }
+            // Room for the write port and every read port.
+            GateKind::Ram2 { reads, .. } => {
+                Vec2::new(70.0, 50.0 + 20.0 * f32::from((*reads).clamp(1, 8) - 1))
             }
             _ => Vec2::new(50.0, 50.0),
         }

@@ -174,7 +174,17 @@ fn hit(transform: &Transform, kind: &GateKind, world: Vec2) -> bool {
     local.x.abs() <= half.x && local.y.abs() <= half.y
 }
 
-/// Left-click selects a gate.
+/// A left click on the canvas: on a gate, that gate (to select); on empty
+/// canvas, nothing, and the selection is cleared.
+pub fn canvas_click(hit: Option<Entity>, selected: &mut SelectedGate) -> Option<Entity> {
+    if hit.is_none() && selected.0.is_some() {
+        selected.0 = None;
+    }
+    hit
+}
+
+/// Left-click selects a gate; a left click on empty canvas (not over the
+/// HUD) clears the selection.
 pub fn update_inputs_on_left_click(
     q_window: Query<&Window, With<PrimaryWindow>>,
     ui_pointer: Res<UiPointerState>,
@@ -182,6 +192,7 @@ pub fn update_inputs_on_left_click(
     q_camera: Query<(&Camera, &GlobalTransform)>,
     query: Query<(Entity, &Transform, &GateType)>,
     mut select_writer: MessageWriter<GateComponentSelectionEvent>,
+    mut selected: ResMut<SelectedGate>,
 ) {
     if ui_pointer.over_egui || !mouse_button_input.just_pressed(MouseButton::Left) {
         return;
@@ -193,9 +204,15 @@ pub fn update_inputs_on_left_click(
     let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
         return;
     };
-    if let Some((entity, ..)) = query.iter().find(|(_, t, ty)| hit(t, &ty.kind, world)) {
+    let target = query
+        .iter()
+        .find(|(_, t, ty)| hit(t, &ty.kind, world))
+        .map(|(entity, ..)| entity);
+    let mut next = *selected;
+    if let Some(entity) = canvas_click(target, &mut next) {
         select_writer.write(GateComponentSelectionEvent { entity });
     }
+    selected.set_if_neq(next);
 }
 
 /// Update [`SelectedGate`] when a selection event fires.
@@ -294,8 +311,8 @@ pub fn format_tick(tick: u64) -> String {
     out
 }
 
-/// The transport card, top centre: run, pause, step, speed chips (and a
-/// `⋯` popover with the exact rate), and the tick.
+/// The transport card, top centre: run, pause, step, reset (also `R`),
+/// speed chips (and a `⋯` popover with the exact rate), and the tick.
 #[allow(clippy::too_many_arguments)]
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
@@ -306,6 +323,7 @@ pub fn simulation_config_ui_system(
     time: Res<Time>,
     game_state: Res<State<crate::GameState>>,
     theme: Res<Theme>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut more_open: Local<bool>,
 ) -> Result<(), BevyError> {
     if game_state.get() != &crate::GameState::Simulating {
@@ -327,6 +345,7 @@ pub fn simulation_config_ui_system(
         None => "measuring…".to_owned(),
     };
     let mut speed: Option<Option<f64>> = None;
+    let mut reset = keys.just_pressed(KeyCode::KeyR) && !ctx.egui_wants_keyboard_input();
     egui::Area::new(egui::Id::new("hud_transport"))
         .anchor(egui::Align2::CENTER_TOP, [0.0, layout.margin])
         .order(egui::Order::Middle)
@@ -354,6 +373,15 @@ pub fn simulation_config_ui_system(
                             .clicked()
                         {
                             bridge.step(1);
+                        }
+                        if chunky_button(ui, &palette, "Reset", false)
+                            .on_hover_text(
+                                "Back to tick 0: registers and memories to their \
+                                 initial values, inputs kept (R)",
+                            )
+                            .clicked()
+                        {
+                            reset = true;
                         }
                         rule(ui, &palette, 30.0);
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -397,6 +425,10 @@ pub fn simulation_config_ui_system(
                     });
                 });
         });
+    if reset {
+        bridge.reset();
+        tick_rate_meter.reset(0);
+    }
     if let Some(choice) = speed {
         match choice {
             Some(hz) => {
@@ -605,43 +637,62 @@ fn edit_kind_params(
             ));
         }
         GateKind::SrLatch | GateKind::SubCircuit { .. } => {}
-        _ => {
-            if let Some(mut w) = k.width() {
-                width_drag(ui, "Width", &mut w, 1..=64);
-                if Some(w) != k.width() {
-                    k = k.with_width(w);
+        // The width has its chips and exact value above.
+        _ => match &mut k {
+            GateKind::Const { w, value } => {
+                ui.horizontal(|ui| {
+                    ui.label("Value");
+                    ui.add(egui::DragValue::new(value).hexadecimal(1, false, true));
+                });
+                *value &= logi_sim::netlist::mask(*w);
+            }
+            GateKind::Split { w, lo, len } => {
+                let w = *w;
+                width_drag(ui, "Low bit", lo, 0..=w - 1);
+                let max_len = w - *lo;
+                width_drag(ui, "Length", len, 1..=max_len);
+            }
+            GateKind::Extend { from, to, signed } => {
+                let to = *to;
+                width_drag(ui, "From width", from, 1..=to);
+                ui.checkbox(signed, "Sign extend");
+            }
+            GateKind::Ram { addr_bits, .. } | GateKind::Rom { addr_bits, .. } => {
+                width_drag(
+                    ui,
+                    "Address bits",
+                    addr_bits,
+                    1..=logi_sim::netlist::MAX_ADDR_BITS,
+                );
+            }
+            GateKind::Ram2 {
+                addr_bits,
+                reads,
+                mask,
+                init,
+                ..
+            } => {
+                width_drag(
+                    ui,
+                    "Address bits",
+                    addr_bits,
+                    1..=logi_sim::netlist::MAX_ADDR_BITS,
+                );
+                width_drag(
+                    ui,
+                    "Read ports",
+                    reads,
+                    1..=logi_sim::netlist::MAX_READ_PORTS,
+                );
+                ui.checkbox(mask, "Per-bit write enable");
+                // Initial contents past the (new) address space are cut.
+                init.truncate(1usize << *addr_bits);
+                if !init.is_empty() {
+                    ui.label(format!("Initial contents: {} words", init.len()));
                 }
             }
-            match &mut k {
-                GateKind::Const { w, value } => {
-                    ui.horizontal(|ui| {
-                        ui.label("Value");
-                        ui.add(egui::DragValue::new(value).hexadecimal(1, false, true));
-                    });
-                    *value &= logi_sim::netlist::mask(*w);
-                }
-                GateKind::Split { w, lo, len } => {
-                    let w = *w;
-                    width_drag(ui, "Low bit", lo, 0..=w - 1);
-                    let max_len = w - *lo;
-                    width_drag(ui, "Length", len, 1..=max_len);
-                }
-                GateKind::Extend { from, to, signed } => {
-                    let to = *to;
-                    width_drag(ui, "From width", from, 1..=to);
-                    ui.checkbox(signed, "Sign extend");
-                }
-                GateKind::Ram { addr_bits, .. } | GateKind::Rom { addr_bits, .. } => {
-                    width_drag(
-                        ui,
-                        "Address bits",
-                        addr_bits,
-                        1..=logi_sim::netlist::MAX_ADDR_BITS,
-                    );
-                }
-                _ => {}
-            }
-        }
+            _ => {}
+        },
     }
     k
 }
@@ -749,8 +800,12 @@ pub fn ui_for_selected_gate(
     if !ctx.egui_wants_keyboard_input()
         && (keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace))
     {
+        // A read-only demo refuses the delete (with a toast); the part
+        // stays, and so does the selection.
         writers.delete_gate.write(DeleteGate { entity });
-        sel.0 = None;
+        if !active.read_only {
+            sel.0 = None;
+        }
         return Ok(());
     }
 
@@ -836,7 +891,7 @@ pub fn ui_for_selected_gate(
                                 );
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                if ui.small_button("×").on_hover_text("Close").clicked() {
+                                if ui.small_button("×").on_hover_text("Close (Esc)").clicked() {
                                     close = true;
                                 }
                             });
@@ -859,7 +914,7 @@ pub fn ui_for_selected_gate(
                             }
                         });
 
-                        // Width chips.
+                        // Width chips, and the exact width beside the caption.
                         let width_kind = !matches!(
                             ty.kind,
                             GateKind::Merge { .. } | GateKind::SrLatch | GateKind::SubCircuit { .. }
@@ -867,8 +922,29 @@ pub fn ui_for_selected_gate(
                         if let (Some(w), true) = (ty.kind.width(), width_kind) {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 4.0;
-                                ui.label(caption(&palette, "Width"));
-                                ui.scope(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(caption(&palette, "Width"));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let mut exact = w;
+                                            ui.add_enabled(
+                                                editable,
+                                                egui::DragValue::new(&mut exact)
+                                                    .range(1..=64)
+                                                    .suffix(" bit"),
+                                            )
+                                            .on_hover_text("Any width from 1 to 64");
+                                            if exact != w {
+                                                writers.kinds.write(SetGateKind {
+                                                    entity,
+                                                    kind: ty.kind.with_width(exact),
+                                                });
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.add_enabled_ui(editable, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
                                         let n = WIDTH_CHIPS.len() as f32;
@@ -897,7 +973,9 @@ pub fn ui_for_selected_gate(
 
                         // The kind's other parameters (the width has its chips).
                         if !width_only(&ty.kind) {
-                            let edited = edit_kind_params(ui, &palette, &ty.kind);
+                            let edited = ui
+                                .add_enabled_ui(editable, |ui| edit_kind_params(ui, &palette, &ty.kind))
+                                .inner;
                             if edited != ty.kind {
                                 writers.kinds.write(SetGateKind {
                                     entity,
@@ -1172,6 +1250,23 @@ pub fn workspace_io_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_on_empty_canvas_clears_the_selection() {
+        let mut world = World::new();
+        let (a, b) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let mut selected = SelectedGate(Some(a));
+        assert_eq!(canvas_click(Some(b), &mut selected), Some(b));
+        assert_eq!(
+            selected.0,
+            Some(a),
+            "a click on a gate selects via the event"
+        );
+        assert_eq!(canvas_click(None, &mut selected), None);
+        assert_eq!(selected.0, None, "empty canvas deselects");
+        assert_eq!(canvas_click(None, &mut selected), None);
+        assert_eq!(selected.0, None);
+    }
 
     #[test]
     fn ticks_group_by_thousands() {

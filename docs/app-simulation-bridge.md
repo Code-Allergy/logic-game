@@ -120,13 +120,28 @@ costs no per-entity work. The look ("Studio Workshop") comes from
 - pins, lamps and input switches follow `GateValues` by swapping shared
   materials; display text is re-formatted only when its value, width or
   format changes;
-- wires run from the driver's output pin to the sink's input pin; wire
-  geometry is recomputed only for wires whose endpoints changed or whose
-  endpoint gate moved (or got a new pin layout); dragging a gate touches
-  only its wires and never the `Design`;
-- a wire is cased: a core sprite (marigold on, slate off, teal or pale teal
-  for buses, thicker for buses) over an ink casing; wires are staggered in
-  depth so a crossing reads as an overpass. Buses carry a value pill;
+- wires are routed on the 20-unit grid (`src/sim/routing.rs`): each net
+  (a driver pin and its sinks) becomes a tree of horizontal and vertical
+  runs that leave outputs to the right and enter inputs from the left,
+  keep clear of the tiles, share trunks, branch at T junctions (never
+  four-way) and never overlap another net; where two nets meet they
+  cross straight. It is an A* search per sink on a sparse grid graph with
+  costs for length, bends and crossings, nets shortest first, with
+  rip-up and reroute for sinks that fall back or cut a tile.
+  `route_wires_system` routes the open view when gates or wires are added
+  or removed, a pin layout or the view changes, or a gate moves; a move
+  keeps the path of every sink whose pins stayed put, so dragging a gate
+  re-routes only its wires (and branches hanging off them) and never
+  touches the `Design`. Paths a dragged gate now covers are fixed on the
+  first frame without movement. `render_svg --ortho` uses the same router;
+- a wire is cased: an ink casing under a coloured core (marigold on, slate
+  off, teal or pale teal for buses, thicker for buses), each a mesh along
+  the routed path with r 20 corners. A value change only swaps the core's
+  shared material; the meshes are rebuilt only when the path changes. A
+  branch gets a junction dot; where one wire passes over another the
+  bench shows through a gap in the lower one (nets get distinct depth
+  slots, and one gap mesh per view sits just below each upper wire). A
+  bus carries a value pill on its net's longest horizontal run;
 - a combinational-loop compile error (`SimDiagnostics::compile_error`,
   with `loops` as gate ids and instance paths) marks the gates and wires
   on the loop in the open view with `LoopHighlight` (tomato), until a

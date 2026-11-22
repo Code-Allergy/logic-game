@@ -449,11 +449,7 @@ fn partition(
 
 /// Slots read by commits.
 fn commit_reads(commits: &[Commit]) -> impl Iterator<Item = u32> + '_ {
-    commits.iter().flat_map(|c| match *c {
-        Commit::Copy { next, .. } => [next, ZERO_SLOT, ZERO_SLOT],
-        Commit::RamWrite { we, addr, data, .. } => [we, addr, data],
-        Commit::MemClear { en, .. } => [en, ZERO_SLOT, ZERO_SLOT],
-    })
+    commits.iter().flat_map(Commit::reads)
 }
 
 /// Destination slots in execution order: scalar instructions (from
@@ -605,8 +601,8 @@ fn locality_order(
                 .map(|p| p.slot)
                 .chain(commits.iter().flat_map(|c| match *c {
                     Commit::Copy { next, .. } => vec![next],
-                    Commit::RamWrite { we, addr, data, .. } => vec![we, addr, data],
                     Commit::MemClear { en, .. } => vec![en],
+                    _ => c.reads().to_vec(),
                 }))
                 .filter_map(|s| {
                     let p = r.producer[s as usize];
@@ -710,18 +706,7 @@ fn renumber(p: &mut Program, ops: &[Op], dsts: &[u32], lane_of: &[u32]) {
                 state: m(state),
                 next: m(next),
             },
-            Commit::RamWrite {
-                mem,
-                we,
-                addr,
-                data,
-            } => Commit::RamWrite {
-                mem,
-                we: m(we),
-                addr: m(addr),
-                data: m(data),
-            },
-            Commit::MemClear { mem, en } => Commit::MemClear { mem, en: m(en) },
+            other => other.map_reads(m),
         };
     }
     for port in p.ports.inputs.iter_mut().chain(p.ports.outputs.iter_mut()) {
@@ -876,6 +861,40 @@ fn lower(
                 we,
                 addr,
                 data,
+            });
+            em.state_keys.push(key(StateLoc::Mem(m), *w));
+        }
+        K::Ram2 {
+            addr_bits,
+            w,
+            reads,
+            mask,
+            init,
+        } => {
+            let m = em.mem(*addr_bits, *w, init, true);
+            for k in 0..*reads as usize {
+                em.push(Op::MemRead, o(k), i(3 + k), m, z, 0);
+            }
+            let we = em.temp(if *mask { *w } else { 1 });
+            let addr = em.temp(*addr_bits);
+            let data = em.temp(*w);
+            em.push(Op::Copy, we, i(1), z, z, 0);
+            em.push(Op::Copy, addr, i(0), z, z, 0);
+            em.push(Op::Copy, data, i(2), z, z, 0);
+            em.commits.push(if *mask {
+                Commit::RamWriteMasked {
+                    mem: m,
+                    mask: we,
+                    addr,
+                    data,
+                }
+            } else {
+                Commit::RamWrite {
+                    mem: m,
+                    we,
+                    addr,
+                    data,
+                }
             });
             em.state_keys.push(key(StateLoc::Mem(m), *w));
         }

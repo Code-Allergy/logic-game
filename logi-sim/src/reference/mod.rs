@@ -60,8 +60,9 @@ struct Inst {
     /// Next state, computed at the end of each settle.
     next: SecondaryMap<NodeId, u64>,
     mems: SecondaryMap<NodeId, Vec<u64>>,
-    /// Pending RAM write `(addr, data)`, applied at commit.
-    writes: SecondaryMap<NodeId, Option<(usize, u64)>>,
+    /// Pending RAM write `(addr, data, mask)`, applied at commit to the
+    /// bits set in `mask`.
+    writes: SecondaryMap<NodeId, Option<(usize, u64, u64)>>,
     /// Pending screen clear (a Pixel screen's `clear`), applied at commit
     /// before the write.
     clears: SecondaryMap<NodeId, bool>,
@@ -94,7 +95,10 @@ impl Inst {
                     inst.state.insert(id, 0);
                     inst.next.insert(id, 0);
                 }
-                NodeKind::Ram { addr_bits, w, init } => {
+                NodeKind::Ram { addr_bits, w, init }
+                | NodeKind::Ram2 {
+                    addr_bits, w, init, ..
+                } => {
                     let mut mem = vec![0u64; 1usize << addr_bits];
                     for (slot, v) in mem.iter_mut().zip(init.iter()) {
                         *slot = v & mask(*w);
@@ -141,8 +145,9 @@ impl Inst {
             }
         }
         for (id, w) in self.writes.iter_mut() {
-            if let Some((addr, data)) = w.take() {
-                self.mems[id][addr] = data;
+            if let Some((addr, data, mask)) = w.take() {
+                let word = &mut self.mems[id][addr];
+                *word = (*word & !mask) | (data & mask);
             }
         }
         for (_, child) in self.children.iter_mut() {
@@ -274,7 +279,7 @@ impl Reference {
         self.inst(path)?.state.get(node).copied()
     }
 
-    /// Committed contents of a RAM or screen.
+    /// Committed contents of a RAM (`Ram` or `Ram2`) or screen.
     pub fn mem(&self, path: &[NodeId], node: NodeId) -> Option<&[u64]> {
         self.inst(path)?.mems.get(node).map(Vec::as_slice)
     }
@@ -416,6 +421,9 @@ fn eval(
         Delay { .. } | Register { .. } | SrLatch => smallvec![inst.state[id]],
         DLatch { .. } => smallvec![if i(0) != 0 { i(1) } else { inst.state[id] }],
         Ram { .. } => smallvec![inst.mems[id][i(0) as usize]],
+        Ram2 { reads, .. } => (0..*reads as usize)
+            .map(|k| inst.mems[id][i(3 + k) as usize])
+            .collect(),
         Screen { .. } => smallvec![],
         Instance(child) => {
             let child_inputs: Vec<u64> = (0..node.inputs.len()).map(i).collect();
@@ -456,8 +464,17 @@ fn compute_next(def: &Definition, inst: &mut Inst) {
                 }
             }
             NodeKind::Ram { .. } => {
-                let write = (i(1) != 0).then(|| (i(0) as usize, i(2)));
+                let write = (i(1) != 0).then(|| (i(0) as usize, i(2), u64::MAX));
                 inst.writes[id] = write;
+                continue;
+            }
+            NodeKind::Ram2 { mask, .. } => {
+                let bits = match (*mask, i(1) != 0) {
+                    (true, _) => i(1),
+                    (false, true) => u64::MAX,
+                    (false, false) => 0,
+                };
+                inst.writes[id] = (bits != 0).then(|| (i(0) as usize, i(2), bits));
                 continue;
             }
             NodeKind::Screen {
@@ -471,13 +488,13 @@ fn compute_next(def: &Definition, inst: &mut Inst) {
                 match mode {
                     ScreenMode::Pixel => {
                         let clear = i(4) != 0;
-                        let write = (i(3) != 0).then(|| (at(i(0), i(1)), i(2)));
+                        let write = (i(3) != 0).then(|| (at(i(0), i(1)), i(2), u64::MAX));
                         inst.clears[id] = clear;
                         inst.writes[id] = write;
                         continue;
                     }
                     ScreenMode::Memory => {
-                        inst.writes[id] = (i(1) != 0).then(|| (i(0) as usize, i(2)));
+                        inst.writes[id] = (i(1) != 0).then(|| (i(0) as usize, i(2), u64::MAX));
                         continue;
                     }
                     ScreenMode::Scan => {
@@ -489,7 +506,7 @@ fn compute_next(def: &Definition, inst: &mut Inst) {
                         } else if i(1) != 0 {
                             (0, (y + 1).min(h), None)
                         } else {
-                            let write = (x < w && y < h).then(|| (at(x, y), i(0)));
+                            let write = (x < w && y < h).then(|| (at(x, y), i(0), u64::MAX));
                             ((x + 1).min(w), y, write)
                         };
                         inst.writes[id] = write;
@@ -533,6 +550,7 @@ fn depends(
         CombDeps::All => true,
         CombDeps::None => false,
         CombDeps::Pins(pins) => pins.contains(&(p as u8)),
+        CombDeps::Diagonal { first } => p == first as usize + q,
         CombDeps::Instance(c) => paths[c][p][q],
     }
 }

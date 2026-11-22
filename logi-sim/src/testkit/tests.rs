@@ -512,6 +512,7 @@ fn bitblasted_designs_are_equivalent() {
                         NodeKind::Split { .. }
                             | NodeKind::Merge { .. }
                             | NodeKind::Ram { .. }
+                            | NodeKind::Ram2 { .. }
                             | NodeKind::Rom { .. }
                             | NodeKind::Input { .. }
                             | NodeKind::Output { .. }
@@ -521,6 +522,46 @@ fn bitblasted_designs_are_equivalent() {
                 }
             }
             assert_equivalent_by_index(&d, &bb, seed, 20);
+        }
+    }
+}
+
+#[test]
+fn ram2_register_file_matches_the_register_one() {
+    for (addr_bits, w) in [(1, 1), (3, 8), (5, 64)] {
+        assert_equivalent(
+            &register_file(addr_bits, w),
+            &register_file_ram2(addr_bits, w, &[]),
+            addr_bits as u64,
+            300,
+        );
+    }
+}
+
+#[test]
+fn fifo_matches_a_queue() {
+    let d = fifo(3, 8);
+    let mut r = Reference::new(&d).unwrap();
+    let mut model = std::collections::VecDeque::new();
+    let mut rng = Rng::new(9);
+    for t in 0..2000 {
+        let (push, pop, data) = (rng.coin(), rng.coin(), rng.next_u64() & 0xFF);
+        r.set("push", push as u64);
+        r.set("pop", pop as u64);
+        r.set("data", data);
+        r.tick().unwrap();
+        // The inputs reach state at the next commit; the outputs show the
+        // queue before them.
+        assert_eq!(r.get("count"), model.len() as u64, "tick {t}");
+        if let Some(&head) = model.front() {
+            assert_eq!(r.get("head"), head, "tick {t}");
+        }
+        let (was_full, was_empty) = (model.len() == 8, model.is_empty());
+        if pop && !was_empty {
+            model.pop_front();
+        }
+        if push && !was_full {
+            model.push_back(data);
         }
     }
 }
