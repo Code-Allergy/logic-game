@@ -81,6 +81,7 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
             slot: class_slot[r],
             width: w,
             name: root_def.name_of(port).map(str::to_string),
+            node: port,
         });
     }
     let mut net_slot = vec![ZERO_SLOT; n];
@@ -102,7 +103,12 @@ pub(super) fn emit(mut e: Elab<'_>, opts: &Options) -> Program {
             _ => unreachable!("validated"),
         };
         let slot = root_def.nodes[port].inputs[0].map_or(ZERO_SLOT, |net| net_slot[e.global(0, net) as usize]);
-        ports.outputs.push(Port { slot, width: w, name: root_def.name_of(port).map(str::to_string) });
+        ports.outputs.push(Port {
+            slot,
+            width: w,
+            name: root_def.name_of(port).map(str::to_string),
+            node: port,
+        });
     }
 
     // ── Debug map ──────────────────────────────────────────────────────────
