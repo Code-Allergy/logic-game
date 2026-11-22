@@ -15,7 +15,8 @@ default = []
 # plus the world inspector. Not for release or wasm builds.
 dev = ["bevy/dynamic_linking", "inspector"]
 # The egui world inspector window.
-inspector = ["dep:bevy-inspector-egui"]
+# (Registering every reflected type is only of use to the inspector.)
+inspector = ["dep:bevy-inspector-egui", "bevy/reflect_auto_register"]
 
 [dependencies]
 logi-sim = { path = "logi-sim" }
@@ -23,15 +24,39 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 smallvec = "1"
 
 # egui
-bevy = { version = "0.19.0", features = ["wayland"] }
-bevy_egui = "0.40"
-bevy-inspector-egui = { version = "0.37", optional = true }
+# Only what a 2D game with a bevy_ui title menu and an egui HUD uses: no
+# 3D/PBR, glTF, audio, animation, scenes, gamepads (gilrs) or image
+# formats (the game loads no image files). `webgl2` is the wasm backend.
+bevy = { version = "0.20.1", default-features = false, features = [
+    "std",
+    "async_executor",
+    "multi_threaded",
+    "bevy_log",
+    "bevy_state",
+    "bevy_asset",
+    "bevy_winit",
+    "x11",
+    "wayland",
+    "webgl2",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite_render",
+    "bevy_gizmos_render",
+    "bevy_text",
+    "default_font",
+    "bevy_ui_render",
+    "bevy_ui_widgets",
+    "bevy_input_focus",
+    "ui_picking",
+] }
+bevy_egui = "0.43"
+bevy-inspector-egui = { version = "0.38", optional = true, default-features = false, features = ["2d", "documentation", "egui_clipboard"] }
 
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 
 [build-dependencies]
-embed-resource = "1"
+embed-resource = "3"
 
 
 # Blake3 pure on windows, for cross compilation

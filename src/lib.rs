@@ -8,6 +8,7 @@ use bevy_egui::EguiContexts;
 pub mod camera;
 pub mod editor;
 pub mod fonts;
+pub mod mcp;
 pub mod settings;
 pub mod sim;
 pub mod theme;

@@ -68,7 +68,7 @@ fn err<T>(message: impl Into<String>) -> Result<T, SourceError> {
     Err(SourceError(message.into()))
 }
 
-trait Context<T> {
+pub(crate) trait Context<T> {
     fn context(self, place: impl fmt::Display) -> Result<T, SourceError>;
 }
 
@@ -279,7 +279,7 @@ fn parse_circuit(value: Value) -> Result<SourceCircuit, SourceError> {
     inner().context(place)
 }
 
-fn parse_wire(value: Value) -> Result<Vec<String>, SourceError> {
+pub(crate) fn parse_wire(value: Value) -> Result<Vec<String>, SourceError> {
     let bad = || SourceError("a wire is [source, sink, ...] (two or more strings)".into());
     let Value::Array(items) = value else {
         return Err(bad());
@@ -297,18 +297,29 @@ fn parse_wire(value: Value) -> Result<Vec<String>, SourceError> {
 }
 
 fn parse_node(value: Value) -> Result<SourceNode, SourceError> {
+    parse_node_entry(value, true).map(|(node, _)| node)
+}
+
+/// A node entry. Without `need_at` the position may be left out (the
+/// batch editor lays such nodes out): the second value says whether it
+/// was given, and an array's `step` defaults to a column.
+pub(crate) fn parse_node_entry(
+    value: Value,
+    need_at: bool,
+) -> Result<(SourceNode, bool), SourceError> {
     let mut map = take_object(value, "a node")?;
     let name = required_string(&mut map, "name")?;
-    let mut inner = || -> Result<SourceNode, SourceError> {
+    let mut inner = || -> Result<(SourceNode, bool), SourceError> {
         if !valid_name(&name) {
             return err("a node name is letters, digits and '_' (not starting with a digit)");
         }
         let ty = take_string(&mut map, "type")?;
         let use_ = take_string(&mut map, "use")?;
         let label = take_string(&mut map, "label")?;
-        let at = match map.shift_remove("at") {
-            Some(v) => parse_point(v, "at")?,
-            None => return err("missing \"at\" (its position, [x, y])"),
+        let (at, placed) = match map.shift_remove("at") {
+            Some(v) => (parse_point(v, "at")?, true),
+            None if need_at => return err("missing \"at\" (its position, [x, y])"),
+            None => ([0.0, 0.0], false),
         };
         let count = match map.shift_remove("count") {
             None => None,
@@ -325,7 +336,13 @@ fn parse_node(value: Value) -> Result<SourceNode, SourceError> {
         let array = match (count, step) {
             (Some(count), Some(step)) => Some(NodeArray { count, step }),
             (None, None) => None,
-            (Some(_), None) => return err("an array (\"count\") needs a \"step\" [dx, dy]"),
+            (Some(_), None) if need_at => {
+                return err("an array (\"count\") needs a \"step\" [dx, dy]");
+            }
+            (Some(count), None) => Some(NodeArray {
+                count,
+                step: [0.0, 80.0],
+            }),
             (None, Some(_)) => return err("\"step\" is only allowed with \"count\""),
         };
         let body = match (ty, use_) {
@@ -340,18 +357,28 @@ fn parse_node(value: Value) -> Result<SourceNode, SourceError> {
             (Some(_), Some(_)) => return err("a node has either \"type\" or \"use\", not both"),
             (None, None) => return err("a node needs \"type\" (a primitive) or \"use\""),
         };
-        Ok(SourceNode {
-            name: name.clone(),
-            body,
-            label,
-            at,
-            array,
-        })
+        Ok((
+            SourceNode {
+                name: name.clone(),
+                body,
+                label,
+                at,
+                array,
+            },
+            placed,
+        ))
     };
     inner().context(format_args!("node \"{name}\""))
 }
 
-fn valid_name(name: &str) -> bool {
+/// `#3fa2c1`: a node by the first hex digits of its id (the batch editor,
+/// for parts without a usable label).
+pub(crate) fn is_id_ref(name: &str) -> bool {
+    name.strip_prefix('#')
+        .is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+pub(crate) fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
@@ -564,7 +591,7 @@ pub fn circuit_id(key: &str, name: &str) -> Uuid {
     Uuid::new_v5(&ID_NAMESPACE, format!("{key}/{name}").as_bytes())
 }
 
-fn item_id(circuit: Uuid, what: &str) -> Uuid {
+pub(crate) fn item_id(circuit: Uuid, what: &str) -> Uuid {
     Uuid::new_v5(&circuit, what.as_bytes())
 }
 
@@ -739,26 +766,31 @@ pub fn expand(
 }
 
 /// One expanded node of a source node.
-struct Element {
-    id: Uuid,
-    name: String,
-    pos: [f32; 2],
+pub(crate) struct Element {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) pos: [f32; 2],
 }
 
-struct NodeEntry {
-    is_array: bool,
-    elements: Vec<Element>,
-    inputs: (Vec<u8>, Vec<String>),
-    outputs: (Vec<u8>, Vec<String>),
+/// A named node: its elements (one unless an array) and its pins as
+/// `(widths, names)`.
+pub(crate) struct NodeEntry {
+    pub(crate) is_array: bool,
+    pub(crate) elements: Vec<Element>,
+    pub(crate) inputs: (Vec<u8>, Vec<String>),
+    pub(crate) outputs: (Vec<u8>, Vec<String>),
 }
+
+/// The named nodes of a circuit.
+pub(crate) type NodeTable = HashMap<String, NodeEntry>;
 
 /// A parsed reference `node[range].pin:bits`.
 #[derive(Debug, PartialEq)]
-struct Ref<'a> {
-    node: &'a str,
-    index: Option<(u32, u32)>,
-    pin: Option<&'a str>,
-    bits: Option<(u32, u32)>,
+pub(crate) struct Ref<'a> {
+    pub(crate) node: &'a str,
+    pub(crate) index: Option<(u32, u32)>,
+    pub(crate) pin: Option<&'a str>,
+    pub(crate) bits: Option<(u32, u32)>,
 }
 
 fn parse_range(text: &str) -> Option<(u32, u32)> {
@@ -774,11 +806,11 @@ fn parse_range(text: &str) -> Option<(u32, u32)> {
     }
 }
 
-fn parse_ref(text: &str) -> Result<Ref<'_>, SourceError> {
+pub(crate) fn parse_ref(text: &str) -> Result<Ref<'_>, SourceError> {
     let bad = |why: &str| SourceError(format!("bad reference \"{text}\": {why}"));
     let end = text.find(['[', '.', ':']).unwrap_or(text.len());
     let node = &text[..end];
-    if !valid_name(node) {
+    if !valid_name(node) && !is_id_ref(node) {
         return Err(bad("expected a node name first"));
     }
     let mut rest = &text[end..];
@@ -838,7 +870,7 @@ struct Slot {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Dir {
+pub(crate) enum Dir {
     Out,
     In,
 }
@@ -876,11 +908,11 @@ fn find_pin(entry: &NodeEntry, node: &str, pin: Option<&str>, dir: Dir) -> Resul
 }
 
 /// A pin a reference names: `(element, pin, pin width, lo, len)`.
-type PinBits<'e> = (&'e Element, u8, u8, u8, u8);
+pub(crate) type PinBits<'e> = (&'e Element, u8, u8, u8, u8);
 
 /// The pins a reference names.
-fn resolve<'e>(
-    nodes: &'e HashMap<String, NodeEntry>,
+pub(crate) fn resolve<'e>(
+    nodes: &'e NodeTable,
     text: &str,
     dir: Dir,
 ) -> Result<Vec<PinBits<'e>>, SourceError> {
@@ -967,107 +999,146 @@ fn expand_circuit(
         nodes: Vec::new(),
         wires: Vec::new(),
     };
-    let mut nodes: HashMap<String, NodeEntry> = HashMap::new();
+    let mut nodes: NodeTable = HashMap::new();
+    let definition = |r: &str| -> Result<Uuid, SourceError> {
+        if r.contains('/') {
+            externals
+                .names
+                .and_then(|n| n.get(r))
+                .copied()
+                .ok_or_else(|| SourceError(format!("unknown definition \"{r}\"")))
+        } else {
+            Ok(circuit_id(key, r))
+        }
+    };
+    let new_id = |what: &str| item_id(id, what);
     for node in &circuit.nodes {
-        let place = format!("node \"{}\"", node.name);
-        let kind = match &node.body {
-            NodeBody::Primitive { ty, params } if node.array.is_some() => {
-                // Element 0 (parameters may use `{i}`, see below).
-                primitive_kind(ty, &element_params(params, 0)).context(&place)?
-            }
-            NodeBody::Primitive { ty, params } => primitive_kind(ty, params).context(&place)?,
-            NodeBody::Use(r) => {
-                let definition = if r.contains('/') {
-                    *externals.names.and_then(|n| n.get(r)).ok_or_else(|| {
-                        SourceError(format!("{place}: unknown definition \"{r}\""))
-                    })?
-                } else {
-                    circuit_id(key, r)
-                };
-                GateKind::SubCircuit { definition }
-            }
-        };
-        let pins = library.pins(&kind);
-        let ((in_w, out_w), (in_n, out_n)) = match &pins {
-            Some(pins) => (pins.clone(), library.pin_names(&kind)),
-            None => return err(format!("{place}: its pins are unknown")),
-        };
-        let is_port = kind.is_port();
-        let is_instance = matches!(kind, GateKind::SubCircuit { .. });
-        let count = node.array.map_or(1, |a| a.count);
-        let step = node.array.map_or([0.0, 0.0], |a| a.step);
-        // In an array, `{i}` in a string parameter is the element's index.
-        let templated = match &node.body {
-            NodeBody::Primitive { ty, params }
-                if node.array.is_some()
-                    && params
-                        .values()
-                        .any(|v| v.as_str().is_some_and(|s| s.contains("{i}"))) =>
-            {
-                Some((ty, params))
-            }
-            _ => None,
-        };
-        let mut elements = Vec::new();
-        for i in 0..count {
-            let kind = match templated {
-                Some((ty, params)) => {
-                    let element = primitive_kind(ty, &element_params(params, i))
-                        .context(format_args!("{place}, element {i}"))?;
-                    if library.pins(&element) != pins {
-                        return err(format!(
-                            "{place}: the elements of an array must have the same pins \
-                             (element {i} differs from element 0)"
-                        ));
-                    }
-                    element
-                }
-                None => kind.clone(),
-            };
-            let name = if node.array.is_some() {
-                format!("{}[{i}]", node.name)
-            } else {
-                node.name.clone()
-            };
-            let label = match &node.label {
-                Some(l) => Some(template(l, i)),
-                None if is_port && node.array.is_some() => Some(format!("{}{i}", node.name)),
-                None if is_port || is_instance => Some(name.clone()),
-                None => None,
-            };
-            let pos = [
-                node.at[0] + step[0] * i as f32,
-                node.at[1] + step[1] * i as f32,
-            ];
-            let node_id = item_id(id, &format!("node/{name}"));
-            doc.nodes.push(DocNode {
-                id: node_id,
-                kind,
-                label,
-                x: pos[0],
-                y: pos[1],
-                layer: DEFAULT_LAYER_UUID,
-                layer_order: 0,
-                properties: HashMap::new(),
-            });
-            elements.push(Element {
-                id: node_id,
-                name,
-                pos,
-            });
-        }
-        let entry = NodeEntry {
-            is_array: node.array.is_some(),
-            elements,
-            inputs: (in_w.to_vec(), in_n),
-            outputs: (out_w.to_vec(), out_n),
-        };
-        if nodes.insert(node.name.clone(), entry).is_some() {
-            return err(format!("two nodes are named \"{}\"", node.name));
-        }
+        add_node(
+            &mut doc,
+            &mut nodes,
+            node,
+            library,
+            &definition,
+            false,
+            &new_id,
+        )?;
     }
+    check_port_labels(&doc)?;
+    let plan = plan_wires(&nodes, &circuit.wires)?;
+    emit_wires(&mut doc, plan, &new_id)?;
+    doc.nodes.sort_by_key(|n| n.id);
+    doc.wires.sort_by_key(|w| w.id);
+    Ok(doc)
+}
 
-    // Port labels name the instance pins, so they must be unique.
+/// Add the node (or array of nodes) `node` to `doc` and to the table of
+/// named nodes. `definition` resolves a `use` reference, `new_id` makes
+/// the id of `"node/<name>"`; with `label_all` every node is labelled
+/// with its name (the batch editor, `crate::mcp::batch`), not only ports
+/// and instances.
+pub(crate) fn add_node(
+    doc: &mut CircuitDocument,
+    nodes: &mut NodeTable,
+    node: &SourceNode,
+    library: &CircuitLibrary,
+    definition: &dyn Fn(&str) -> Result<Uuid, SourceError>,
+    label_all: bool,
+    new_id: &dyn Fn(&str) -> Uuid,
+) -> Result<(), SourceError> {
+    let place = format!("node \"{}\"", node.name);
+    let kind = match &node.body {
+        NodeBody::Primitive { ty, params } if node.array.is_some() => {
+            // Element 0 (parameters may use `{i}`, see below).
+            primitive_kind(ty, &element_params(params, 0)).context(&place)?
+        }
+        NodeBody::Primitive { ty, params } => primitive_kind(ty, params).context(&place)?,
+        NodeBody::Use(r) => GateKind::SubCircuit {
+            definition: definition(r).context(&place)?,
+        },
+    };
+    let pins = library.pins(&kind);
+    let ((in_w, out_w), (in_n, out_n)) = match &pins {
+        Some(pins) => (pins.clone(), library.pin_names(&kind)),
+        None => return err(format!("{place}: its pins are unknown")),
+    };
+    let is_port = kind.is_port();
+    let is_instance = matches!(kind, GateKind::SubCircuit { .. });
+    let count = node.array.map_or(1, |a| a.count);
+    let step = node.array.map_or([0.0, 0.0], |a| a.step);
+    // In an array, `{i}` in a string parameter is the element's index.
+    let templated = match &node.body {
+        NodeBody::Primitive { ty, params }
+            if node.array.is_some()
+                && params
+                    .values()
+                    .any(|v| v.as_str().is_some_and(|s| s.contains("{i}"))) =>
+        {
+            Some((ty, params))
+        }
+        _ => None,
+    };
+    let mut elements = Vec::new();
+    for i in 0..count {
+        let kind = match templated {
+            Some((ty, params)) => {
+                let element = primitive_kind(ty, &element_params(params, i))
+                    .context(format_args!("{place}, element {i}"))?;
+                if library.pins(&element) != pins {
+                    return err(format!(
+                        "{place}: the elements of an array must have the same pins \
+                         (element {i} differs from element 0)"
+                    ));
+                }
+                element
+            }
+            None => kind.clone(),
+        };
+        let name = if node.array.is_some() {
+            format!("{}[{i}]", node.name)
+        } else {
+            node.name.clone()
+        };
+        let label = match &node.label {
+            Some(l) => Some(template(l, i)),
+            None if is_port && node.array.is_some() => Some(format!("{}{i}", node.name)),
+            None if is_port || is_instance || label_all => Some(name.clone()),
+            None => None,
+        };
+        let pos = [
+            node.at[0] + step[0] * i as f32,
+            node.at[1] + step[1] * i as f32,
+        ];
+        let node_id = new_id(&format!("node/{name}"));
+        doc.nodes.push(DocNode {
+            id: node_id,
+            kind,
+            label,
+            x: pos[0],
+            y: pos[1],
+            layer: DEFAULT_LAYER_UUID,
+            layer_order: 0,
+            properties: HashMap::new(),
+        });
+        elements.push(Element {
+            id: node_id,
+            name,
+            pos,
+        });
+    }
+    let entry = NodeEntry {
+        is_array: node.array.is_some(),
+        elements,
+        inputs: (in_w.to_vec(), in_n),
+        outputs: (out_w.to_vec(), out_n),
+    };
+    if nodes.insert(node.name.clone(), entry).is_some() {
+        return err(format!("two nodes are named \"{}\"", node.name));
+    }
+    Ok(())
+}
+
+/// Port labels name the instance pins, so they must be unique.
+pub(crate) fn check_port_labels(doc: &CircuitDocument) -> Result<(), SourceError> {
     let mut seen = HashSet::new();
     for n in &doc.nodes {
         if let (GateKind::Input { .. } | GateKind::Output { .. }, Some(label)) = (&n.kind, &n.label)
@@ -1076,13 +1147,27 @@ fn expand_circuit(
             return err(format!("two ports are labelled \"{label}\""));
         }
     }
+    Ok(())
+}
 
-    // Collect, per input pin, the source bits driving each of its bits.
+/// What wire entries connect: per input pin, the source bits driving each
+/// of its bits.
+pub(crate) struct WirePlan {
+    /// The input pins, in the order they were first named.
+    pub(crate) sinks: Vec<(Uuid, u8)>,
+    assigned: HashMap<(Uuid, u8), (Slot, BTreeMap<u8, Piece>)>,
+}
+
+/// Read wire entries against the named nodes.
+pub(crate) fn plan_wires(
+    nodes: &NodeTable,
+    wires: &[Vec<String>],
+) -> Result<WirePlan, SourceError> {
     let mut sinks: Vec<(Uuid, u8)> = Vec::new();
     let mut assigned: HashMap<(Uuid, u8), (Slot, BTreeMap<u8, Piece>)> = HashMap::new();
-    for (wi, wire) in circuit.wires.iter().enumerate() {
+    for (wi, wire) in wires.iter().enumerate() {
         let place = format!("wires[{wi}] {}", Value::from(wire.clone()));
-        let sources: Vec<Piece> = resolve(&nodes, &wire[0], Dir::Out)
+        let sources: Vec<Piece> = resolve(nodes, &wire[0], Dir::Out)
             .context(&place)?
             .into_iter()
             .map(|(e, pin, pin_width, lo, len)| Piece {
@@ -1097,7 +1182,7 @@ fn expand_circuit(
             .collect();
         let total: u32 = sources.iter().map(|p| u32::from(p.len)).sum();
         for sink in &wire[1..] {
-            let slots: Vec<Slot> = resolve(&nodes, sink, Dir::In)
+            let slots: Vec<Slot> = resolve(nodes, sink, Dir::In)
                 .context(&place)?
                 .into_iter()
                 .map(|(e, pin, pin_width, lo, len)| Slot {
@@ -1174,7 +1259,20 @@ fn expand_circuit(
             }
         }
     }
+    Ok(WirePlan { sinks, assigned })
+}
 
+/// Emit the wires of `plan` into `doc`, with the adapters they need.
+/// `new_id` makes the id of `"wire/<sink>/<pin>"` and of an adapter node.
+pub(crate) fn emit_wires(
+    doc: &mut CircuitDocument,
+    plan: WirePlan,
+    new_id: &dyn Fn(&str) -> Uuid,
+) -> Result<(), SourceError> {
+    let WirePlan {
+        sinks,
+        mut assigned,
+    } = plan;
     // Emit wires, with Split/Merge adapters where bits are regrouped. A
     // node's splits stand in a column to its right and its merges in a
     // column to its left, one box apart (see `ADAPTER_*`).
@@ -1219,7 +1317,7 @@ fn expand_circuit(
             pieces.push(piece);
         }
         let wire = |from: Uuid, from_pin: u8, to: Uuid, to_pin: u8, what: String| DocWire {
-            id: item_id(id, &format!("wire/{what}")),
+            id: new_id(&format!("wire/{what}")),
             from: PinAddr {
                 node: from,
                 pin: from_pin,
@@ -1246,7 +1344,7 @@ fn expand_circuit(
                         piece.name, piece.pin, piece.lo, piece.len
                     );
                     let k = adapters_at.entry((piece.node, true)).or_default();
-                    let s = item_id(id, &format!("node/{what}"));
+                    let s = new_id(&format!("node/{what}"));
                     doc.nodes.push(DocNode {
                         id: s,
                         kind: GateKind::Split {
@@ -1278,7 +1376,7 @@ fn expand_circuit(
         }
         let what = format!("~merge/{sink_what}");
         let k = adapters_at.entry((slot.node, false)).or_default();
-        let merge = item_id(id, &format!("node/{what}"));
+        let merge = new_id(&format!("node/{what}"));
         doc.nodes.push(DocNode {
             id: merge,
             kind: GateKind::Merge {
@@ -1299,9 +1397,7 @@ fn expand_circuit(
         doc.wires
             .push(wire(merge, 0, slot.node, slot.pin, sink_what));
     }
-    doc.nodes.sort_by_key(|n| n.id);
-    doc.wires.sort_by_key(|w| w.id);
-    Ok(doc)
+    Ok(())
 }
 
 #[cfg(test)]

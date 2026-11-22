@@ -4,7 +4,10 @@
 // Requires the 2dCamera to be setup in the main.rs file
 
 use crate::theme::Theme;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui::Pressed;
+use bevy::ui_widgets::{Activate, ActivateOnPress, Button};
 
 use crate::GameState;
 
@@ -67,7 +70,10 @@ fn spawn_main_menu(
         |size: f32| art.map_or_else(|| TextFont::from_font_size(size), |a| a.fonts.name(size));
     let button = |action: MainMenuButtonAction| {
         (
+            // Acts on press, as the menu always has.
             Button,
+            ActivateOnPress,
+            Hovered::default(),
             Node {
                 width: Val::Px(220.0),
                 height: Val::Px(52.0),
@@ -120,41 +126,42 @@ fn spawn_main_menu(
         });
 }
 
-fn main_menu_button_system(
-    mut interaction_query: Query<
-        (
-            &Interaction,
-            &mut BackgroundColor,
-            &mut BorderColor,
-            &MainMenuButtonAction,
-        ),
-        Changed<Interaction>,
-    >,
+/// Run a main menu button's action when it is activated (on press).
+fn main_menu_activate(
+    activate: On<Activate>,
+    actions: Query<&MainMenuButtonAction>,
     mut next_state: ResMut<NextState<GameState>>,
     mut exit: MessageWriter<AppExit>,
     mut theme: ResMut<Theme>,
 ) {
-    let palette = theme.palette;
-    for (interaction, mut color, _border_color, action) in &mut interaction_query {
-        match *interaction {
-            Interaction::Pressed => {
-                *color = palette.on.into();
-                match action {
-                    MainMenuButtonAction::Start => next_state.set(GameState::Simulating),
-                    MainMenuButtonAction::DemoMap => next_state.set(GameState::DemoMap),
-                    MainMenuButtonAction::Theme => theme.toggle(),
-                    MainMenuButtonAction::Exit => {
-                        exit.write(AppExit::Success);
-                    }
-                };
-            }
-            Interaction::Hovered => {
-                *color = palette.hover.into();
-            }
-            Interaction::None => {
-                *color = palette.raised.into();
-            }
+    let Ok(action) = actions.get(activate.entity) else {
+        return;
+    };
+    match action {
+        MainMenuButtonAction::Start => next_state.set(GameState::Simulating),
+        MainMenuButtonAction::DemoMap => next_state.set(GameState::DemoMap),
+        MainMenuButtonAction::Theme => theme.toggle(),
+        MainMenuButtonAction::Exit => {
+            exit.write(AppExit::Success);
         }
+    }
+}
+
+/// Colour the main menu buttons by their pressed and hovered state.
+fn main_menu_button_system(
+    mut buttons: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor), With<MainMenuButtonAction>>,
+    theme: Res<Theme>,
+) {
+    let palette = theme.palette;
+    for (hovered, pressed, mut color) in &mut buttons {
+        let want = if pressed {
+            palette.on
+        } else if hovered.get() {
+            palette.hover
+        } else {
+            palette.raised
+        };
+        color.set_if_neq(want.into());
     }
 }
 
@@ -176,7 +183,8 @@ impl MainMenuPlugin {
 
 impl Plugin for MainMenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(self.state.clone()), setup_main_menu)
+        app.add_observer(main_menu_activate)
+            .add_systems(OnEnter(self.state.clone()), setup_main_menu)
             .add_systems(
                 Update,
                 (main_menu_button_system, restyle_main_menu)
@@ -224,9 +232,10 @@ mod tests {
             .find(|(_, a)| matches!(a, MainMenuButtonAction::Theme))
             .map(|(e, _)| e)
             .unwrap();
-        app.world_mut()
-            .entity_mut(theme_button)
-            .insert(Interaction::Pressed);
+        // What the button widget sends when it is pressed.
+        app.world_mut().trigger(Activate {
+            entity: theme_button,
+        });
         app.update();
         assert!(app.world().resource::<Theme>().is_night());
         app.update();
