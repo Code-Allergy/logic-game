@@ -47,9 +47,9 @@ use super::{
 };
 
 /// Distance from the chip's parts to its port columns.
-const PORT_MARGIN: f32 = 80.0;
+const PORT_MARGIN: f32 = 120.0;
 /// Vertical distance between ports in a column.
-const PORT_PITCH: f32 = 60.0;
+const PORT_PITCH: f32 = 100.0;
 /// Grid the chip's instance and ports are placed on.
 const GRID: f32 = 10.0;
 

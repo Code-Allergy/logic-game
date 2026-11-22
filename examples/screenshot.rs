@@ -28,6 +28,11 @@
 //! `empty` and `loop` are a new empty workspace and a small editable
 //! circuit with a combinational loop.
 //!
+//! `--multi LABEL,LABEL,...` selects those parts together (the selection
+//! card shows; `kind:NAME` stands for every part of that kind, e.g.
+//! `kind:And`); with `--make-chip NAME` they are then made into a chip of
+//! that name (the workspace must be editable), and `--open-chip` opens it.
+//!
 //! `--map` shows the demo map instead of a demo (the id is ignored), with
 //! the demos listed by `--opened ID,ID,...` (the last one last) as the
 //! progress, kept in memory only; `--level N` picks a stop.
@@ -43,9 +48,9 @@ use bevy_egui::EguiPlugin;
 use gate_quest::editor::demo_map::{DemoMapState, progress::DemoProgress};
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
 use gate_quest::sim::{
-    ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel,
-    LoadWorkspaceEvent, OpenDefinitionView, SelectedGate, SetInputValue, SimBridge,
-    SimulationPlugin, WorkspaceDocument, demos, source,
+    ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel, GateType,
+    LoadWorkspaceEvent, MakeChip, MultiSelection, OpenDefinitionView, OpenInstanceView,
+    SelectedGate, SetInputValue, SimBridge, SimulationPlugin, WorkspaceDocument, demos, source,
 };
 use gate_quest::temp::GateComponentSelectionEvent;
 use gate_quest::theme::{Theme, ThemeMode, ThemePlugin};
@@ -71,6 +76,9 @@ struct Shot {
     definition: Option<String>,
     fit: bool,
     editable: bool,
+    multi: Vec<String>,
+    make_chip: Option<String>,
+    open_chip: bool,
     frame: u32,
 }
 
@@ -139,6 +147,7 @@ fn main() {
     let (mut map, mut opened, mut level) = (false, String::new(), None);
     let (mut definition, mut fit) = (None, false);
     let mut editable = false;
+    let (mut multi, mut make_chip, mut open_chip) = (Vec::new(), None, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--night" => night = true,
@@ -172,6 +181,16 @@ fn main() {
             "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "--definition" => definition = args.next(),
             "--fit" => fit = true,
+            "--multi" => {
+                multi = args
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect();
+            }
+            "--make-chip" => make_chip = args.next(),
+            "--open-chip" => open_chip = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -211,6 +230,9 @@ fn main() {
             definition,
             fit,
             editable,
+            multi,
+            make_chip,
+            open_chip,
             frame: 0,
         })
         .add_systems(
@@ -240,7 +262,14 @@ fn drive(
     windows: Query<&Window>,
     mut exit: MessageWriter<AppExit>,
     // Grouped: a system takes at most 16 parameters.
-    (mut map, mut active): (ResMut<DemoMapState>, ResMut<ActiveCircuit>),
+    (mut map, mut active, mut group, ids, mut make, mut open_instance): (
+        ResMut<DemoMapState>,
+        ResMut<ActiveCircuit>,
+        ResMut<MultiSelection>,
+        Query<(Entity, &GateIdentity, &GateType)>,
+        MessageWriter<MakeChip>,
+        MessageWriter<OpenInstanceView>,
+    ),
 ) {
     shot.frame += 1;
     if shot.map {
@@ -305,6 +334,49 @@ fn drive(
                     .find(|(n, _)| n == name)
                     .unwrap_or_else(|| panic!("no circuit {name}"));
                 open.write(OpenDefinitionView { definition: doc.id });
+            }
+            let mut primary = None;
+            for token in &shot.multi {
+                let found: Vec<Entity> = match token.strip_prefix("kind:") {
+                    Some(kind) => ids
+                        .iter()
+                        .filter(|(_, _, t)| t.kind.display_name() == kind)
+                        .map(|(e, ..)| e)
+                        .collect(),
+                    None => labels
+                        .iter()
+                        .filter(|(_, l)| &l.value == token)
+                        .map(|(e, _)| e)
+                        .take(1)
+                        .collect(),
+                };
+                assert!(!found.is_empty(), "no part {token}");
+                for entity in found {
+                    primary = group.toggle(entity, primary);
+                }
+            }
+            if primary.is_some() {
+                selected.0 = primary;
+            }
+        }
+        34 => {
+            if let Some(name) = &shot.make_chip {
+                make.write(MakeChip {
+                    gates: group
+                        .entities()
+                        .iter()
+                        .filter_map(|e| ids.get(*e).ok())
+                        .map(|(_, id, _)| id.uuid)
+                        .collect(),
+                    name: name.clone(),
+                });
+            }
+        }
+        37 => {
+            if shot.open_chip
+                && let Some(entity) = selected.0
+            {
+                open_instance.write(OpenInstanceView { entity });
             }
         }
         40 => {

@@ -63,13 +63,43 @@ A subcircuit definition is a circuit like any other. Its ports are its
 `Input` and `Output` nodes, ordered by `label` (then `id`); that order gives
 the instance's pin numbers. `Display` nodes are not ports.
 
-`circuits` is the definition table. A definition is identified only by its
+`circuits` is the definition table. A definition is identified by its
 `id`, which is stable: every instance refers to it by id, it is stored
 once however many instances there are, and saving and loading keep it.
 Placing a saved workspace as a cell uses that workspace's root `id` as the
 definition id. When the editor changes a definition's ports, the pin
 numbers in wires to its instances are renumbered before the file is
-written, so a saved wire always names the port it was connected to.
+written, so a saved wire always names the port it was connected to
+(ports are followed by node id, else by label and width; wires to a port
+that is gone are removed, and the editor says so).
+
+### Versions of a definition
+
+A circuit may carry an optional integer `revision` (absent means 0): an
+edit counter of its content. The editor bumps it each time it changes a
+definition (editing inside it, making a chip inside it), and a saved
+root gets the revision it was loaded with plus one when its content
+changed since. Two copies of a definition with the same `id` are compared
+by content (nodes and wires in any order, the name; not `revision`), and
+when they differ, by `revision`:
+
+| Offered copy | Meaning |
+|---|---|
+| same content | the same definition, whatever the revisions |
+| higher `revision` | a newer version |
+| same `revision` | both were edited since they parted (diverged) |
+| lower `revision` | an older version |
+
+The library of the open workspace never replaces a definition with
+different content without the player's say: placing a chip from a saved
+workspace whose copy is newer or diverged asks whether to refresh every
+instance or keep the workspace's version; an older saved copy is ignored
+(with a note). Loading a workspace takes its definitions as they are
+(nothing from the circuit open before remains).
+
+Make chip (select parts, then `Ctrl+G` or the selection card) adds a new
+definition with `revision` 1 to the workspace; it is saved in `circuits`
+like any other.
 
 ## Node
 
