@@ -3,7 +3,6 @@
 // Takes in a target state to be active in
 // Requires the 2dCamera to be setup in the main.rs file
 
-use crate::settings_overlay::SettingsMenuOpen;
 use crate::theme::Theme;
 use bevy::prelude::*;
 
@@ -19,8 +18,19 @@ pub enum MainMenuButtonAction {
     Start,
     /// The demo map (the curriculum road).
     DemoMap,
-    Settings,
+    /// Switch the day and night workshop (the one setting there is; `T`
+    /// does the same anywhere).
+    Theme,
     Exit,
+}
+
+/// The theme button's label: the current theme.
+pub fn theme_button_label(theme: &Theme) -> &'static str {
+    if theme.is_night() {
+        "Theme: night"
+    } else {
+        "Theme: day"
+    }
 }
 
 fn setup_main_menu(
@@ -28,11 +38,33 @@ fn setup_main_menu(
     theme: Res<Theme>,
     art: Option<Res<crate::sim::art::CanvasArt>>,
 ) {
+    spawn_main_menu(&mut commands, &theme, art.as_deref());
+}
+
+/// Rebuild the menu in the new colours when the theme changes.
+fn restyle_main_menu(
+    mut commands: Commands,
+    theme: Res<Theme>,
+    art: Option<Res<crate::sim::art::CanvasArt>>,
+    query: Query<Entity, With<MainMenu>>,
+) {
+    if !theme.is_changed() || theme.is_added() {
+        return;
+    }
+    for entity in &query {
+        commands.entity(entity).despawn();
+    }
+    spawn_main_menu(&mut commands, &theme, art.as_deref());
+}
+
+fn spawn_main_menu(
+    commands: &mut Commands,
+    theme: &Theme,
+    art: Option<&crate::sim::art::CanvasArt>,
+) {
     let palette = theme.palette;
-    let font = |size: f32| {
-        art.as_ref()
-            .map_or_else(|| TextFont::from_font_size(size), |a| a.fonts.name(size))
-    };
+    let font =
+        |size: f32| art.map_or_else(|| TextFont::from_font_size(size), |a| a.fonts.name(size));
     let button = |action: MainMenuButtonAction| {
         (
             Button,
@@ -80,8 +112,8 @@ fn setup_main_menu(
                 .spawn(button(MainMenuButtonAction::DemoMap))
                 .with_child(label("Demo map"));
             parent
-                .spawn(button(MainMenuButtonAction::Settings))
-                .with_child(label("Options"));
+                .spawn(button(MainMenuButtonAction::Theme))
+                .with_child(label(theme_button_label(theme)));
             parent
                 .spawn(button(MainMenuButtonAction::Exit))
                 .with_child(label("Exit"));
@@ -99,15 +131,10 @@ fn main_menu_button_system(
         Changed<Interaction>,
     >,
     mut next_state: ResMut<NextState<GameState>>,
-    mut settings_open: ResMut<SettingsMenuOpen>,
     mut exit: MessageWriter<AppExit>,
-    theme: Res<Theme>,
+    mut theme: ResMut<Theme>,
 ) {
     let palette = theme.palette;
-    if settings_open.0 {
-        return;
-    }
-
     for (interaction, mut color, _border_color, action) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => {
@@ -115,7 +142,7 @@ fn main_menu_button_system(
                 match action {
                     MainMenuButtonAction::Start => next_state.set(GameState::Simulating),
                     MainMenuButtonAction::DemoMap => next_state.set(GameState::DemoMap),
-                    MainMenuButtonAction::Settings => settings_open.0 = !settings_open.0,
+                    MainMenuButtonAction::Theme => theme.toggle(),
                     MainMenuButtonAction::Exit => {
                         exit.write(AppExit::Success);
                     }
@@ -152,8 +179,69 @@ impl Plugin for MainMenuPlugin {
         app.add_systems(OnEnter(self.state.clone()), setup_main_menu)
             .add_systems(
                 Update,
-                (main_menu_button_system,).run_if(in_state(self.state.clone())),
+                (main_menu_button_system, restyle_main_menu)
+                    .chain()
+                    .run_if(in_state(self.state.clone())),
             )
             .add_systems(OnExit(self.state.clone()), cleanup_main_menu);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::state::app::StatesPlugin;
+
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_resource::<Theme>()
+            .add_message::<AppExit>()
+            .init_state::<GameState>()
+            .add_plugins(MainMenuPlugin::new(GameState::MainMenu));
+        app.update();
+        app
+    }
+
+    fn labels(app: &mut App) -> Vec<String> {
+        let mut q = app.world_mut().query::<&Text>();
+        let mut out: Vec<String> = q.iter(app.world()).map(|t| t.0.clone()).collect();
+        out.sort();
+        out
+    }
+
+    /// The menu offers only settings that exist: the theme, which the
+    /// button switches, and the menu follows it.
+    #[test]
+    fn the_theme_button_switches_day_and_night() {
+        let mut app = app();
+        assert!(labels(&mut app).iter().any(|l| l == "Theme: day"));
+        let theme_button = app
+            .world_mut()
+            .query::<(Entity, &MainMenuButtonAction)>()
+            .iter(app.world())
+            .find(|(_, a)| matches!(a, MainMenuButtonAction::Theme))
+            .map(|(e, _)| e)
+            .unwrap();
+        app.world_mut()
+            .entity_mut(theme_button)
+            .insert(Interaction::Pressed);
+        app.update();
+        assert!(app.world().resource::<Theme>().is_night());
+        app.update();
+        let labels = labels(&mut app);
+        assert!(labels.iter().any(|l| l == "Theme: night"), "{labels:?}");
+        assert_eq!(
+            labels.iter().filter(|l| l.starts_with("Theme")).count(),
+            1,
+            "the menu is rebuilt, not doubled"
+        );
+        let menus = app
+            .world_mut()
+            .query_filtered::<(), With<MainMenu>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(menus, 1);
     }
 }

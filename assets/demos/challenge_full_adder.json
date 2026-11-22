@@ -1,0 +1,19 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "main",
+      "title": "Full adder",
+      "nodes": [
+        {"name": "A", "type": "Input", "at": [0, 80]},
+        {"name": "B", "type": "Input", "at": [0, 0]},
+        {"name": "Cin", "type": "Input", "at": [0, -80]},
+        {"name": "Sum", "type": "Output", "at": [480, 40]},
+        {"name": "Cout", "type": "Output", "at": [480, -40]}
+      ],
+      "wires": []
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 //! The player's display settings: the UI scale and the theme.
 //!
 //! On native builds they are a small JSON file next to the demo progress,
-//! `workspaces/.settings.json` ([`settings_dir`]), written atomically
+//! `.settings.json` in the workspaces folder of the player's data folder
+//! ([`settings_dir`]; see the README's Saving section), written atomically
 //! (to `.settings.json.tmp`, then renamed) whenever they change:
 //!
 //! ```json
@@ -30,10 +31,16 @@ pub const SETTINGS_FILE: &str = ".settings.json";
 pub const SETTINGS_FORMAT: &str = "gatequest-settings";
 pub const SETTINGS_VERSION: u32 = 1;
 
-/// The folder the settings file lives in: next to the demo progress
-/// (the saved workspaces).
+/// The folder the settings file lives in: next to the demo progress, in
+/// the player's workspaces folder
+/// ([`WorkspaceStore::player`](crate::editor::workspace::WorkspaceStore::player):
+/// `workspaces` in the per-user data folder, or `GATEQUEST_DATA_DIR`),
+/// else `./workspaces`.
 pub fn settings_dir() -> PathBuf {
-    PathBuf::from(crate::WORKSPACE_DIR)
+    crate::editor::workspace::WorkspaceStore::player().map_or_else(
+        || PathBuf::from(crate::WORKSPACE_DIR),
+        |store| store.dir().to_path_buf(),
+    )
 }
 
 /// The UI scale presets, in percent.

@@ -35,7 +35,13 @@
 //! Instance pins are numbered by port order (port label, then id). When an
 //! edit adds, removes or renames ports, wires to instances of the
 //! definition (in the root and in other definitions) are renumbered so
-//! they stay on the same port; wires to a removed port are deleted.
+//! they stay on the same port: followed by the port's node id, or else by
+//! its name (a port deleted and added again with the same label and
+//! width keeps its wires). Wires to a port that is gone are deleted, and
+//! the editor says which ports lost wires.
+//!
+//! Each write-back bumps the definition's `revision` (see
+//! [`CircuitDocument`]), so a saved copy can tell it is older or newer.
 
 use bevy::ecs::entity_disabling::Disabled;
 use bevy::ecs::system::SystemParam;
@@ -211,7 +217,7 @@ fn find_instance(
 }
 
 /// Spawn a definition's gates and wires as view items.
-fn spawn_view(commands: &mut Commands, doc: &CircuitDocument) {
+pub(crate) fn spawn_view(commands: &mut Commands, doc: &CircuitDocument) {
     for node in &doc.nodes {
         let e = spawn_gate(commands, node, doc.id);
         commands.entity(e).insert(InstanceViewItem);
@@ -224,10 +230,18 @@ fn spawn_view(commands: &mut Commands, doc: &CircuitDocument) {
 
 /// How the pins of a definition's instances move after an edit: old pin
 /// index to new pin index, `None` for a removed port.
+///
+/// A port is followed by its node id (a relabelled port keeps its wires);
+/// a port whose node is gone reconnects to a new port of the same name and
+/// width that no other old port took, so a port deleted and re-created, or
+/// a definition refreshed from a saved copy, keeps its wires where it can.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PinRemap {
     pub inputs: Vec<Option<u8>>,
     pub outputs: Vec<Option<u8>>,
+    /// Names of the old ports (for reporting dropped wires).
+    input_names: Vec<String>,
+    output_names: Vec<String>,
 }
 
 impl PinRemap {
@@ -237,13 +251,39 @@ impl PinRemap {
         let (oi, oo) = old.interface();
         let (ni, no) = new.interface();
         let map = |o: &[&DocNode], n: &[&DocNode]| -> Vec<Option<u8>> {
-            o.iter()
+            let mut out: Vec<Option<u8>> = o
+                .iter()
                 .map(|x| n.iter().position(|y| y.id == x.id).map(|p| p as u8))
-                .collect()
+                .collect();
+            let mut taken: Vec<bool> = vec![false; n.len()];
+            for p in out.iter().flatten() {
+                taken[usize::from(*p)] = true;
+            }
+            for (i, x) in o.iter().enumerate() {
+                if out[i].is_some() {
+                    continue;
+                }
+                let Some(label) = x.label.as_deref() else {
+                    continue;
+                };
+                let found = n.iter().enumerate().position(|(j, y)| {
+                    !taken[j]
+                        && y.label.as_deref() == Some(label)
+                        && y.kind.width() == x.kind.width()
+                });
+                if let Some(j) = found {
+                    taken[j] = true;
+                    out[i] = Some(j as u8);
+                }
+            }
+            out
         };
+        let name = |n: &&DocNode| n.label.clone().unwrap_or_else(|| "?".into());
         let remap = Self {
             inputs: map(&oi, &ni),
             outputs: map(&oo, &no),
+            input_names: oi.iter().map(name).collect(),
+            output_names: oo.iter().map(name).collect(),
         };
         let identity = |v: &[Option<u8>]| v.iter().enumerate().all(|(i, p)| *p == Some(i as u8));
         (!identity(&remap.inputs) || !identity(&remap.outputs)).then_some(remap)
@@ -257,9 +297,35 @@ impl PinRemap {
         self.outputs.get(usize::from(pin)).copied().flatten()
     }
 
+    fn input_name(&self, pin: u8) -> String {
+        self.input_names
+            .get(usize::from(pin))
+            .cloned()
+            .unwrap_or_else(|| format!("in {pin}"))
+    }
+
+    fn output_name(&self, pin: u8) -> String {
+        self.output_names
+            .get(usize::from(pin))
+            .cloned()
+            .unwrap_or_else(|| format!("out {pin}"))
+    }
+
+    /// The port a wire to instances of `def` loses, if it loses one.
+    fn dropped(&self, instances: &[Uuid], source: (Uuid, u8), sink: (Uuid, u8)) -> Option<String> {
+        if instances.contains(&source.0) && self.output(source.1).is_none() {
+            return Some(self.output_name(source.1));
+        }
+        if instances.contains(&sink.0) && self.input(sink.1).is_none() {
+            return Some(self.input_name(sink.1));
+        }
+        None
+    }
+
     /// Renumber the wires of `doc` to instances of `def`. Returns the
-    /// updated document if anything changed.
-    fn apply(&self, def: Uuid, doc: &CircuitDocument) -> Option<CircuitDocument> {
+    /// updated document if anything changed, and the ports of the wires
+    /// it dropped.
+    fn apply(&self, def: Uuid, doc: &CircuitDocument) -> Option<(CircuitDocument, Vec<String>)> {
         let instances: Vec<Uuid> = doc
             .nodes
             .iter()
@@ -270,23 +336,46 @@ impl PinRemap {
             return None;
         }
         let mut out = doc.clone();
+        let mut dropped = Vec::new();
         out.wires.retain_mut(|w| {
+            if let Some(port) =
+                self.dropped(&instances, (w.from.node, w.from.pin), (w.to.node, w.to.pin))
+            {
+                dropped.push(port);
+                return false;
+            }
             if instances.contains(&w.from.node) {
-                match self.output(w.from.pin) {
-                    Some(p) => w.from.pin = p,
-                    None => return false,
-                }
+                w.from.pin = self.output(w.from.pin).unwrap_or(w.from.pin);
             }
             if instances.contains(&w.to.node) {
-                match self.input(w.to.pin) {
-                    Some(p) => w.to.pin = p,
-                    None => return false,
-                }
+                w.to.pin = self.input(w.to.pin).unwrap_or(w.to.pin);
             }
             true
         });
-        (out != *doc).then_some(out)
+        if out.wires == doc.wires {
+            return None;
+        }
+        out.revision = doc.revision + 1;
+        Some((out, dropped))
     }
+}
+
+/// Wires dropped because the ports they were on are gone, for the player:
+/// `None` when there are none.
+pub(crate) fn dropped_message(definition: &str, ports: &[String]) -> Option<String> {
+    if ports.is_empty() {
+        return None;
+    }
+    let mut names: Vec<&str> = ports.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    names.dedup();
+    let names: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+    Some(format!(
+        "\"{definition}\" changed its ports: removed {} wire(s) to {} (no port of that name \
+         is left).",
+        ports.len(),
+        names.join(", ")
+    ))
 }
 
 /// Writes the open view back to its definition in the library, keeping
@@ -301,35 +390,64 @@ pub struct DefinitionWriter<'w, 's> {
 
 impl DefinitionWriter<'_, '_> {
     /// Write the open view's document to the library if it differs.
-    /// Returns whether it did.
-    fn write_back(&mut self, view: &CircuitView, commands: &mut Commands) -> bool {
-        let Some(frame) = view.frames.last() else {
-            return false;
-        };
+    /// Returns a message for the player when wires were dropped (ports
+    /// removed).
+    fn write_back(&mut self, view: &CircuitView, commands: &mut Commands) -> Option<String> {
+        let frame = view.frames.last()?;
         let def = frame.definition;
-        let doc = self.items.document(def, frame.name.clone());
+        let mut doc = self.items.document(def, frame.name.clone());
         let old = self.library.get(def).cloned();
         if old.as_ref().is_some_and(|have| same_document(have, &doc)) {
-            return false;
+            return None;
         }
-        let remap = old.as_ref().and_then(|old| PinRemap::between(old, &doc));
-        self.library.definitions.insert(def, Arc::new(doc));
-        if let Some(remap) = remap {
-            self.renumber_instance_wires(def, &remap, commands);
-        }
-        true
+        doc.revision = old.as_ref().map_or(1, |o| o.revision + 1);
+        self.replace(Arc::new(doc), commands)
     }
 
-    fn renumber_instance_wires(&mut self, def: Uuid, remap: &PinRemap, commands: &mut Commands) {
+    /// Replace a definition in the library, renumbering the wires to its
+    /// instances (in the root circuit and in other definitions) so they
+    /// stay on the same ports. Returns a message for the player when
+    /// wires were dropped.
+    pub fn replace(
+        &mut self,
+        doc: Arc<CircuitDocument>,
+        commands: &mut Commands,
+    ) -> Option<String> {
+        let def = doc.id;
+        let name = doc.name.clone();
+        let remap = self
+            .library
+            .get(def)
+            .and_then(|old| PinRemap::between(old, &doc));
+        self.library.replace(doc);
+        let dropped = match remap {
+            Some(remap) => self.renumber_instance_wires(def, &remap, commands),
+            None => Vec::new(),
+        };
+        dropped_message(&name, &dropped)
+    }
+
+    fn renumber_instance_wires(
+        &mut self,
+        def: Uuid,
+        remap: &PinRemap,
+        commands: &mut Commands,
+    ) -> Vec<String> {
+        let mut dropped = Vec::new();
         let mut parents: Vec<(Uuid, CircuitDocument)> = self
             .library
             .definitions
             .iter()
-            .filter_map(|(id, d)| remap.apply(def, d).map(|d| (*id, d)))
+            .filter_map(|(id, d)| {
+                remap.apply(def, d).map(|(d, lost)| {
+                    dropped.extend(lost);
+                    (*id, d)
+                })
+            })
             .collect();
         parents.sort_by_key(|(id, _)| *id);
-        for (id, d) in parents {
-            self.library.definitions.insert(id, Arc::new(d));
+        for (_, d) in parents {
+            self.library.replace(Arc::new(d));
         }
         let instances: Vec<Uuid> = self
             .root_gates
@@ -338,51 +456,34 @@ impl DefinitionWriter<'_, '_> {
             .map(|(id, _)| id.uuid)
             .collect();
         if instances.is_empty() {
-            return;
+            return dropped;
         }
         for (entity, mut ep) in &mut self.root_wires {
+            if let Some(port) = remap.dropped(
+                &instances,
+                (ep.source_gate, ep.source_pin),
+                (ep.sink_gate, ep.sink_pin),
+            ) {
+                dropped.push(port);
+                commands.entity(entity).despawn();
+                continue;
+            }
             let mut new = *ep;
             if instances.contains(&ep.source_gate) {
-                match remap.output(ep.source_pin) {
-                    Some(p) => new.source_pin = p,
-                    None => {
-                        commands.entity(entity).despawn();
-                        continue;
-                    }
-                }
+                new.source_pin = remap.output(ep.source_pin).unwrap_or(ep.source_pin);
             }
             if instances.contains(&ep.sink_gate) {
-                match remap.input(ep.sink_pin) {
-                    Some(p) => new.sink_pin = p,
-                    None => {
-                        commands.entity(entity).despawn();
-                        continue;
-                    }
-                }
+                new.sink_pin = remap.input(ep.sink_pin).unwrap_or(ep.sink_pin);
             }
             ep.set_if_neq(new);
         }
+        dropped
     }
 }
 
-/// Equal up to node and wire order.
+/// Equal up to node and wire order (and the revision).
 pub(crate) fn same_document(a: &CircuitDocument, b: &CircuitDocument) -> bool {
-    if a.id != b.id
-        || a.name != b.name
-        || a.nodes.len() != b.nodes.len()
-        || a.wires.len() != b.wires.len()
-    {
-        return false;
-    }
-    let mut an: Vec<_> = a.nodes.iter().collect();
-    let mut bn: Vec<_> = b.nodes.iter().collect();
-    an.sort_by_key(|n| n.id);
-    bn.sort_by_key(|n| n.id);
-    let mut aw: Vec<_> = a.wires.iter().collect();
-    let mut bw: Vec<_> = b.wires.iter().collect();
-    aw.sort_by_key(|w| w.id);
-    bw.sort_by_key(|w| w.id);
-    an == bn && aw == bw
+    a.same_content(b)
 }
 
 /// Handle [`OpenInstanceView`], [`OpenDefinitionView`] and [`CloseView`].
@@ -467,7 +568,9 @@ pub fn view_navigation_system(
                 .insert_recursive::<Children>(Disabled);
         }
     } else {
-        writer.write_back(&view, &mut commands);
+        if let Some(message) = writer.write_back(&view, &mut commands) {
+            feedback.refuse(message);
+        }
         for entity in &view_items {
             commands.entity(entity).despawn();
         }
@@ -529,6 +632,7 @@ pub fn write_back_view_system(
     mut removed_gates: RemovedComponents<GateIdentity>,
     mut removed_wires: RemovedComponents<WireIdentity>,
     active: Res<ActiveCircuit>,
+    mut feedback: ResMut<AuthoringFeedback>,
 ) {
     let removed = removed_gates.read().count() + removed_wires.read().count() > 0;
     // A view switch this frame already wrote the old view back; the new
@@ -536,7 +640,9 @@ pub fn write_back_view_system(
     if view.is_root() || view.is_changed() || active.is_changed() {
         return;
     }
-    if removed || !changed_gates.is_empty() || !changed_wires.is_empty() {
-        writer.write_back(&view, &mut commands);
+    if (removed || !changed_gates.is_empty() || !changed_wires.is_empty())
+        && let Some(message) = writer.write_back(&view, &mut commands)
+    {
+        feedback.refuse(message);
     }
 }

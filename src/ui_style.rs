@@ -221,6 +221,9 @@ pub enum HudIcon {
     Back,
     /// An arrow pointing left to a bar (back to the root circuit).
     BackToRoot,
+    /// A hooked arrow back (undo) or forward (redo).
+    Undo,
+    Redo,
 }
 
 /// A square chunky button with a painted icon.
@@ -310,6 +313,24 @@ pub fn paint_icon(
             if icon == HudIcon::BackToRoot {
                 painter.line_segment([p(-10.5, -7.0), p(-10.5, 7.0)], line);
             }
+        }
+        HudIcon::Undo | HudIcon::Redo => {
+            // Undo: an arrowhead pointing left at the top, the shaft
+            // hooking round to the right and back; redo is its mirror.
+            let sx = if icon == HudIcon::Undo { 1.0 } else { -1.0 };
+            let p = |x: f32, y: f32| c + EVec2::new(sx * x, y);
+            let mut shaft = vec![p(-5.0, -4.0), p(2.0, -4.0)];
+            shaft.extend((1..=12).map(|i| {
+                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 12.0;
+                p(2.0 + 5.0 * a.cos(), 1.0 + 5.0 * a.sin())
+            }));
+            shaft.push(p(-4.0, 6.0));
+            painter.add(egui::Shape::line(shaft, stroke(2.5, colour)));
+            painter.add(egui::Shape::convex_polygon(
+                vec![p(-10.0, -4.0), p(-4.0, -9.0), p(-4.0, 1.0)],
+                colour,
+                Stroke::NONE,
+            ));
         }
     }
 }
@@ -451,6 +472,14 @@ pub fn chip_sized(
     let width = (galley.size().x + 22.0).max(min_width.unwrap_or(0.0));
     let (rect, response) = ui.allocate_exact_size(EVec2::new(width, CHIP_HEIGHT), Sense::click());
     if ui.is_rect_visible(rect) {
+        // A disabled UI paints faded; the chosen chip of a disabled row
+        // (a read-only inspector) is painted solid, so the current choice
+        // stays readable, in the night theme too.
+        let mut painter = ui.painter().clone();
+        if on && !ui.is_enabled() {
+            let undone = painter.opacity() / ui.visuals().disabled_alpha().max(0.01);
+            painter.set_opacity(undone);
+        }
         let fill = if on {
             palette.text
         } else if response.hovered() {
@@ -458,14 +487,14 @@ pub fn chip_sized(
         } else {
             palette.raised
         };
-        ui.painter().rect(
+        painter.rect(
             rect,
             CornerRadius::same(9),
             egui_color(fill),
             stroke(2.0, egui_color(palette.ink)),
             StrokeKind::Inside,
         );
-        ui.painter().galley(
+        painter.galley(
             rect.center() - galley.size() * 0.5,
             galley,
             Color32::PLACEHOLDER,
@@ -520,6 +549,16 @@ pub const STATUS_WIDTH: f32 = 200.0;
 /// The least room the file card (top left) gets: the badge, a readable
 /// title and its buttons, with both back buttons of a nested view.
 pub const FILE_MIN_WIDTH: f32 = 396.0;
+/// The Undo and Redo buttons with the space before each: what the file
+/// card needs on top of [`FILE_MIN_WIDTH`] to hold them.
+pub const UNDO_BUTTONS_WIDTH: f32 = 2.0 * (ICON_BUTTON_WIDTH + 8.0);
+/// The Undo and Redo buttons' own card, when the file card has no room
+/// for them: two icon buttons (40 x 34 with a 3 px edge) 8 px apart, 8
+/// px padding and the 2.5 px outline.
+pub const UNDO_CARD: Vec2 = Vec2::new(
+    2.0 * ICON_BUTTON_WIDTH + 8.0 + 2.0 * (8.0 + 2.5),
+    34.0 + BUTTON_EDGE + 2.0 * (8.0 + 2.5),
+);
 /// The exact-rate popover under the transport card.
 pub const TRANSPORT_MORE_SIZE: Vec2 = Vec2::new(280.0, 170.0);
 
@@ -708,6 +747,31 @@ impl HudLayout {
         )
     }
 
+    /// Whether the Undo and Redo buttons fit in the file card: its room
+    /// holds them and still [`FILE_MIN_WIDTH`]. Else they get a card of
+    /// their own ([`Self::undo_rect`]).
+    pub fn undo_in_file_card(&self) -> bool {
+        self.file_rect().width() >= FILE_MIN_WIDTH + UNDO_BUTTONS_WIDTH
+    }
+
+    /// The Undo and Redo card: left edge, below the file card (shown
+    /// when [`Self::undo_in_file_card`] is false).
+    pub fn undo_rect(&self) -> Rect {
+        let min = Vec2::new(self.margin, self.top_band());
+        Rect::from_corners(min, min + UNDO_CARD)
+    }
+
+    /// The left column below the top row, for the library drawer or the
+    /// challenge card: [`Self::library_rect`], starting below the Undo
+    /// and Redo card when `undo_card` (that card is shown).
+    pub fn left_column_rect(&self, undo_card: bool) -> Rect {
+        let mut rect = self.library_rect();
+        if undo_card {
+            rect.min.y = self.undo_rect().max.y + self.gap;
+        }
+        rect
+    }
+
     /// The library drawer: left edge, below the file card, down to just
     /// above the minimap stack.
     pub fn library_rect(&self) -> Rect {
@@ -837,6 +901,47 @@ mod tests {
         assert!(defs.font_data.contains_key("Nunito-ExtraBold"));
     }
 
+    /// The fill of each chip painted by `add` (a row of chips), as
+    /// painted: `(on, alpha)` in paint order.
+    fn chip_fills(enabled: bool, chips: &[bool]) -> Vec<u8> {
+        let theme = Theme::night();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(workshop_fonts());
+        ctx.set_global_style(workshop_style(&theme));
+        let mut out = None;
+        for _ in 0..3 {
+            out = Some(ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    for (i, on) in chips.iter().enumerate() {
+                        chip(ui, &theme.palette, format!("{i}"), *on);
+                    }
+                });
+            }));
+        }
+        out.unwrap()
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(r) if r.corner_radius == CornerRadius::same(9) => {
+                    Some(r.fill.a())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_disabled_row_keeps_its_chosen_chip_solid() {
+        let enabled = chip_fills(true, &[false, true, false]);
+        assert_eq!(enabled, [255, 255, 255]);
+        // Disabled (a read-only inspector): the others fade, the chosen
+        // one does not, so the current mode or size reads at a glance.
+        let disabled = chip_fills(false, &[false, true, false]);
+        assert_eq!(disabled.len(), 3);
+        assert!(disabled[0] < 255 && disabled[2] < 255, "{disabled:?}");
+        assert_eq!(disabled[1], 255, "{disabled:?}");
+    }
+
     #[test]
     fn style_uses_the_theme_tokens() {
         for theme in [Theme::day(), Theme::night()] {
@@ -903,6 +1008,8 @@ mod tests {
         assert_eq!((l.margin, l.inspector_width, l.slot), (24.0, 320.0, 64.0));
         assert!(l.zoom_beside_minimap);
         assert!(l.signals.x > 500.0);
+        assert!(l.undo_in_file_card(), "room for Undo and Redo at 1080p");
+        assert!(!HudLayout::new(Vec2::new(1280.0, 720.0)).undo_in_file_card());
     }
 
     /// At every UI scale (and Auto) the cards, laid out in egui points,
@@ -947,13 +1054,22 @@ mod tests {
             ("parts", l.parts_rect()),
             ("signals", l.signals_rect()),
         ];
+        // With the Undo and Redo buttons in a card of their own, the left
+        // column (library drawer or challenge card) starts below.
+        let undo_card = !l.undo_in_file_card();
         let side = [
             ("inspector", l.inspector_rect()),
-            ("library", l.library_rect()),
+            ("library or challenge", l.left_column_rect(undo_card)),
             ("build details", l.build_details_rect()),
             ("exact rate", l.transport_more_rect()),
         ];
-        let all: Vec<_> = top.iter().chain(&bottom).chain(&side).collect();
+        let undo = undo_card.then(|| ("undo", l.undo_rect()));
+        let all: Vec<_> = top
+            .iter()
+            .chain(&bottom)
+            .chain(&side)
+            .chain(undo.as_ref())
+            .collect();
         for (name, r) in &all {
             assert!(
                 window.contains(r.min) && window.contains(r.max),
@@ -992,8 +1108,12 @@ mod tests {
         }
         let inspector = l.inspector_rect();
         assert!(inspector.height() > 300.0, "inspector at {w}x{h}{what}");
-        let library = l.library_rect();
+        let library = l.left_column_rect(undo_card);
         assert!(library.height() > 250.0, "library at {w}x{h}{what}");
+        assert_eq!(
+            l.undo_in_file_card(),
+            l.file_rect().width() >= FILE_MIN_WIDTH + UNDO_BUTTONS_WIDTH
+        );
         assert_eq!(l.compact, w < 1600.0 || h < 900.0);
     }
 
