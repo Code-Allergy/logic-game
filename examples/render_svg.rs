@@ -9,8 +9,8 @@
 //!
 //! Every circuit of each file is written to `<out>/<file>.<circuit>.svg`
 //! (`--out` defaults to `target/previews`). The picture shows the expanded
-//! circuit as the editor has it: one box per node (the editor's size and
-//! colour, the label above it, the kind or value inside), generated
+//! circuit as the editor has it: one box per node (the editor's size, and
+//! the colour of its family, the label above it, the kind or value inside), generated
 //! `Split`/`Merge` adapters included, on the 20-unit grid. Wires are drawn
 //! as the editor draws them, straight from centre to centre; with `--ortho`
 //! they are drawn instead from the right side of the driver to the left
@@ -27,10 +27,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use bevy::math::Vec2;
+use gate_quest::sim::art::family;
 use gate_quest::sim::demos::{DEMO_DIR, DemoCatalog, GALLERY_DIR};
 use gate_quest::sim::layout::overlaps;
 use gate_quest::sim::source;
 use gate_quest::sim::{CircuitDocument, CircuitLibrary, GateKind};
+use gate_quest::theme::{Family, Palette};
 
 const MARGIN: f32 = 60.0;
 
@@ -118,8 +120,16 @@ fn load(catalog: &DemoCatalog, input: &str) -> Result<(String, Circuits, Circuit
     Ok((stem, circuits, library))
 }
 
+/// Box colour: the strong colour of the part's family in the Workshop
+/// day palette (ink for logic, violet for state, sky for I/O).
 fn colour(kind: &GateKind) -> String {
-    let c = kind.color().to_srgba();
+    let palette = Palette::DAY;
+    let c = match family(kind) {
+        Family::Logic => palette.ink,
+        Family::State => palette.state,
+        Family::Io => palette.io,
+    }
+    .to_srgba();
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     format!(
         "#{:02x}{:02x}{:02x}",

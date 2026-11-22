@@ -11,6 +11,8 @@ use bevy_egui::{
 };
 use uuid::Uuid;
 
+use crate::theme::Theme;
+use crate::ui_style::egui_color;
 use crate::{
     GameState,
     sim::{
@@ -126,10 +128,14 @@ pub fn editor_ui_system(
     active: Res<ActiveCircuit>,
     library: Res<CircuitLibrary>,
     gates: Query<(&GateIdentity, &GateType, &GateLabel)>,
+    theme: Res<Theme>,
 ) -> Result<(), BevyError> {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
     }
+    let info = egui_color(theme.palette.io_text);
+    let warn = egui_color(theme.palette.on_text);
+    let error = egui_color(theme.palette.fault_text);
 
     let ctx = contexts.ctx_mut()?;
     let Ok(window) = q_window.single() else {
@@ -203,7 +209,7 @@ pub fn editor_ui_system(
                     ui.label(&demo.description);
                 }
                 ui.colored_label(
-                    egui::Color32::from_rgb(140, 200, 255),
+                    info,
                     "Read-only demo: toggle inputs and open subcircuits freely; copy it to edit.",
                 );
                 if ui.button("Copy to my workspace").clicked() {
@@ -227,7 +233,7 @@ pub fn editor_ui_system(
                         frame.name
                     )
                 };
-                ui.colored_label(egui::Color32::from_rgb(140, 200, 255), note);
+                ui.colored_label(info, note);
                 ui.horizontal(|ui| {
                     if ui.button("← Back to parent circuit").clicked() {
                         close_requested = Some(false);
@@ -266,7 +272,7 @@ pub fn editor_ui_system(
                 });
             }
             if let Some(status) = &editor_state.status {
-                ui.colored_label(egui::Color32::from_rgb(255, 200, 90), status);
+                ui.colored_label(warn, status);
             }
 
             ui.separator();
@@ -358,7 +364,7 @@ pub fn editor_ui_system(
                     }
                 }
                 Err(e) => {
-                    ui.colored_label(egui::Color32::from_rgb(255, 120, 90), format!("Cannot load the demos: {e}"));
+                    ui.colored_label(error, format!("Cannot load the demos: {e}"));
                 }
             }
 
@@ -415,6 +421,7 @@ pub fn editor_ui_system(
             ui.label("• Left-click: select (properties window: toggle inputs, edit, delete)");
             ui.label("• Delete key: delete the selected gate");
             ui.label("• Connection Mode: click source then sink, choose pins, then connect");
+            ui.label("• T: day or night workshop");
         });
     });
 
@@ -606,7 +613,7 @@ pub fn editor_ui_system(
                 let widths_match = source_width.is_some() && source_width == sink_width;
                 if source_width.is_some() && sink_width.is_some() && !widths_match {
                     ui.colored_label(
-                        egui::Color32::from_rgb(255, 200, 90),
+                        warn,
                         format!(
                             "Pin widths differ ({} vs {} bits); use Split/Merge/Extend.",
                             source_width.unwrap_or(0),

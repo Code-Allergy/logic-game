@@ -9,6 +9,8 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use uuid::Uuid;
 
+use crate::theme::Theme;
+use crate::ui_style::{caption, chunky_button, egui_color};
 use crate::{
     MainCamera, UiPointerState, editor::workspace::save_workspace,
     temp::GateComponentSelectionEvent,
@@ -19,39 +21,65 @@ use super::{
     DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind, GateLabel, GateLabelChanged,
     GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected, SelectedGate, SetGateKind,
     SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter, WireEndpoints,
-    WireState, WorkspaceRevision,
+    WireState, WorkspaceRevision, art,
     spatial_grid::SpatialGrid,
     view::{CircuitView, InstanceViewItem, OpenInstanceView},
 };
 
+/// The bench: one quad with the dot-grid texture repeated across it.
 #[derive(Component)]
-pub struct SimBackground;
+pub struct SimBackground {
+    image: Handle<Image>,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Background and camera
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Draw a background behind all simulation entities.
+/// Draw the bench (the dot grid every 20 units) behind all simulation
+/// entities: a single mesh whose material repeats a small dot texture, so
+/// the grid costs one draw at any size.
 pub fn draw_sim_background_system(
     mut commands: Commands,
-    query: Query<Entity, With<SimBackground>>,
+    query: Query<(), With<SimBackground>>,
+    theme: Res<Theme>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    materials: Option<ResMut<Assets<ColorMaterial>>>,
+    images: Option<ResMut<Assets<Image>>>,
 ) {
     if !query.is_empty() {
         return;
     }
+    let (Some(mut meshes), Some(mut materials), Some(mut images)) = (meshes, materials, images)
+    else {
+        return;
+    };
+    let image = images.add(art::bench_image(&theme.palette));
+    let material = materials.add(art::bench_material(image.clone()));
     commands.spawn((
-        SimBackground,
-        Sprite {
-            color: Color::srgba(0.050, 0.229, 0.793, 1.000),
-            ..Default::default()
-        },
-        Transform {
-            translation: Vec3::new(0.0, 0.0, -1000.0),
-            scale: Vec3::new(8000.0, 6000.0, 1.0),
-            ..Default::default()
-        },
+        SimBackground { image },
+        Mesh2d(meshes.add(Rectangle::new(art::BENCH_SIZE, art::BENCH_SIZE))),
+        MeshMaterial2d(material),
+        Transform::from_xyz(0.0, 0.0, -1000.0),
         Visibility::Visible,
     ));
+}
+
+/// Repaint the bench texture when the theme changes.
+pub fn sync_bench_theme_system(
+    theme: Res<Theme>,
+    benches: Query<&SimBackground>,
+    images: Option<ResMut<Assets<Image>>>,
+) {
+    if !theme.is_changed() {
+        return;
+    }
+    let Some(mut images) = images else { return };
+    for bench in &benches {
+        if let Some(mut image) = images.get_mut(&bench.image) {
+            image.data = Some(art::bench_texels(&theme.palette));
+        }
+    }
 }
 
 /// Fit the camera to the circuit after a workspace load.
@@ -252,6 +280,7 @@ pub fn simulation_config_ui_system(
     feedback: Res<AuthoringFeedback>,
     time: Res<Time>,
     game_state: Res<State<crate::GameState>>,
+    theme: Res<Theme>,
 ) -> Result<(), BevyError> {
     if game_state.get() != &crate::GameState::Simulating {
         return Ok(());
@@ -260,65 +289,90 @@ pub fn simulation_config_ui_system(
     let tick_count = bridge.tick_count();
     tick_rate_meter.sample(tick_count, time.delta_secs_f64());
 
-    egui::Window::new("Simulation Config").show(contexts.ctx_mut()?, |ui| {
-        ui.label("Tick Rate (Hz)");
-        if ui
-            .checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate")
-            .changed()
-        {
-            tick_rate_meter.reset(tick_count);
-        }
-        ui.label(match tick_rate_meter.average_hz {
-            Some(rate) => format!("Average tick rate: {}", format_si_hz(rate)),
-            None => "Average tick rate: measuring…".to_owned(),
-        });
-        ui.add_enabled(
-            !sim_config.unlimited_tick_rate,
-            egui::Slider::new(&mut sim_config.tick_rate, 0.1..=10_000_000.0)
-                .logarithmic(true)
-                .text("Tick Rate"),
-        );
-
-        ui.separator();
-        ui.label(format!("Sim ticks: {tick_count}"));
-        ui.label(format!("Running: {}", bridge.is_running()));
-        ui.horizontal(|ui| {
-            let running = bridge.is_running();
-            if ui.button(if running { "Pause" } else { "Play" }).clicked() {
-                bridge.set_running(!running);
-            }
-            if ui.button("Step").clicked() {
-                bridge.step(1);
-            }
-        });
-        match diagnostics.running_revision {
-            Some(rev) => ui.label(format!("Circuit revision: {rev}")),
-            None => ui.label("Circuit: compiling…"),
-        };
-        if let Some(error) = &diagnostics.compile_error {
-            ui.separator();
-            ui.colored_label(
-                egui::Color32::from_rgb(255, 120, 90),
-                format!(
-                    "Edit {} not applied; the previous circuit keeps running:",
-                    error.revision
-                ),
-            );
-            for message in &error.messages {
-                ui.colored_label(egui::Color32::from_rgb(255, 120, 90), message);
-            }
-            if error.loops.iter().any(|l| !l.is_empty()) {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 120, 90),
-                    "The gates and wires on the loop are outlined in red.",
+    let palette = theme.palette;
+    let fault = egui_color(palette.fault_text);
+    egui::Window::new("Simulation")
+        .title_bar(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_TOP, [0.0, 16.0])
+        .frame(crate::ui_style::card(&palette))
+        .show(contexts.ctx_mut()?, |ui| {
+            ui.horizontal(|ui| {
+                let running = bridge.is_running();
+                let run = if running { "▶ Running" } else { "▶ Run" };
+                if chunky_button(ui, &palette, run, running).clicked() && !running {
+                    bridge.set_running(true);
+                }
+                if chunky_button(ui, &palette, "Pause", false).clicked() && running {
+                    bridge.set_running(false);
+                }
+                if chunky_button(ui, &palette, "Step", false).clicked() {
+                    bridge.step(1);
+                }
+                ui.separator();
+                ui.vertical(|ui| {
+                    ui.label(caption(&palette, "tick"));
+                    ui.label(
+                        egui::RichText::new(format!("{tick_count}"))
+                            .monospace()
+                            .size(16.0),
+                    );
+                });
+                ui.separator();
+                ui.vertical(|ui| {
+                    ui.label(caption(&palette, "rate"));
+                    ui.label(
+                        egui::RichText::new(match tick_rate_meter.average_hz {
+                            Some(rate) => format_si_hz(rate),
+                            None => "measuring…".to_owned(),
+                        })
+                        .monospace(),
+                    );
+                });
+            });
+            ui.collapsing("Speed", |ui| {
+                if ui
+                    .checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited Tick Rate")
+                    .changed()
+                {
+                    tick_rate_meter.reset(tick_count);
+                }
+                ui.add_enabled(
+                    !sim_config.unlimited_tick_rate,
+                    egui::Slider::new(&mut sim_config.tick_rate, 0.1..=10_000_000.0)
+                        .logarithmic(true)
+                        .text("Tick Rate (Hz)"),
                 );
+                match diagnostics.running_revision {
+                    Some(rev) => ui.label(format!("Circuit revision: {rev}")),
+                    None => ui.label("Circuit: compiling…"),
+                };
+            });
+            if let Some(error) = &diagnostics.compile_error {
+                ui.separator();
+                ui.colored_label(
+                    fault,
+                    egui::RichText::new(format!(
+                        "Edit {} not applied; the previous circuit keeps running:",
+                        error.revision
+                    ))
+                    .text_style(egui::TextStyle::Button),
+                );
+                for message in &error.messages {
+                    ui.colored_label(fault, message);
+                }
+                if error.loops.iter().any(|l| !l.is_empty()) {
+                    ui.colored_label(
+                        fault,
+                        "The gates and wires on the loop are outlined in red.",
+                    );
+                }
             }
-        }
-        if let Some(message) = &feedback.message {
-            ui.separator();
-            ui.colored_label(egui::Color32::from_rgb(255, 200, 90), message);
-        }
-    });
+            if let Some(message) = &feedback.message {
+                ui.separator();
+                ui.colored_label(egui_color(palette.on_text), message);
+            }
+        });
     Ok(())
 }
 
@@ -497,6 +551,7 @@ pub fn ui_for_selected_gate(
 
     egui::Window::new("Gate Properties")
         .collapsible(false)
+        .anchor(egui::Align2::RIGHT_TOP, [-18.0, 18.0])
         .show(ctx, |ui| {
             ui.label(format!("Kind: {}", ty.kind.display_name()));
             ui.label(format!("UUID: {}", identity.uuid));

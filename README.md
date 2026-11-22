@@ -29,6 +29,16 @@ development, enable:
 For example `cargo run -p gate_quest --features dev`, or
 `--features inspector` for the inspector without dynamic linking.
 
+## Look and feel
+
+The canvas and panels use the "Studio Workshop" design: chunky tiles with
+an ink outline and a solid bottom edge, cased wires (an ink casing around a
+coloured core; marigold for on, slate for off, teal for buses with a value
+pill), on a dot-grid bench. Every colour comes from the `Theme` resource
+(`src/theme.rs`), with a day and a night palette; press `T` or use the
+Day/Night card to switch. `cargo run --example screenshot -- <id> out.png
+[--night]` saves a screenshot of a demo or gallery item.
+
 ## Documentation
 
 - `docs/sim-v2-design.md`: simulator design and implementation notes.
@@ -71,3 +81,15 @@ its twin of word primitives). See `docs/save-format.md` ("Gallery").
 canonical form (`-- --check` checks them); `cargo run --example
 render_svg -- <id>` draws SVG previews of a demo's or gallery item's
 circuits.
+
+## Credits
+
+Fonts bundled in `assets/fonts/` (embedded in the binary), both under the
+SIL Open Font License 1.1:
+
+- [Nunito](https://github.com/googlefonts/nunito), Copyright 2014 The
+  Nunito Project Authors (SemiBold and ExtraBold). Licence:
+  `assets/fonts/OFL-Nunito.txt`.
+- [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono), Copyright
+  2020 The JetBrains Mono Project Authors (Bold). Licence:
+  `assets/fonts/OFL-JetBrainsMono.txt`.

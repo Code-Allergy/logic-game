@@ -9,11 +9,14 @@ use bevy::{
 use bevy_egui::EguiContexts;
 
 pub mod editor;
+pub mod fonts;
 pub mod selection;
 pub mod settings;
 pub mod settings_overlay;
 pub mod sim;
+pub mod theme;
 pub mod title;
+pub mod ui_style;
 
 pub mod temp {
     use bevy::prelude::*;
@@ -29,9 +32,6 @@ pub mod temp {
 
 pub const WORKSPACE_DIR: &str = "./workspaces";
 pub const DEFAULT_WORKSPACE_EXT: &str = ".json";
-pub const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.15);
-pub const HOVERED_BUTTON: Color = Color::srgb(0.25, 0.25, 0.25);
-pub const PRESSED_BUTTON: Color = Color::srgb(0.35, 0.75, 0.35);
 pub const SIMULATION_TICK_RATE: f64 = 10.0;
 pub const GAME_TITLE: &str = "GateQuest";
 pub const GAME_WEB_TAG: &str = "#gatequest-canvas";

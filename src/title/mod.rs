@@ -3,7 +3,8 @@
 // Takes in a target state to be active in
 // Requires the 2dCamera to be setup in the main.rs file
 
-use crate::{HOVERED_BUTTON, NORMAL_BUTTON, PRESSED_BUTTON, settings_overlay::SettingsMenuOpen};
+use crate::settings_overlay::SettingsMenuOpen;
+use crate::theme::Theme;
 use bevy::prelude::*;
 
 use crate::GameState;
@@ -20,7 +21,37 @@ pub enum MainMenuButtonAction {
     Exit,
 }
 
-fn setup_main_menu(mut commands: Commands) {
+fn setup_main_menu(
+    mut commands: Commands,
+    theme: Res<Theme>,
+    art: Option<Res<crate::sim::art::CanvasArt>>,
+) {
+    let palette = theme.palette;
+    let font = |size: f32| {
+        art.as_ref()
+            .map_or_else(|| TextFont::from_font_size(size), |a| a.fonts.name(size))
+    };
+    let button = |action: MainMenuButtonAction| {
+        (
+            Button,
+            Node {
+                width: Val::Px(220.0),
+                height: Val::Px(52.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: UiRect {
+                    bottom: Val::Px(6.0),
+                    ..UiRect::all(Val::Px(2.5))
+                },
+                border_radius: BorderRadius::all(Val::Px(12.0)),
+                ..default()
+            },
+            BorderColor::all(palette.ink),
+            BackgroundColor(palette.raised),
+            action,
+        )
+    };
+    let label = |text: &str| (Text::new(text), font(20.0), TextColor(palette.text));
     commands
         .spawn((
             Node {
@@ -29,63 +60,26 @@ fn setup_main_menu(mut commands: Commands) {
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(10.0),
+                row_gap: Val::Px(14.0),
                 ..default()
             },
             MainMenu,
         ))
         .with_children(|parent| {
+            parent.spawn((
+                Text::new(crate::GAME_TITLE),
+                font(56.0),
+                TextColor(palette.text),
+            ));
             parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(50.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    // BorderColor::all(Color::BLACK),
-                    // BorderRadius::MAX,
-                    MainMenuButtonAction::Start,
-                ))
-                .with_children(|parent| {
-                    parent.spawn(Text::new("Start"));
-                });
+                .spawn(button(MainMenuButtonAction::Start))
+                .with_child(label("Start"));
             parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(50.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    // BorderColor(Color::BLACK),
-                    // BorderRadius::MAX,
-                    MainMenuButtonAction::Settings,
-                ))
-                .with_children(|parent| {
-                    parent.spawn(Text::new("Options"));
-                });
+                .spawn(button(MainMenuButtonAction::Settings))
+                .with_child(label("Options"));
             parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(50.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    // BorderColor(Color::BLACK),
-                    // BorderRadius::MAX,
-                    MainMenuButtonAction::Exit,
-                ))
-                .with_children(|parent| {
-                    parent.spawn(Text::new("Exit"));
-                });
+                .spawn(button(MainMenuButtonAction::Exit))
+                .with_child(label("Exit"));
         });
 }
 
@@ -102,16 +96,17 @@ fn main_menu_button_system(
     mut next_state: ResMut<NextState<GameState>>,
     mut settings_open: ResMut<SettingsMenuOpen>,
     mut exit: MessageWriter<AppExit>,
+    theme: Res<Theme>,
 ) {
+    let palette = theme.palette;
     if settings_open.0 {
         return;
     }
 
-    for (interaction, mut color, mut _border_color, action) in &mut interaction_query {
+    for (interaction, mut color, _border_color, action) in &mut interaction_query {
         match *interaction {
             Interaction::Pressed => {
-                *color = PRESSED_BUTTON.into();
-                // border_color. = RED.into();
+                *color = palette.on.into();
                 match action {
                     MainMenuButtonAction::Start => next_state.set(GameState::Simulating),
                     MainMenuButtonAction::Settings => settings_open.0 = !settings_open.0,
@@ -121,12 +116,10 @@ fn main_menu_button_system(
                 };
             }
             Interaction::Hovered => {
-                *color = HOVERED_BUTTON.into();
-                // border_color.0 = Color::WHITE;
+                *color = palette.hover.into();
             }
             Interaction::None => {
-                *color = NORMAL_BUTTON.into();
-                // border_color.0 = Color::BLACK;
+                *color = palette.raised.into();
             }
         }
     }
