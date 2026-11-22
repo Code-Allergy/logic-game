@@ -29,7 +29,7 @@ use super::systems::CanvasCursor;
 use super::visuals::{TileSpec, WIRE_CORNER};
 use super::{CircuitLibrary, CreateWire, GateIdentity, GateKind, GateLabel, GateType};
 use crate::theme::{Palette, Theme};
-use crate::ui_style::{egui_color, heavy, stroke};
+use crate::ui_style::{egui_color, heavy, stroke, window_to_egui};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pins and hit-testing
@@ -612,7 +612,8 @@ pub fn pin_tooltip_system(
     if let Some(note) = &note {
         size = egui::vec2(size.x.max(note.size().x), size.y + note.size().y);
     }
-    let at = egui::pos2(screen.x, screen.y) + egui::vec2(14.0, 14.0);
+    // The cursor is in window pixels; the painter in egui points.
+    let at = window_to_egui(screen, ctx.zoom_factor()) + egui::vec2(14.0, 14.0);
     let rect = egui::Rect::from_min_size(at, size + pad * 2.0);
     painter.rect(
         rect,
