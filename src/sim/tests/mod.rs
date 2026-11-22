@@ -4,6 +4,7 @@
 mod demos;
 mod gallery;
 pub mod geometry_tests;
+mod history;
 mod instance_views;
 mod routing;
 mod rtl;
