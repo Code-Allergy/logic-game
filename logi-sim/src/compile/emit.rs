@@ -16,6 +16,7 @@ struct Emitter {
     widths: Vec<u8>,
     ops: Vec<Op>,
     instrs: Vec<Instr>,
+    imms: Vec<u64>,
     consts: Vec<(u32, u64)>,
     commits: Vec<Commit>,
     mems: Vec<MemDesc>,
@@ -30,7 +31,8 @@ impl Emitter {
 
     fn push(&mut self, op: Op, dst: u32, a: u32, b: u32, c: u32, imm: u64) {
         self.ops.push(op);
-        self.instrs.push(Instr { dst, a, b, c, imm });
+        self.instrs.push(Instr { dst, a, b, c });
+        self.imms.push(imm);
     }
 
     fn mem(&mut self, addr_bits: u8, width: u8, init: &[u64], writable: bool) -> u32 {
@@ -125,6 +127,7 @@ pub(super) fn emit(mut e: Elab<'_>) -> Program {
         widths,
         ops: Vec::new(),
         instrs: Vec::new(),
+        imms: Vec::new(),
         consts: Vec::new(),
         commits: Vec::new(),
         mems: Vec::new(),
@@ -144,12 +147,14 @@ pub(super) fn emit(mut e: Elab<'_>) -> Program {
     }
 
     // ── Levelize and group into blocks ─────────────────────────────────────
-    let Emitter { widths, ops, instrs, consts, commits, mems, state_keys } = em;
+    let Emitter { widths, ops, instrs, imms, consts, commits, mems, state_keys } = em;
     let (ranks, order) = levelize(&ops, &instrs, widths.len());
     let mut sorted: Vec<u32> = order;
     sorted.sort_by_key(|&i| (ranks[i as usize], ops[i as usize], i));
     let mut blocks: Vec<Block> = Vec::new();
     let mut out = Vec::with_capacity(instrs.len());
+    let mut out_imms = Vec::with_capacity(instrs.len());
+    let mut out_ops = Vec::with_capacity(instrs.len());
     for &i in &sorted {
         let (op, rank) = (ops[i as usize], ranks[i as usize]);
         match blocks.last_mut() {
@@ -157,19 +162,99 @@ pub(super) fn emit(mut e: Elab<'_>) -> Program {
             _ => blocks.push(Block { op, rank, start: out.len() as u32, len: 1 }),
         }
         out.push(instrs[i as usize]);
+        out_imms.push(imms[i as usize]);
+        out_ops.push(op);
     }
 
-    Program {
+    let mut p = Program {
         slot_count: widths.len() as u32,
         consts,
         blocks,
         instrs: out,
+        imms: out_imms,
         commits,
         mems,
         ports,
         debug,
         state_keys,
+    };
+    renumber(&mut p, &out_ops);
+    p
+}
+
+/// Renumber slots densely in the order they are first produced: zero, root
+/// inputs, constants, state, then instruction destinations in execution
+/// order. Writes in a block become sequential, values produced close in time
+/// sit close in memory, and unreferenced slots disappear.
+fn renumber(p: &mut Program, ops: &[Op]) {
+    let mut map = vec![UNASSIGNED; p.slot_count as usize];
+    let mut next = 0u32;
+    let mut assign = |s: u32, map: &mut Vec<u32>| {
+        if map[s as usize] == UNASSIGNED {
+            map[s as usize] = next;
+            next += 1;
+        }
+    };
+    assign(ZERO_SLOT, &mut map);
+    for port in &p.ports.inputs {
+        assign(port.slot, &mut map);
     }
+    for &(s, _) in &p.consts {
+        assign(s, &mut map);
+    }
+    for c in &p.commits {
+        if let Commit::Copy { state, .. } = *c {
+            assign(state, &mut map);
+        }
+    }
+    for ins in &p.instrs {
+        assign(ins.dst, &mut map);
+    }
+    // Anything still unassigned is read but never written: it can only be
+    // the zero slot's class, which is already slot 0.
+    let m = |s: u32| {
+        let n = map[s as usize];
+        assert_ne!(n, UNASSIGNED, "internal error: slot {s} read but never produced");
+        n
+    };
+    for (ins, &op) in p.instrs.iter_mut().zip(ops) {
+        let (sa, sb, sc) = op.slot_operands();
+        ins.dst = m(ins.dst);
+        if sa {
+            ins.a = m(ins.a);
+        }
+        if sb {
+            ins.b = m(ins.b);
+        }
+        if sc {
+            ins.c = m(ins.c);
+        }
+    }
+    for (s, _) in &mut p.consts {
+        *s = m(*s);
+    }
+    for c in &mut p.commits {
+        *c = match *c {
+            Commit::Copy { state, next } => Commit::Copy { state: m(state), next: m(next) },
+            Commit::RamWrite { mem, we, addr, data } => {
+                Commit::RamWrite { mem, we: m(we), addr: m(addr), data: m(data) }
+            }
+        };
+    }
+    for port in p.ports.inputs.iter_mut().chain(p.ports.outputs.iter_mut()) {
+        port.slot = m(port.slot);
+    }
+    for slots in &mut p.debug.net_slots {
+        for (_, s) in slots.iter_mut() {
+            *s = m(*s);
+        }
+    }
+    for key in &mut p.state_keys {
+        if let StateLoc::Slot(s) = &mut key.loc {
+            *s = m(*s);
+        }
+    }
+    p.slot_count = next;
 }
 
 fn lower(

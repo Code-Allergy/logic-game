@@ -16,6 +16,9 @@
 //! 3. **Settle.** Run the blocks in order. Instructions in a block share one
 //!    [`Op`] and one rank, and never read each other's results.
 //!
+//! Slots are numbered densely: the zero slot, root inputs, constants, state,
+//! then instruction destinations in execution order.
+//!
 //! Construction is: zero all slots, load constants, apply inputs (all zero),
 //! settle at tick 0.
 //!
@@ -34,7 +37,7 @@ use crate::netlist::{DefId, NetId, NodeId};
 pub const ZERO_SLOT: u32 = 0;
 
 /// Opcode. Fields of [`Instr`] are slot indices unless noted as literals.
-/// `imm` is described per op. Results are masked only where an op can set
+/// `imm` is the instruction's entry in [`Program::imms`], described per op. Results are masked only where an op can set
 /// bits above the width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
@@ -113,7 +116,6 @@ pub struct Instr {
     pub a: u32,
     pub b: u32,
     pub c: u32,
-    pub imm: u64,
 }
 
 /// A run of instructions with the same op and rank: `instrs[start..start+len]`.
@@ -259,6 +261,10 @@ pub struct Program {
     pub consts: Vec<(u32, u64)>,
     pub blocks: Vec<Block>,
     pub instrs: Vec<Instr>,
+    /// Per-instruction immediate (`imms[k]` belongs to `instrs[k]`), kept out
+    /// of [`Instr`] so ops that do not need it stream 16 bytes per
+    /// instruction.
+    pub imms: Vec<u64>,
     pub commits: Vec<Commit>,
     pub mems: Vec<MemDesc>,
     pub ports: PortMap,

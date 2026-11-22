@@ -416,3 +416,10 @@ pub fn sr_latch_nor_delayed() -> Design {
     b.output("Qn", qn);
     d
 }
+
+/// A program that never halts (for throughput benchmarks): increments
+/// `ram[0]` forever and doubles it into `acc` each pass.
+pub const LOOP_PROGRAM: [u64; 6] = {
+    use isa::*;
+    [op(LDI, 0), op(ADDI, 1), op(ST, 0), op(LD, 0), op(ADD, 0), op(JMP, 1)]
+};

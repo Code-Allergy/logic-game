@@ -40,6 +40,19 @@ pub struct GenConfig {
     pub unconnected_percent: u32,
     /// Inject one combinational loop (see [`Generated::injected_loop`]).
     pub inject_loop: bool,
+    /// Which combinational primitives to use.
+    pub ops: OpMix,
+}
+
+/// Combinational primitive mix for the generator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OpMix {
+    /// Every combinational primitive.
+    #[default]
+    All,
+    /// Only the 2-input bitwise gates and `Not` (the legacy gate set, for
+    /// baselines against the legacy runners when `max_width` is 1).
+    Gates,
 }
 
 impl Default for GenConfig {
@@ -57,6 +70,7 @@ impl Default for GenConfig {
             instance_percent: 8,
             unconnected_percent: 3,
             inject_loop: false,
+            ops: OpMix::All,
         }
     }
 }
@@ -78,7 +92,15 @@ impl GenConfig {
             instance_percent: 0,
             unconnected_percent: 0,
             inject_loop: false,
+            ops: OpMix::All,
         }
+    }
+
+    /// A flat, combinational, gates-only DAG (`Not` and 2-input bitwise
+    /// gates) of exactly `nodes` gates at width `w`. With `w == 1` it maps
+    /// one-to-one onto the legacy circuit model.
+    pub fn gates(seed: u64, nodes: usize, w: u8) -> Self {
+        Self { ops: OpMix::Gates, max_width: w, ..Self::dag(seed, nodes, w) }
     }
 }
 
@@ -164,6 +186,9 @@ impl<'a> DefGen<'a> {
 
     fn width(&mut self) -> u8 {
         let max = self.cfg.max_width;
+        if self.cfg.ops == OpMix::Gates {
+            return max;
+        }
         match self.rng.below(10) {
             0..=3 => 1,
             4 => max,
@@ -309,6 +334,17 @@ impl<'a> DefGen<'a> {
 
     fn comb_kind(&mut self) -> NodeKind {
         let w = self.width();
+        if self.cfg.ops == OpMix::Gates {
+            return match self.rng.below(7) {
+                0 => NodeKind::Not { w },
+                1 => NodeKind::And { w },
+                2 => NodeKind::Or { w },
+                3 => NodeKind::Xor { w },
+                4 => NodeKind::Nand { w },
+                5 => NodeKind::Nor { w },
+                _ => NodeKind::Xnor { w },
+            };
+        }
         match self.rng.below(22) {
             0 => NodeKind::Not { w },
             1 | 2 => NodeKind::And { w },
