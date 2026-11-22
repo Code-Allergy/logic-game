@@ -213,14 +213,22 @@ fn all_metrics() -> Value {
 /// Run `n` ticks of `case` and nothing else: the target for `perf stat`
 /// (two runs of different lengths cancel start-up out) and for profiling
 /// the tick loop (`cargo xtask perf flamegraph bin:perf-metrics -- ticks
-/// cpu16 2000000`). `options` is `default` or `editor`; `threads` lays the
+/// cpu16 2000000`). `options` is `default`, `editor` or `raw` (simplify
+/// off, as the throughput benchmarks); `threads` lays the
 /// program out for and runs it on that many threads.
 fn run_ticks(name: &str, n: u64, options: &str, threads: usize) {
     let d = case(name);
     let opts = match options {
         "default" => Options::default(),
         "editor" => Options::debug(),
-        other => panic!("options {other:?}: default or editor"),
+        // As the throughput benchmarks: simplify off (every node is an
+        // instruction), default layout and packing.
+        "raw" => Options {
+            slot_order: Default::default(),
+            pack: Default::default(),
+            ..Options::unoptimized()
+        },
+        other => panic!("options {other:?}: default, editor or raw"),
     };
     let p = Arc::new(compile(&d, &opts.for_threads(threads)).unwrap());
     let mut sim = Sim::with_options(p, SimOptions::threaded(threads));
@@ -250,7 +258,9 @@ fn main() {
             );
         }
         _ => {
-            eprintln!("usage: perf-metrics [cases | ticks <case> <n> [default|editor] [threads]]");
+            eprintln!(
+                "usage: perf-metrics [cases | ticks <case> <n> [default|editor|raw] [threads]]"
+            );
             std::process::exit(2);
         }
     }

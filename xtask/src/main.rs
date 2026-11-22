@@ -50,7 +50,7 @@ commands:
   stat <target> [-- args]        perf stat hardware counters
       targets: example:<name> (game example), bench:<suite>[/<filter>],
                bin:perf-metrics
-      --call-graph <dwarf|fp|lbr>   (flamegraph; default dwarf)
+      --call-graph <fp|dwarf|lbr>   (flamegraph; default fp)
       --freq <hz>                   (flamegraph; default 997)
 ";
 

@@ -75,6 +75,15 @@ fn build(spec: &str, passthrough: &[String]) -> Result<Target, String> {
         _ => return Err(format!("target kind {kind:?}: use example, bench or bin")),
     };
     args.extend(passthrough.iter().cloned());
+    // Different arguments, different files.
+    let mut slug = slug;
+    for a in passthrough {
+        let a: String = a
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        slug = format!("{slug}-{a}");
+    }
     eprintln!("perf: building {spec} (profile {PROFILE})");
     let out = util::output(cargo.stdout(Stdio::piped()))?;
     let artifact = artifact.replace('-', "_");
@@ -113,7 +122,7 @@ pub fn flamegraph(args: &[String]) -> Result<ExitCode, String> {
     let dir = util::perf_dir().join("profiles");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let data = dir.join(format!("{}.data", t.slug));
-    let call_graph = match a.opt("call-graph").unwrap_or("dwarf") {
+    let call_graph = match a.opt("call-graph").unwrap_or("fp") {
         "dwarf" => "dwarf,32768",
         "fp" => "fp",
         "lbr" => "lbr",
