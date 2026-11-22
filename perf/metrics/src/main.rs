@@ -240,6 +240,15 @@ fn cpi(name: &str, options: &str, secs: f64) {
             ph.ops_per_tick(),
             p.instrs.len() + p.commits.len()
         );
+        for (k, v) in ph.variants.iter().enumerate() {
+            let pruned =
+                logi_sim::compile::phases::prune(&p, v).map_or(v.instrs.len(), |b| b.instrs.len());
+            println!(
+                "  variant {k}: {} instructions ({pruned} when fused), {} commits",
+                v.instrs.len(),
+                v.commits.len()
+            );
+        }
     }
     for mode in ["tick", "run"] {
         let mut best = f64::MAX;

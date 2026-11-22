@@ -38,6 +38,11 @@ pub(crate) struct Replacement {
     pub states: Vec<(Vec<NodeId>, NodeId)>,
     /// What it was matched as (diagnostics, reports).
     pub desc: String,
+    /// A truth table (`super::matcher::table`) rather than a catalogue
+    /// function: lowered only with `Options::tables`, and never used as a
+    /// child's abstraction when analysing a parent (a parent's flat
+    /// expands the child's gates instead).
+    pub table: bool,
 }
 
 impl Replacement {

@@ -80,6 +80,12 @@ pub struct Options {
     /// ([`Program::phases`]). Every exposed slot reads the same at every
     /// tick. See `phases.rs`.
     pub clock_phases: bool,
+    /// Truth tables (issue #117, stage 4; needs `func_match`): a
+    /// combinational subcircuit definition with 5 to 12 input bits that
+    /// matches no catalogue function, and costs more than its table, runs
+    /// as one ROM read (plus the index concatenation and output slices).
+    /// Its internal nets stay readable through shadow slots.
+    pub tables: bool,
     /// Nets to keep observable under dead-code elimination:
     /// `(instance path, NetId)`.
     pub probes: Vec<(Vec<NodeId>, NetId)>,
@@ -159,6 +165,7 @@ impl Default for Options {
             func_match: true,
             words: true,
             clock_phases: true,
+            tables: true,
             probes: Vec::new(),
             slot_order: SlotOrder::default(),
             pack: PackMode::Auto,
@@ -182,6 +189,7 @@ impl Options {
             func_match: false,
             words: false,
             clock_phases: false,
+            tables: false,
             probes: Vec::new(),
             slot_order: SlotOrder::Production,
             pack: PackMode::Off,

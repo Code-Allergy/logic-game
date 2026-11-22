@@ -90,7 +90,7 @@ pub(super) fn emit(
             let Some(info) = analysis.get(e.insts[i].def) else {
                 continue;
             };
-            if !info.matched() {
+            if !info.matched() || (info.is_table() && !opts.tables) {
                 continue;
             }
             let pdef = &design.defs[e.insts[p as usize].def];

@@ -384,8 +384,11 @@ fn an_adder_with_one_wrong_gate_does_not_match() {
         let mut d = Design::new("root");
         let r = ripple_def(&mut d, 4, Some(bit));
         let i = info(&d, "ripple");
-        // The carry out is still an adder's; the sum is not anything.
-        assert!(!i.matched(), "bit {bit}: matched as {}", i.note);
+        // The carry out is still an adder's; the sum is not anything in
+        // the catalogue. With 9 input bits it is small enough to run as
+        // its own truth table (exact by construction), and nothing else.
+        assert!(i.is_table(), "bit {bit}: matched as {}", i.note);
+        assert_eq!(i.proof, Some(Proof::Table { bits: 9 }));
         check_all("near-miss", &wrap(d, r, 1));
     }
 }
@@ -563,4 +566,117 @@ fn a_chain_with_a_crossed_slice_is_not_composed() {
     let i = info(&d, "bad16");
     assert!(!i.matched(), "{}", i.note);
     check_all("bad16", &wrap(d, def, 1));
+}
+
+// ── Truth tables (stage 4) ───────────────────────────────────────────────
+
+/// Tables on against off (and both against the reference), every tick,
+/// outputs, state and every net including the table's internal nets
+/// (shadow slots), under the editor's options and the defaults.
+fn check_tables(name: &str, d: &Design) -> (usize, usize) {
+    on_off_with(name, d, false, 60, |o| Options { tables: false, ..o });
+    on_off_with(name, d, true, 60, |o| Options { tables: false, ..o })
+}
+
+/// A `n`-to-`2^n` decoder with enable from gates: `Y` (one bit per output
+/// port).
+fn decoder_def(d: &mut Design, n: u8) -> DefId {
+    let def = d.add_definition("decoder");
+    let mut b = Builder::new(d, def);
+    let sel = b.input("S", n);
+    let en = b.input("E", 1);
+    let bits: Vec<NetId> = (0..n).map(|k| b.bit(sel, k)).collect();
+    let nots: Vec<NetId> = bits.iter().map(|&x| b.not(x)).collect();
+    for v in 0..1u32 << n {
+        let mut y = en;
+        for k in 0..n as usize {
+            let t = if v >> k & 1 == 1 { bits[k] } else { nots[k] };
+            y = b.and(y, t);
+        }
+        b.output(format!("Y{v}"), y);
+    }
+    def
+}
+
+/// Irregular logic over two inputs of `wa` and `wb` bits, with no
+/// catalogue match: `Y = parity(A & B) ^ (A0 & B0) | (A1 ^ B1)`.
+fn irregular_def(d: &mut Design, wa: u8, wb: u8) -> DefId {
+    let def = d.add_definition("irregular");
+    let mut b = Builder::new(d, def);
+    let a = b.input("A", wa);
+    let x = b.input("B", wb);
+    let w = wa.min(wb);
+    let (al, xl) = (b.split(a, 0, w), b.split(x, 0, w));
+    let m = b.and(al, xl);
+    let p = b.reduce_xor(m);
+    let (a0, b0, a1, b1) = (b.bit(a, 0), b.bit(x, 0), b.bit(a, 1), b.bit(x, 1));
+    let q = b.and(a0, b0);
+    let r = b.xor(a1, b1);
+    let s = b.xor(p, q);
+    let y = b.or(s, r);
+    let z = b.nand(y, a1);
+    b.output("Y", y);
+    b.output("Z", z);
+    def
+}
+
+#[test]
+fn decoders_run_as_truth_tables() {
+    for n in 1..=5u8 {
+        let mut d = Design::new("root");
+        let def = decoder_def(&mut d, n);
+        let i = info(&d, "decoder");
+        if n + 1 < matcher::MIN_TABLE_BITS as u8 {
+            // Small decoders stay gates (see `MIN_TABLE_BITS`).
+            assert!(!i.is_table(), "{}", i.note);
+        } else {
+            assert!(i.is_table(), "n {n}: {}", i.note);
+            assert_eq!(i.proof, Some(Proof::Table { bits: n as u32 + 1 }));
+        }
+        let (on, off) = check_tables("decoder", &wrap(d, def, 2));
+        assert!(on <= off, "n {n}: {off} -> {on}");
+    }
+}
+
+#[test]
+fn twelve_input_bits_are_tabled_and_thirteen_are_not() {
+    let mut d = Design::new("root");
+    let def = irregular_def(&mut d, 6, 6);
+    let i = info(&d, "irregular");
+    assert!(i.is_table(), "{}", i.note);
+    assert_eq!(i.proof, Some(Proof::Table { bits: 12 }));
+    let (on, off) = check_tables("12 bits", &wrap(d, def, 1));
+    assert!(on < off, "{off} -> {on}");
+
+    let mut d = Design::new("root");
+    let def = irregular_def(&mut d, 7, 6);
+    let i = info(&d, "irregular");
+    assert!(!i.matched(), "13 bits: {}", i.note);
+    let (on, off) = check_tables("13 bits", &wrap(d, def, 1));
+    assert_eq!(on, off);
+}
+
+/// A table is built once per definition and cached under its content key:
+/// a root edit analyses nothing again, and the instance keeps its table.
+#[test]
+fn tables_are_cached_per_definition() {
+    let mut d = Design::new("root");
+    let def = decoder_def(&mut d, 4);
+    let mut d = wrap(d, def, 3);
+    let mut cache = MatchCache::new();
+    let p = crate::compile::compile_cached(&d, &Options::default(), &mut cache, |_| {}).unwrap();
+    let analysed = cache.analysed;
+    assert_eq!(p.mems.len(), 3, "one ROM per instance");
+    let r = d.root;
+    let net = d.defs[r]
+        .nets
+        .iter()
+        .find(|(_, n)| n.width == 1)
+        .map(|(id, _)| id)
+        .unwrap();
+    let not = d.add_node(r, NodeKind::Not { w: 1 }).unwrap();
+    d.connect(r, net, (not, 0)).unwrap();
+    let q = crate::compile::compile_cached(&d, &Options::default(), &mut cache, |_| {}).unwrap();
+    assert_eq!(cache.analysed, analysed, "nothing analysed again");
+    assert_eq!(q.mems.len(), 3);
 }

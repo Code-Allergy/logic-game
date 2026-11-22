@@ -46,7 +46,7 @@ const MAX_CACHED: usize = 2048;
 pub type ContentKey = [u8; 32];
 
 /// Version of the serialization behind [`ContentKey`].
-pub const KEY_FORMAT: &[u8] = b"logi-sim func-match key v1";
+pub const KEY_FORMAT: &[u8] = b"logi-sim func-match key v2";
 
 /// What the analysis found for one definition.
 #[derive(Debug)]
@@ -63,6 +63,11 @@ pub struct DefInfo {
 impl DefInfo {
     pub fn matched(&self) -> bool {
         self.repl.is_some()
+    }
+
+    /// Matched as a truth table (see `matcher::table`).
+    pub fn is_table(&self) -> bool {
+        self.repl.as_ref().is_some_and(|r| r.table)
     }
 
     /// The gate-level flat of `def` for reading internal nets.
@@ -208,7 +213,7 @@ fn analyse_def(design: &Design, def: DefId, done: &Analysis) -> DefInfo {
     let abstr = |c: DefId| {
         done.get(c)
             .and_then(|i| i.repl.clone())
-            .filter(|r| !r.is_sequential())
+            .filter(|r| !r.is_sequential() && !r.table)
     };
     let info = |repl: Option<Replacement>, proof, note: String| DefInfo {
         repl: repl.map(Arc::new),
@@ -228,7 +233,7 @@ fn analyse_def(design: &Design, def: DefId, done: &Analysis) -> DefInfo {
             .iter()
             .filter(|s| !matches!(s.kind, NodeKind::Const { .. }))
             .count();
-        matcher::match_comb(&f, cost)
+        matcher::match_comb(&f, cost).or_else(|why| matcher::table(&f, cost).ok_or(why))
     } else {
         matcher::match_seq(&f)
     };

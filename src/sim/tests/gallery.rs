@@ -1900,3 +1900,24 @@ fn clock_phases_preserve_the_gate_cpu() {
         }
     }
 }
+
+/// Truth tables (logi-sim issue #117, stage 4) change nothing observable
+/// in any demo or gallery item, nor in the gate CPU over 3000 ticks:
+/// tables on against off, under the editor's options and the defaults,
+/// every tick, outputs, state and every net (a table's internal nets read
+/// through shadow slots).
+#[test]
+fn truth_tables_preserve_every_demo_and_gallery_item() {
+    use logi_sim::compile::Options;
+    let catalog = demos();
+    for item in catalog.demos.iter().chain(&catalog.gallery) {
+        let design = crate::sim::netlist::design_of(&item.workspace).unwrap();
+        let ticks = if item.id == "cpu16" { 3000 } else { 150 };
+        for debug in [true, false] {
+            options_match(&item.id, &design, debug, ticks, |o| Options {
+                tables: false,
+                ..o
+            });
+        }
+    }
+}
