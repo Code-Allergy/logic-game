@@ -719,9 +719,9 @@ pub(crate) fn table(flat: &Flat, gate_cost: usize) -> Option<(Replacement, Proof
         flat.eval(&ins, &[], &mut vals);
         let mut word = 0u64;
         let mut at = 0u32;
-        for j in 0..nout {
-            word |= (flat.output(&vals, j) & mask(ports.wo[j])) << at;
-            at += ports.wo[j] as u32;
+        for (j, &w) in ports.wo.iter().enumerate() {
+            word |= (flat.output(&vals, j) & mask(w)) << at;
+            at += w as u32;
         }
         contents.push(word);
     }
@@ -763,18 +763,18 @@ pub(crate) fn table(flat: &Flat, gate_cost: usize) -> Option<(Replacement, Proof
     });
     if nout > 1 {
         let mut lo = 0u8;
-        for j in 0..nout {
+        for (j, &len) in ports.wo.iter().enumerate() {
             r.nodes.push(super::replace::RNode {
                 kind: NodeKind::Split {
                     w: wsum as u8,
                     lo,
-                    len: ports.wo[j],
+                    len,
                 },
                 ins: smallvec![word],
                 outs: smallvec![Ref::Out(j as u16)],
                 state: None,
             });
-            lo += ports.wo[j];
+            lo += len;
         }
     }
     Some((r, Proof::Table { bits: ports.bits }))
