@@ -2,6 +2,7 @@
 
 mod app;
 mod chips;
+mod poke;
 mod sim;
 
 use std::sync::Arc;

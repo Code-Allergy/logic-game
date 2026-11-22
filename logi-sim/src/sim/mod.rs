@@ -141,8 +141,8 @@ impl SimOptions {
 pub struct Counters {
     /// Calls to [`Sim::tick`].
     pub ticks: u64,
-    /// Settles (one per tick, plus construction, [`Sim::reset`] and
-    /// [`Sim::import_state`]).
+    /// Settles (one per tick, plus construction, [`Sim::reset`],
+    /// [`Sim::import_state`] and [`Sim::resettle`]).
     pub settles: u64,
     /// Blocks dispatched.
     pub blocks: u64,
@@ -471,7 +471,17 @@ impl Sim {
         }
     }
 
+    /// Apply the staged root inputs to their slots, then evaluate.
     fn settle(&mut self) {
+        let p = &*self.program;
+        for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
+            self.slots[port.slot as usize] = v;
+        }
+        self.evaluate();
+    }
+
+    /// Run the blocks once, from the input slots as they are.
+    fn evaluate(&mut self) {
         #[cfg(feature = "counters")]
         {
             let c = &mut self.counters;
@@ -482,9 +492,6 @@ impl Sim {
             c.packed_words += per.packed_words;
         }
         let p = &*self.program;
-        for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
-            self.slots[port.slot as usize] = v;
-        }
         if let Some(pool) = &self.pool {
             pool.settle(&mut self.slots, &self.mems, self.tick);
             debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
@@ -586,6 +593,54 @@ impl Sim {
         }
         self.tick = snap.tick;
         self.settle();
+    }
+
+    // ── Writing single state elements ─────────────────────────────────────
+    //
+    // For harnesses that set a few registers and memory words before each
+    // of many cases: each write costs one slot or word, not a copy of the
+    // state. Write what is needed, then call `resettle` once.
+
+    /// Value of state element `key` (an index into
+    /// [`Program::state_keys`]); 0 for a memory (read it with [`Sim::mem`]).
+    pub fn state(&self, key: usize) -> u64 {
+        match self.program.state_keys[key].loc {
+            StateLoc::Slot(s) => self.read(s),
+            StateLoc::Mem(_) => 0,
+        }
+    }
+
+    /// Set state element `key` (an index into [`Program::state_keys`]) to
+    /// `value`, masked to its width. Nothing is evaluated: nets keep their
+    /// values until [`Sim::resettle`] or the next tick. Panics if `key` is
+    /// a memory (use [`Sim::set_mem_word`]).
+    pub fn set_state(&mut self, key: usize, value: u64) {
+        let k = &self.program.state_keys[key];
+        let StateLoc::Slot(slot) = k.loc else {
+            panic!("state key {key} is a memory; set its words with set_mem_word");
+        };
+        let value = value & mask(k.width);
+        self.write_slot(slot, value);
+    }
+
+    /// Set word `addr` of memory `index` (see [`crate::compile::MemDesc`])
+    /// to `value`, masked to the memory's width. Nothing is evaluated until
+    /// [`Sim::resettle`] or the next tick. A ROM's word changes for this
+    /// simulation until [`Sim::reset`]. Panics if `addr` is past the end.
+    pub fn set_mem_word(&mut self, index: u32, addr: usize, value: u64) {
+        let width = self.program.mems[index as usize].width;
+        self.mems[index as usize][addr] = value & mask(width);
+        self.mem_writes[index as usize] += 1;
+    }
+
+    /// Evaluate every net again from the current state, at the current
+    /// tick, without a commit: after [`Sim::set_state`] or
+    /// [`Sim::set_mem_word`], every net is consistent with the new state
+    /// and the next tick commits from it. Root inputs set since the last
+    /// tick are not applied: they still reach the logic at the next tick,
+    /// as they would have without this call.
+    pub fn resettle(&mut self) {
+        self.evaluate();
     }
 }
 
