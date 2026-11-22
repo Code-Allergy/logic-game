@@ -674,7 +674,7 @@ fn edit_screen_params(ui: &mut egui::Ui, palette: &crate::theme::Palette, kind: 
     if text {
         ui.label(
             egui::RichText::new("8-bit character codes (ASCII); bit 7 inverts the cell.")
-                .size(12.0)
+                .size(13.0)
                 .color(egui_color(palette.text_secondary)),
         );
     } else {
@@ -702,7 +702,7 @@ fn edit_screen_params(ui: &mut egui::Ui, palette: &crate::theme::Palette, kind: 
     };
     ui.label(
         egui::RichText::new(hint)
-            .size(12.0)
+            .size(13.0)
             .color(egui_color(palette.text_secondary)),
     );
 }
@@ -1001,7 +1001,7 @@ pub fn ui_for_selected_gate(
                                 .on_hover_text(format!("Id {}", identity.uuid));
                                 ui.label(
                                     egui::RichText::new(kind_blurb(&ty.kind))
-                                        .size(12.0)
+                                        .size(13.0)
                                         .color(c(palette.text_secondary)),
                                 );
                             });
@@ -1295,7 +1295,7 @@ pub fn ui_for_selected_gate(
                                     } else {
                                         format!("{text} (not simulated)")
                                     };
-                                    ui.label(egui::RichText::new(text).monospace().size(12.0));
+                                    ui.label(egui::RichText::new(text).monospace().size(13.0));
                                     if editable && ui.small_button("Delete").clicked() {
                                         writers.delete_wire.write(DeleteWire { entity: wire });
                                     }

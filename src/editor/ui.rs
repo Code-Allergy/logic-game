@@ -277,7 +277,7 @@ pub fn file_card(
                 let state = format!(" · {}", view.state);
                 let state_w = ui
                     .painter()
-                    .layout_no_wrap(state.clone(), egui::FontId::proportional(12.0), secondary)
+                    .layout_no_wrap(state.clone(), egui::FontId::proportional(13.0), secondary)
                     .size()
                     .x;
                 let path_w = text_width - state_w;
@@ -289,19 +289,19 @@ pub fn file_card(
                         // Too little room for a useful path: the state alone
                         // (the tooltip has the path).
                         if path_w < FILE_PATH_MIN {
-                            ui.label(egui::RichText::new(view.state).size(12.0).color(secondary));
+                            ui.label(egui::RichText::new(view.state).size(13.0).color(secondary));
                             return;
                         }
                         ui.scope(|ui| {
                             ui.set_max_width(path_w);
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(view.path).size(12.0).color(secondary),
+                                    egui::RichText::new(view.path).size(13.0).color(secondary),
                                 )
                                 .truncate(),
                             );
                         });
-                        ui.label(egui::RichText::new(state).size(12.0).color(secondary));
+                        ui.label(egui::RichText::new(state).size(13.0).color(secondary));
                     })
                     .response;
                 crumb.on_hover_text(view.note);
@@ -503,7 +503,7 @@ pub fn editor_ui_system(
                         )),
                         _ => ui.label(format!("Demo, level {}: {}", demo.level, demo.title)),
                     };
-                    ui.label(egui::RichText::new(&demo.description).size(12.0));
+                    ui.label(egui::RichText::new(&demo.description).size(13.0));
                 }
                 ui.colored_label(
                     info,
@@ -569,7 +569,7 @@ pub fn editor_ui_system(
                     egui::CollapsingHeader::new(egui::RichText::new("Demos").font(heavy(15.0)))
                         .default_open(true)
                         .show(ui, |ui| {
-                    ui.label(egui::RichText::new("From gates to a CPU: each level is built from the ones before it. Demos open read-only.").size(12.0));
+                    ui.label(egui::RichText::new("From gates to a CPU: each level is built from the ones before it. Demos open read-only.").size(13.0));
                     if chunky_button(ui, &palette, "Open the demo map", false)
                         .on_hover_text("The road from one gate to a CPU, with your progress")
                         .clicked()
@@ -595,7 +595,7 @@ pub fn editor_ui_system(
                         });
                     egui::CollapsingHeader::new(egui::RichText::new("Gallery").font(heavy(15.0)))
                         .show(ui, |ui| {
-                    ui.label(egui::RichText::new("More circuits, from simple to complex, built from the demos and from each other. They open read-only too.").size(12.0));
+                    ui.label(egui::RichText::new("More circuits, from simple to complex, built from the demos and from each other. They open read-only too.").size(13.0));
                     let mut category = None;
                     for item in &catalog.gallery {
                         if category != item.category.as_deref() {
@@ -674,7 +674,7 @@ pub fn editor_ui_system(
                 "Esc: drop the armed part or wire tool, else deselect",
                 "T: day or night workshop",
             ] {
-                ui.label(egui::RichText::new(tip).size(12.0));
+                ui.label(egui::RichText::new(tip).size(13.0));
             }
                 });
                         });
@@ -955,7 +955,7 @@ fn ui_armed_hint(
         Order::Tooltip,
         egui::Id::new("armed_hint"),
     ));
-    let galley = painter.layout_no_wrap(text.to_string(), heavy(12.0), egui_color(palette.on_ink));
+    let galley = painter.layout_no_wrap(text.to_string(), heavy(13.0), egui_color(palette.on_ink));
     let rect = egui::Rect::from_min_size(
         pos + egui::vec2(14.0, 14.0),
         galley.size() + egui::vec2(14.0, 6.0),

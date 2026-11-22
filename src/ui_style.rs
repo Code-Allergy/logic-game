@@ -153,7 +153,7 @@ pub fn workshop_style(theme: &Theme) -> egui::Style {
         (TextStyle::Heading, heavy(20.0)),
         (TextStyle::Body, prop(14.0)),
         (TextStyle::Button, heavy(14.0)),
-        (TextStyle::Small, prop(12.0)),
+        (TextStyle::Small, prop(13.0)),
         (TextStyle::Monospace, FontId::monospace(13.0)),
     ]
     .into();
@@ -342,7 +342,7 @@ pub fn chunky_button_with(
 pub fn caption(palette: &Palette, text: &str) -> egui::RichText {
     egui::RichText::new(text.to_uppercase())
         .text_style(TextStyle::Button)
-        .size(11.0)
+        .size(12.0)
         .color(egui_color(palette.text_secondary))
 }
 

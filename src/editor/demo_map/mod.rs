@@ -910,7 +910,7 @@ fn progress_card(
         at(16.0, 72.0),
         Align2::LEFT_CENTER,
         format!("{} of {} demos opened", status.opened, status.total),
-        FontId::monospace(11.0 * s),
+        FontId::monospace(12.0 * s),
         p.text,
     );
     match next {
@@ -920,7 +920,7 @@ fn progress_card(
                 at(16.0, 100.0),
                 Align2::LEFT_CENTER,
                 "Next stop:",
-                kit.body(12.0),
+                kit.body(13.0),
                 p.text_secondary,
             );
             let name = format!("{} · {}", level.level, level.short_title());
@@ -979,7 +979,7 @@ fn level_panel(
         *y += h + gap * s;
     };
     let stop = egui::RichText::new(format!("STOP {}", level.level))
-        .font(kit.heavy(12.0))
+        .font(kit.heavy(13.0))
         .extra_letter_spacing(1.2 * s)
         .color(kit.c(p.text_secondary));
     let galley = egui::WidgetText::from(stop).into_galley(
