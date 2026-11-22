@@ -163,6 +163,28 @@ fn demos_form_a_pyramid() {
     }
 }
 
+/// Every level has a description and a short stop name for the demo map;
+/// both fields are optional in the manifest.
+#[test]
+fn levels_have_map_descriptions_and_the_fields_are_optional() {
+    let catalog = demos();
+    assert_eq!(catalog.levels.len(), 10);
+    for level in &catalog.levels {
+        assert!(!level.description.is_empty(), "level {}", level.level);
+        assert!(!level.short_title().is_empty());
+        assert!(level.short_title().len() <= 16, "{}", level.short_title());
+    }
+    assert_eq!(catalog.levels[3].short_title(), "Choosing");
+    assert_eq!(catalog.levels[9].short_title(), "CPU");
+
+    // An older manifest without the fields still loads.
+    let old: crate::sim::demos::Level =
+        serde_json::from_str(r#"{ "level": 4, "title": "Choosing: decoders and multiplexers" }"#)
+            .unwrap();
+    assert_eq!(old.description, "");
+    assert_eq!(old.short_title(), "Choosing");
+}
+
 #[test]
 fn bad_files_are_refused_with_a_message() {
     let file = |circuit: &str| {

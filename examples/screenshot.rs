@@ -8,6 +8,7 @@
 //! cargo run --example screenshot -- traffic_light out.png --ticks 40 --zoom 0.8
 //! cargo run --example screenshot -- counter out.png --size 1280x720 --select Count
 //! cargo run --example screenshot -- counter out.png --library   # Library drawer open
+//! cargo run --example screenshot -- - map.png --map --opened gates,universal,register
 //! cargo run --example screenshot -- cpu out.png --definition alu8   # a definition
 //! cargo run --example screenshot -- path/to/file.json out.png       # any version 6 file
 //! cargo run --example screenshot -- empty out.png               # a new empty workspace
@@ -26,6 +27,10 @@
 //! opens the demo as an editable workspace instead of read-only. The ids
 //! `empty` and `loop` are a new empty workspace and a small editable
 //! circuit with a combinational loop.
+//!
+//! `--map` shows the demo map instead of a demo (the id is ignored), with
+//! the demos listed by `--opened ID,ID,...` (the last one last) as the
+//! progress, kept in memory only; `--level N` picks a stop.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,6 +40,7 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::window::WindowResolution;
 use bevy_egui::EguiPlugin;
 
+use gate_quest::editor::demo_map::{DemoMapState, progress::DemoProgress};
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
 use gate_quest::sim::{
     ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel,
@@ -60,6 +66,8 @@ struct Shot {
     library: bool,
     set: Vec<(String, u64)>,
     tab: Option<PartTab>,
+    map: bool,
+    level: Option<u32>,
     definition: Option<String>,
     fit: bool,
     editable: bool,
@@ -128,11 +136,15 @@ fn main() {
     let (mut size, mut select, mut library) = ((1600, 1000), None, false);
     let mut set = Vec::new();
     let mut tab = None;
+    let (mut map, mut opened, mut level) = (false, String::new(), None);
     let (mut definition, mut fit) = (None, false);
     let mut editable = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--night" => night = true,
+            "--map" => map = true,
+            "--opened" => opened = args.next().unwrap_or_default(),
+            "--level" => level = args.next().and_then(|l| l.parse().ok()),
             "--library" => library = true,
             "--editable" => editable = true,
             "--select" => select = args.next(),
@@ -163,7 +175,9 @@ fn main() {
             other => panic!("unknown argument {other}"),
         }
     }
+    let progress = DemoProgress::with_opened(opened.split(',').filter(|id| !id.is_empty()));
     App::new()
+        .insert_resource(progress)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 resolution: WindowResolution::new(size.0, size.1),
@@ -174,7 +188,11 @@ fn main() {
         .add_plugins((EguiPlugin::default(), WorkshopUiPlugin, ThemePlugin))
         .add_plugins(SimulationPlugin::new(GameState::Simulating))
         .add_plugins(EditorPlugin)
-        .insert_state(GameState::Simulating)
+        .insert_state(if map {
+            GameState::DemoMap
+        } else {
+            GameState::Simulating
+        })
         .insert_resource(UiPointerState::default())
         .insert_resource(ClearColor(Theme::default().palette.bench))
         .add_message::<GateComponentSelectionEvent>()
@@ -188,6 +206,8 @@ fn main() {
             library,
             set,
             tab,
+            map,
+            level,
             definition,
             fit,
             editable,
@@ -219,9 +239,31 @@ fn drive(
     gates: Query<&Transform, (With<GateIdentity>, Without<MainCamera>)>,
     windows: Query<&Window>,
     mut exit: MessageWriter<AppExit>,
-    mut active: ResMut<ActiveCircuit>,
+    // Grouped: a system takes at most 16 parameters.
+    (mut map, mut active): (ResMut<DemoMapState>, ResMut<ActiveCircuit>),
 ) {
     shot.frame += 1;
+    if shot.map {
+        match shot.frame {
+            5 if shot.night => theme.set(ThemeMode::Night),
+            30 => {
+                if let Some(level) = shot.level {
+                    map.level = Some(level);
+                    map.demo = None;
+                }
+            }
+            70 => {
+                commands
+                    .spawn(Screenshot::primary_window())
+                    .observe(save_to_disk(shot.out.clone()));
+            }
+            100 => {
+                exit.write(AppExit::Success);
+            }
+            _ => {}
+        }
+        return;
+    }
     match shot.frame {
         5 => {
             let (name, workspace, all, fixture) = load(&shot.id);

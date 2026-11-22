@@ -17,6 +17,8 @@ struct MainMenu;
 #[derive(Component, Clone, Copy)]
 pub enum MainMenuButtonAction {
     Start,
+    /// The demo map (the curriculum road).
+    DemoMap,
     Settings,
     Exit,
 }
@@ -75,6 +77,9 @@ fn setup_main_menu(
                 .spawn(button(MainMenuButtonAction::Start))
                 .with_child(label("Start"));
             parent
+                .spawn(button(MainMenuButtonAction::DemoMap))
+                .with_child(label("Demo map"));
+            parent
                 .spawn(button(MainMenuButtonAction::Settings))
                 .with_child(label("Options"));
             parent
@@ -109,6 +114,7 @@ fn main_menu_button_system(
                 *color = palette.on.into();
                 match action {
                     MainMenuButtonAction::Start => next_state.set(GameState::Simulating),
+                    MainMenuButtonAction::DemoMap => next_state.set(GameState::DemoMap),
                     MainMenuButtonAction::Settings => settings_open.0 = !settings_open.0,
                     MainMenuButtonAction::Exit => {
                         exit.write(AppExit::Success);

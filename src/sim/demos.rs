@@ -114,12 +114,31 @@ struct ManifestFile {
     demos: Vec<ManifestDemo>,
 }
 
-/// A level of the pyramid.
-#[derive(Debug, Clone, Deserialize)]
+/// A level of the pyramid: a stop on the demo map.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Level {
     pub level: u32,
     pub title: String,
+    /// One or two sentences about the level (the demo map's level panel).
+    /// Optional: manifests without it still load.
+    #[serde(default)]
+    pub description: String,
+    /// A short name for the stop on the demo map. Optional: defaults to
+    /// the title up to a colon (see [`Level::short_title`]).
+    #[serde(default)]
+    pub short: Option<String>,
+}
+
+impl Level {
+    /// The stop's name on the demo map: `short`, else the title up to a
+    /// colon (`"Choosing: decoders and multiplexers"` reads `"Choosing"`).
+    pub fn short_title(&self) -> &str {
+        match &self.short {
+            Some(short) if !short.trim().is_empty() => short.trim(),
+            _ => self.title.split(':').next().unwrap_or_default().trim(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

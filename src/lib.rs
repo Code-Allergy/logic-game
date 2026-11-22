@@ -50,6 +50,9 @@ pub enum GameState {
     MainMenu,
     Loading,
     Simulating,
+    /// The demo map: the curriculum road, a level's demos and the gallery
+    /// (`editor::demo_map`). The circuit stays loaded, hidden and paused.
+    DemoMap,
     Paused,
     Settings,
 }

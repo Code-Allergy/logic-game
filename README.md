@@ -68,7 +68,33 @@ the wheel zooms about the cursor.
 [--select LABEL] [--set LABEL=VALUE] [--tab NAME] [--library] [--editable]
 [--fit] [--definition NAME]` saves a screenshot of a demo, a gallery item
 (or `empty`, a new workspace, or `loop`, a build error) or a version 6
-file (optionally one of its definitions).
+file (optionally one of its definitions); `--map [--opened ID,ID,...]
+[--level N]` shows the demo map instead, with that progress (in memory).
+
+## The demo map
+
+A full-screen view of the curriculum as a road from one gate to a CPU,
+opened from the map button on the file card, "Open the demo map" in the
+Library, or "Demo map" on the title menu; `Esc` or "Back to workshop"
+returns to the editor. The app still starts on the title menu.
+
+- The road has one stop per level, laid out from the level count: marigold
+  once a demo of the level has been opened, sky with a ring and a "You are
+  here" pin at the level of the demo opened last, white before that. Click
+  a stop to pick its level. The progress card counts the opened demos and
+  names the next stop (the first stop after yours with a demo left).
+- The level panel shows the level's description (`levels[].description`
+  in the manifest) and its demos with thumbnails drawn from the circuit,
+  a visited box (click to tick or clear), "Open" and "Copy to my
+  workshop".
+- The gallery shelf filters by category; click a card to open it.
+
+Opened demos are recorded whenever a demo or gallery item is open, however
+it was opened. Native builds keep the record in
+`workspaces/.demo-progress.json` (`{"format": "gatequest-progress",
+"version": 1, "opened": [...], "last": "..."}`, written atomically; hidden
+files are not listed as workspaces). The web build keeps it in memory for
+the session.
 
 ## Documentation
 
