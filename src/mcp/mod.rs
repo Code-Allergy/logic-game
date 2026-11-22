@@ -5,6 +5,8 @@
 //!   of operations to a workspace document.
 //! - [`view`] – text views of a circuit.
 //! - [`testing`] – stored tests of chips, run as a suite.
+//! - [`compiled`] – what the compiler makes of a circuit, build errors
+//!   with parts named, and the tests that pin it.
 //! - [`rig`] – a private simulation of one circuit, with signals by name.
 //! - [`run`] – experiment scripts on a rig: stimulus, expectations,
 //!   recordings, comparison with a trace, snapshots.
@@ -24,6 +26,7 @@
 pub mod app;
 pub mod batch;
 pub mod chips;
+pub mod compiled;
 #[cfg(feature = "mcp")]
 pub mod http;
 pub mod import;

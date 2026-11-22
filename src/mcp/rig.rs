@@ -25,7 +25,7 @@ use logi_sim::sim::Sim;
 use uuid::Uuid;
 
 use super::batch::{Names, Place, circuit_at, names_of};
-use super::memfile;
+use super::{compiled, memfile};
 use crate::sim::netlist::{DesignMap, design_map_of};
 use crate::sim::source::{self, Dir};
 use crate::sim::{CircuitDocument, CircuitLibrary, GateKind, WorkspaceDocument};
@@ -88,24 +88,14 @@ pub struct Rig {
     names: HashMap<Uuid, Names>,
 }
 
-fn compile(design: &Design, options: &Options) -> Result<Program, String> {
-    logi_sim::compile::compile(design, options).map_err(|errors| {
-        let loops = errors
-            .iter()
-            .any(|e| matches!(e, logi_sim::compile::CompileError::CombinationalLoop { .. }));
-        if loops {
-            "the circuit does not build: it has a loop of gates with no state in it".to_string()
-        } else {
-            format!(
-                "the circuit does not build: {}",
-                errors
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        }
-    })
+fn compile(
+    ws: &WorkspaceDocument,
+    design: &Design,
+    map: &DesignMap,
+    options: &Options,
+) -> Result<Program, String> {
+    compiled::compile_design(ws, design, map, options)
+        .map_err(|e| format!("the circuit does not build: {}", compiled::one_line(&e)))
 }
 
 impl Rig {
@@ -121,7 +111,7 @@ impl Rig {
     /// Compile `ws`, its root the circuit under test.
     pub fn of(ws: WorkspaceDocument) -> Result<Rig, String> {
         let (design, map) = design_map_of(&ws)?;
-        let program = compile(&design, &Options::default())?;
+        let program = compile(&ws, &design, &map, &Options::default())?;
         let sim = Sim::try_new(Arc::new(program)).map_err(|e| e.0)?;
         Ok(Rig {
             library: CircuitLibrary {
@@ -489,7 +479,7 @@ impl Rig {
             probes: self.probes.clone(),
             ..Options::default()
         };
-        let program = compile(&self.design, &options)?;
+        let program = compile(&self.ws, &self.design, &self.map, &options)?;
         let mut sim = Sim::try_new(Arc::new(program)).map_err(|e| e.0)?;
         for (name, value) in &self.inputs {
             if let Some(port) = sim.program().ports.input(name) {

@@ -251,12 +251,7 @@ fn merge_report(all: &mut Vec<CircuitReport>, one: CircuitReport) {
 /// checked too). The root's flattened part count, or the errors.
 pub fn build(ws: &WorkspaceDocument) -> Result<usize, Vec<String>> {
     let options = logi_sim::compile::Options::default();
-    let compile = |ws: &WorkspaceDocument| -> Result<(), Vec<String>> {
-        let design = crate::sim::netlist::design_of(ws).map_err(|e| vec![e])?;
-        logi_sim::compile::compile(&design, &options)
-            .map(|_| ())
-            .map_err(|errors| errors.iter().map(ToString::to_string).collect())
-    };
+    let compile = |ws: &WorkspaceDocument| super::compiled::compile(ws, &options).map(|_| ());
     let mut errors = compile(ws).err().unwrap_or_default();
     let library = CircuitLibrary {
         definitions: ws.definitions.clone(),

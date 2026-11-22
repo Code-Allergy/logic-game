@@ -9,7 +9,10 @@
 //!   the same random inputs into this chip and the other, every output
 //!   compared after every tick, both from power-on;
 //! - `script`: an experiment script ([`super::run`]) whose `expect`,
-//!   `until` and `compare` steps must hold.
+//!   `until` and `compare` steps must hold;
+//! - `compiled`, `unoptimized`: what the compiler makes of the chip, and
+//!   that it behaves the same with the word-level passes off
+//!   ([`super::compiled`]).
 //!
 //! Each test runs on a fresh simulation of its chip compiled alone, so
 //! tests never see each other's state and can run in parallel.
@@ -25,6 +28,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::batch::{Place, circuit_at, find_circuit};
+use super::compiled;
 use super::rig::Rig;
 use super::run::{self, RunState};
 use crate::sim::challenges::{self, Port, PortTest};
@@ -35,7 +39,15 @@ pub const DEFAULT_SAMPLES: u64 = 1000;
 /// The most cases an `equivalent` test may ask for.
 pub const MAX_SAMPLES: u64 = 10_000_000;
 
-const KINDS: [&str; 5] = ["table", "formula", "sequence", "equivalent", "script"];
+const KINDS: [&str; 7] = [
+    "table",
+    "formula",
+    "sequence",
+    "equivalent",
+    "script",
+    "compiled",
+    "unoptimized",
+];
 
 /// The name of a test and its one kind with its body.
 fn parts(test: &Value) -> Result<(&str, &str, &Value), String> {
@@ -67,7 +79,7 @@ pub fn name_of(test: &Value) -> &str {
     test.get("name").and_then(Value::as_str).unwrap_or("?")
 }
 
-fn ports(doc: &CircuitDocument) -> (Vec<Port>, Vec<Port>) {
+pub(super) fn ports(doc: &CircuitDocument) -> (Vec<Port>, Vec<Port>) {
     let (ins, outs) = doc.interface();
     let port = |n: &&crate::sim::DocNode| Port {
         name: n.label.clone().unwrap_or_default(),
@@ -80,7 +92,7 @@ fn ports(doc: &CircuitDocument) -> (Vec<Port>, Vec<Port>) {
 }
 
 /// The workspace with the circuit at `place` as its root.
-fn rooted(ws: &WorkspaceDocument, place: Place) -> WorkspaceDocument {
+pub(super) fn rooted(ws: &WorkspaceDocument, place: Place) -> WorkspaceDocument {
     let mut ws = ws.clone();
     if let Place::Definition(_) = place {
         ws.root = circuit_at(&ws, place).clone();
@@ -89,45 +101,47 @@ fn rooted(ws: &WorkspaceDocument, place: Place) -> WorkspaceDocument {
 }
 
 fn fresh_sim(ws: &WorkspaceDocument) -> Result<Sim, String> {
-    let design = crate::sim::netlist::design_of(ws)?;
-    let program = logi_sim::compile::compile(&design, &logi_sim::compile::Options::default())
-        .map_err(|errors| {
-            let loops = errors
-                .iter()
-                .any(|e| matches!(e, logi_sim::compile::CompileError::CombinationalLoop { .. }));
-            if loops {
-                "it does not build: a loop of gates with no state in it".to_string()
-            } else {
-                format!(
-                    "it does not build: {}",
-                    errors
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                )
-            }
-        })?;
-    Sim::try_new(Arc::new(program)).map_err(|e| e.0)
+    let built = compiled::compile(ws, &logi_sim::compile::Options::default())
+        .map_err(|e| format!("it does not build: {}", compiled::one_line(&e)))?;
+    Sim::try_new(Arc::new(built.program)).map_err(|e| e.0)
 }
 
-struct Equivalent {
-    to: Place,
-    to_name: String,
-    samples: u64,
-    seed: u64,
-    hold: u64,
+/// How random inputs are drawn when two simulations are compared.
+pub(super) struct Sampling {
+    pub samples: u64,
+    pub seed: u64,
+    /// Ticks each set of inputs is held for.
+    pub hold: u64,
 }
 
-fn equivalent(ws: &WorkspaceDocument, body: &Value) -> Result<Equivalent, String> {
-    let Value::Object(body) = body else {
-        return Err("\"equivalent\" takes {\"to\": chip, ...}".into());
-    };
+/// The `samples`, `seed` and `hold` fields of a test body.
+pub(super) fn sampling(body: &Map<String, Value>) -> Result<Sampling, String> {
     let number = |key: &str, default: u64| match body.get(key) {
         None => Ok(default),
         Some(v) => v
             .as_u64()
             .ok_or_else(|| format!("\"{key}\" must be a whole number")),
+    };
+    let samples = number("samples", DEFAULT_SAMPLES)?;
+    if !(1..=MAX_SAMPLES).contains(&samples) {
+        return Err(format!("\"samples\" must be 1 to {MAX_SAMPLES}"));
+    }
+    Ok(Sampling {
+        samples,
+        seed: number("seed", 1)?,
+        hold: number("hold", 1)?.max(1),
+    })
+}
+
+struct Equivalent {
+    to: Place,
+    to_name: String,
+    sampling: Sampling,
+}
+
+fn equivalent(ws: &WorkspaceDocument, body: &Value) -> Result<Equivalent, String> {
+    let Value::Object(body) = body else {
+        return Err("\"equivalent\" takes {\"to\": chip, ...}".into());
     };
     if let Some(k) = body
         .keys()
@@ -141,16 +155,10 @@ fn equivalent(ws: &WorkspaceDocument, body: &Value) -> Result<Equivalent, String
         return Err("\"equivalent\" needs \"to\": the chip to compare with".into());
     };
     let place = find_circuit(ws, Some(to))?.ok_or_else(|| format!("no chip \"{to}\""))?;
-    let samples = number("samples", DEFAULT_SAMPLES)?;
-    if !(1..=MAX_SAMPLES).contains(&samples) {
-        return Err(format!("\"samples\" must be 1 to {MAX_SAMPLES}"));
-    }
     Ok(Equivalent {
         to: place,
         to_name: to.clone(),
-        samples,
-        seed: number("seed", 1)?,
-        hold: number("hold", 1)?.max(1),
+        sampling: sampling(body)?,
     })
 }
 
@@ -188,6 +196,8 @@ pub fn validate(ws: &WorkspaceDocument, place: Place, test: &Value) -> Result<()
                 Value::Object(script) if script.get("steps").is_some_and(Value::is_array) => Ok(()),
                 _ => Err("\"script\" takes {\"steps\": [...], ...}".into()),
             },
+            "compiled" => compiled::validate_compiled(ws, place, body),
+            "unoptimized" => compiled::validate_unoptimized(body),
             _ => {
                 let mut spec = Map::new();
                 spec.insert(kind.to_string(), body.clone());
@@ -211,6 +221,81 @@ fn mask(w: u8) -> u64 {
     if w >= 64 { u64::MAX } else { (1u64 << w) - 1 }
 }
 
+/// Feed `a` and `b` the same random inputs from power-on and compare
+/// every output after every tick: the cases run, or the first case that
+/// differs. `labels` say what each simulation is in the message
+/// (`Sum: this chip gives 3, "add_ref" gives 4`). Both have the ports
+/// `inputs` and `outputs`, by name.
+pub(super) fn compare(
+    a: &mut Sim,
+    b: &mut Sim,
+    inputs: &[Port],
+    outputs: &[Port],
+    sampling: &Sampling,
+    labels: (&str, &str),
+) -> Result<u64, String> {
+    let port = |sim: &Sim, name: &str, input: bool| {
+        let ports = &sim.program().ports;
+        if input {
+            ports.input(name)
+        } else {
+            ports.output(name)
+        }
+        .ok_or_else(|| format!("the ports differ: no port \"{name}\" on both chips"))
+    };
+    let mut ins = Vec::new();
+    for p in inputs {
+        ins.push((p, port(a, &p.name, true)?, port(b, &p.name, true)?));
+    }
+    let mut outs = Vec::new();
+    for p in outputs {
+        outs.push((p, port(a, &p.name, false)?, port(b, &p.name, false)?));
+    }
+    let mut state = sampling.seed;
+    for case in 1..=sampling.samples {
+        let values: Vec<u64> = ins
+            .iter()
+            .map(|(p, ..)| next(&mut state) & mask(p.w))
+            .collect();
+        for ((_, pa, pb), v) in ins.iter().zip(&values) {
+            a.set_input(*pa, *v);
+            b.set_input(*pb, *v);
+        }
+        for _ in 0..sampling.hold {
+            a.tick();
+            b.tick();
+            let wrong: Vec<String> = outs
+                .iter()
+                .filter(|(_, pa, pb)| a.output(*pa) != b.output(*pb))
+                .map(|(p, pa, pb)| {
+                    format!(
+                        "{}: {} gives {}, {} gives {}",
+                        p.name,
+                        labels.0,
+                        a.output(*pa),
+                        labels.1,
+                        b.output(*pb)
+                    )
+                })
+                .collect();
+            if !wrong.is_empty() {
+                let given: Vec<String> = ins
+                    .iter()
+                    .zip(&values)
+                    .map(|((p, ..), v)| format!("{}={v}", p.name))
+                    .collect();
+                return Err(format!(
+                    "case {case} (tick {}): inputs {}; {}",
+                    a.tick_count(),
+                    given.join(", "),
+                    wrong.join("; ")
+                ));
+            }
+        }
+    }
+    Ok(sampling.samples)
+}
+
 /// Run one test on the circuit at `place`: the cases it ran, or why it
 /// failed.
 pub fn run_test(ws: &WorkspaceDocument, place: Place, test: &Value) -> Result<u64, String> {
@@ -223,66 +308,17 @@ pub fn run_test(ws: &WorkspaceDocument, place: Place, test: &Value) -> Result<u6
             let mut a = fresh_sim(&rooted_ws)?;
             let mut b =
                 fresh_sim(&rooted(ws, e.to)).map_err(|err| format!("\"{}\": {err}", e.to_name))?;
-            let port = |sim: &Sim, name: &str, input: bool| {
-                let ports = &sim.program().ports;
-                if input {
-                    ports.input(name)
-                } else {
-                    ports.output(name)
-                }
-                .ok_or_else(|| format!("the ports differ: no port \"{name}\" on both chips"))
-            };
-            let mut ins = Vec::new();
-            for p in &inputs {
-                ins.push((p, port(&a, &p.name, true)?, port(&b, &p.name, true)?));
-            }
-            let mut outs = Vec::new();
-            for p in &outputs {
-                outs.push((p, port(&a, &p.name, false)?, port(&b, &p.name, false)?));
-            }
-            let mut state = e.seed;
-            for case in 1..=e.samples {
-                let values: Vec<u64> = ins
-                    .iter()
-                    .map(|(p, ..)| next(&mut state) & mask(p.w))
-                    .collect();
-                for ((_, pa, pb), v) in ins.iter().zip(&values) {
-                    a.set_input(*pa, *v);
-                    b.set_input(*pb, *v);
-                }
-                for _ in 0..e.hold {
-                    a.tick();
-                    b.tick();
-                    let wrong: Vec<String> = outs
-                        .iter()
-                        .filter(|(_, pa, pb)| a.output(*pa) != b.output(*pb))
-                        .map(|(p, pa, pb)| {
-                            format!(
-                                "{}: this chip gives {}, \"{}\" gives {}",
-                                p.name,
-                                a.output(*pa),
-                                e.to_name,
-                                b.output(*pb)
-                            )
-                        })
-                        .collect();
-                    if !wrong.is_empty() {
-                        let given: Vec<String> = ins
-                            .iter()
-                            .zip(&values)
-                            .map(|((p, ..), v)| format!("{}={v}", p.name))
-                            .collect();
-                        return Err(format!(
-                            "case {case} (tick {}): inputs {}; {}",
-                            a.tick_count(),
-                            given.join(", "),
-                            wrong.join("; ")
-                        ));
-                    }
-                }
-            }
-            Ok(e.samples)
+            compare(
+                &mut a,
+                &mut b,
+                &inputs,
+                &outputs,
+                &e.sampling,
+                ("this chip", &format!("\"{}\"", e.to_name)),
+            )
         }
+        "compiled" => compiled::run_compiled(ws, place, body),
+        "unoptimized" => compiled::run_unoptimized(ws, place, body),
         "script" => {
             let Value::Object(script) = body else {
                 return Err("\"script\" takes {\"steps\": [...], ...}".into());
