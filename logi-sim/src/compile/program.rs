@@ -49,7 +49,6 @@
 //! RAM write ports) into slots that only commits read, so a root input
 //! changed between ticks reaches state at the commit after the next settle.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use slotmap::SecondaryMap;
@@ -361,7 +360,7 @@ pub struct InstanceInfo {
 pub struct DebugMap {
     pub instances: Vec<InstanceInfo>,
     /// `(parent instance, instance node) -> child instance`.
-    pub children: HashMap<(u32, NodeId), u32>,
+    pub children: super::FastMap<(u32, NodeId), u32>,
     /// Per instance: `NetId -> slot`.
     pub net_slots: Vec<SecondaryMap<NetId, u32>>,
 }

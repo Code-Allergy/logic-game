@@ -24,6 +24,13 @@ pub use program::*;
 
 use std::fmt;
 
+/// Hash map with `foldhash`'s fast hasher and a fixed seed: deterministic
+/// iteration for a given insertion history, and no SipHash on the
+/// compiler's hot paths.
+pub type FastMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::FixedState>;
+/// Hash set counterpart of [`FastMap`].
+pub type FastSet<K> = std::collections::HashSet<K, foldhash::fast::FixedState>;
+
 use crate::netlist::{Design, NetId, NodeId, ValidationError};
 
 /// Default [`Options::pack_min`].

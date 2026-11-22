@@ -1,12 +1,12 @@
 //! Passes 5 and 6: slot assignment, lowering to instructions, levelizing and
 //! block emission.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use slotmap::SecondaryMap;
 
-use super::Options;
+use super::{FastMap, Options};
 use super::elaborate::Elab;
 use super::lift;
 use super::pack;
@@ -126,7 +126,7 @@ pub(super) fn emit(
     // ── Debug map ──────────────────────────────────────────────────────────
     let mut debug = DebugMap {
         instances: e.insts.clone(),
-        children: HashMap::new(),
+        children: FastMap::default(),
         net_slots: Vec::with_capacity(e.insts.len()),
     };
     for (i, info) in e.insts.iter().enumerate() {
@@ -760,7 +760,7 @@ fn renumber(
     }
     // View slots follow the lane slots.
     let view_base = next + 64 * p.lane_words.len() as u32;
-    let view_index: HashMap<u32, u32> = views
+    let view_index: FastMap<u32, u32> = views
         .iter()
         .enumerate()
         .map(|(i, &(fake, _))| (fake, i as u32))
