@@ -7,26 +7,26 @@
       "name": "register8",
       "title": "8-bit register",
       "nodes": [
-        {"name": "D", "type": "Input", "w": 8, "at": [-350, 100]},
-        {"name": "Load", "type": "Input", "at": [-350, 0]},
-        {"name": "Clk", "type": "Input", "at": [-350, -100]},
+        {"name": "D", "type": "Input", "w": 8, "at": [0, -320]},
+        {"name": "Load", "type": "Input", "at": [0, -240]},
+        {"name": "Clk", "type": "Input", "at": [0, 360]},
         {
           "name": "hold",
           "use": "mux/mux2",
           "label": "keep{i}",
-          "at": [-100, 280],
+          "at": [280, 0],
           "count": 8,
-          "step": [0, -80]
+          "step": [140, 0]
         },
         {
           "name": "ff",
           "use": "flip_flop/dff",
           "label": "bit{i}",
-          "at": [100, 280],
+          "at": [280, 120],
           "count": 8,
-          "step": [0, -80]
+          "step": [140, 0]
         },
-        {"name": "Q", "type": "Output", "w": 8, "at": [350, 0]}
+        {"name": "Q", "type": "Output", "w": 8, "at": [1540, 360]}
       ],
       "wires": [
         ["Load", "hold.Sel"],
@@ -40,19 +40,19 @@
       "name": "main",
       "title": "Register",
       "nodes": [
-        {"name": "D", "type": "Input", "w": 8, "at": [-300, 100]},
-        {"name": "Load", "type": "Input", "at": [-300, 0]},
-        {"name": "Clk", "type": "Input", "at": [-300, -100]},
-        {"name": "reg", "use": "register8", "label": "8-bit register (gates)", "at": [0, 60]},
+        {"name": "D", "type": "Input", "w": 8, "at": [0, 80]},
+        {"name": "Load", "type": "Input", "at": [0, 0]},
+        {"name": "Clk", "type": "Input", "at": [0, -80]},
+        {"name": "reg", "use": "register8", "label": "8-bit register (gates)", "at": [280, 80]},
         {
           "name": "prim",
           "type": "Register",
           "w": 8,
           "label": "Register primitive",
-          "at": [0, -120]
+          "at": [280, -80]
         },
-        {"name": "q_gates", "type": "Output", "w": 8, "label": "Q (gates)", "at": [300, 60]},
-        {"name": "q_prim", "type": "Output", "w": 8, "label": "Q (Register)", "at": [300, -120]}
+        {"name": "q_gates", "type": "Output", "w": 8, "label": "Q (gates)", "at": [420, 80]},
+        {"name": "q_prim", "type": "Output", "w": 8, "label": "Q (Register)", "at": [420, -80]}
       ],
       "wires": [
         ["D", "reg.D", "prim.d"],

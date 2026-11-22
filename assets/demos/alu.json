@@ -7,40 +7,40 @@
       "name": "alu8",
       "title": "8-bit ALU",
       "nodes": [
-        {"name": "A", "type": "Input", "w": 8, "at": [-550, 200]},
-        {"name": "B", "type": "Input", "w": 8, "at": [-550, 0]},
-        {"name": "Op", "type": "Input", "w": 2, "at": [-550, -250]},
+        {"name": "A", "type": "Input", "w": 8, "at": [0, 0]},
+        {"name": "B", "type": "Input", "w": 8, "at": [0, -560]},
+        {"name": "Op", "type": "Input", "w": 2, "at": [0, 120]},
         {
           "name": "flip",
           "use": "gates/xor",
           "label": "B xor sub {i}",
-          "at": [-350, 300],
+          "at": [840, 400],
           "count": 8,
           "step": [0, -80]
         },
-        {"name": "add", "use": "ripple_adder/adder8", "label": "A + B or A - B", "at": [-150, 200]},
+        {"name": "add", "use": "ripple_adder/adder8", "label": "A + B or A - B", "at": [1260, 700]},
         {
           "name": "ands",
           "use": "gates/and",
           "label": "and{i}",
-          "at": [-150, 50],
+          "at": [840, -560],
           "count": 8,
-          "step": [0, -40]
+          "step": [0, -160]
         },
         {
           "name": "ors",
           "use": "gates/or",
           "label": "or{i}",
-          "at": [-50, 50],
+          "at": [840, -640],
           "count": 8,
-          "step": [0, -40]
+          "step": [0, -160]
         },
-        {"name": "select", "use": "mux_tree/mux4x8", "label": "result", "at": [150, 0]},
-        {"name": "any", "type": "ReduceOr", "w": 8, "at": [300, -150]},
-        {"name": "none", "use": "gates/not", "at": [400, -150]},
-        {"name": "Y", "type": "Output", "w": 8, "at": [550, 0]},
-        {"name": "Carry", "type": "Output", "at": [550, 150]},
-        {"name": "Zero", "type": "Output", "at": [550, -150]}
+        {"name": "select", "use": "mux_tree/mux4x8", "label": "result", "at": [1400, -880]},
+        {"name": "any", "type": "ReduceOr", "w": 8, "at": [1540, -1020]},
+        {"name": "none", "use": "gates/not", "at": [1680, -1020]},
+        {"name": "Y", "type": "Output", "w": 8, "at": [1820, -880]},
+        {"name": "Carry", "type": "Output", "at": [1820, 700]},
+        {"name": "Zero", "type": "Output", "at": [1820, -1020]}
       ],
       "wires": [
         ["B", "flip.A", "ands.B", "ors.B"],

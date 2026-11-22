@@ -68,13 +68,14 @@ workspace" makes an editable copy.
 | 9 ALU | 8-bit ALU: add, subtract, AND, OR, carry and zero flags |
 | 10 A small CPU | Program counter, ROM program, microcode, register file and ALU; multiplies 5 by 7 |
 
-A **Gallery** of 27 more circuits sits beside the curriculum in
+A **Gallery** of 29 more circuits sits beside the curriculum in
 `assets/gallery/`: combinational (comparators, parity, Gray code, priority
 encoder, 7-segment display, barrel shifter, carry-lookahead adder, array
 multiplier), sequential (shift register, LFSR, counters, debouncer, PWM,
 state machines, traffic light, stopwatch) and small systems (a stack, a
-UART transmitter, a reaction-timer game and a CPU printing Fibonacci
-numbers). See `docs/save-format.md` ("Gallery").
+UART transmitter, a reaction-timer game, a CPU printing Fibonacci
+numbers, and a 16-bit CPU of about 15 000 gates printing primes beside
+its twin of word primitives). See `docs/save-format.md` ("Gallery").
 
 `cargo run --example demo_fmt` rewrites the demo and gallery files in
 canonical form (`-- --check` checks them); `cargo run --example

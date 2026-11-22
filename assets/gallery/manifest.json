@@ -195,6 +195,20 @@
       "title": "CPU: Fibonacci",
       "description": "The curriculum's CPU with three more instructions, ADDI, SUBI and ANDI (ops 12 to 14: rd = rs op imm, the ALU's B input switched to the immediate). Its program prints the Fibonacci numbers 0, 1, 1, 2, 3, 5, ... 144 on Out, using OR r, r as a move and SUBI to count the loop down, then halts.",
       "uses": ["alu/alu8", "mux/mux2x8", "register/register8", "register_file/regfile4x8", "ripple_adder/adder8"]
+    },
+    {
+      "id": "cpu16",
+      "category": "systems",
+      "title": "16-bit CPU of gates",
+      "description": "A multi-cycle 16-bit CPU in which every register bit is a flip-flop of gates: program counter, instruction register, eight registers r0-r7, the A, B and Y latches, the stack pointer, a 16-word stack memory, the flags and the state. Each instruction takes three or four clock periods: fetch, decode (read registers), execute (ALU), and write back for instructions that write a register or memory; the control unit is hard-wired logic (a 4-to-16 decoder, an OR plane and the state flip-flops), not microcode. The program ROM and the 256-word data RAM are primitives. Instructions are 16 bits: op (15-12), rd (11-9), rs (8-6), rt (5-3), fn (2-0); imm8 is bits 7-0, simm6 bits 5-0 sign-extended. Ops: 1 ALU rd = rs fn rt (fn 0 ADD, 1 SUB, 2 AND, 3 OR, 4 XOR, 5 NOT rs, 6 SHL rs, 7 SHR rs), 2 CMP rs, rt (flags of rs - rt), 3 LDI rd, imm8, 4 ADDI rd = rs + simm6, 5 LD rd = RAM[rs + simm6], 6 ST RAM[rs + simm6] = rd, 8 JMP imm8, 9 branch to imm8 if the condition in bits 11-9 holds (0 Z, 1 not Z, 2 C, 3 not C, 4 N, 5 not N, 6 always), 10 CALL imm8 (push the return address on a 16-word stack), 11 RET, 12 OUT rs, 15 HLT, the rest NOP. ALU, ADDI and CMP set Z, N and C (C: the adder's carry, which for SUB and CMP means no borrow; the bit shifted out for shifts; 0 for logic). The program prints the primes below 250 on Out: it keeps the primes found in the data RAM and tests each odd candidate by CALLing a subroutine that divides by repeated subtraction (and CALLs another), then halts.",
+      "uses": ["cla_adder/cla4", "decoder/decoder2", "flip_flop/dff", "mux/mux2", "mux/mux2x8", "register/register8"]
+    },
+    {
+      "id": "cpu16_rtl",
+      "category": "systems",
+      "title": "16-bit CPU of words",
+      "description": "The 16-bit CPU of gates again, with the same instruction set and the same program, built from word primitives (Register, Add, Mux, Ram, Rom) instead of gates: it runs one instruction per tick, with the control signals from a 16-word control ROM. Its Out sequence is the same as the gate CPU's (the primes below 250), at a small fraction of the simulation cost.",
+      "uses": []
     }
   ]
 }
