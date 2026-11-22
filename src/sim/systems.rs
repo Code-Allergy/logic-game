@@ -579,6 +579,32 @@ fn edit_kind_params(ui: &mut egui::Ui, kind: &GateKind) -> GateKind {
                     1..=logi_sim::netlist::MAX_ADDR_BITS,
                 );
             }
+            GateKind::Ram2 {
+                addr_bits,
+                reads,
+                mask,
+                init,
+                ..
+            } => {
+                width_drag(
+                    ui,
+                    "Address bits",
+                    addr_bits,
+                    1..=logi_sim::netlist::MAX_ADDR_BITS,
+                );
+                width_drag(
+                    ui,
+                    "Read ports",
+                    reads,
+                    1..=logi_sim::netlist::MAX_READ_PORTS,
+                );
+                ui.checkbox(mask, "Per-bit write enable");
+                // Initial contents past the (new) address space are cut.
+                init.truncate(1usize << *addr_bits);
+                if !init.is_empty() {
+                    ui.label(format!("Initial contents: {} words", init.len()));
+                }
+            }
             _ => {}
         },
     }

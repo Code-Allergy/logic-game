@@ -79,6 +79,7 @@ pub fn family(kind: &GateKind) -> Family {
         | G::DLatch { .. }
         | G::SrLatch
         | G::Ram { .. }
+        | G::Ram2 { .. }
         | G::Rom { .. } => Family::State,
         _ => Family::Logic,
     }
@@ -454,6 +455,7 @@ pub fn tile_caption(kind: &GateKind) -> Option<String> {
         G::DLatch { .. } => "D-L".into(),
         G::SrLatch => "SR".into(),
         G::Ram { .. } => "RAM".into(),
+        G::Ram2 { .. } => "RAM2".into(),
         G::Rom { .. } => "ROM".into(),
         G::Const { w, value } if *w > 4 => format!("{value:X}"),
         G::Const { value, .. } => format!("{value}"),

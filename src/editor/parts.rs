@@ -152,6 +152,7 @@ pub fn kind_title(kind: &GateKind) -> &'static str {
         "D-LATCH" => "D latch",
         "SR-LATCH" => "SR latch",
         "RAM" => "RAM",
+        "DUAL-PORT RAM" => "Dual-port RAM",
         "SUBCIRCUIT" => "Chip",
         other => other,
     }
@@ -189,6 +190,7 @@ pub fn kind_blurb(kind: &GateKind) -> &'static str {
         "D-LATCH" => "Follows d while en is on, then holds",
         "SR-LATCH" => "Set turns it on, reset turns it off",
         "RAM" => "Memory you can write and read",
+        "DUAL-PORT RAM" => "One write port, several read ports",
         "SUBCIRCUIT" => "A circuit used as a part",
         _ => "",
     }

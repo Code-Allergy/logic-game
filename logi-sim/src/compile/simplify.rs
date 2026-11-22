@@ -52,8 +52,8 @@ pub(super) fn simplify(
                 commit_written[state as usize] = true;
                 commit_read[next as usize] = true;
             }
-            Commit::RamWrite { we, addr, data, .. } => {
-                for s in [we, addr, data] {
+            _ => {
+                for s in c.reads() {
                     commit_read[s as usize] = true;
                 }
             }
@@ -163,23 +163,7 @@ pub(super) fn simplify(
 
     // Apply replacements everywhere else.
     for c in &mut em.commits {
-        *c = match *c {
-            Commit::Copy { state, next } => Commit::Copy {
-                state,
-                next: resolve(&mut repl, next),
-            },
-            Commit::RamWrite {
-                mem,
-                we,
-                addr,
-                data,
-            } => Commit::RamWrite {
-                mem,
-                we: resolve(&mut repl, we),
-                addr: resolve(&mut repl, addr),
-                data: resolve(&mut repl, data),
-            },
-        };
+        *c = c.map_reads(|s| resolve(&mut repl, s));
     }
     for p in &mut ports.outputs {
         p.slot = resolve(&mut repl, p.slot);
@@ -213,8 +197,8 @@ pub(super) fn simplify(
         for c in &em.commits {
             match *c {
                 Commit::Copy { next, .. } => mark(next, &mut live_slot, &mut stack),
-                Commit::RamWrite { we, addr, data, .. } => {
-                    for s in [we, addr, data] {
+                _ => {
+                    for s in c.reads() {
                         mark(s, &mut live_slot, &mut stack);
                     }
                 }

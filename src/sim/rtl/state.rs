@@ -30,9 +30,23 @@ const CELLS: &[&str] = &[
     "$mem_v2",
 ];
 
-/// Memories with a read address other than the write address are built
-/// from registers up to this many words.
+/// Memories with several write ports are built from registers up to this
+/// many words.
 pub(super) const MAX_REGISTER_FILE: usize = 64;
+
+/// Read ports of one dual-port RAM; a memory with more becomes several
+/// copies written alike.
+const MAX_READ_PORTS: usize = logi_sim::netlist::MAX_READ_PORTS as usize;
+
+/// One write port of a memory cell.
+struct WritePort {
+    /// Its index among the cell's write ports.
+    index: usize,
+    /// Per-bit write enable.
+    en: Vec<Bit>,
+    addr: Vec<Bit>,
+    data: Vec<Bit>,
+}
 
 pub(super) fn handles(ty: &str) -> bool {
     CELLS.contains(&ty) || gate_ff(ty).is_some()
@@ -378,8 +392,8 @@ impl ModuleBuilder<'_> {
     }
 
     /// `$mem_v2` and `$mem`: a `Rom` per read port without write ports; a
-    /// `Ram` when every read port reads at the write address; otherwise
-    /// registers (up to [`MAX_REGISTER_FILE`] words).
+    /// dual-port RAM (`Ram2`, up to 8 read ports each) with one write port;
+    /// registers (up to [`MAX_REGISTER_FILE`] words) with several.
     fn map_memory(
         &mut self,
         c: &CellIn,
@@ -401,9 +415,6 @@ impl ModuleBuilder<'_> {
         let refuse = |why: String| err(format!("memory {memid}: {why}"));
         if c.param_or("OFFSET", 0) != 0 {
             return refuse("addresses with an OFFSET are not supported".into());
-        }
-        if nwr > 1 {
-            return refuse(format!("{nwr} write ports; at most one is supported"));
         }
         if c.param_bits("RD_WIDE_CONTINUATION", nrd)?.contains(&true)
             || c.param_bits("WR_WIDE_CONTINUATION", nwr)?.contains(&true)
@@ -433,17 +444,18 @@ impl ModuleBuilder<'_> {
                     .fold(0u64, |v, (i, &b)| v | u64::from(b) << i)
             })
             .collect();
-        let has_init = init.iter().any(|&v| v != 0);
         let rd_sync = c.param_bits("RD_CLK_ENABLE", nrd)?;
-        let rd_transparent = if v2 {
+        // Whether read port `i` sees the word write port `j` writes at the
+        // same tick (bit `i * WR_PORTS + j` of the masks).
+        let transparency = if v2 {
             let mask = c.param_bits("RD_TRANSPARENCY_MASK", nrd * nwr)?;
             let x = c.param_bits("RD_COLLISION_X_MASK", nrd * nwr)?;
-            (0..nrd)
-                .map(|i| nwr == 1 && mask[i] && !x[i])
-                .collect::<Vec<_>>()
+            (0..nrd * nwr).map(|k| mask[k] && !x[k]).collect::<Vec<_>>()
         } else {
-            c.param_bits("RD_TRANSPARENT", nrd)?
+            let t = c.param_bits("RD_TRANSPARENT", nrd)?;
+            (0..nrd * nwr).map(|k| t[k / nwr.max(1)]).collect()
         };
+        let rd_transparent = |i: usize, j: usize| transparency[i * nwr + j];
         let rd_en = c.conn_w("RD_EN", nrd)?;
         let rd_addr = c.conn_w("RD_ADDR", nrd * abits)?;
         let rd_data = c.conn_w("RD_DATA", nrd * w)?;
@@ -483,15 +495,21 @@ impl ModuleBuilder<'_> {
             }
         };
 
-        let write = if nwr == 1 {
-            let wen = c.conn_w("WR_EN", w)?;
-            let waddr = c.conn_w("WR_ADDR", abits)?;
-            let wdata = c.conn_w("WR_DATA", w)?;
-            (!wen.iter().all(|&b| b == Bit::Zero)).then_some((wen, waddr, wdata))
-        } else {
-            None
-        };
-        let Some((wen, waddr, wdata)) = write else {
+        // The write ports that can write (an enable not constant 0), in
+        // port order: (index, per-bit enable, address, data).
+        let wr_en = c.conn_w("WR_EN", nwr * w)?;
+        let wr_addr = c.conn_w("WR_ADDR", nwr * abits)?;
+        let wr_data = c.conn_w("WR_DATA", nwr * w)?;
+        let writes: Vec<WritePort> = (0..nwr)
+            .map(|j| WritePort {
+                index: j,
+                en: wr_en[j * w..(j + 1) * w].to_vec(),
+                addr: wr_addr[j * abits..(j + 1) * abits].to_vec(),
+                data: wr_data[j * w..(j + 1) * w].to_vec(),
+            })
+            .filter(|p| !p.en.iter().all(|&b| b == Bit::Zero))
+            .collect();
+        if writes.is_empty() {
             // Read only: a ROM per read port.
             let mut name = Some((name, label));
             for i in 0..nrd {
@@ -506,85 +524,135 @@ impl ModuleBuilder<'_> {
                 self.alias(&rd_data[i * w..(i + 1) * w], &out);
             }
             return Ok(());
-        };
-
-        // One write port. A per-bit enable that is the same bit throughout
-        // is one write enable.
-        let uniform = wen.iter().all(|&b| b == wen[0]);
-        let mut we = if uniform { wen[0] } else { self.any(of, &wen) };
-        let high = waddr.get(need..).unwrap_or(&[]).to_vec();
-        if !high.is_empty() {
-            // Writes past the end of the memory do nothing.
-            let past = self.any(of, &high);
-            let inside = self.not1(of, past);
-            we = self.and1(of, we, inside);
         }
-        let single_port = (0..nrd).all(|i| addr_of(i) == waddr.as_slice());
-        let waddr = fit(&waddr, need, false);
-        // The word written, given the word `old` stored there.
-        let merged = |s: &mut Self, old: &[Bit]| -> Vec<Bit> {
-            if uniform {
-                return wdata.clone();
+        // Per write port: the enable (any bit, and the address inside the
+        // memory: writes past the end do nothing) and the address cut to
+        // the bits the size needs.
+        let mut enables = Vec::new();
+        for p in &writes {
+            let uniform = p.en.iter().all(|&b| b == p.en[0]);
+            let mut we = if uniform {
+                p.en[0]
+            } else {
+                self.any(of, &p.en)
+            };
+            let high = p.addr.get(need..).unwrap_or(&[]).to_vec();
+            let inside = if high.is_empty() {
+                Bit::One
+            } else {
+                let past = self.any(of, &high);
+                self.not1(of, past)
+            };
+            we = self.and1(of, we, inside);
+            enables.push((uniform, we, inside, fit(&p.addr, need, false)));
+        }
+        // The word port `k` writes over the word `old` (byte enables merge).
+        let merged = |s: &mut Self, k: usize, old: &[Bit]| -> Vec<Bit> {
+            let p = &writes[k];
+            if enables[k].0 {
+                return p.data.clone();
             }
-            let keep = s.not_v(of, &wen);
-            let x = s.bitwise(of, Op::And, &wdata, &wen);
+            let keep = s.not_v(of, &p.en);
+            let x = s.bitwise(of, Op::And, &p.data, &p.en);
             let z = s.bitwise(of, Op::And, old, &keep);
             s.bitwise(of, Op::Or, &x, &z)
         };
-
-        if single_port {
-            // A Ram. Initial contents: the Ram holds `word ^ init`, so that
-            // its power-up 0 reads as `init` (a Rom at the same address).
-            let state = self.fresh(w);
-            let init_word =
-                has_init.then(|| self.helper1(of, "init", rom(&init), vec![waddr.clone()]));
-            let word = match &init_word {
-                Some(k) => self.bitwise(of, Op::Xor, &state, k),
-                None => state.clone(),
-            };
-            let new = merged(self, &word);
-            let stored = match &init_word {
-                Some(k) => self.bitwise(of, Op::Xor, &new, k),
-                None => new.clone(),
-            };
-            let kind = GateKind::Ram {
-                addr_bits: need as u8,
-                w: w as u8,
-            };
-            let inputs = vec![Some(waddr.clone()), Some(vec![we]), Some(stored)];
-            self.add_node(name, label, kind, inputs, Some(vec![state]), false);
-            for i in 0..nrd {
-                let next = if rd_sync[i] && rd_transparent[i] {
-                    if uniform {
-                        self.mux_v(of, we, &word, &wdata)
-                    } else {
-                        new.clone()
-                    }
+        // A clocked read port that is transparent sees the words being
+        // written at its address: `word` with those writes applied.
+        let transparent_read = |s: &mut Self, i: usize, raddr: &[Bit], word: Vec<Bit>| {
+            let mut word = word;
+            for k in 0..writes.len() {
+                if !(rd_sync[i] && rd_transparent(i, writes[k].index)) {
+                    continue;
+                }
+                let (_, we, _, waddr) = &enables[k];
+                let same = if raddr == waddr.as_slice() {
+                    Bit::One
                 } else {
-                    word.clone()
+                    s.eq_v(of, raddr, waddr)
                 };
-                let out = read_port(self, i, next);
-                self.alias(&rd_data[i * w..(i + 1) * w], &out);
+                let hit = s.and1(of, *we, same);
+                let new = merged(s, k, &word);
+                word = s.mux_v(of, hit, &word, &new);
+            }
+            word
+        };
+
+        if writes.len() == 1 {
+            // One write port: dual-port RAMs, each with up to
+            // `MAX_READ_PORTS` read ports, all written alike.
+            let (uniform, we, inside, waddr) = enables[0].clone();
+            let p = &writes[0];
+            let (mask, we_pin) = if uniform {
+                (false, vec![we])
+            } else {
+                let inside = vec![inside; w];
+                (true, self.bitwise(of, Op::And, &p.en, &inside))
+            };
+            let mut init = init.clone();
+            while init.last() == Some(&0) {
+                init.pop();
+            }
+            let mut name = Some((name, label));
+            let ports: Vec<usize> = (0..nrd).collect();
+            for group in ports.chunks(MAX_READ_PORTS) {
+                let (n, l) = name
+                    .take()
+                    .unwrap_or_else(|| (self.names.fresh(&format!("{of}_copy")), None));
+                let raddrs: Vec<Vec<Bit>> = group
+                    .iter()
+                    .map(|&i| fit(addr_of(i), need, false))
+                    .collect();
+                let kind = GateKind::Ram2 {
+                    addr_bits: need as u8,
+                    w: w as u8,
+                    reads: group.len() as u8,
+                    mask,
+                    init: init.clone(),
+                };
+                let mut inputs = vec![
+                    Some(waddr.clone()),
+                    Some(we_pin.clone()),
+                    Some(p.data.clone()),
+                ];
+                inputs.extend(raddrs.iter().cloned().map(Some));
+                let words = self.add_node(n, l, kind, inputs, None, false);
+                for ((&i, word), raddr) in group.iter().zip(words).zip(&raddrs) {
+                    let next = transparent_read(self, i, raddr, word);
+                    let out = read_port(self, i, next);
+                    self.alias(&rd_data[i * w..(i + 1) * w], &out);
+                }
             }
             return Ok(());
         }
 
+        // Several write ports: a register per word, written by each port in
+        // turn (a later port wins at the same address, which is Yosys's
+        // priority order, and a valid choice where it leaves it undefined).
         if size > MAX_REGISTER_FILE {
             return refuse(format!(
-                "{size} words, read at another address than the one written: such memories \
-                 are built from registers, up to {MAX_REGISTER_FILE} words (a Ram has one \
-                 address for reading and writing)"
+                "{} write ports and {size} words: memories with several write ports are \
+                 built from registers, up to {MAX_REGISTER_FILE} words (the dual-port RAM \
+                 primitive has one write port)",
+                writes.len()
             ));
         }
         self.register_files.push(memid.clone());
         let mut words = Vec::new();
         for (k, &init_k) in init.iter().enumerate() {
-            let hit = self.eq_v(of, &waddr, &const_word(k as u64, need));
-            let sel = self.and1(of, we, hit);
             let state = self.fresh(w);
             let k_bits = const_word(init_k, w);
             let word = self.bitwise(of, Op::Xor, &state, &k_bits);
-            let new = merged(self, &word);
+            let mut new = word.clone();
+            let mut sel = Bit::Zero;
+            for (j, (_, we, _, waddr)) in enables.iter().enumerate() {
+                let hit = self.eq_v(of, waddr, &const_word(k as u64, need));
+                let hit = self.and1(of, *we, hit);
+                let written = merged(self, j, &new);
+                new = self.mux_v(of, hit, &new, &written);
+                sel = self.or1(of, sel, hit);
+            }
+            // Registers power up at 0: they hold `word ^ init`.
             let stored = self.bitwise(of, Op::Xor, &new, &k_bits);
             let reg = self.names.fresh(&format!("{of}_{k}"));
             let label = (k == 0).then(|| label.clone()).flatten();
@@ -597,14 +665,7 @@ impl ModuleBuilder<'_> {
         for i in 0..nrd {
             let raddr = fit(addr_of(i), need, false);
             let data = self.select(of, words.clone(), &raddr);
-            let next = if rd_sync[i] && rd_transparent[i] {
-                let same = self.eq_v(of, &raddr, &waddr);
-                let hit = self.and1(of, we, same);
-                let new = merged(self, &data);
-                self.mux_v(of, hit, &data, &new)
-            } else {
-                data
-            };
+            let next = transparent_read(self, i, &raddr, data);
             let out = read_port(self, i, next);
             self.alias(&rd_data[i * w..(i + 1) * w], &out);
         }

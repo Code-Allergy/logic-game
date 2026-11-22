@@ -183,9 +183,83 @@ fn fixtures_match_the_reference() {
         counter(8),
         counter_bitblasted(8),
         register_file(3, 16),
+        register_file_ram2(3, 16, &[1, 2, 3]),
+        fifo(3, 8),
         sr_latch_nor_delayed(),
     ] {
         differential(&d, 7, 100);
+    }
+}
+
+#[test]
+fn ram2_loops_follow_each_read_port() {
+    let ram2 = || NodeKind::Ram2 {
+        addr_bits: 2,
+        w: 2,
+        reads: 2,
+        mask: true,
+        init: Arc::from(vec![]),
+    };
+    // rdata0 -> raddr1 and rdata1 -> the write port compile.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let a = b.input("a", 2);
+    let (ram, _) = b.state_placeholder(ram2());
+    let q0 = b.out(ram, 0);
+    let q1 = b.out(ram, 1);
+    b.connect(a, (ram, 3));
+    b.connect(q0, (ram, 4));
+    for pin in 0..3 {
+        b.connect(q1, (ram, pin));
+    }
+    b.output("q1", q1);
+    differential(&d, 3, 50);
+
+    // rdata0 -> raddr0 is a loop.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let (ram, _) = b.state_placeholder(ram2());
+    let q0 = b.out(ram, 0);
+    b.connect(q0, (ram, 3));
+    assert_eq!(loops_of(&d), vec![vec![at(&[], ram)]]);
+}
+
+#[test]
+fn ram2_lowers_to_one_memory_and_one_commit() {
+    for mask in [false, true] {
+        let mut d = Design::new("top");
+        let r = d.root;
+        let mut b = d.builder(r);
+        let waddr = b.input("waddr", 4);
+        let we = b.input("we", if mask { 8 } else { 1 });
+        let wdata = b.input("wdata", 8);
+        let ra: Vec<_> = (0..3).map(|k| b.input(format!("r{k}"), 4)).collect();
+        let q = b.ram2(waddr, we, wdata, &ra, &[9; 16]);
+        for (k, &q) in q.iter().enumerate() {
+            b.output(format!("q{k}"), q);
+        }
+        let p = compile_ok(&d);
+        check_program_invariants(&p);
+        assert_eq!(p.mems.len(), 1);
+        assert!(p.mems[0].writable);
+        assert_eq!(p.commits.len(), 1);
+        assert_eq!(
+            matches!(p.commits[0], Commit::RamWriteMasked { .. }),
+            mask,
+            "{:?}",
+            p.commits[0]
+        );
+        let reads = p
+            .blocks
+            .iter()
+            .filter(|b| b.op == Op::MemRead)
+            .map(|b| b.len)
+            .sum::<u32>();
+        assert_eq!(reads, 3);
+        assert_eq!(p.state_keys.len(), 1);
+        differential(&d, mask as u64, 100);
     }
 }
 

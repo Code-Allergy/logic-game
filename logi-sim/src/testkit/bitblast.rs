@@ -43,17 +43,22 @@ pub fn bitblast(src: &Design) -> Design {
             NodeKind::Delay { w } => per_bit(&mut b, *w, NodeKind::Delay { w: 1 }),
             NodeKind::Register { w } => per_bit(&mut b, *w, NodeKind::Register { w: 1 }),
             NodeKind::DLatch { w } => per_bit(&mut b, *w, NodeKind::DLatch { w: 1 }),
-            NodeKind::SrLatch | NodeKind::Ram { .. } => vec![b.node(node.kind.clone(), &[])],
+            NodeKind::SrLatch | NodeKind::Ram { .. } | NodeKind::Ram2 { .. } => {
+                vec![b.node(node.kind.clone(), &[])]
+            }
             NodeKind::Instance(_) => panic!("bitblast: instances are not supported"),
             _ => continue,
         };
-        let q = if matches!(node.kind, NodeKind::Ram { .. }) {
-            let word = b.out(nodes[0], 0);
-            b.bus_expand(word)
+        if matches!(node.kind, NodeKind::Ram { .. } | NodeKind::Ram2 { .. }) {
+            for (k, &net) in node.outputs.iter().enumerate() {
+                let word = b.out(nodes[0], k as u8);
+                let q = b.bus_expand(word);
+                bits.insert(net, q);
+            }
         } else {
-            nodes.iter().map(|&n| b.out(n, 0)).collect()
-        };
-        bits.insert(node.outputs[0], q);
+            let q = nodes.iter().map(|&n| b.out(n, 0)).collect();
+            bits.insert(node.outputs[0], q);
+        }
         placeholders.insert(id, nodes);
     }
 
@@ -137,8 +142,8 @@ pub fn bitblast(src: &Design) -> Design {
                     }
                 }
             }
-            NodeKind::Ram { .. } => {
-                for k in 0..3 {
+            NodeKind::Ram { .. } | NodeKind::Ram2 { .. } => {
+                for k in 0..node.inputs.len() {
                     if let Some(src) = pin(k) {
                         let word = b.bus_collect(&src);
                         b.connect(word, (nodes[0], k as u8));

@@ -541,8 +541,7 @@ struct ModuleBuilder<'a> {
     clocks: usize,
     /// Flip-flops and latches with an asynchronous reset, set or load.
     asyncs: usize,
-    /// Memories built from registers (read and write at different
-    /// addresses).
+    /// Memories built from registers (several write ports).
     register_files: Vec<String>,
 }
 
@@ -1284,8 +1283,8 @@ fn import_module(
     }
     for memory in &b.register_files {
         warnings.push(format!(
-            "{place}: memory {memory} reads and writes at different addresses, so it is \
-             built from registers"
+            "{place}: memory {memory} has several write ports, so it is built from \
+             registers"
         ));
     }
     if let Some(inits) = initial_values(module) {
@@ -1314,6 +1313,17 @@ fn import_module(
                         .expect("tagged");
                     if params.get("w").and_then(Value::as_u64) == Some(1) {
                         params.shift_remove("w");
+                    }
+                    // Optional parameters at their defaults.
+                    if params.get("mask") == Some(&Value::Bool(false)) {
+                        params.shift_remove("mask");
+                    }
+                    if params
+                        .get("init")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                    {
+                        params.shift_remove("init");
                     }
                     debug_assert_eq!(primitive_kind(&ty, &params).ok().as_ref(), Some(kind));
                     NodeBody::Primitive { ty, params }
