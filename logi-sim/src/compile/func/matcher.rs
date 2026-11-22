@@ -274,8 +274,8 @@ fn bit_support(flat: &Flat, ports: &Ports) -> Option<Vec<Vec<u128>>> {
         .map(|&w| vec![0u128; w as usize])
         .collect();
     for (p, &v) in flat.inputs.iter().enumerate() {
-        for i in 0..ports.wi[p] as usize {
-            sup[v as usize][i] = 1u128 << (ports.off[p] + i as u32);
+        for (i, b) in sup[v as usize].iter_mut().enumerate() {
+            *b = 1u128 << (ports.off[p] + i as u32);
         }
     }
     let all = |sup: &Vec<Vec<u128>>, v: u32| sup[v as usize].iter().fold(0u128, |a, &b| a | b);
