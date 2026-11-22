@@ -153,7 +153,7 @@ Seven tools in the first stage. Each takes its bulk argument inline or as
 | Tool | Tier | Milestone | Does |
 |---|---|---|---|
 | `workspace` | document | 1 | `list`, `open`, `new`, `save`, `status`, `demos`, `open_demo` |
-| `view` | document | 1 | Text views of a circuit: outline, diagnostics, stats, groups |
+| `view` | document | 1 | Text views of a circuit: outline, diagnostics, stats, groups, compiled |
 | `edit` | document | 1 | Apply a batch of operations atomically |
 | `test` | document | 2 | Run stored tests of one chip or the whole workspace |
 | `run` | document | 2 | Run an experiment script on a private simulation |
@@ -192,6 +192,34 @@ whose name or kind starts with it.
 layout advisory. `stats` gives part counts by kind and the flattened
 size. `groups` lists the parts that would make chips ("Auto-layout",
 below).
+
+`compiled` compiles the circuit as a root, as tests do, and says what
+the compiler made of it: every chip definition it reaches, sorted, as
+`matched as …` (the word functions the function matcher replaced it
+with), `not matched: …` (why not) or `not analysed` (a clock or memory is
+inside it); then the program's size (instructions in total and by op,
+state words, slots, memories, depth), the instruction count with
+`func_match`, `lift` and `words` off, and a `compiled` test that pins the
+result as it is:
+
+```
+compiled "main" as a root (2 chip definition(s) reached; the root itself is never replaced)
+  full_adder: matched as [Add { a: 0, b: 1, inv_b: false, cin: In(2), carry: true }, Add { … carry: false }]
+  half_adder: not matched: no cheaper: 2 vs 2
+program: 39 instructions (AddCarry 8, AddSum 8, Concat 7, Shr 16), 0 state words, 43 slots, 0 memories, depth 10
+without func_match, lift and words: 63 instructions
+a test that pins this (edit op "tests"):
+  {"name":"compiled","compiled":{"matched":["full_adder"],"instructions":{"max":39}}}
+```
+
+The circuit itself is never replaced; to see whether a chip matches,
+view a circuit that places it. The text after `matched as` is the
+compiler's own note.
+
+A build error, wherever it is reported, names parts by label path as the
+other tools take them: `a loop of gates with no state in it: alu/n1 ->
+alu/n2 -> alu/n1`, along the loop when it is one cycle inside one
+circuit, else sorted, with at most 12 names.
 
 ### `edit`
 
@@ -236,27 +264,54 @@ demos are examples of the syntax and one parser serves both. Differences:
 | `layout` | Lay out the circuit again, or only the parts named. |
 | `make_chip` (3) | `{"parts": [refs], "name": chip}`: the parts become a new chip and are replaced by one instance of it, wired the same way (the editor's "make chip", `sim/chip.rs`). Ports are named after what they connect to. |
 | `copy_of` (3) | `"circuit name"`, as the first op of a chip that does not exist yet: the chip starts as a copy of that circuit. |
-| `expand` (3) | References, or `true` for every part of the circuit that has one: a word-level part is replaced by an instance of its gate-level chip (below). |
+| `expand` (3) | `true`, references, or `{"parts": …, "deep": true}`: a word-level part is replaced by an instance of its gate-level chip, and with `deep` a chip by its gate-level copy (below). |
 | `tests`, `remove_tests` (2) | Set stored tests (by name), or remove them. |
 
 **Gate-level chips.** `expand` turns an 8-bit `Add` into an instance of
-the chip `Add_8_gates`: a ripple-carry adder of `Xor`, `And` and `Or`
-gates between ports named after the part's pins. The chip is made on
-first use (`logi_sim::testkit::bitblast` on that one part, read back as
-a circuit and laid out, `mcp/chips.rs`), is shared by every part of that
-kind and width, and is an ordinary chip that can be opened, edited and
-tested. Word-wide gates, `Mux`, `Switch`, `Add`, `Eq`, `LtU`, the
-reductions and `Delay`, `Register` and `DLatch` have one; 1-bit gates,
-memories, wiring and chips do not. To get the gate-level form of a whole
-chip and keep the original as its reference:
+the chip `Add_8_gates`: eight `full_adder_cell`s (two `Xor`, two `And`,
+one `Or`) placed as the array `fa[0..8]`, carries chained, between ports
+named after the part's pins. Gate chips are built the way a person would
+build them with `edit` (`mcp/chips.rs` writes the `add` and `wire` ops
+and the batch editor applies them), so every part is labelled, arrays can
+be addressed (`fa[3].cout`) and the chip is laid out. They are made on
+first use, shared by every part of that kind and width, and are ordinary
+chips that can be opened, edited and tested.
+
+Up to 8 bits a part is an array of a cell or of 1-bit gates: word-wide
+gates, `Mux`, `Switch`, `Delay`, `Register` and `DLatch` an array
+`bit[0..w]` of the same kind 1 bit wide; `LtU` a chain of `ltu_cell`s
+from bit 0 up; `Eq` an `Xnor` per bit and a tree of `And`; the
+reductions a tree of 2-input gates. A wider part is made of 8-bit
+chunks, `byte[0..k]` of the 8-bit chip (and `rest`), chained or joined by
+a small tree: a 64-bit adder is eight `Add_8_gates`. No generated circuit
+has more than about 30 parts. 1-bit gates, memories, wiring and chips
+have no gate-level form of their own.
+
+`{"expand": {"parts": true, "deep": true}}` expands the chips placed in
+the circuit too, at any depth. The originals stay as they are, as the
+word-level reference: a placed chip `alu` is pointed at a copy
+`alu_gates` whose word-level parts are expanded and whose own chips are
+replaced the same way. A chip with nothing to expand at any depth is left
+as it is. The copy belongs to `alu`: the next expansion of `alu` finds it
+and uses it when it is still the same, or makes it again in place when
+`alu` (or a chip inside it) has changed, its placements keeping their
+wires by port. Edits made by hand to a copy are lost then; copy it under
+another name to keep them. A chip of that name that `expand` did not make
+is left alone, and the copy is named `alu_gates_2`. The report says how
+many parts were expanded and how many chips were made. To get the
+gate-level form of a whole design and keep the original as its
+reference:
 
 ```json
-{"circuit": "alu_gates", "ops": [
-  {"copy_of": "alu"},
-  {"expand": true},
-  {"tests": [{"name": "same as alu", "equivalent": {"to": "alu"}}]}
+{"circuit": "cpu_gates", "ops": [
+  {"copy_of": "cpu"},
+  {"expand": {"parts": true, "deep": true}},
+  {"tests": [{"name": "same as cpu", "equivalent": {"to": "cpu"}}]}
 ]}
 ```
+
+Without `deep`, `{"expand": true}` and `{"expand": [refs]}` expand this
+circuit's own parts only.
 
 **A chip's ports.** Pins of a placed chip are numbered in the order of
 its port labels, so adding, removing or renaming a port moves the
@@ -288,6 +343,8 @@ the design grows. A test has a `name` and one of:
 | `table`, `formula`, `sequence` | As challenge tests (`docs/save-format.md`, "Challenges"), on the chip's own ports. |
 | `equivalent` | `{"to": chip, "samples": n, "seed": s, "hold": k}`: the same random inputs into both chips, every output compared after every tick, both from power-on. This checks a gate-level chip against its word-level or imported reference. The chips must have the same ports. |
 | `script` | A `run` script (below): it passes when no `expect`, `until` or `compare` fails. |
+| `compiled` | `{"matched": [chips] or {chip: true \| "text" \| {"exactly": "text"}}, "unmatched": [chips], "instructions": {"max": n, "min": n, "exactly": n}}`, any of the three: the chips that must match (a text the match must contain, or must be), the chips that must not, and bounds on the instruction count. Every broken promise is reported. The chips named must be placed in the circuit at some depth. A test with only `matched` and `max` survives compiler improvements; `unmatched`, `min` and `exactly` pin the compiler as it is. `view compiled` prints one for the current state. |
+| `unoptimized` | `{"samples": n, "seed": s, "hold": k, "off": ["func_match", "lift", "words"]}`: the chip compiled as usual against the same chip with those passes off (default: all three), the same random inputs into both from power-on, every output compared after every tick; the first difference is reported as for `equivalent`. This tests flattening, function matching and word lifting on the design itself. |
 
 The `edit` ops `{"tests": [...]}` (set or replace by name) and
 `{"remove_tests": [names]}` (or `true` for all) change them. A test is
@@ -584,7 +641,9 @@ cargo build -p gate_quest --features mcp --bin gatequest-mcp
 ```
 
 The code is in `src/mcp/`: `batch.rs` (the edit function), `view.rs`,
-`chips.rs` (gate-level chips), `import.rs` (Verilog and netlists),
+`chips.rs` (gate-level chips), `compiled.rs` (what the compiler did,
+build errors with parts named, the `compiled` and `unoptimized` tests),
+`import.rs` (Verilog and netlists),
 `testing.rs` (stored tests), `rig.rs` (a private simulation with signals
 by name), `run.rs` (experiment scripts), `memfile.rs` (memory files),
 `session.rs` (the tools as plain functions on one open workspace, its
@@ -597,8 +656,6 @@ tools over `rmcp`) and `http.rs` (the game's HTTP endpoint). Only
 Done: everything listed under milestones 1 to 4 below. Known gaps, to
 close in later milestones:
 
-- A combinational loop is reported with the simulator's node ids, not
-  with part names.
 - A `Split` adapter made by an earlier request is not reused by a later
   one that needs the same bits; a second one is made.
 - In the game, a chip that is not placed anywhere is lost when the
@@ -616,10 +673,6 @@ close in later milestones:
   served yet.
 - New parts in a placed circuit are laid out as one block below it;
   they are not fitted near the parts they connect to.
-- `expand` works one circuit at a time: the chips placed in it are not
-  expanded with it (run it in each).
-- A gate-level chip is flat: a 64-bit adder is one circuit of 320 gates,
-  above the size the layout advice asks for.
 
 ## Testing the server
 
