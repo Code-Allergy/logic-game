@@ -8,9 +8,16 @@
 //! cargo run --example screenshot -- traffic_light out.png --ticks 40 --zoom 0.8
 //! cargo run --example screenshot -- counter out.png --size 1280x720 --select Count
 //! cargo run --example screenshot -- counter out.png --library   # Library drawer open
+//! cargo run --example screenshot -- cpu out.png --definition alu8   # a definition
+//! cargo run --example screenshot -- path/to/file.json out.png       # any version 6 file
 //! cargo run --example screenshot -- empty out.png               # a new empty workspace
 //! cargo run --example screenshot -- loop out.png                # a build (loop) error
 //! ```
+//!
+//! The first argument is a demo or gallery id, or the path of a version 6
+//! file. `--definition NAME` opens the definition of that name (a circuit
+//! of the file) instead of the root circuit. `--fit` frames the circuit in
+//! the canvas (`--zoom` scales that framing).
 //!
 //! `--size WxH` sets the window size (default 1600x1000); `--select LABEL`
 //! selects the first part with that label, so the inspector shows it;
@@ -20,7 +27,7 @@
 //! `empty` and `loop` are a new empty workspace and a small editable
 //! circuit with a combinational loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -30,8 +37,9 @@ use bevy_egui::EguiPlugin;
 
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
 use gate_quest::sim::{
-    ActiveCircuit, CircuitDocument, DocNode, DocWire, GateKind, GateLabel, LoadWorkspaceEvent,
-    SelectedGate, SetInputValue, SimBridge, SimulationPlugin, WorkspaceDocument, demos,
+    ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel,
+    LoadWorkspaceEvent, OpenDefinitionView, SelectedGate, SetInputValue, SimBridge,
+    SimulationPlugin, WorkspaceDocument, demos, source,
 };
 use gate_quest::temp::GateComponentSelectionEvent;
 use gate_quest::theme::{Theme, ThemeMode, ThemePlugin};
@@ -52,20 +60,23 @@ struct Shot {
     library: bool,
     set: Vec<(String, u64)>,
     tab: Option<PartTab>,
+    definition: Option<String>,
+    fit: bool,
     editable: bool,
     frame: u32,
 }
 
-/// The workspace for `id`: a demo or gallery item, or `empty` / `loop`.
-/// Returns its title, the workspace, and whether it is a fixture (always
-/// editable).
-fn workspace_for(id: &str) -> (String, Arc<WorkspaceDocument>, bool) {
+type Circuits = Vec<(String, Arc<CircuitDocument>)>;
+
+/// The workspace and the circuits by name of a demo or gallery id, of a
+/// version 6 file, or of the fixtures `empty` / `loop`. The last value says
+/// whether it is a fixture (always editable).
+fn load(id: &str) -> (String, Arc<WorkspaceDocument>, Circuits, bool) {
     match id {
-        "empty" => (
-            "workspace".into(),
-            Arc::new(WorkspaceDocument::new(CircuitDocument::new("workspace"))),
-            true,
-        ),
+        "empty" => {
+            let ws = WorkspaceDocument::new(CircuitDocument::new("workspace"));
+            return ("workspace".into(), Arc::new(ws), Vec::new(), true);
+        }
         "loop" => {
             let mut root = CircuitDocument::new("loop");
             let a = DocNode::labeled(GateKind::Input { w: 1 }, Vec2::new(-150.0, 0.0), "A");
@@ -77,13 +88,35 @@ fn workspace_for(id: &str) -> (String, Arc<WorkspaceDocument>, bool) {
                 DocWire::new(and.id, 0, y.id, 0),
             ];
             root.nodes = vec![a, and, y];
-            ("loop".into(), Arc::new(WorkspaceDocument::new(root)), true)
+            let ws = WorkspaceDocument::new(root);
+            return ("loop".into(), Arc::new(ws), Vec::new(), true);
         }
-        _ => {
-            let catalog = demos::catalog().expect("the demos load");
-            let demo = catalog.get(id).expect("a demo or gallery id");
-            (demo.title.clone(), Arc::clone(&demo.workspace), false)
-        }
+        _ => {}
+    }
+    let catalog = demos::catalog().expect("the demos load");
+    let path = Path::new(id);
+    if path.is_file() {
+        let text = std::fs::read_to_string(path).expect("read the file");
+        let file = source::parse(&text).expect("a version 6 file");
+        let stem = path
+            .file_stem()
+            .map_or("file".into(), |s| s.to_string_lossy().into_owned());
+        let expansion = source::expand(&file, &format!("screenshot/{stem}"), &catalog.externals())
+            .expect("the file expands");
+        (
+            stem,
+            Arc::new(expansion.workspace),
+            expansion.circuits,
+            false,
+        )
+    } else {
+        let demo = catalog.get(id).expect("a demo or gallery id, or a file");
+        (
+            demo.title.clone(),
+            Arc::clone(&demo.workspace),
+            demo.circuits.clone(),
+            false,
+        )
     }
 }
 
@@ -95,6 +128,7 @@ fn main() {
     let (mut size, mut select, mut library) = ((1600, 1000), None, false);
     let mut set = Vec::new();
     let mut tab = None;
+    let (mut definition, mut fit) = (None, false);
     let mut editable = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -124,6 +158,8 @@ fn main() {
             }
             "--ticks" => ticks = args.next().and_then(|t| t.parse().ok()).unwrap_or(ticks),
             "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
+            "--definition" => definition = args.next(),
+            "--fit" => fit = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -152,6 +188,8 @@ fn main() {
             library,
             set,
             tab,
+            definition,
+            fit,
             editable,
             frame: 0,
         })
@@ -174,16 +212,21 @@ fn drive(
     mut inputs: MessageWriter<SetInputValue>,
     mut theme: ResMut<Theme>,
     bridge: Res<SimBridge>,
-    mut load: MessageWriter<LoadWorkspaceEvent>,
-    mut cameras: Query<&mut Projection, With<MainCamera>>,
+    mut load_workspace: MessageWriter<LoadWorkspaceEvent>,
+    mut open: MessageWriter<OpenDefinitionView>,
+    mut circuits: Local<Circuits>,
+    mut cameras: Query<(&mut Projection, &mut Transform), With<MainCamera>>,
+    gates: Query<&Transform, (With<GateIdentity>, Without<MainCamera>)>,
+    windows: Query<&Window>,
     mut exit: MessageWriter<AppExit>,
     mut active: ResMut<ActiveCircuit>,
 ) {
     shot.frame += 1;
     match shot.frame {
         5 => {
-            let (name, workspace, fixture) = workspace_for(&shot.id);
-            load.write(LoadWorkspaceEvent {
+            let (name, workspace, all, fixture) = load(&shot.id);
+            *circuits = all;
+            load_workspace.write(LoadWorkspaceEvent {
                 name,
                 workspace,
                 read_only: !(fixture || shot.editable),
@@ -214,11 +257,44 @@ fn drive(
             if let Some(tab) = shot.tab {
                 editor.part_tab = tab;
             }
+            if let Some(name) = &shot.definition {
+                let (_, doc) = circuits
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .unwrap_or_else(|| panic!("no circuit {name}"));
+                open.write(OpenDefinitionView { definition: doc.id });
+            }
         }
         40 => {
-            if let (Some(zoom), Ok(mut projection)) = (shot.zoom, cameras.single_mut())
-                && let Projection::Orthographic(ortho) = projection.as_mut()
+            let Ok((mut projection, mut camera)) = cameras.single_mut() else {
+                return;
+            };
+            let Projection::Orthographic(ortho) = projection.as_mut() else {
+                return;
+            };
+            if shot.fit
+                && let Ok(window) = windows.single()
+                && !gates.is_empty()
             {
+                // The HUD cards float over the canvas: leave a margin for them.
+                let (lo, hi) = gates.iter().fold(
+                    (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)),
+                    |(lo, hi), t| {
+                        (
+                            lo.min(t.translation.truncate()),
+                            hi.max(t.translation.truncate()),
+                        )
+                    },
+                );
+                let (lo, hi) = (lo - Vec2::splat(60.0), hi + Vec2::splat(60.0));
+                let panel = 0.0;
+                let room = Vec2::new(window.width() - panel - 200.0, window.height() - 260.0);
+                let scale = ((hi - lo) / room).max_element() * shot.zoom.unwrap_or(1.0);
+                ortho.scale = scale;
+                let centre = (lo + hi) * 0.5;
+                camera.translation.x = centre.x - panel * 0.5 * scale;
+                camera.translation.y = centre.y + 40.0 * scale;
+            } else if let Some(zoom) = shot.zoom {
                 ortho.scale = zoom;
             }
         }

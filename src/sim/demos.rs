@@ -101,6 +101,8 @@ pub const GALLERY_EMBEDDED: &[(&str, &str)] = embed!(
     "uart_tx.json",
     "reaction_timer.json",
     "cpu_fibonacci.json",
+    "cpu16.json",
+    "cpu16_rtl.json",
 );
 
 #[derive(Debug, Deserialize)]

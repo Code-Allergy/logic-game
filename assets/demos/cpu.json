@@ -14,12 +14,12 @@
           "duty": 2,
           "phase": 2,
           "label": "Clock",
-          "at": [-700, -300]
+          "at": [0, -200]
         },
-        {"name": "one", "type": "Const", "value": 1, "at": [-700, 350]},
-        {"name": "zero", "type": "Const", "w": 8, "value": 0, "at": [-700, 270]},
-        {"name": "pc", "use": "register/register8", "label": "program counter", "at": [-550, 100]},
-        {"name": "next", "use": "ripple_adder/adder8", "label": "pc + 1", "at": [-550, 300]},
+        {"name": "one", "type": "Const", "value": 1, "at": [0, 40]},
+        {"name": "zero", "type": "Const", "w": 8, "value": 0, "at": [0, -120]},
+        {"name": "pc", "use": "register/register8", "label": "program counter", "at": [140, 80]},
+        {"name": "next", "use": "ripple_adder/adder8", "label": "pc + 1", "at": [280, -120]},
         {
           "name": "rom",
           "type": "Rom",
@@ -30,7 +30,7 @@
             "0x8200", "0xF000"
           ],
           "label": "program",
-          "at": [-400, 100]
+          "at": [280, -320]
         },
         {
           "name": "control",
@@ -39,26 +39,31 @@
           "addr_bits": 4,
           "contents": [0, 3, 4, 8, 1, 1, 1, 1, 16, 0, 0, 0, 0, 0, 0, 32],
           "label": "decoder (microcode)",
-          "at": [-250, 250]
+          "at": [560, 40]
         },
         {
           "name": "regs",
           "use": "register_file/regfile4x8",
           "label": "registers r0-r3",
-          "at": [-50, 50]
+          "at": [840, -320]
         },
-        {"name": "alu", "use": "alu/alu8", "label": "ALU", "at": [150, 100]},
-        {"name": "wdata", "use": "mux/mux2x8", "label": "ALU or immediate", "at": [300, 250]},
-        {"name": "any", "type": "ReduceOr", "w": 8, "at": [150, -100]},
-        {"name": "is_zero", "use": "gates/not", "at": [250, -100]},
-        {"name": "taken", "use": "gates/and", "label": "JZ taken", "at": [350, -150]},
-        {"name": "jump", "use": "gates/or", "label": "jump", "at": [450, -200]},
-        {"name": "target", "use": "mux/mux2x8", "label": "pc + 1 or target", "at": [-250, -150]},
-        {"name": "hold", "use": "mux/mux2x8", "label": "stay on HLT", "at": [-400, -150]},
-        {"name": "out", "use": "register/register8", "label": "output register", "at": [300, -350]},
-        {"name": "Out", "type": "Output", "w": 8, "at": [550, -350]},
-        {"name": "PC", "type": "Output", "w": 8, "at": [-400, 300]},
-        {"name": "Halted", "type": "Output", "at": [550, -450]}
+        {"name": "alu", "use": "alu/alu8", "label": "ALU", "at": [980, -400]},
+        {"name": "wdata", "use": "mux/mux2x8", "label": "ALU or immediate", "at": [1260, -400]},
+        {"name": "any", "type": "ReduceOr", "w": 8, "at": [980, -520]},
+        {"name": "is_zero", "use": "gates/not", "at": [1120, -480]},
+        {"name": "taken", "use": "gates/and", "label": "JZ taken", "at": [1260, -240]},
+        {"name": "jump", "use": "gates/or", "label": "jump", "at": [1400, -200]},
+        {"name": "target", "use": "mux/mux2x8", "label": "pc + 1 or target", "at": [1540, -80]},
+        {"name": "hold", "use": "mux/mux2x8", "label": "stay on HLT", "at": [1680, 80]},
+        {
+          "name": "out",
+          "use": "register/register8",
+          "label": "output register",
+          "at": [1400, -280]
+        },
+        {"name": "Out", "type": "Output", "w": 8, "at": [1960, -280]},
+        {"name": "PC", "type": "Output", "w": 8, "at": [1960, 160]},
+        {"name": "Halted", "type": "Output", "at": [1960, -80]}
       ],
       "wires": [
         ["clock", "pc.Clk", "regs.Clk", "out.Clk"],

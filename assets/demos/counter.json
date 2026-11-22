@@ -7,16 +7,16 @@
       "name": "counter8",
       "title": "8-bit counter",
       "nodes": [
-        {"name": "Clk", "type": "Input", "at": [-400, -200]},
-        {"name": "Enable", "type": "Input", "at": [-400, 100]},
-        {"name": "Reset", "type": "Input", "at": [-400, 0]},
-        {"name": "zero", "type": "Const", "w": 8, "value": 0, "at": [-400, 250]},
-        {"name": "one", "type": "Const", "value": 1, "at": [-400, 180]},
-        {"name": "inc", "use": "ripple_adder/adder8", "label": "Q + 1", "at": [-200, 220]},
-        {"name": "clear", "use": "mux/mux2x8", "label": "0 on Reset", "at": [-20, 150]},
-        {"name": "load", "use": "gates/or", "label": "Enable or Reset", "at": [-200, 50]},
-        {"name": "reg", "use": "register/register8", "label": "register", "at": [150, 0]},
-        {"name": "Q", "type": "Output", "w": 8, "at": [350, 0]}
+        {"name": "Clk", "type": "Input", "at": [0, -160]},
+        {"name": "Enable", "type": "Input", "at": [0, 0]},
+        {"name": "Reset", "type": "Input", "at": [0, -80]},
+        {"name": "zero", "type": "Const", "w": 8, "value": 0, "at": [0, 160]},
+        {"name": "one", "type": "Const", "value": 1, "at": [0, 240]},
+        {"name": "inc", "use": "ripple_adder/adder8", "label": "Q + 1", "at": [280, 160]},
+        {"name": "clear", "use": "mux/mux2x8", "label": "0 on Reset", "at": [420, 40]},
+        {"name": "load", "use": "gates/or", "label": "Enable or Reset", "at": [420, -80]},
+        {"name": "reg", "use": "register/register8", "label": "register", "at": [560, 0]},
+        {"name": "Q", "type": "Output", "w": 8, "at": [700, 0]}
       ],
       "wires": [
         ["reg", "inc.A", "Q"],
@@ -41,34 +41,34 @@
           "duty": 2,
           "phase": 2,
           "label": "Clock",
-          "at": [-400, 200]
+          "at": [0, 240]
         },
-        {"name": "Enable", "type": "Input", "at": [-400, 100]},
-        {"name": "Reset", "type": "Input", "at": [-400, 0]},
-        {"name": "counter", "use": "counter8", "label": "8-bit counter (gates)", "at": [-50, 150]},
-        {"name": "count", "type": "Display", "w": 8, "label": "Count", "at": [300, 150]},
-        {"name": "prev", "type": "Delay", "label": "clock last tick", "at": [-250, -120]},
-        {"name": "not_prev", "type": "Not", "at": [-130, -120]},
-        {"name": "edge", "type": "And", "label": "rising edge", "at": [-10, -80]},
-        {"name": "any", "type": "Or", "at": [-130, -220]},
-        {"name": "en_w", "type": "And", "at": [100, -150]},
-        {"name": "one_w", "type": "Const", "w": 8, "value": 1, "at": [-250, -320]},
-        {"name": "zero_w", "type": "Const", "w": 8, "value": 0, "at": [-250, -400]},
-        {"name": "add_w", "type": "Add", "w": 8, "at": [-50, -320]},
-        {"name": "mux_w", "type": "Mux", "w": 8, "at": [80, -320]},
+        {"name": "Enable", "type": "Input", "at": [0, 160]},
+        {"name": "Reset", "type": "Input", "at": [0, 80]},
+        {"name": "counter", "use": "counter8", "label": "8-bit counter (gates)", "at": [840, 160]},
+        {"name": "count", "type": "Display", "w": 8, "label": "Count", "at": [1000, 160]},
+        {"name": "prev", "type": "Delay", "label": "clock last tick", "at": [280, 0]},
+        {"name": "not_prev", "type": "Not", "at": [420, 0]},
+        {"name": "edge", "type": "And", "label": "rising edge", "at": [560, 0]},
+        {"name": "any", "type": "Or", "at": [280, -120]},
+        {"name": "en_w", "type": "And", "at": [700, -80]},
+        {"name": "one_w", "type": "Const", "w": 8, "value": 1, "at": [420, -200]},
+        {"name": "zero_w", "type": "Const", "w": 8, "value": 0, "at": [560, -320]},
+        {"name": "add_w", "type": "Add", "w": 8, "at": [560, -160]},
+        {"name": "mux_w", "type": "Mux", "w": 8, "at": [700, -280]},
         {
           "name": "reg_w",
           "type": "Register",
           "w": 8,
           "label": "Register primitive",
-          "at": [200, -250]
+          "at": [840, -200]
         },
         {
           "name": "count_w",
           "type": "Display",
           "w": 8,
           "label": "Count (Register)",
-          "at": [350, -250]
+          "at": [1000, -200]
         }
       ],
       "wires": [
