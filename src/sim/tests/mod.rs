@@ -1,6 +1,7 @@
 //! Integration tests for the ECS → `Design` → v2 engine path, run in a
 //! headless `App` with [`SimulationRuntimePlugin`].
 
+mod chips;
 mod demos;
 mod gallery;
 pub mod geometry_tests;

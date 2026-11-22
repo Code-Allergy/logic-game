@@ -58,8 +58,8 @@ pub use authoring::*;
 pub use bridge::{CompileFailure, LoopNode, SimBridge, SimDiagnostics, SimRuntime};
 pub use demos::{Demo, DemoCatalog};
 pub use document::{
-    CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, PinAddr,
-    WorkspaceDocument,
+    CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, Incoming, MergeReport,
+    PinAddr, WorkspaceDocument,
 };
 pub use history::{HISTORY_LIMIT, HistoryCommand, UndoHistory};
 pub use kind::{GateKind, MAX_SCREEN_SCALE, SCREEN_BEZEL, ScreenMode, ScreenPalette, TEXT_CELL};

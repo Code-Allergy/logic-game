@@ -13,9 +13,9 @@ use crate::sim::{
     TickRateMeter, WireIdentity, WorkspaceRevision,
     authoring::{
         apply_authoring_messages_system, apply_create_gate_system, apply_create_wire_system,
-        apply_delete_system, apply_register_definitions_system, apply_set_input_system,
-        apply_set_kind_system, load_workspace_system, sync_gate_names_system,
-        track_authoring_component_changes_system,
+        apply_delete_system, apply_refresh_definitions_system, apply_register_definitions_system,
+        apply_set_input_system, apply_set_kind_system, load_workspace_system,
+        sync_gate_names_system, track_authoring_component_changes_system,
     },
     bridge::{
         collect_engine_events_system, drive_local_engine_system, project_probes_system,
@@ -34,6 +34,7 @@ use crate::sim::{
     visuals::SimulationVisualsPlugin,
 };
 use crate::sim::{HistoryCommand, UndoHistory, history::edit_history_system};
+use crate::sim::{LoadedRoot, PendingChipUpdates, RefreshDefinitions};
 
 use super::demos;
 use super::spatial_grid::SpatialGrid;
@@ -95,7 +96,10 @@ impl Plugin for SimulationRuntimePlugin {
             .init_resource::<SimulationConfig>()
             .init_resource::<TickRateMeter>()
             .init_resource::<UndoHistory>()
+            .init_resource::<LoadedRoot>()
+            .init_resource::<PendingChipUpdates>()
             .add_message::<HistoryCommand>()
+            .add_message::<RefreshDefinitions>()
             .add_message::<CreateGate>()
             .add_message::<CreateWire>()
             .add_message::<DeleteGate>()
@@ -128,6 +132,7 @@ impl Plugin for SimulationRuntimePlugin {
                     load_workspace_system,
                     view_navigation_system,
                     apply_register_definitions_system,
+                    apply_refresh_definitions_system,
                     apply_create_gate_system,
                     apply_create_wire_system,
                     apply_delete_system,
