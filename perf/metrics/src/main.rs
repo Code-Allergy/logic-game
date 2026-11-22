@@ -242,6 +242,15 @@ fn named_options(options: &str) -> Options {
             lift: false,
             ..Options::debug()
         },
+        // Function matching (issue #117, stage 2) off, for comparison.
+        "default-nomatch" => Options {
+            func_match: false,
+            ..Options::default()
+        },
+        "editor-nomatch" => Options {
+            func_match: false,
+            ..Options::debug()
+        },
         // As the throughput benchmarks: simplify off (every node is an
         // instruction), default layout and packing.
         "raw" => Options {
@@ -249,7 +258,9 @@ fn named_options(options: &str) -> Options {
             pack: Default::default(),
             ..Options::unoptimized()
         },
-        other => panic!("options {other:?}: default, editor, raw, default-nolift or editor-nolift"),
+        other => panic!(
+            "options {other:?}: default, editor, raw, default-nolift, editor-nolift, default-nomatch or editor-nomatch"
+        ),
     }
 }
 
@@ -286,6 +297,57 @@ fn breakdown(name: &str, options: &str) {
     }
     total.sort_by(f64::total_cmp);
     println!("{line}; total {:.2}", total[total.len() / 2]);
+    // Recompile after a one-gate edit of the root (what the editor does on
+    // every edit), with the function-matching cache of the previous
+    // compile: median of 11.
+    {
+        use logi_sim::compile::{compile_cached, func::MatchCache};
+        use logi_sim::netlist::NodeKind;
+        let mut cache = MatchCache::new();
+        compile_cached(&d, &opts, &mut cache, |_| {}).unwrap();
+        let mut edited = d.clone();
+        let root = edited.root;
+        let net = edited.defs[root]
+            .nets
+            .iter()
+            .find(|(_, n)| n.width == 1)
+            .map(|(id, _)| id)
+            .expect("a 1-bit root net");
+        let not = edited.add_node(root, NodeKind::Not { w: 1 }).unwrap();
+        edited.connect(root, net, (not, 0)).unwrap();
+        let mut runs: Vec<Vec<(logi_sim::compile::Pass, f64)>> = Vec::new();
+        for _ in 0..11 {
+            let mut t = std::time::Instant::now();
+            let mut v = Vec::new();
+            compile_cached(&edited, &opts, &mut cache, |pass| {
+                v.push((pass, t.elapsed().as_secs_f64() * 1e3));
+                t = std::time::Instant::now();
+            })
+            .unwrap();
+            runs.push(v);
+        }
+        let mut line = String::from("recompile after a one-gate root edit, ms:");
+        for i in 0..runs[0].len() {
+            let mut xs: Vec<f64> = runs.iter().map(|r| r[i].1).collect();
+            xs.sort_by(f64::total_cmp);
+            line += &format!(" {} {:.2}", runs[0][i].0.name(), xs[xs.len() / 2]);
+        }
+        let mut total: Vec<f64> = runs.iter().map(|r| r.iter().map(|x| x.1).sum()).collect();
+        total.sort_by(f64::total_cmp);
+        println!("{line}; total {:.2}", total[total.len() / 2]);
+        println!(
+            "match cache: {} definitions analysed, {} reused",
+            cache.analysed, cache.reused
+        );
+        if opts.func_match {
+            for (name, matched, note) in logi_sim::compile::func::report(&d, &mut cache) {
+                println!(
+                    "  {} {name}: {note}",
+                    if matched { "matched  " } else { "unmatched" }
+                );
+            }
+        }
+    }
     let mut def_of_slot: HashMap<u32, &str> = HashMap::new();
     for (inst, map) in p.debug.net_slots.iter().enumerate() {
         let def = &d.defs[p.debug.instances[inst].def];
@@ -373,7 +435,7 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: perf-metrics [cases | ticks <case> <n> [OPTIONS] [threads] | breakdown <case> [OPTIONS]]\n\
-                 OPTIONS: default, editor, raw, default-nolift, editor-nolift"
+                 OPTIONS: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch"
             );
             std::process::exit(2);
         }

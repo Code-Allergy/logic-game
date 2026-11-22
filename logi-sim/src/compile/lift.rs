@@ -40,9 +40,6 @@
 //! Each round is linear in the instruction count (hash maps keyed by
 //! operand descriptors); there are at most [`MAX_ROUNDS`] rounds.
 
-use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
-
 use smallvec::{SmallVec, smallvec};
 
 use super::Options;
@@ -52,35 +49,9 @@ use crate::netlist::mask;
 
 const NONE: u32 = u32::MAX;
 
-/// A fast hasher for the small integer keys of this pass (FxHash's
-/// multiply-rotate; the default SipHash dominated the pass's time).
-#[derive(Default)]
-struct Fx(u64);
-
-impl Hasher for Fx {
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.write_u64(b as u64);
-        }
-    }
-    fn write_u8(&mut self, i: u8) {
-        self.write_u64(i as u64);
-    }
-    fn write_u32(&mut self, i: u32) {
-        self.write_u64(i as u64);
-    }
-    fn write_usize(&mut self, i: usize) {
-        self.write_u64(i as u64);
-    }
-    fn write_u64(&mut self, i: u64) {
-        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
-    }
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
-type Map<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
+/// The pass's maps: `foldhash` (the default SipHash dominated the pass's
+/// time).
+type Map<K, V> = super::FastMap<K, V>;
 /// Label rounds (each may add state banks).
 const MAX_ROUNDS: usize = 6;
 /// Times the rounds are rerun after rejecting unprofitable state banks.

@@ -22,7 +22,7 @@
 //! an alias of a slot written by a commit, because commits run in sequence.
 //! Such an instruction is kept as a copy instead.
 
-use std::collections::HashMap;
+use super::FastMap;
 
 use super::Options;
 use super::emit::Emitter;
@@ -71,7 +71,7 @@ pub(super) fn simplify(
     };
 
     let mut keep = vec![true; em.instrs.len()];
-    let mut seen: HashMap<(Op, u32, u32, u32, u64), u32> = HashMap::new();
+    let mut seen: FastMap<(Op, u32, u32, u32, u64), u32> = FastMap::default();
 
     for &k in order {
         let k = k as usize;
