@@ -2,16 +2,16 @@
   "format": "gatequest-demos",
   "version": 1,
   "levels": [
-    { "level": 1, "title": "Gates" },
-    { "level": 2, "title": "Adding bits" },
-    { "level": 3, "title": "Adding words" },
-    { "level": 4, "title": "Choosing: decoders and multiplexers" },
-    { "level": 5, "title": "Feedback" },
-    { "level": 6, "title": "Latches and flip-flops" },
-    { "level": 7, "title": "Registers and counters" },
-    { "level": 8, "title": "Register file" },
-    { "level": 9, "title": "ALU" },
-    { "level": 10, "title": "A small CPU" }
+    { "level": 1, "title": "Gates", "description": "Six little tiles that each decide one thing. Everything on this road is built from them." },
+    { "level": 2, "title": "Adding bits", "description": "Two gates add two bits. Chain the halves and three bits add up, carry and all." },
+    { "level": 3, "title": "Adding words", "description": "Eight full adders in a row add whole numbers, the carry rippling from bit to bit." },
+    { "level": 4, "title": "Choosing: decoders and multiplexers", "short": "Choosing", "description": "A number picks one line out of many, or one word out of many. This is how a computer chooses." },
+    { "level": 5, "title": "Feedback", "description": "Feed a gate its own output and it remembers. One loop holds one bit." },
+    { "level": 6, "title": "Latches and flip-flops", "short": "Latches", "description": "Put a gate in front of the loop and the bit changes only when told: on a level, then on a clock edge." },
+    { "level": 7, "title": "Registers and counters", "short": "Registers", "description": "Flip-flops in a row hold a whole number. Feed a register its own value plus one and it counts." },
+    { "level": 8, "title": "Register file", "description": "Four registers behind one write port and two read ports: the CPU's scratch pad." },
+    { "level": 9, "title": "ALU", "description": "Add, subtract, AND and OR in one box, with flags that say whether the result was zero or carried." },
+    { "level": 10, "title": "A small CPU", "short": "CPU", "description": "A counter walks through a program; each instruction steers the register file and the ALU. The end of the road." }
   ],
   "demos": [
     {

@@ -464,6 +464,22 @@ pub struct RegisterDefinitions {
     pub definitions: HashMap<Uuid, Arc<CircuitDocument>>,
 }
 
+impl RegisterDefinitions {
+    /// Everything needed to place workspace `ws` as a chip: its
+    /// definitions plus its root, keyed by the root's id. Returns the
+    /// registration and the chip's kind.
+    pub fn chip(ws: &WorkspaceDocument) -> (Self, GateKind) {
+        let mut definitions = ws.definitions.clone();
+        definitions.insert(ws.root.id, Arc::new(ws.root.clone()));
+        (
+            Self { definitions },
+            GateKind::SubCircuit {
+                definition: ws.root.id,
+            },
+        )
+    }
+}
+
 #[derive(Message)]
 pub struct GateLabelChanged {
     pub gate_uuid: Uuid,
