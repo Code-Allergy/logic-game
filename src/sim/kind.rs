@@ -120,6 +120,9 @@ pub enum GateKind {
     Rom {
         addr_bits: u8,
         w: u8,
+        /// Words from address 0; missing ones read 0 (and the field may
+        /// be left out for an empty ROM).
+        #[serde(default)]
         contents: Vec<u64>,
     },
     Delay {

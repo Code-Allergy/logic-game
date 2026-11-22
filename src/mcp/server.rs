@@ -18,14 +18,16 @@ use super::session::Session;
 const INSTRUCTIONS: &str = "\
 Build and inspect GateQuest logic circuits. Open or make a workspace with `workspace`, change it \
 with `edit` (one call can build a whole chip: node and wire entries are those of save format \
-version 6, with arrays and bus wiring), and read it back with `view`. Parts are named by their \
+version 6, with arrays and bus wiring), and read it back with `view`. Store tests with a chip \
+(edit op `tests`) and run them all with `test`; run a whole experiment in one call with `run`. Parts are named by their \
 label; a chip is made by editing a circuit name that does not exist yet and placed with \
 {\"use\": name}. Positions may be left out: parts are laid out automatically. Keep circuits \
 small and build larger ones from chips.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceArgs {
-    /// One of: list, open, new, save, status.
+    /// One of: list, open, new, save, status, demos (list the built-in
+    /// examples), open_demo (open an editable copy of one; name is its id).
     pub action: String,
     /// The workspace's name: required for open and new; for save, a new
     /// name saves a copy under it.
@@ -67,6 +69,44 @@ pub struct EditArgs {
     pub file: Option<String>,
     /// Report what would change, and change nothing.
     pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TestArgs {
+    /// Run the tests of this circuit only (a chip's name, or "main").
+    /// Left out: every circuit of the workspace.
+    pub circuit: Option<String>,
+    /// Run only the tests of this name.
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RunArgs {
+    /// The circuit to simulate: a chip's name, or leave out for the root.
+    pub circuit: Option<String>,
+    /// Keep the simulation and its snapshots under this name: the next
+    /// call with the same name continues where this one stopped.
+    pub session: Option<String>,
+    /// The steps, in order. Each is an object:
+    /// {"set": {input: value}}, {"ticks": n},
+    /// {"until": "expression", "max_ticks": n}, {"expect": {signal: value}},
+    /// {"read": [signals, "ram@0x00..0x10"]},
+    /// {"load": {"part": memory, "file": path, "skip": n, "length": n, "at": addr}},
+    /// {"store": {"part": memory, "file": path}},
+    /// {"record": [signals], "when": "expression"},
+    /// {"compare": {"file": path, "columns": [...], "radix": 16, "context": 5}} or {"compare": {"rows": [[...]]}},
+    /// {"snapshot": name}, {"restore": name}, {"reset": true}.
+    /// A signal is a path of labels: "cpu/alu/sum.y:0..4"; "ram@0x10" is a memory word.
+    pub steps: Option<Vec<Value>>,
+    /// Short names for signal paths, usable in expressions:
+    /// {"pc": "cpu/pc.q"}.
+    pub signals: Option<Map<String, Value>>,
+    /// Write every recorded row to this file (.csv, or .vcd).
+    pub trace: Option<String>,
+    /// The most ticks this call may run (default 1,000,000).
+    pub max_ticks: Option<u64>,
+    /// Read the script (steps, signals, ...) from this JSON file.
+    pub file: Option<String>,
 }
 
 /// The server: one session shared by its tools.
@@ -136,6 +176,46 @@ impl Server {
         let file = args.file.map(PathBuf::from);
         self.session()
             .edit_tool(request, file.as_deref(), args.dry_run.unwrap_or(false))
+    }
+
+    #[tool(
+        description = "Run the tests stored with the chips of the open workspace (set them with \
+                       edit: {\"tests\": [...]}). Reports each failure with its first failing \
+                       case, and a count of what passed."
+    )]
+    fn test(&self, Parameters(args): Parameters<TestArgs>) -> Result<String, String> {
+        self.session()
+            .test_tool(args.circuit.as_deref(), args.name.as_deref())
+    }
+
+    #[tool(
+        description = "Run one whole experiment on a private simulation of a circuit: set \
+                       inputs, load memories from files, run ticks or until a condition, expect \
+                       values, record signals to a trace file, compare them with an expected \
+                       trace (stops at the first difference), snapshot and restore. The circuit \
+                       shown in the editor is not disturbed."
+    )]
+    fn run(&self, Parameters(args): Parameters<RunArgs>) -> Result<String, String> {
+        let mut script = Map::new();
+        if let Some(steps) = args.steps {
+            script.insert("steps".into(), steps.into());
+        }
+        if let Some(signals) = args.signals {
+            script.insert("signals".into(), Value::Object(signals));
+        }
+        if let Some(trace) = args.trace {
+            script.insert("trace".into(), trace.into());
+        }
+        if let Some(max) = args.max_ticks {
+            script.insert("max_ticks".into(), max.into());
+        }
+        let file = args.file.map(PathBuf::from);
+        self.session().run_tool(
+            args.circuit.as_deref(),
+            args.session.as_deref(),
+            script,
+            file.as_deref(),
+        )
     }
 }
 

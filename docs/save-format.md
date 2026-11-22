@@ -79,6 +79,35 @@ written, so a saved wire always names the port it was connected to
 (ports are followed by node id, else by label and width; wires to a port
 that is gone are removed, and the editor says so).
 
+### Stored tests
+
+A workspace may keep tests with its circuits, so that a chip's tests run
+again whenever the design grows (`docs/mcp-server.md`, "`test` and stored
+tests"). In a version 5 file they are a top-level `tests` object from
+circuit `id` to an array of tests; in a version 6 file each circuit may
+have a `tests` array. The field is left out when there are none, and
+tests of a circuit that is no longer in the workspace are dropped when it
+is saved. The editor does not show them; it keeps the ones a workspace
+was loaded with and writes them back.
+
+```json
+"tests": {
+  "6c1b…": [
+    {"name": "truth", "table": {"inputs": ["A", "B"], "outputs": ["Sum", "Carry"],
+                                "rows": [[0, 0, 0, 0], [1, 1, 0, 1]]}},
+    {"name": "same as Add", "equivalent": {"to": "add_ref", "samples": 500}}
+  ]
+}
+```
+
+A test has a `name` (unique in its circuit) and one of:
+
+| Kind | Meaning |
+|---|---|
+| `table`, `formula`, `sequence` | As a challenge's test ("Challenges", below), on the circuit's own ports. |
+| `equivalent` | `{"to": chip, "samples": n, "seed": s, "hold": k}`: the same random inputs into this circuit and the chip named `to` (they must have the same ports), every output compared after every tick, both from power-on. `samples` defaults to 1000 and `seed` to 1; each input is held for `hold` ticks (1). |
+| `script` | An experiment script (`docs/mcp-server.md`, "`run`"): it passes when no `expect`, `until` or `compare` step fails. |
+
 ### Versions of a definition
 
 A circuit may carry an optional integer `revision` (absent means 0): an

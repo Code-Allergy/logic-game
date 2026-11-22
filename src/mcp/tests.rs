@@ -1,5 +1,7 @@
 //! Tests of the batch editor and the views.
 
+mod sim;
+
 use std::sync::Arc;
 
 use bevy::math::Vec2;
@@ -13,18 +15,18 @@ use crate::sim::layout::overlaps;
 use crate::sim::source::Externals;
 use crate::sim::{CircuitDocument, DocNode, GateKind, WorkspaceDocument};
 
-fn empty() -> WorkspaceDocument {
+pub(super) fn empty() -> WorkspaceDocument {
     // A fixed id: the ids of parts derive from it.
     let mut root = CircuitDocument::new("test");
     root.id = uuid::Uuid::from_u128(7);
     WorkspaceDocument::new(root)
 }
 
-fn edit(ws: &WorkspaceDocument, request: Value) -> (WorkspaceDocument, Report) {
+pub(super) fn edit(ws: &WorkspaceDocument, request: Value) -> (WorkspaceDocument, Report) {
     apply(ws, &request, &Externals::default()).unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn refused(ws: &WorkspaceDocument, request: Value) -> String {
+pub(super) fn refused(ws: &WorkspaceDocument, request: Value) -> String {
     match apply(ws, &request, &Externals::default()) {
         Ok(_) => panic!("the edit should have been refused"),
         Err(e) => e.0,
@@ -40,7 +42,7 @@ fn sim(ws: &WorkspaceDocument) -> Sim {
 
 /// A half adder chip, a full adder chip of two, and an 8-bit adder of
 /// eight full adders as the root.
-fn adder8() -> WorkspaceDocument {
+pub(super) fn adder8() -> WorkspaceDocument {
     let (ws, report) = edit(
         &empty(),
         json!({"edits": [
@@ -538,7 +540,7 @@ fn diagnostics_report_loops_open_inputs_and_size() {
 }
 
 /// A scratch folder for one test's workspaces.
-fn scratch(test: &str) -> std::path::PathBuf {
+pub(super) fn scratch(test: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "gatequest-mcp-{test}-{}-{}",
         std::process::id(),
@@ -674,7 +676,7 @@ mod protocol {
                 .map(|t| t.name.to_string())
                 .collect();
             tools.sort();
-            assert_eq!(tools, ["edit", "view", "workspace"]);
+            assert_eq!(tools, ["edit", "run", "test", "view", "workspace"]);
 
             let call = |name: &'static str, args: Value| {
                 let Value::Object(args) = args else {
@@ -714,6 +716,33 @@ mod protocol {
             assert!(!failed && said.contains("chip half_adder"), "{said}");
             let (_, said) = call("view", json!({"what": "stats"})).await;
             assert!(said.contains("flattened: 9 parts"), "{said}");
+
+            // A stored test and an experiment, through the protocol.
+            let (failed, said) = call(
+                "edit",
+                json!({"circuit": "half_adder", "ops": [{"tests": [
+                    {"name": "sum", "formula": {"expect": {"Sum": "A ^ B", "Carry": "A & B"}}}]}]}),
+            )
+            .await;
+            assert!(!failed && said.contains("+1 tests"), "{said}");
+            let (failed, said) = call("test", json!({})).await;
+            assert!(!failed && said.contains("1 of 1 tests passed"), "{said}");
+            let (failed, said) = call(
+                "run",
+                json!({"steps": [{"set": {"P": 1, "Q": 1}}, {"ticks": 1},
+                                 {"expect": {"S": 0, "ha/c": 1}}, {"read": ["ha/x"]}]}),
+            )
+            .await;
+            assert!(
+                !failed && said.contains("ha/x = 0 (0)") && said.ends_with("ok\n"),
+                "{said}"
+            );
+            let (failed, said) = call(
+                "run",
+                json!({"steps": [{"ticks": 1}, {"expect": {"S": 1}}]}),
+            )
+            .await;
+            assert!(failed && said.contains("FAILED steps[1]"), "{said}");
 
             client.cancel().await.unwrap();
             server.await.unwrap();

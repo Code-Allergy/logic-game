@@ -1379,6 +1379,7 @@ fn cpu16_alus_compute_every_function() {
         let w = WorkspaceDocument {
             root: (**doc).clone(),
             definitions: item.workspace.definitions.clone(),
+            tests: Default::default(),
         };
         let mut sim = sim_of(&w);
         for &(a, b) in &cases {

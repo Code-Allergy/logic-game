@@ -852,6 +852,37 @@ fn read_back(app: &mut App) -> WorkspaceDocument {
 }
 
 #[test]
+fn stored_tests_survive_the_editor_and_the_file() {
+    let dir = temp_dir();
+    let mut workspace = demo("full_adder");
+    let chip = *workspace.definitions.keys().next().expect("a definition");
+    let test = serde_json::json!({"name": "t", "table": {"inputs": [], "outputs": [], "rows": []}});
+    workspace
+        .tests
+        .insert(workspace.root.id, vec![test.clone()]);
+    workspace
+        .tests
+        .insert(chip, vec![test.clone(), test.clone()]);
+    // A test of a circuit that is not in the workspace is dropped.
+    workspace.tests.insert(Uuid::new_v4(), vec![test.clone()]);
+
+    let mut app = app();
+    load(&mut app, workspace.clone());
+    let read = read_back(&mut app);
+    assert_eq!(read.tests.len(), 2);
+    assert_eq!(read.tests[&read.root.id], vec![test.clone()]);
+    assert_eq!(read.tests[&chip].len(), 2);
+
+    save_workspace_in(&dir, "tested", &read).unwrap();
+    let loaded = read_workspace_in(&dir, "tested").unwrap();
+    assert_eq!(loaded.tests, read.tests);
+    // A workspace without tests writes no "tests" field.
+    let plain = crate::editor::workspace::workspace_to_json("p", &demo("half_adder")).unwrap();
+    assert!(!plain.contains("\"tests\""));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn save_and_load_round_trip() {
     let dir = temp_dir();
     let mut app = app();

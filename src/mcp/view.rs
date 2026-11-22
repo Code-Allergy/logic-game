@@ -187,6 +187,11 @@ pub fn outline(
         let _ = writeln!(out, "ports: in {} | out {}", list(&ins), list(&outs));
     }
 
+    if let Some(tests) = ws.tests.get(&doc.id).filter(|t| !t.is_empty()) {
+        let names: Vec<&str> = tests.iter().map(super::testing::name_of).collect();
+        let _ = writeln!(out, "tests: {}", names.join(", "));
+    }
+
     // Chips used.
     let mut chips: BTreeMap<String, usize> = BTreeMap::new();
     for n in &doc.nodes {
@@ -255,11 +260,12 @@ pub fn status(ws: &WorkspaceDocument) -> String {
     for chip in chips {
         let _ = writeln!(
             out,
-            "chip {}: {} parts, {} wires, placed {} time(s)",
+            "chip {}: {} parts, {} wires, placed {} time(s), {} test(s)",
             chip.name,
             chip.nodes.len(),
             chip.wires.len(),
-            uses.get(&chip.id).copied().unwrap_or(0)
+            uses.get(&chip.id).copied().unwrap_or(0),
+            ws.tests.get(&chip.id).map_or(0, Vec::len)
         );
     }
     out.push_str(&diagnostics(ws));

@@ -90,6 +90,12 @@ impl WorkspaceRevision {
     }
 }
 
+/// The stored tests of the open workspace's circuits. The ECS holds only
+/// parts and wires, so the tests a workspace was loaded with are kept
+/// here and written back when it is saved ([`CircuitReader::workspace`]).
+#[derive(Resource, Debug, Clone, Default)]
+pub struct WorkspaceTests(pub super::document::CircuitTests);
+
 /// The revision and content hash of the root circuit as it was loaded, so
 /// that a saved root (placed elsewhere as a chip) carries a revision that
 /// grows when it is edited: [`CircuitReader::root_document`] gives the
@@ -432,6 +438,7 @@ pub type RootItems = (Without<InstanceViewItem>, Allow<Disabled>);
 pub struct CircuitReader<'w, 's> {
     pub active: Res<'w, ActiveCircuit>,
     loaded: Option<Res<'w, LoadedRoot>>,
+    tests: Option<Res<'w, WorkspaceTests>>,
     pub library: Res<'w, CircuitLibrary>,
     pub view: Res<'w, CircuitView>,
     open: DocumentQueries<'w, 's>,
@@ -474,7 +481,17 @@ impl CircuitReader<'_, '_> {
             // keep ids unique if it does.
             root.id = Uuid::new_v4();
         }
-        WorkspaceDocument { root, definitions }
+        let mut workspace = WorkspaceDocument {
+            root,
+            definitions,
+            tests: self
+                .tests
+                .as_deref()
+                .map(|t| t.0.clone())
+                .unwrap_or_default(),
+        };
+        workspace.tests = workspace.kept_tests();
+        workspace
     }
 }
 
@@ -1143,12 +1160,14 @@ pub fn load_workspace_system(
     mut view: ResMut<CircuitView>,
     mut loaded: ResMut<LoadedRoot>,
     mut pending: ResMut<PendingChipUpdates>,
+    mut tests: ResMut<WorkspaceTests>,
     gates: Query<Entity, (With<GateIdentity>, Allow<Disabled>)>,
     wires: Query<Entity, (With<WireIdentity>, Allow<Disabled>)>,
 ) {
     let Some(event) = events.read().last() else {
         return;
     };
+    tests.0 = event.workspace.tests.clone();
     // Close any subcircuit view; parked root entities go too.
     if !view.is_root() {
         view.reset();

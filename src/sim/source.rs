@@ -101,6 +101,8 @@ pub struct SourceCircuit {
     pub nodes: Vec<SourceNode>,
     /// Each entry is `[source, sink, sink, ...]`.
     pub wires: Vec<Vec<String>>,
+    /// Stored tests, as written (`docs/save-format.md`, "Stored tests").
+    pub tests: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -268,12 +270,18 @@ fn parse_circuit(value: Value) -> Result<SourceCircuit, SourceError> {
             None => Vec::new(),
             Some(_) => return err("\"wires\" must be an array"),
         };
+        let tests = match map.shift_remove("tests") {
+            Some(Value::Array(items)) if items.iter().all(Value::is_object) => items,
+            None => Vec::new(),
+            Some(_) => return err("\"tests\" must be an array of objects"),
+        };
         no_unknown_fields(&map)?;
         Ok(SourceCircuit {
             name: name.clone(),
             title,
             nodes,
             wires,
+            tests,
         })
     };
     inner().context(place)
@@ -448,6 +456,9 @@ fn circuit_to_value(circuit: &SourceCircuit) -> Value {
                 .collect(),
         ),
     );
+    if !circuit.tests.is_empty() {
+        map.insert("tests".into(), Value::Array(circuit.tests.clone()));
+    }
     Value::Object(map)
 }
 
@@ -755,8 +766,19 @@ pub fn expand(
     }
     let root = (*expanded[file.root.as_str()]).clone();
     let definitions = library.reachable_from(&root);
+    let tests = file
+        .circuits
+        .iter()
+        .filter(|c| !c.tests.is_empty())
+        .map(|c| (expanded[c.name.as_str()].id, c.tests.clone()))
+        .filter(|(id, _)| *id == root.id || definitions.contains_key(id))
+        .collect();
     Ok(Expansion {
-        workspace: WorkspaceDocument { root, definitions },
+        workspace: WorkspaceDocument {
+            root,
+            definitions,
+            tests,
+        },
         circuits: file
             .circuits
             .iter()

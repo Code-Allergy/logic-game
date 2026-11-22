@@ -551,6 +551,19 @@ pub fn editable_copy(workspace: &WorkspaceDocument, name: &str) -> WorkspaceDocu
     };
     let mut root = rewrite(&workspace.root, Uuid::new_v4());
     root.name = name.to_string();
+    // Tests follow their circuit to its new id.
+    let tests = workspace
+        .tests
+        .iter()
+        .filter_map(|(id, tests)| {
+            let new = if *id == workspace.root.id {
+                root.id
+            } else {
+                *remap.get(id)?
+            };
+            Some((new, tests.clone()))
+        })
+        .collect();
     WorkspaceDocument {
         root,
         definitions: workspace
@@ -558,5 +571,6 @@ pub fn editable_copy(workspace: &WorkspaceDocument, name: &str) -> WorkspaceDocu
             .iter()
             .map(|(id, def)| (remap[id], Arc::new(rewrite(def, remap[id]))))
             .collect(),
+        tests,
     }
 }

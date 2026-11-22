@@ -10,7 +10,9 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use super::batch::{self, Place};
-use super::view;
+use super::rig::Rig;
+use super::run::{self, RunState};
+use super::{testing, view};
 use crate::editor::workspace::{OnConflict, WorkspaceStore};
 use crate::sim::demos::catalog;
 use crate::sim::source::Externals;
@@ -27,11 +29,27 @@ struct Open {
     unsaved: bool,
 }
 
-/// One client's state: the store it reads and saves in, and the open
-/// workspace.
+/// Simulations kept between `run` calls, at most.
+pub const MAX_SIM_SESSIONS: usize = 8;
+
+/// A simulation kept between `run` calls.
+struct SimSession {
+    name: String,
+    /// The circuit it simulates, and the workspace change it was built at.
+    circuit: uuid::Uuid,
+    generation: u64,
+    state: RunState,
+}
+
+/// One client's state: the store it reads and saves in, the open
+/// workspace, and the simulations kept between `run` calls.
 pub struct Session {
     store: WorkspaceStore,
     open: Option<Open>,
+    /// Counts changes of the open workspace: a kept simulation is of the
+    /// workspace as it was at one of them.
+    generation: u64,
+    sims: Vec<SimSession>,
 }
 
 fn externals() -> Externals<'static> {
@@ -40,7 +58,12 @@ fn externals() -> Externals<'static> {
 
 impl Session {
     pub fn new(store: WorkspaceStore) -> Self {
-        Self { store, open: None }
+        Self {
+            store,
+            open: None,
+            generation: 0,
+            sims: Vec::new(),
+        }
     }
 
     /// The open workspace, for hosts and tests.
@@ -64,7 +87,8 @@ impl Session {
         }
     }
 
-    /// The `workspace` tool: `list`, `open`, `new`, `save`, `status`.
+    /// The `workspace` tool: `list`, `open`, `new`, `save`, `status`,
+    /// `demos`, `open_demo`.
     pub fn workspace_tool(
         &mut self,
         action: &str,
@@ -104,10 +128,40 @@ impl Session {
                 self.may_replace(discard)?;
                 let workspace = self.store.read(name).map_err(|e| e.to_string())?;
                 let out = format!("opened \"{name}\"\n{}", view::status(&workspace));
+                self.generation += 1;
                 self.open = Some(Open {
                     name: name.to_string(),
                     workspace,
                     unsaved: false,
+                });
+                Ok(out)
+            }
+            "demos" => {
+                let catalog = catalog().map_err(str::to_string)?;
+                let mut out = String::from("demos and gallery items (open one with open_demo):\n");
+                for demo in catalog.all() {
+                    out.push_str(&format!("  {}  {}\n", demo.id, demo.title));
+                }
+                Ok(out)
+            }
+            "open_demo" => {
+                let id = named()?;
+                self.may_replace(discard)?;
+                let catalog = catalog().map_err(str::to_string)?;
+                let demo = catalog
+                    .get(id)
+                    .ok_or_else(|| format!("no demo \"{id}\" (list them with action \"demos\")"))?;
+                let name = self.store.unique_name(id);
+                let workspace = crate::sim::demos::editable_copy(&demo.workspace, &name);
+                let out = format!(
+                    "opened a copy of \"{id}\" as \"{name}\" (not saved yet)\n{}",
+                    view::status(&workspace)
+                );
+                self.generation += 1;
+                self.open = Some(Open {
+                    name,
+                    workspace,
+                    unsaved: true,
                 });
                 Ok(out)
             }
@@ -119,6 +173,7 @@ impl Session {
                         "a workspace named \"{name}\" is already saved; open it, or pick another name"
                     ));
                 }
+                self.generation += 1;
                 self.open = Some(Open {
                     name: name.to_string(),
                     workspace: WorkspaceDocument::new(CircuitDocument::new(name)),
@@ -163,7 +218,7 @@ impl Session {
                 ))
             }
             other => Err(format!(
-                "unknown action \"{other}\" (actions: list, open, new, save, status)"
+                "unknown action \"{other}\" (actions: list, open, new, save, status, demos, open_demo)"
             )),
         }
     }
@@ -250,7 +305,112 @@ impl Session {
         if workspace != open.workspace {
             open.workspace = workspace;
             open.unsaved = true;
+            self.generation += 1;
         }
         Ok(report.to_string())
+    }
+
+    /// The `test` tool: run the stored tests of one circuit, or of every
+    /// circuit of the workspace; with `name`, only tests of that name.
+    /// `Err` holds the report when a test failed.
+    pub fn test_tool(&self, circuit: Option<&str>, name: Option<&str>) -> Result<String, String> {
+        let report = testing::run_suite(&self.opened()?.workspace, circuit, name)?;
+        if report.failed() > 0 {
+            Err(report.text())
+        } else {
+            Ok(report.text())
+        }
+    }
+
+    /// The `run` tool: an experiment script on a private simulation of
+    /// `circuit`. With `session` the simulation and its snapshots are
+    /// kept for the next call with the same name. With `file` the script
+    /// is read from that JSON file. `Err` holds the report when the
+    /// experiment failed.
+    pub fn run_tool(
+        &mut self,
+        circuit: Option<&str>,
+        session: Option<&str>,
+        mut script: Map<String, Value>,
+        file: Option<&Path>,
+    ) -> Result<String, String> {
+        script.retain(|_, v| !v.is_null());
+        if let Some(path) = file {
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let Value::Object(from_file) = serde_json::from_str::<Value>(&text)
+                .map_err(|e| format!("{}: not valid JSON: {e}", path.display()))?
+            else {
+                return Err(format!("{}: a script is an object", path.display()));
+            };
+            for (k, v) in from_file {
+                script.entry(k).or_insert(v);
+            }
+        }
+        // A script file may name its circuit and session too.
+        let take = |script: &mut Map<String, Value>, key: &str| match script.shift_remove(key) {
+            Some(Value::String(s)) => Some(s),
+            _ => None,
+        };
+        let circuit = circuit
+            .map(str::to_string)
+            .or_else(|| take(&mut script, "circuit"));
+        let session = session
+            .map(str::to_string)
+            .or_else(|| take(&mut script, "session"));
+        script.shift_remove("circuit");
+        script.shift_remove("session");
+
+        let generation = self.generation;
+        let ws = &self
+            .open
+            .as_ref()
+            .ok_or("no workspace is open; call workspace with action \"open\" or \"new\" first")?
+            .workspace;
+        let place = batch::find_circuit(ws, circuit.as_deref())?
+            .ok_or_else(|| format!("no circuit \"{}\"", circuit.clone().unwrap_or_default()))?;
+        let circuit_id = batch::circuit_at(ws, place).id;
+
+        let mut note = String::new();
+        let kept = session.as_deref().and_then(|name| {
+            let i = self.sims.iter().position(|s| s.name == name)?;
+            let kept = self.sims.remove(i);
+            if kept.circuit == circuit_id && kept.generation == generation {
+                note = format!(
+                    "session \"{name}\" continues at tick {}\n",
+                    kept.state.rig.tick_count()
+                );
+                Some(kept.state)
+            } else {
+                note = format!(
+                    "session \"{name}\" was dropped (the workspace or the circuit changed); \
+                     starting from power-on\n"
+                );
+                None
+            }
+        });
+        let mut state = match kept {
+            Some(state) => state,
+            None => RunState::new(Rig::build(ws, place)?),
+        };
+        let outcome = run::run(&mut state, &script);
+        if let Some(name) = session {
+            if self.sims.len() >= MAX_SIM_SESSIONS {
+                let dropped = self.sims.remove(0);
+                note.push_str(&format!(
+                    "session \"{}\" was dropped (at most {MAX_SIM_SESSIONS} are kept)\n",
+                    dropped.name
+                ));
+            }
+            self.sims.push(SimSession {
+                name,
+                circuit: circuit_id,
+                generation,
+                state,
+            });
+        }
+        let outcome = outcome?;
+        let text = format!("{note}{}", outcome.text);
+        if outcome.failed { Err(text) } else { Ok(text) }
     }
 }
