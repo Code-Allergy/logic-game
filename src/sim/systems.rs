@@ -183,36 +183,214 @@ pub fn canvas_click(hit: Option<Entity>, selected: &mut SelectedGate) -> Option<
     hit
 }
 
-/// Left-click selects a gate; a left click on empty canvas (not over the
-/// HUD) clears the selection.
-pub fn update_inputs_on_left_click(
+/// The cursor over the canvas this frame: window position (logical
+/// pixels, y down) and world position, or `None` outside the window.
+/// [`canvas_cursor_system`] fills it in; the pointer systems only read it.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct CanvasCursor {
+    pub screen: Option<Vec2>,
+    pub world: Option<Vec2>,
+}
+
+/// Track the cursor in [`CanvasCursor`] (left as it is without a window
+/// or camera, as in headless tests).
+pub fn canvas_cursor_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
-    ui_pointer: Res<UiPointerState>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-    query: Query<(Entity, &Transform, &GateType)>,
-    mut select_writer: MessageWriter<GateComponentSelectionEvent>,
-    mut selected: ResMut<SelectedGate>,
+    mut cursor: ResMut<CanvasCursor>,
 ) {
-    if ui_pointer.over_egui || !mouse_button_input.just_pressed(MouseButton::Left) {
-        return;
-    }
-    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single())
+    let (Ok(window), Ok((camera, camera_transform))) = (q_window.single(), q_camera.single())
     else {
         return;
     };
-    let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
+    *cursor = CanvasCursor {
+        screen: window.cursor_position(),
+        world: cursor_world_pos(window, camera, camera_transform),
+    };
+}
+
+/// Pixels the pointer must travel with the left button held on a part
+/// before the press becomes a move instead of a click.
+pub const DRAG_THRESHOLD: f32 = 5.0;
+
+/// A press on the canvas being followed until its release.
+#[derive(Debug, Clone, Copy)]
+pub struct CanvasPress {
+    pub button: MouseButton,
+    /// The part under the pointer when pressed.
+    pub gate: Option<Entity>,
+    /// Window position of the press.
+    pub start: Vec2,
+    /// The part's position minus the pointer's world position at the press.
+    pub offset: Vec2,
+    /// The part follows the pointer (a right press on a part at once, a
+    /// left press once it moved [`DRAG_THRESHOLD`]).
+    pub dragging: bool,
+    /// The pointer travelled past [`DRAG_THRESHOLD`].
+    pub moved: bool,
+}
+
+/// The press on the canvas, if a mouse button went down on it.
+#[derive(Resource, Debug, Default)]
+pub struct CanvasPointer {
+    pub press: Option<CanvasPress>,
+}
+
+impl CanvasPointer {
+    /// A part is being dragged.
+    pub fn dragging(&self) -> bool {
+        self.press.is_some_and(|p| p.dragging)
+    }
+}
+
+/// The value a click on an input part sets: a 1-bit input toggles. A
+/// wider input is only selected (its value is set in the inspector, where
+/// each bit has a chip), so a click never changes a bus by surprise.
+pub fn input_click_value(kind: &GateKind, value: u64) -> Option<u64> {
+    match kind {
+        GateKind::Input { w: 1 } => Some(value ^ 1),
+        _ => None,
+    }
+}
+
+#[derive(SystemParam)]
+pub struct CanvasPointerWriters<'w> {
+    select: MessageWriter<'w, GateComponentSelectionEvent>,
+    inputs: MessageWriter<'w, SetInputValue>,
+}
+
+type CanvasGate = (
+    Entity,
+    &'static mut Transform,
+    &'static GateType,
+    Option<&'static InputDrive>,
+    Has<InstanceViewItem>,
+);
+
+/// Mouse buttons on the canvas (not over the HUD):
+///
+/// - a left press on a part selects it (on empty canvas, clears the
+///   selection); released without moving, it toggles a 1-bit input (also
+///   in a read-only demo: inputs may change there), see
+///   [`input_click_value`];
+/// - a left drag on a part, past [`DRAG_THRESHOLD`], moves it, and a right
+///   drag moves it at once; dropped, it snaps to the editor grid
+///   ([`GRID`](super::layout::GRID)).
+///
+/// Nothing moves in a read-only demo, and with a part armed or the wire
+/// tool on a left click only picks (no move, no toggle). The moved part
+/// keeps [`Selected`] (drawn on top) until the next drag.
+#[allow(clippy::too_many_arguments)]
+pub fn canvas_pointer_system(
+    ui_pointer: Res<UiPointerState>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    cursor: Res<CanvasCursor>,
+    active: Res<crate::sim::ActiveCircuit>,
+    editor: Option<Res<crate::editor::EditorState>>,
+    mut pointer: ResMut<CanvasPointer>,
+    mut selected: ResMut<SelectedGate>,
+    mut gates: Query<CanvasGate, With<GateIdentity>>,
+    dragged: Query<Entity, With<Selected>>,
+    mut commands: Commands,
+    mut writers: CanvasPointerWriters,
+) {
+    let tool_in_hand = editor
+        .as_ref()
+        .is_some_and(|e| e.connection_mode || e.selected_gate_type.is_some());
+    let start_drag = |commands: &mut Commands, gate: Entity, offset: Vec2| {
+        for e in &dragged {
+            commands.entity(e).remove::<Selected>();
+        }
+        commands.entity(gate).insert(Selected { offset });
+    };
+
+    // A new press.
+    for button in [MouseButton::Left, MouseButton::Right] {
+        if !buttons.just_pressed(button) || pointer.press.is_some() || ui_pointer.over_egui {
+            continue;
+        }
+        let (Some(screen), Some(world)) = (cursor.screen, cursor.world) else {
+            continue;
+        };
+        let target = gates
+            .iter()
+            .find(|(_, t, ty, ..)| hit(t, &ty.kind, world))
+            .map(|(entity, t, ..)| (entity, t.translation.truncate() - world));
+        let mut press = CanvasPress {
+            button,
+            gate: target.map(|(e, _)| e),
+            start: screen,
+            offset: target.map_or(Vec2::ZERO, |(_, o)| o),
+            dragging: false,
+            moved: false,
+        };
+        if button == MouseButton::Left {
+            let mut next = *selected;
+            if let Some(entity) = canvas_click(press.gate, &mut next) {
+                writers.select.write(GateComponentSelectionEvent { entity });
+            }
+            selected.set_if_neq(next);
+        } else if let Some(gate) = press.gate
+            && !active.read_only
+        {
+            start_drag(&mut commands, gate, press.offset);
+            press.dragging = true;
+        }
+        pointer.press = Some(press);
+    }
+
+    let Some(mut press) = pointer.press else {
         return;
     };
-    let target = query
-        .iter()
-        .find(|(_, t, ty)| hit(t, &ty.kind, world))
-        .map(|(entity, ..)| entity);
-    let mut next = *selected;
-    if let Some(entity) = canvas_click(target, &mut next) {
-        select_writer.write(GateComponentSelectionEvent { entity });
+    // Movement.
+    if let Some(screen) = cursor.screen
+        && screen.distance(press.start) > DRAG_THRESHOLD
+    {
+        press.moved = true;
     }
-    selected.set_if_neq(next);
+    let held = buttons.pressed(press.button);
+    if held
+        && press.moved
+        && !press.dragging
+        && press.button == MouseButton::Left
+        && !active.read_only
+        && !tool_in_hand
+        && let Some(gate) = press.gate
+    {
+        start_drag(&mut commands, gate, press.offset);
+        press.dragging = true;
+    }
+    if press.dragging
+        && let Some(gate) = press.gate
+        && let Ok((_, mut transform, ..)) = gates.get_mut(gate)
+    {
+        let at = transform.translation.truncate();
+        let to = match cursor.world {
+            Some(world) if held => world + press.offset,
+            // Dropped after a move: onto the grid.
+            _ if !held && press.moved => super::layout::snap_to_grid(at),
+            _ => at,
+        };
+        if at != to {
+            transform.translation.x = to.x;
+            transform.translation.y = to.y;
+        }
+    }
+    if held {
+        pointer.press = Some(press);
+        return;
+    }
+    // Released: a click on a 1-bit input toggles it.
+    pointer.press = None;
+    if press.button == MouseButton::Left
+        && !press.moved
+        && !tool_in_hand
+        && let Some(gate) = press.gate
+        && let Ok((entity, _, ty, Some(drive), false)) = gates.get(gate)
+        && let Some(value) = input_click_value(&ty.kind, drive.value)
+    {
+        writers.inputs.write(SetInputValue { entity, value });
+    }
 }
 
 /// Update [`SelectedGate`] when a selection event fires.
@@ -222,72 +400,6 @@ pub fn update_selected_gate(
 ) {
     for event in event_reader.read() {
         selected_gate.0 = Some(event.entity);
-    }
-}
-
-/// Right-click to select and drag gates.
-#[allow(clippy::too_many_arguments)]
-pub fn gate_selection_system(
-    q_window: Query<&Window, With<PrimaryWindow>>,
-    q_camera: Query<(&Camera, &GlobalTransform)>,
-    grid: Res<SpatialGrid>,
-    ui_pointer: Res<UiPointerState>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-    query: Query<(&Transform, &GateType), With<GateIdentity>>,
-    mut commands: Commands,
-    selected_query: Query<Entity, With<Selected>>,
-    active: Res<crate::sim::ActiveCircuit>,
-) {
-    // Gates of a read-only demo cannot be dragged.
-    if ui_pointer.over_egui
-        || active.read_only
-        || !mouse_button_input.just_pressed(MouseButton::Right)
-    {
-        return;
-    }
-    for e in &selected_query {
-        commands.entity(e).remove::<Selected>();
-    }
-    let (Ok(window), Ok((camera, global_transform))) = (q_window.single(), q_camera.single())
-    else {
-        return;
-    };
-    let Some(world) = cursor_world_pos(window, camera, global_transform) else {
-        return;
-    };
-    for entity in grid.query_near(world, 100.0) {
-        if let Ok((transform, ty)) = query.get(entity)
-            && hit(transform, &ty.kind, world)
-        {
-            let offset = transform.translation.truncate() - world;
-            commands.entity(entity).insert(Selected { offset });
-            break;
-        }
-    }
-}
-
-/// Move the selected gate while the right mouse button is held.
-pub fn drag_selected_system(
-    q_window: Query<&Window, With<PrimaryWindow>>,
-    q_camera: Query<(&Camera, &GlobalTransform)>,
-    ui_pointer: Res<UiPointerState>,
-    mut query: Query<(&mut Transform, &Selected), With<GateIdentity>>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-) {
-    if ui_pointer.over_egui || !mouse_button_input.pressed(MouseButton::Right) {
-        return;
-    }
-    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single())
-    else {
-        return;
-    };
-    let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
-        return;
-    };
-    for (mut transform, selected) in &mut query {
-        let new_pos = world + selected.offset;
-        transform.translation.x = new_pos.x;
-        transform.translation.y = new_pos.y;
     }
 }
 

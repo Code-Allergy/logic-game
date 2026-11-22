@@ -95,6 +95,11 @@ pub struct Layout {
     pub crossings: (usize, usize),
 }
 
+/// The nearest grid point to `p` (where a part dragged on the canvas lands).
+pub fn snap_to_grid(p: Vec2) -> Vec2 {
+    (p / GRID).round() * GRID
+}
+
 fn snap_down(v: f32) -> f32 {
     (v / GRID).floor() * GRID
 }

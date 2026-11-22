@@ -22,9 +22,9 @@ use crate::sim::{
         request_screens_system, sync_design_system, update_tickrate_system,
     },
     systems::{
-        drag_selected_system, draw_sim_background_system, fit_camera_to_circuit_system,
-        gate_selection_system, save_on_exit_system, simulation_config_ui_system,
-        sync_bench_theme_system, ui_for_selected_gate, update_inputs_on_left_click,
+        CanvasCursor, CanvasPointer, canvas_cursor_system, canvas_pointer_system,
+        draw_sim_background_system, fit_camera_to_circuit_system, save_on_exit_system,
+        simulation_config_ui_system, sync_bench_theme_system, ui_for_selected_gate,
         update_selected_gate, update_spatial_grid_system, workspace_io_system,
     },
     view::{
@@ -148,6 +148,8 @@ impl Plugin for SimulationViewPlugin {
 
         app.add_plugins(SimulationVisualsPlugin)
             .init_resource::<SelectedGate>()
+            .init_resource::<CanvasCursor>()
+            .init_resource::<CanvasPointer>()
             .add_message::<crate::camera::FitView>()
             .insert_resource(SpatialGrid::new(100.0))
             .register_type::<crate::sim::LogicDisplay>()
@@ -197,10 +199,8 @@ impl Plugin for SimulationViewPlugin {
             .add_systems(
                 Update,
                 (
-                    gate_selection_system.before(drag_selected_system),
-                    drag_selected_system,
+                    (canvas_cursor_system, canvas_pointer_system).chain(),
                     update_spatial_grid_system,
-                    update_inputs_on_left_click,
                     update_selected_gate,
                 )
                     .run_if(in_state(state.clone())),
