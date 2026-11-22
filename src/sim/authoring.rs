@@ -515,6 +515,9 @@ pub struct LoadWorkspaceEvent {
     pub workspace: Arc<WorkspaceDocument>,
     /// Open it read-only (a built-in demo).
     pub read_only: bool,
+    /// It is not saved anywhere yet (an imported netlist, a copy that could
+    /// not be written): it counts as unsaved changes from the start.
+    pub unsaved: bool,
 }
 
 #[derive(Message)]
@@ -952,4 +955,7 @@ pub fn load_workspace_system(
     };
     spawn_document(&mut commands, root, root.id);
     *revision = WorkspaceRevision::default();
+    if event.unsaved && !event.read_only {
+        revision.mark_dirty();
+    }
 }

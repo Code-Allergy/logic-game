@@ -31,12 +31,12 @@ use bevy_egui::{
 };
 
 use crate::GameState;
-use crate::sim::{ActiveCircuit, Demo, DemoCatalog, LoadWorkspaceEvent, demos};
+use crate::sim::{ActiveCircuit, Demo, DemoCatalog, LoadWorkspaceEvent, WorkspaceRevision, demos};
 use crate::theme::{Palette, Theme, ThemeMode};
 use crate::ui_style::{HudIcon, egui_color, heavy, paint_icon, stroke};
 
 use super::EditorState;
-use super::workspace::save_workspace;
+use super::files::{OpenRequest, open_now, request_open};
 use bevy_egui::egui::emath::GuiRounding as _;
 use progress::{DemoProgress, RoadStatus, StopState, road_status};
 use road::{LabelSide, MapLayout, stop_size};
@@ -376,6 +376,7 @@ pub fn demo_map_system(
     editor: Option<ResMut<EditorState>>,
     mut load: MessageWriter<LoadWorkspaceEvent>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
+    open: (Option<Res<ActiveCircuit>>, Option<Res<WorkspaceRevision>>),
 ) -> Result {
     if game_state.get() != &GameState::DemoMap {
         return Ok(());
@@ -450,25 +451,20 @@ pub fn demo_map_system(
                 open_in_editor(
                     editor.as_deref_mut(),
                     &mut load,
-                    demo.title.clone(),
-                    Arc::clone(&demo.workspace),
-                    true,
+                    &open,
+                    OpenRequest::Workspace {
+                        name: demo.title.clone(),
+                        workspace: Arc::clone(&demo.workspace),
+                        read_only: true,
+                        unsaved: false,
+                        status: None,
+                    },
                 );
                 next_state.set(GameState::Simulating);
             }
             Action::Copy(demo) => {
                 // As the Library's "Copy to my workspace": fresh ids, saved
-                // right away.
-                let name = format!("{} (copy)", demo.title);
-                let copy = demos::editable_copy(&demo.workspace, &name);
-                let status = match save_workspace(&name, &copy) {
-                    Ok(()) => format!("Copied \"{}\" to your workspace \"{name}\".", demo.title),
-                    Err(err) => format!("Copied \"{}\" (not saved to disk: {err}).", demo.title),
-                };
-                if let Some(editor) = editor.as_deref_mut() {
-                    editor.status = Some(status);
-                    editor.saved_workspaces = None;
-                }
+                // right away under a free name.
                 if progress.mark_opened(&demo.id)
                     && let Err(e) = progress.save()
                 {
@@ -477,9 +473,8 @@ pub fn demo_map_system(
                 open_in_editor(
                     editor.as_deref_mut(),
                     &mut load,
-                    name,
-                    Arc::new(copy),
-                    false,
+                    &open,
+                    OpenRequest::CopyDemo(demo.id.clone()),
                 );
                 next_state.set(GameState::Simulating);
             }
@@ -489,26 +484,21 @@ pub fn demo_map_system(
     Ok(())
 }
 
-/// Load `workspace` into the editor (as the Library does).
+/// Open `request` in the editor as the Library does: behind the
+/// unsaved-changes guard, which the workshop shows.
 fn open_in_editor(
     editor: Option<&mut EditorState>,
     load: &mut MessageWriter<LoadWorkspaceEvent>,
-    name: String,
-    workspace: Arc<crate::sim::WorkspaceDocument>,
-    read_only: bool,
+    (active, revision): &(Option<Res<ActiveCircuit>>, Option<Res<WorkspaceRevision>>),
+    request: OpenRequest,
 ) {
-    if let Some(editor) = editor {
-        editor.current_workspace = Some(name.clone());
-        editor.workspace_file_name = name.clone();
-        editor.selected_gate_type = None;
-        editor.library_open = false;
-        editor.clear_connection();
+    match (editor, active, revision) {
+        (Some(editor), Some(active), Some(revision)) => {
+            editor.library_open = false;
+            request_open(editor, load, active, revision, request);
+        }
+        (editor, _, _) => open_now(editor, load, request),
     }
-    load.write(LoadWorkspaceEvent {
-        name,
-        workspace,
-        read_only,
-    });
 }
 
 /// The bench: ground and dot grid.

@@ -18,7 +18,10 @@
 //! - `hud`: the parts bar, minimap, zoom, build pill, signals and toasts.
 //! - `parts`: the parts bar's catalogue (tabs, number keys, names).
 //! - `systems`: wire-building selection.
-//! - `workspace`: on-disk workspace helpers.
+//! - `workspace`: on-disk workspace helpers (the player's data folder,
+//!   safe names, Save As, atomic writes).
+//! - `files`: replacing the open circuit, behind the unsaved-changes
+//!   guard.
 //! - `demo_map`: the full-screen demo map ([`crate::GameState::DemoMap`])
 //!   and the record of opened demos.
 //!
@@ -26,6 +29,7 @@
 //! messages of [`crate::sim::authoring`].
 
 pub mod demo_map;
+pub mod files;
 pub mod hud;
 pub mod parts;
 mod systems;
@@ -83,6 +87,11 @@ pub struct EditorState {
     pub dragging_part: Option<(GateKind, Option<String>)>,
     /// Gates (by id) pinned to the top of the Signals card.
     pub watched: Vec<Uuid>,
+    /// A workspace, demo or copy waiting to replace the open circuit until
+    /// the player answers the unsaved-changes question.
+    pub pending_open: Option<files::PendingOpen>,
+    /// The outcome of the last save (set by the save system).
+    pub last_save: Option<Result<String, String>>,
 }
 
 impl Default for EditorState {
@@ -106,6 +115,8 @@ impl Default for EditorState {
             part_tab: PartTab::default(),
             dragging_part: None,
             watched: Vec::new(),
+            pending_open: None,
+            last_save: None,
         }
     }
 }
