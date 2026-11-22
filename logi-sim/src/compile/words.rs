@@ -160,7 +160,7 @@ impl Graph<'_> {
 
     /// The node for `op` with these operands and immediate, `w` bits wide,
     /// after the rewrites in the module docs.
-    fn mk(&mut self, op: Op, a: u32, b: u32, c: u32, imm: u64, w: u8, depth: u32) -> u32 {
+    fn mk(&mut self, op: Op, a: u32, b: u32, c: u32, imm: u64, w: u8) -> u32 {
         let (sa, sb, sc) = op.slot_operands();
         if op != Op::Clock {
             let all_const = (!sa || self.cval(a).is_some())
@@ -177,9 +177,9 @@ impl Graph<'_> {
         match op {
             Op::Copy => return a,
             Op::Shr if imm == mask(imm.count_ones() as u8) && imm != 0 => {
-                return self.slice(a, b, imm.count_ones(), depth);
+                return self.slice(a, b, imm.count_ones());
             }
-            Op::Concat => return self.concat(a, b, c, w, depth),
+            Op::Concat => return self.concat(a, b, c, w, 0),
             Op::Mux => {
                 if let Some(s) = self.cval(a) {
                     return if s != 0 { c } else { b };
@@ -189,7 +189,7 @@ impl Graph<'_> {
                 }
                 let sel = *self.node(a);
                 if sel.kind == Kind::Op(Op::Not) && sel.imm == 1 && self.w(sel.a) == 1 {
-                    return self.mk(Op::Mux, sel.a, c, b, 0, w, depth);
+                    return self.mk(Op::Mux, sel.a, c, b, 0, w);
                 }
             }
             Op::And | Op::Or if a == b => return a,
@@ -254,7 +254,7 @@ impl Graph<'_> {
     }
 
     /// Bits `off..off + len` of node `x`.
-    fn slice(&mut self, x: u32, off: u32, len: u32, depth: u32) -> u32 {
+    fn slice(&mut self, x: u32, off: u32, len: u32) -> u32 {
         let nx = *self.node(x);
         let wx = nx.w as u32;
         if off >= wx || len == 0 {
@@ -268,14 +268,14 @@ impl Graph<'_> {
             Kind::Const => return self.konst((nx.imm >> off) & mask(len as u8), len as u8),
             Kind::Op(Op::Shr) => {
                 let l2 = nx.imm.count_ones();
-                return self.slice(nx.a, nx.b + off, len.min(l2.saturating_sub(off)), depth);
+                return self.slice(nx.a, nx.b + off, len.min(l2.saturating_sub(off)));
             }
             Kind::Op(Op::Concat) if (self.w(nx.a) as u32) <= nx.c => {
                 if off + len <= nx.c {
-                    return self.slice(nx.a, off, len, depth);
+                    return self.slice(nx.a, off, len);
                 }
                 if off >= nx.c {
-                    return self.slice(nx.b, off - nx.c, len, depth);
+                    return self.slice(nx.b, off - nx.c, len);
                 }
             }
             _ => {}
@@ -302,7 +302,7 @@ impl Graph<'_> {
             && oq as u32 == op_ as u32 + c
             && (lp as u32 == c || (lp as u32) < c && op_ as u32 + lp as u32 >= self.w(bp) as u32)
         {
-            return self.slice(bp, op_ as u32, c + lq as u32, depth);
+            return self.slice(bp, op_ as u32, c + lq as u32);
         }
         if depth < MAX_DEPTH
             && let Some(r) = self.merge_ops(p, q, c, depth)
@@ -332,7 +332,7 @@ impl Graph<'_> {
 
     /// `x` as a bitwise op or mux over the same bit positions: `(op, the
     /// select (for Mux), value operands, imm)`, through a slice.
-    fn as_op(&mut self, x: u32, depth: u32) -> Option<(Op, u32, [u32; 2], u64)> {
+    fn as_op(&mut self, x: u32) -> Option<(Op, u32, [u32; 2], u64)> {
         let (base, off, len) = self.as_slice(x);
         let nb = *self.node(base);
         let Kind::Op(op) = nb.kind else {
@@ -341,7 +341,7 @@ impl Graph<'_> {
         let sliced = base != x;
         let arm = |g: &mut Self, n: u32| {
             if sliced {
-                g.slice(n, off as u32, len as u32, depth)
+                g.slice(n, off as u32, len as u32)
             } else {
                 n
             }
@@ -372,8 +372,8 @@ impl Graph<'_> {
     /// `Concat(P, Q, c)` of two ops of one kind as one op of concatenated
     /// arms, if every arm's concatenation simplifies away.
     fn merge_ops(&mut self, p: u32, q: u32, c: u32, depth: u32) -> Option<u32> {
-        let (op, sp, ap, ip) = self.as_op(p, depth)?;
-        let (oq, sq, aq, iq) = self.as_op(q, depth)?;
+        let (op, sp, ap, ip) = self.as_op(p)?;
+        let (oq, sq, aq, iq) = self.as_op(q)?;
         if op != oq || sp != sq {
             return None;
         }
@@ -409,9 +409,9 @@ impl Graph<'_> {
             arms[k] = r;
         }
         let r = match op {
-            Op::Mux => self.mk(Op::Mux, sp, arms[0], arms[1], 0, w, depth + 1),
-            Op::Not => self.mk(Op::Not, arms[0], ZERO_SLOT, ZERO_SLOT, imm, w, depth + 1),
-            _ => self.mk(op, arms[0], arms[1], ZERO_SLOT, imm, w, depth + 1),
+            Op::Mux => self.mk(Op::Mux, sp, arms[0], arms[1], 0, w),
+            Op::Not => self.mk(Op::Not, arms[0], ZERO_SLOT, ZERO_SLOT, imm, w),
+            _ => self.mk(op, arms[0], arms[1], ZERO_SLOT, imm, w),
         };
         // P and Q are bit fields of the result (when they do not overlap).
         if self.w(p) as u32 <= c {
@@ -670,7 +670,7 @@ fn attempt(inp: &Input<'_>, groups: &[Vec<u32>]) -> (Attempt, Vec<(u32, u32)>) {
                 .map(|&x| inp.value_w[x as usize] as u32)
                 .sum::<u32>() as u8;
             let l = g.leaf(gs, gw);
-            g.slice(l, off as u32, inp.value_w[s as usize] as u32, 0)
+            g.slice(l, off as u32, inp.value_w[s as usize] as u32)
         } else {
             g.leaf(s, inp.value_w[s as usize])
         }
@@ -688,7 +688,7 @@ fn attempt(inp: &Input<'_>, groups: &[Vec<u32>]) -> (Attempt, Vec<(u32, u32)>) {
         let m = |s: u32, is: bool| if is { node_of[s as usize] } else { s };
         let (a, b, c) = (m(ins.a, sa), m(ins.b, sb), m(ins.c, sc));
         debug_assert!(!sa || a != NONE);
-        let n = g.mk(op, a, b, c, em.imms[k], em.widths[ins.dst as usize], 0);
+        let n = g.mk(op, a, b, c, em.imms[k], em.widths[ins.dst as usize]);
         node_of[ins.dst as usize] = n;
     }
     let node = |s: u32| -> u32 { node_of[s as usize] };
@@ -1009,7 +1009,7 @@ impl Emission {
             if let Some((t, toff)) = g.piece(n, 0, x.w)
                 && self.home.contains_key(&t)
             {
-                let r = g.slice(t, toff as u32, x.w as u32, 0);
+                let r = g.slice(t, toff as u32, x.w as u32);
                 if r != n && !self.redirect.contains_key(&r) {
                     self.redirect.insert(n, r);
                     self.stack.push(r);

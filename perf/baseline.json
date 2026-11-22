@@ -51,15 +51,15 @@
     },
     "program.cpu16.default.blocks": {
       "kind": "size",
-      "value": 93
+      "value": 66
     },
     "program.cpu16.default.commits": {
       "kind": "size",
-      "value": 125
+      "value": 77
     },
     "program.cpu16.default.instrs": {
       "kind": "size",
-      "value": 672
+      "value": 335
     },
     "program.cpu16.default.packed_lanes": {
       "kind": "size",
@@ -71,19 +71,19 @@
     },
     "program.cpu16.default.slots": {
       "kind": "size",
-      "value": 809
+      "value": 424
     },
     "program.cpu16.editor.blocks": {
       "kind": "size",
-      "value": 95
+      "value": 76
     },
     "program.cpu16.editor.commits": {
       "kind": "size",
-      "value": 125
+      "value": 77
     },
     "program.cpu16.editor.instrs": {
       "kind": "size",
-      "value": 677
+      "value": 369
     },
     "program.cpu16.editor.packed_lanes": {
       "kind": "size",
@@ -95,11 +95,11 @@
     },
     "program.cpu16.editor.slots": {
       "kind": "size",
-      "value": 815
+      "value": 459
     },
     "program.cpu16_rtl.default.blocks": {
       "kind": "size",
-      "value": 53
+      "value": 50
     },
     "program.cpu16_rtl.default.commits": {
       "kind": "size",
@@ -107,7 +107,7 @@
     },
     "program.cpu16_rtl.default.instrs": {
       "kind": "size",
-      "value": 137
+      "value": 135
     },
     "program.cpu16_rtl.default.packed_lanes": {
       "kind": "size",
@@ -119,11 +119,11 @@
     },
     "program.cpu16_rtl.default.slots": {
       "kind": "size",
-      "value": 171
+      "value": 169
     },
     "program.cpu16_rtl.editor.blocks": {
       "kind": "size",
-      "value": 55
+      "value": 52
     },
     "program.cpu16_rtl.editor.commits": {
       "kind": "size",
@@ -131,7 +131,7 @@
     },
     "program.cpu16_rtl.editor.instrs": {
       "kind": "size",
-      "value": 139
+      "value": 137
     },
     "program.cpu16_rtl.editor.packed_lanes": {
       "kind": "size",
@@ -143,11 +143,11 @@
     },
     "program.cpu16_rtl.editor.slots": {
       "kind": "size",
-      "value": 173
+      "value": 171
     },
     "program.dag32_10k.default.blocks": {
       "kind": "size",
-      "value": 337
+      "value": 147
     },
     "program.dag32_10k.default.commits": {
       "kind": "size",
@@ -155,7 +155,7 @@
     },
     "program.dag32_10k.default.instrs": {
       "kind": "size",
-      "value": 853
+      "value": 251
     },
     "program.dag32_10k.default.packed_lanes": {
       "kind": "size",
@@ -167,11 +167,11 @@
     },
     "program.dag32_10k.default.slots": {
       "kind": "size",
-      "value": 920
+      "value": 341
     },
     "program.gates1_100k.default.blocks": {
       "kind": "size",
-      "value": 2287
+      "value": 2262
     },
     "program.gates1_100k.default.commits": {
       "kind": "size",
@@ -179,7 +179,7 @@
     },
     "program.gates1_100k.default.instrs": {
       "kind": "size",
-      "value": 23587
+      "value": 23009
     },
     "program.gates1_100k.default.packed_lanes": {
       "kind": "size",
@@ -191,7 +191,7 @@
     },
     "program.gates1_100k.default.slots": {
       "kind": "size",
-      "value": 23847
+      "value": 23269
     },
     "program.testkit_cpu.default.blocks": {
       "kind": "size",
@@ -223,7 +223,7 @@
     },
     "tick.cpu16.default.ops": {
       "kind": "ops",
-      "value": 797
+      "value": 412
     },
     "tick.cpu16.editor.allocs": {
       "kind": "allocs",
@@ -231,7 +231,7 @@
     },
     "tick.cpu16.editor.ops": {
       "kind": "ops",
-      "value": 802
+      "value": 446
     },
     "tick.cpu16_rtl.default.allocs": {
       "kind": "allocs",
@@ -239,7 +239,7 @@
     },
     "tick.cpu16_rtl.default.ops": {
       "kind": "ops",
-      "value": 152
+      "value": 150
     },
     "tick.cpu16_rtl.editor.allocs": {
       "kind": "allocs",
@@ -247,7 +247,7 @@
     },
     "tick.cpu16_rtl.editor.ops": {
       "kind": "ops",
-      "value": 154
+      "value": 152
     },
     "tick.dag32_10k.default.allocs": {
       "kind": "allocs",
@@ -255,7 +255,7 @@
     },
     "tick.dag32_10k.default.ops": {
       "kind": "ops",
-      "value": 853
+      "value": 251
     },
     "tick.gates1_100k.default.allocs": {
       "kind": "allocs",
@@ -263,7 +263,7 @@
     },
     "tick.gates1_100k.default.ops": {
       "kind": "ops",
-      "value": 23587
+      "value": 23009
     },
     "tick.testkit_cpu.default.allocs": {
       "kind": "allocs",

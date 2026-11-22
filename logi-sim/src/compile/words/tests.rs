@@ -289,3 +289,17 @@ fn random_designs_match_with_and_without() {
         }
     }
 }
+
+/// The perf gate's 10k-node word DAG (`dag32_10k`), which the pass
+/// shrinks most: exact against the pass off and the reference.
+#[test]
+fn large_word_dag_matches_with_and_without() {
+    let d = generate(&GenConfig::dag(1, 10_000, 32)).design;
+    for debug in [false, true] {
+        on_off_with("dag32_10k", &d, debug, 12, |o| Options {
+            words: false,
+            ..o
+        });
+    }
+    check_design(&d, 3, 12, &Options::default()).unwrap();
+}
