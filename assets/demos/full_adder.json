@@ -7,14 +7,14 @@
       "name": "full_adder",
       "title": "Full adder",
       "nodes": [
-        {"name": "A", "type": "Input", "at": [-300, 100]},
-        {"name": "B", "type": "Input", "at": [-300, 0]},
-        {"name": "Cin", "type": "Input", "at": [-300, -100]},
-        {"name": "ha1", "use": "half_adder/half_adder", "at": [-120, 50]},
-        {"name": "ha2", "use": "half_adder/half_adder", "at": [40, -30]},
-        {"name": "carry", "use": "gates/or", "at": [180, -100]},
-        {"name": "Sum", "type": "Output", "at": [320, 0]},
-        {"name": "Cout", "type": "Output", "at": [320, -100]}
+        {"name": "A", "type": "Input", "at": [0, 80]},
+        {"name": "B", "type": "Input", "at": [0, 0]},
+        {"name": "Cin", "type": "Input", "at": [0, -80]},
+        {"name": "ha1", "use": "half_adder/half_adder", "at": [140, 40]},
+        {"name": "ha2", "use": "half_adder/half_adder", "at": [280, 0]},
+        {"name": "carry", "use": "gates/or", "at": [420, -120]},
+        {"name": "Sum", "type": "Output", "at": [560, 0]},
+        {"name": "Cout", "type": "Output", "at": [560, -120]}
       ],
       "wires": [
         ["A", "ha1.A"],

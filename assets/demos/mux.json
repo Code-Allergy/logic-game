@@ -7,14 +7,14 @@
       "name": "mux2",
       "title": "2-to-1 multiplexer",
       "nodes": [
-        {"name": "Sel", "type": "Input", "at": [-300, 150]},
-        {"name": "A", "type": "Input", "at": [-300, 50]},
-        {"name": "B", "type": "Input", "at": [-300, -50]},
-        {"name": "not_sel", "use": "gates/not", "at": [-150, 150]},
-        {"name": "pass_a", "use": "gates/and", "at": [0, 80]},
-        {"name": "pass_b", "use": "gates/and", "at": [0, -50]},
-        {"name": "either", "use": "gates/or", "at": [150, 0]},
-        {"name": "Y", "type": "Output", "at": [300, 0]}
+        {"name": "Sel", "type": "Input", "at": [0, 120]},
+        {"name": "A", "type": "Input", "at": [0, 40]},
+        {"name": "B", "type": "Input", "at": [0, -40]},
+        {"name": "not_sel", "use": "gates/not", "at": [140, 120]},
+        {"name": "pass_a", "use": "gates/and", "at": [280, 80]},
+        {"name": "pass_b", "use": "gates/and", "at": [280, -40]},
+        {"name": "either", "use": "gates/or", "at": [420, 20]},
+        {"name": "Y", "type": "Output", "at": [560, 20]}
       ],
       "wires": [
         ["Sel", "not_sel.A", "pass_b.B"],
@@ -30,11 +30,11 @@
       "name": "mux2x8",
       "title": "8-bit 2-to-1 multiplexer",
       "nodes": [
-        {"name": "Sel", "type": "Input", "at": [-300, 150]},
-        {"name": "A", "type": "Input", "w": 8, "at": [-300, 50]},
-        {"name": "B", "type": "Input", "w": 8, "at": [-300, -50]},
-        {"name": "bit", "use": "mux2", "at": [0, 280], "count": 8, "step": [0, -80]},
-        {"name": "Y", "type": "Output", "w": 8, "at": [300, 0]}
+        {"name": "Sel", "type": "Input", "at": [0, 380]},
+        {"name": "A", "type": "Input", "w": 8, "at": [0, 0]},
+        {"name": "B", "type": "Input", "w": 8, "at": [0, -480]},
+        {"name": "bit", "use": "mux2", "at": [360, -40], "count": 8, "step": [0, -120]},
+        {"name": "Y", "type": "Output", "w": 8, "at": [640, -460]}
       ],
       "wires": [["Sel", "bit.Sel"], ["A", "bit.A"], ["B", "bit.B"], ["bit.Y", "Y"]]
     },
@@ -42,13 +42,13 @@
       "name": "main",
       "title": "Multiplexer",
       "nodes": [
-        {"name": "Sel", "type": "Input", "at": [-300, 150]},
-        {"name": "A", "type": "Input", "w": 8, "at": [-300, 50]},
-        {"name": "B", "type": "Input", "w": 8, "at": [-300, -50]},
-        {"name": "mux", "use": "mux2x8", "label": "8-bit mux (gates)", "at": [0, 80]},
-        {"name": "prim", "type": "Mux", "w": 8, "label": "Mux primitive", "at": [0, -100]},
-        {"name": "y_gates", "type": "Output", "w": 8, "label": "Y (gates)", "at": [300, 80]},
-        {"name": "y_mux", "type": "Output", "w": 8, "label": "Y (Mux)", "at": [300, -100]}
+        {"name": "Sel", "type": "Input", "at": [0, 80]},
+        {"name": "A", "type": "Input", "w": 8, "at": [0, 0]},
+        {"name": "B", "type": "Input", "w": 8, "at": [0, -80]},
+        {"name": "mux", "use": "mux2x8", "label": "8-bit mux (gates)", "at": [280, 80]},
+        {"name": "prim", "type": "Mux", "w": 8, "label": "Mux primitive", "at": [280, -80]},
+        {"name": "y_gates", "type": "Output", "w": 8, "label": "Y (gates)", "at": [420, 80]},
+        {"name": "y_mux", "type": "Output", "w": 8, "label": "Y (Mux)", "at": [420, -80]}
       ],
       "wires": [
         ["Sel", "mux.Sel", "prim.sel"],
