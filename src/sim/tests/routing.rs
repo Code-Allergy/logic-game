@@ -104,9 +104,10 @@ fn every_demo_and_gallery_circuit_routes_cleanly() {
 }
 
 /// The rubber band of a wire drag ([`band_route`]) is routed like a wire
-/// with only the tiles near its ends: it joins the two pins with
-/// horizontal and vertical runs, in the biggest circuit too. (Timing is
-/// printed with `--nocapture`: it is routed once per target pin.)
+/// with only the tiles near its ends: it joins the two pins (or a pin and
+/// the pointer on the grid) with horizontal and vertical runs, in the
+/// biggest circuit too. (Timing is printed with `--nocapture`: it is
+/// routed once per target pin or grid cell the pointer enters.)
 #[test]
 fn the_rubber_band_routes_between_the_pins_of_any_net() {
     use crate::sim::wiring::band_route;
@@ -124,8 +125,9 @@ fn the_rubber_band_routes_between_the_pins_of_any_net() {
         .expect("the top level");
     let nets = document_nets(doc, &library);
     let (mut bands, mut worst, mut total) = (0, Duration::ZERO, Duration::ZERO);
+    let pointer = |p: Vec2| ((p + Vec2::new(130.0, -70.0)) / 20.0).round() * 20.0;
     for net in &nets.problem.nets {
-        for &sink in &net.sinks {
+        for sink in net.sinks.iter().copied().chain([pointer(net.driver)]) {
             let start = Instant::now();
             let path = band_route(&nets.problem.boxes, net.driver, sink);
             let took = start.elapsed();

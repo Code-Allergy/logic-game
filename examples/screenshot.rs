@@ -520,13 +520,17 @@ fn scripted_wire(
         return;
     };
     match shot.frame {
-        44 => {
+        // Pointed at again as the button goes down, in case the view
+        // settled in between.
+        44 | 45 => {
             let a = find_pin(from, &parts, &library);
             let b = find_pin(to, &parts, &library);
             *ends = Some((a, b));
             window.set_cursor_position(to_screen(a));
+            if shot.frame == 45 {
+                buttons.press(MouseButton::Left);
+            }
         }
-        45 => buttons.press(MouseButton::Left),
         46..=55 => {
             let step = (shot.frame - 45) as f32 / 10.0;
             let at = ends.map(|(a, b)| a.lerp(b, step) + Vec2::new(1.0, -1.0) * step);

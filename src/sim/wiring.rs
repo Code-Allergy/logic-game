@@ -10,9 +10,10 @@
 //!   dragged) and on release decides with [`drop_outcome`]: a wire goes
 //!   through [`CreateWire`] like any other edit, a refusal is a toast;
 //! - [`wire_drag_visuals_system`] draws it in the Workshop look: a cased
-//!   rubber band (routed onto a compatible pin, an orthogonal preview to
-//!   the bare pointer), marigold rings on the hovered and the compatible
-//!   pins, the other pins faded under a veil of the bench colour;
+//!   rubber band routed like a wire (to the pin under the pointer, else to
+//!   the pointer on the grid; tomato over a pin it cannot drop on),
+//!   marigold rings on the hovered and the compatible pins, the other pins
+//!   faded under a veil of the bench colour;
 //! - [`pin_tooltip_system`] names the pin under the pointer (`q · 8 bit`).
 
 use std::f32::consts::TAU;
@@ -22,7 +23,7 @@ use bevy_egui::{EguiContexts, egui};
 use uuid::Uuid;
 
 use super::art::{BIT_CORE, BUS_CORE, CanvasArt, Paint, PinLayout, casing_for};
-use super::routing::{self, NetSpec, RouteProblem};
+use super::routing::{self, GRID, NetSpec, RouteProblem};
 use super::shapes::{Shape, arc, round_corners};
 use super::systems::CanvasCursor;
 use super::visuals::{TileSpec, WIRE_CORNER};
@@ -250,9 +251,10 @@ pub fn pin_title(
 /// out of its routing problem, so routing it costs the same in any circuit.
 const BAND_MARGIN: f32 = 160.0;
 
-/// An orthogonal preview from `from` (a pin) to `to`: out of the pin
-/// horizontally, across at the middle, and in horizontally (a Z; an L or a
-/// straight run when the ends line up).
+/// An orthogonal path from `from` (a pin) to `to`: out of the pin
+/// horizontally, across at the middle, and in horizontally (a Z; a
+/// straight run when the ends line up). The band where routing finds
+/// nothing.
 pub fn band_preview(from: Vec2, to: Vec2) -> Vec<Vec2> {
     let mid = (from.x + to.x) * 0.5;
     let mut points = vec![from, Vec2::new(mid, from.y), Vec2::new(mid, to.y), to];
@@ -369,25 +371,29 @@ pub struct DragArtState {
     hover: Option<(PinRef, Paint)>,
 }
 
-/// The rubber band's points: routed onto a compatible target, else an
-/// orthogonal preview to the pointer.
-fn band_points(pointer: &PinPointer, drag: &WireDrag, boxes: &[Rect]) -> Vec<Vec2> {
-    match pointer.target().filter(|t| t.compatible(&drag.from)) {
-        Some(target) => {
-            let (driver, sink) = if drag.from.output {
-                (drag.from.at, target.at)
-            } else {
-                (target.at, drag.from.at)
-            };
-            band_route(boxes, driver, sink)
-        }
-        None => band_preview(drag.from.at, drag.pointer),
+/// Where the rubber band ends: on the pin under the pointer, else at the
+/// pointer snapped to the routing grid (so the band is routed again only
+/// when the pointer crosses into another grid cell).
+fn band_end(pointer: &PinPointer, drag: &WireDrag) -> Vec2 {
+    pointer
+        .target()
+        .map_or_else(|| (drag.pointer / GRID).round() * GRID, |t| t.at)
+}
+
+/// The rubber band's points: routed like a wire between its pin and its
+/// end, in the wire's direction.
+fn band_points(drag: &WireDrag, end: Vec2, boxes: &[Rect]) -> Vec<Vec2> {
+    if drag.from.output {
+        band_route(boxes, drag.from.at, end)
+    } else {
+        band_route(boxes, end, drag.from.at)
     }
 }
 
 /// Draw the wire drag (see the module docs). Builds its meshes only when
-/// [`PinPointer`] changes, and routes the band only when its target pin
-/// changes: while the pointer roams free the band is an orthogonal preview.
+/// [`PinPointer`] changes, and routes the band (one net, with the tiles
+/// near it: well under a millisecond) only when its end moves to another
+/// pin or grid cell.
 #[allow(clippy::too_many_arguments)]
 pub fn wire_drag_visuals_system(
     mut commands: Commands,
@@ -489,24 +495,20 @@ pub fn wire_drag_visuals_system(
         } else {
             Paint::On
         };
-        (d, target.filter(|t| t.compatible(&d.from)), paint)
+        (d, paint)
     });
-    let key_points = band.map(|(d, snapped, _)| match snapped {
-        // Routed once per target: the pointer may roam over the pin.
-        Some(t) => vec![d.from.at, t.at],
-        None => vec![d.from.at, d.pointer],
-    });
+    let end = drag.map(|d| band_end(&pointer, &d));
     let key = band
-        .zip(key_points)
-        .map(|((d, _, paint), points)| (points, paint, d.from.width > 1));
+        .zip(end)
+        .map(|((d, paint), end)| (vec![d.from.at, end], paint, d.from.width > 1));
     if key != state.band {
         let built = match (&band, &key) {
-            (Some((d, _, paint)), Some((_, _, bus))) => {
+            (Some((d, paint)), Some((ends, _, bus))) => {
                 let boxes: Vec<Rect> = gates
                     .iter()
                     .map(|(_, _, t, ty, ..)| routing::gate_box(&ty.kind, t.translation.truncate()))
                     .collect();
-                let points = round_corners(&band_points(&pointer, d, &boxes), WIRE_CORNER);
+                let points = round_corners(&band_points(d, ends[1], &boxes), WIRE_CORNER);
                 let core = if *bus { BUS_CORE } else { BIT_CORE };
                 Some((
                     Shape::path_stroke(&points, casing_for(core)),
