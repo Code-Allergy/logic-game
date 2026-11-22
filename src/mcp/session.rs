@@ -394,7 +394,7 @@ impl Session {
             "stats" => Ok(view::stats(ws, doc)),
             "groups" => Ok(view::groups(ws, doc)),
             "status" => Ok(view::status(ws)),
-            "compiled" => compiled::view(ws, place),
+            "compiled" | "compile" => compiled::view(ws, place),
             other => Err(format!(
                 "unknown view \"{other}\" (views: outline, diagnostics, stats, groups, status, \
                  compiled)"
