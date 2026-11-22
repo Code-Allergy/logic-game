@@ -244,6 +244,15 @@ fn main() {
         .run();
 }
 
+/// What `--multi`, `--make-chip` and `--open-chip` use.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ChipShot<'w, 's> {
+    group: ResMut<'w, MultiSelection>,
+    ids: Query<'w, 's, (Entity, &'static GateIdentity, &'static GateType)>,
+    make: MessageWriter<'w, MakeChip>,
+    open_instance: MessageWriter<'w, OpenInstanceView>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drive(
     mut commands: Commands,
@@ -262,15 +271,14 @@ fn drive(
     windows: Query<&Window>,
     mut exit: MessageWriter<AppExit>,
     // Grouped: a system takes at most 16 parameters.
-    (mut map, mut active, mut group, ids, mut make, mut open_instance): (
-        ResMut<DemoMapState>,
-        ResMut<ActiveCircuit>,
-        ResMut<MultiSelection>,
-        Query<(Entity, &GateIdentity, &GateType)>,
-        MessageWriter<MakeChip>,
-        MessageWriter<OpenInstanceView>,
-    ),
+    (mut map, mut active, mut chips): (ResMut<DemoMapState>, ResMut<ActiveCircuit>, ChipShot),
 ) {
+    let ChipShot {
+        group,
+        ids,
+        make,
+        open_instance,
+    } = &mut chips;
     shot.frame += 1;
     if shot.map {
         match shot.frame {
