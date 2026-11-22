@@ -22,11 +22,10 @@ const CONGESTED: [&str; 4] = [
     "register_file/regfile4x8",
     "cpu/cpu",
     "priority_encoder/prio8",
-    // Preview branch only: the ALU as re-laid out in the relayout PR.
     "alu/alu8",
 ];
-/// Preview branch only: the 16-bit CPU's top level, whose one fallback the
-/// routing PR reports (it routes the CPU from its own branch).
+/// Circuits whose router may report one fallback: the 16-bit CPU's top
+/// level.
 const MAY_FALL_BACK: [&str; 1] = ["cpu16/cpu16"];
 const MAX_CROSSED: usize = 4;
 
