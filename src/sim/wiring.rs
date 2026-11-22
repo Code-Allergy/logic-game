@@ -16,15 +16,13 @@
 //!   faded under a veil of the bench colour;
 //! - [`pin_tooltip_system`] names the pin under the pointer (`q · 8 bit`).
 
-use std::f32::consts::TAU;
-
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use uuid::Uuid;
 
-use super::art::{BIT_CORE, BUS_CORE, CanvasArt, Paint, PinLayout, casing_for};
+use super::art::{BIT_CORE, BUS_CORE, CanvasArt, PIN_RING, Paint, PinLayout, casing_for};
 use super::routing::{self, GRID, NetSpec, RouteProblem};
-use super::shapes::{Shape, arc, round_corners};
+use super::shapes::{Shape, circle_segments, round_corners};
 use super::systems::CanvasCursor;
 use super::visuals::{TileSpec, WIRE_CORNER};
 use super::{CircuitLibrary, CreateWire, GateIdentity, GateKind, GateLabel, GateType};
@@ -303,22 +301,27 @@ pub enum DragMark {
     BandCore,
     /// Veils over the pins the dragged wire cannot drop on.
     Veils,
-    /// Rings around the pins it can drop on: ink, then marigold.
+    /// Rings around the pins it can drop on: a fill between pin and
+    /// ring, ink, then marigold.
+    RingFill,
     RingInk,
     RingCore,
     /// The ring around the hovered pin: ink, then marigold (tomato over a
-    /// pin a drag cannot drop on).
+    /// pin a drag cannot drop on), with its fill.
+    HoverFill,
     HoverInk,
     HoverCore,
 }
 
 impl DragMark {
-    const ALL: [DragMark; 7] = [
+    const ALL: [DragMark; 9] = [
         DragMark::BandCasing,
         DragMark::BandCore,
         DragMark::Veils,
+        DragMark::RingFill,
         DragMark::RingInk,
         DragMark::RingCore,
+        DragMark::HoverFill,
         DragMark::HoverInk,
         DragMark::HoverCore,
     ];
@@ -328,25 +331,33 @@ impl DragMark {
             DragMark::BandCasing => BAND_Z,
             DragMark::BandCore => BAND_Z + 0.02,
             DragMark::Veils => MARK_Z,
+            DragMark::RingFill => MARK_Z + 0.01,
             DragMark::RingInk => MARK_Z + 0.02,
             DragMark::RingCore => MARK_Z + 0.04,
+            DragMark::HoverFill => MARK_Z + 0.05,
             DragMark::HoverInk => MARK_Z + 0.06,
             DragMark::HoverCore => MARK_Z + 0.08,
         }
     }
 }
 
-/// A ring of `width` at `radius` around `centre`.
+/// A ring of `width` at `radius` around `centre`: a true annulus, with
+/// enough segments to stay round at the closest zoom.
 fn ring(centre: Vec2, radius: f32, width: f32) -> Shape {
-    let mut points = arc(centre, radius, 0.0, TAU, 28);
-    points.pop();
-    Shape::stroke(&points, width, true)
+    let outer = radius + width * 0.5;
+    let segments = circle_segments(outer / crate::camera::MIN_WPP);
+    Shape::annulus(centre, radius - width * 0.5, outer, segments)
 }
 
-/// The cased ring of a pin mark: `(ink, core)` shapes.
-fn pin_mark(pin: &PinRef, gap: f32, core: f32) -> (Shape, Shape) {
+/// The cased ring of a pin mark: `(fill, ink, core)` shapes. The fill
+/// closes the gap between the pin dot and the ring (in the tile colour),
+/// so the tile's outline and the wire under the gap do not show through
+/// as spokes.
+fn pin_mark(pin: &PinRef, gap: f32, core: f32) -> (Shape, Shape, Shape) {
     let r = pin.radius + gap + core * 0.5 + 1.0;
-    (ring(pin.at, r, core + 3.0), ring(pin.at, r, core))
+    let dot = pin.radius + PIN_RING.min(pin.radius * 0.6);
+    let fill = ring(pin.at, (dot + r) * 0.5, r - dot);
+    (fill, ring(pin.at, r, core + 3.0), ring(pin.at, r, core))
 }
 
 /// A part as the drag art reads it: pins and box.
@@ -439,7 +450,12 @@ pub fn wire_drag_visuals_system(
     let from = drag.map(|d| d.from);
     if from != state.from {
         state.from = from;
-        let (mut veils, mut ink, mut core) = (Shape::default(), Shape::default(), Shape::default());
+        let (mut veils, mut fill, mut ink, mut core) = (
+            Shape::default(),
+            Shape::default(),
+            Shape::default(),
+            Shape::default(),
+        );
         if let Some(from) = from {
             for (entity, id, t, _, layout, spec) in &gates {
                 let (Some(layout), Some(spec)) = (layout, spec) else {
@@ -450,7 +466,8 @@ pub fn wire_drag_visuals_system(
                         continue;
                     }
                     if pin.compatible(&from) {
-                        let (i, c) = pin_mark(&pin, 1.5, 2.5);
+                        let (f, i, c) = pin_mark(&pin, 1.5, 2.5);
+                        fill.append(&f);
                         ink.append(&i);
                         core.append(&c);
                     } else {
@@ -461,6 +478,7 @@ pub fn wire_drag_visuals_system(
         }
         let shown = from.is_some();
         shapes.push((DragMark::Veils, shown.then_some(veils), Paint::Bench));
+        shapes.push((DragMark::RingFill, shown.then_some(fill), Paint::Tile));
         shapes.push((DragMark::RingInk, shown.then_some(ink), Paint::Ink));
         shapes.push((DragMark::RingCore, shown.then_some(core), Paint::On));
     }
@@ -472,14 +490,15 @@ pub fn wire_drag_visuals_system(
     });
     if hover != state.hover {
         state.hover = hover;
-        let (ink, core) = match hover {
+        let (fill, ink, core) = match hover {
             Some((pin, _)) => {
-                let (i, c) = pin_mark(&pin, 3.5, 3.5);
-                (Some(i), Some(c))
+                let (f, i, c) = pin_mark(&pin, 3.5, 3.5);
+                (Some(f), Some(i), Some(c))
             }
-            None => (None, None),
+            None => (None, None, None),
         };
         let paint = hover.map_or(Paint::On, |h| h.1);
+        shapes.push((DragMark::HoverFill, fill, Paint::Tile));
         shapes.push((DragMark::HoverInk, ink, Paint::Ink));
         shapes.push((DragMark::HoverCore, core, paint));
     }
