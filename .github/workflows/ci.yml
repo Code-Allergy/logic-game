@@ -20,7 +20,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -41,7 +42,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-cargo-all-doc-tests-${{ hashFiles('**/Cargo.toml') }}
+          key: ubuntu-latest-cargo-all-doc-tests-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ubuntu-latest-cargo-all-doc-tests-
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -61,7 +63,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-cargo-lint-${{ hashFiles('**/Cargo.toml') }}
+          key: ubuntu-latest-cargo-lint-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ubuntu-latest-cargo-lint-
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable

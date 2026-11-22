@@ -18,7 +18,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ubuntu-latest-cargo-bench-${{ hashFiles('**/Cargo.toml') }}
+          key: ubuntu-latest-cargo-bench-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ubuntu-latest-cargo-bench-
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
