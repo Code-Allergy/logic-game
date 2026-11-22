@@ -205,7 +205,8 @@ pub struct Challenge {
     pub allowed: Option<Vec<String>>,
     /// Primitives, and `"demo/circuit"` chips, it must not use.
     pub forbidden: Vec<String>,
-    forbidden_defs: Vec<(String, Uuid)>,
+    /// The forbidden chips: reference, definition id, name for the player.
+    forbidden_defs: Vec<(String, Uuid, String)>,
     pub test: ChallengeTest,
     /// The starter file as written.
     pub source: SourceFile,
@@ -249,8 +250,8 @@ impl Challenge {
             let names: Vec<String> = self
                 .forbidden
                 .iter()
-                .map(|f| match self.forbidden_defs.iter().find(|(r, _)| r == f) {
-                    Some(_) => format!("the {f} chip"),
+                .map(|f| match self.forbidden_defs.iter().find(|(r, ..)| r == f) {
+                    Some((_, _, label)) => label.clone(),
                     None => display(f),
                 })
                 .collect();
@@ -283,8 +284,8 @@ impl Challenge {
                     GateKind::SubCircuit { definition } => self
                         .forbidden_defs
                         .iter()
-                        .find(|(_, id)| id == definition)
-                        .map(|(r, _)| format!("the {r} chip")),
+                        .find(|(_, id, _)| id == definition)
+                        .map(|(_, _, label)| label.clone()),
                     kind => (!self.allows_kind(kind)).then(|| kind.display_name().to_string()),
                 };
                 if let Some(what) = refused {
@@ -300,7 +301,7 @@ impl Challenge {
         !self
             .forbidden_defs
             .iter()
-            .any(|(_, id)| *id == chip.root.id)
+            .any(|(_, id, _)| *id == chip.root.id)
             && self.refused_part(chip).is_none()
     }
 
@@ -768,7 +769,10 @@ pub(super) fn load(
                 let id = catalog
                     .definition_id(f)
                     .ok_or_else(|| place(format!("\"forbidden\": no circuit \"{f}\"")))?;
-                forbidden_defs.push((f.clone(), id));
+                let name = catalog
+                    .definition(id)
+                    .map_or_else(|| f.clone(), |d| d.name.clone());
+                forbidden_defs.push((f.clone(), id, format!("the {name} chip")));
             } else if !PRIMITIVE_TYPES.contains(&f.as_str()) {
                 return Err(place(format!(
                     "\"forbidden\": \"{f}\" is neither a primitive type nor \"demo/circuit\""

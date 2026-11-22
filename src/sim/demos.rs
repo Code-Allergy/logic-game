@@ -470,6 +470,11 @@ impl DemoCatalog {
         self.names.get(reference).copied()
     }
 
+    /// A definition of a demo or gallery item, by id.
+    pub fn definition(&self, id: Uuid) -> Option<&Arc<CircuitDocument>> {
+        self.library.get(id)
+    }
+
     pub fn category_title(&self, id: &str) -> &str {
         self.categories
             .iter()

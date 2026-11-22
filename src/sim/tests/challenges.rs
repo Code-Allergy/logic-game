@@ -435,7 +435,7 @@ fn parts_outside_the_rules_are_refused() {
     let report = c.check(&demo_chip);
     assert!(
         matches!(&report.failure, Some(Failure::Part { part, .. })
-            if part == "the full_adder/full_adder chip"),
+            if part == "the Full adder chip"),
         "{}",
         report.summary()
     );
@@ -470,7 +470,7 @@ fn parts_outside_the_rules_are_refused() {
     assert!(!c.allows_kind(&GateKind::Add { w: 8 }));
     assert_eq!(
         c.parts_rule().as_deref(),
-        Some("No ADD, the ripple_adder/adder8 chip")
+        Some("No ADD, the 8-bit ripple-carry adder chip")
     );
 }
 
