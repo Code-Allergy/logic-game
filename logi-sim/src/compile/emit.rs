@@ -138,7 +138,7 @@ pub(super) fn emit(mut e: Elab<'_>) -> Program {
         for (id, node) in &def.nodes {
             let i = |k: usize| node.inputs[k].map_or(ZERO_SLOT, slot);
             let o = |k: usize| slot(node.outputs[k]);
-            let key = |loc| StateKey { path: NodePath { instances: e.path(inst), node: id }, loc };
+            let key = |loc, width| StateKey { path: NodePath { instances: e.path(inst), node: id }, loc, width };
             lower(&mut em, &node.kind, &i, &o, key);
         }
     }
@@ -177,7 +177,7 @@ fn lower(
     kind: &NodeKind,
     i: &dyn Fn(usize) -> u32,
     o: &dyn Fn(usize) -> u32,
-    key: impl Fn(StateLoc) -> StateKey,
+    key: impl Fn(StateLoc, u8) -> StateKey,
 ) {
     use NodeKind as K;
     let z = ZERO_SLOT;
@@ -243,26 +243,26 @@ fn lower(
             let next = em.temp(*w);
             em.push(Op::Copy, next, i(0), z, z, 0);
             em.commits.push(Commit::Copy { state: o(0), next });
-            em.state_keys.push(key(StateLoc::Slot(o(0))));
+            em.state_keys.push(key(StateLoc::Slot(o(0)), *w));
         }
         K::Register { w } => {
             let next = em.temp(*w);
             em.push(Op::Mux, next, i(0), o(0), i(1), 0);
             em.commits.push(Commit::Copy { state: o(0), next });
-            em.state_keys.push(key(StateLoc::Slot(o(0))));
+            em.state_keys.push(key(StateLoc::Slot(o(0)), *w));
         }
         K::SrLatch => {
             let next = em.temp(1);
             em.push(Op::SrNext, next, i(0), i(1), o(0), 0);
             em.commits.push(Commit::Copy { state: o(0), next });
-            em.state_keys.push(key(StateLoc::Slot(o(0))));
+            em.state_keys.push(key(StateLoc::Slot(o(0)), 1));
         }
         K::DLatch { w } => {
             // The output is combinational (transparent); state is hidden.
             let state = em.temp(*w);
             em.push(Op::Mux, o(0), i(0), state, i(1), 0);
             em.commits.push(Commit::Copy { state, next: o(0) });
-            em.state_keys.push(key(StateLoc::Slot(state)));
+            em.state_keys.push(key(StateLoc::Slot(state), *w));
         }
         K::Ram { addr_bits, w, init } => {
             let m = em.mem(*addr_bits, *w, init, true);
@@ -274,7 +274,7 @@ fn lower(
             em.push(Op::Copy, addr, i(0), z, z, 0);
             em.push(Op::Copy, data, i(2), z, z, 0);
             em.commits.push(Commit::RamWrite { mem: m, we, addr, data });
-            em.state_keys.push(key(StateLoc::Mem(m)));
+            em.state_keys.push(key(StateLoc::Mem(m), *w));
         }
     }
 }

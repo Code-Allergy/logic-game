@@ -14,8 +14,6 @@ mod loops;
 pub mod program;
 
 #[cfg(test)]
-mod exec;
-#[cfg(test)]
 mod tests;
 
 pub use program::*;

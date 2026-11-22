@@ -1,10 +1,11 @@
 use std::time::Instant;
 
-use super::exec::Exec;
+use std::sync::Arc;
+
+use crate::sim::Sim;
 use super::*;
-use crate::netlist::{Builder, DefId, Design, NodeId, NodeKind, mask};
-use crate::reference::Reference;
-use crate::testkit::{GenConfig, Rng, fixtures, generate};
+use crate::netlist::{Builder, DefId, Design, NodeId, NodeKind};
+use crate::testkit::{GenConfig, fixtures, generate};
 
 fn compile_ok(d: &Design) -> Program {
     compile(d, &Options::default()).unwrap_or_else(|e| panic!("compile failed: {e:?}"))
@@ -27,40 +28,16 @@ fn at(instances: &[NodeId], node: NodeId) -> NodePath {
     NodePath { instances: instances.to_vec(), node }
 }
 
-/// Compare every root output and every authored net between the compiled
-/// program and the reference interpreter, at tick 0 and after each of
-/// `ticks` ticks with random inputs.
+/// Check program invariants, then run the differential harness.
 fn differential(d: &Design, seed: u64, ticks: u64) {
-    let p = compile_ok(d);
-    check_program_invariants(&p);
-    let mut x = Exec::new(&p);
-    let mut r = Reference::new(d).unwrap();
-    let mut rng = Rng::new(seed);
-    let widths = d.root_def().signature().0;
-    for t in 0..=ticks {
-        if t > 0 {
-            for (port, &w) in widths.iter().enumerate() {
-                let v = rng.next_u64() & mask(w);
-                x.set_input(port, v);
-                r.set_input(port, v);
-            }
-            x.tick();
-            r.tick().unwrap();
-        }
-        for port in 0..p.ports.outputs.len() {
-            assert_eq!(x.output(port), r.output(port), "seed {seed} tick {t} output {port}");
-        }
-        for inst in 0..p.debug.instances.len() as u32 {
-            let path = p.debug.path(inst);
-            for (net, &slot) in &p.debug.net_slots[inst as usize] {
-                assert_eq!(
-                    x.slots[slot as usize],
-                    r.net(&path, net).unwrap(),
-                    "seed {seed} tick {t} net {path:?}/{net:?}"
-                );
-            }
-        }
+    check_program_invariants(&compile_ok(d));
+    if let Err(e) = crate::testkit::diff::check_design(d, seed, ticks, &Options::default()) {
+        panic!("seed {seed}: {e}");
     }
+}
+
+fn sim(p: Program) -> Sim {
+    Sim::new(Arc::new(p))
 }
 
 /// Blocks are sorted by (rank, op), cover the instruction list exactly, and
@@ -140,7 +117,7 @@ fn fixtures_match_the_reference() {
 fn compiled_cpu_runs_the_multiply_program() {
     let d = fixtures::cpu(&fixtures::MULTIPLY_PROGRAM);
     let p = compile_ok(&d);
-    let mut x = Exec::new(&p);
+    let mut x = sim(p.clone());
     let halted = p.ports.output("halted").unwrap();
     let acc = p.ports.output("acc").unwrap();
     let mut ticks = 0;
@@ -154,7 +131,7 @@ fn compiled_cpu_runs_the_multiply_program() {
         StateLoc::Mem(m) => Some(m),
         _ => None,
     });
-    assert_eq!(x.mems[ram.unwrap() as usize][1], fixtures::MULTIPLY_RESULT);
+    assert_eq!(x.mem(ram.unwrap())[1], fixtures::MULTIPLY_RESULT);
     differential(&d, 0, 120);
 }
 
@@ -300,7 +277,7 @@ fn feedback_through_state_inside_an_instance_compiles() {
     b.output("q", q);
     differential(&d, 0, 20);
     let p = compile_ok(&d);
-    let mut x = Exec::new(&p);
+    let mut x = sim(p.clone());
     for _ in 0..300 {
         x.tick();
     }
@@ -394,7 +371,7 @@ fn chain_depth_is_its_rank_count() {
     assert_eq!(p.instrs.len(), 1000);
     assert_eq!(p.depth(), 1000);
     check_program_invariants(&p);
-    let mut x = Exec::new(&p);
+    let mut x = sim(p.clone());
     x.set_input(0, 1);
     x.tick();
     assert_eq!(x.output(0), 1, "even number of inverters");
@@ -449,7 +426,7 @@ fn long_chain_compiles_without_recursion() {
 fn deep_nesting_compiles_without_recursion() {
     let p = compile_ok(&nested(5_000));
     assert_eq!(p.debug.instances.len(), 5_001);
-    let mut x = Exec::new(&p);
+    let mut x = sim(p.clone());
     x.set_input(0, 1);
     x.tick();
     assert_eq!(x.output(0), 1, "5000 inverters");

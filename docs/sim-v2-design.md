@@ -377,3 +377,18 @@ ambiguous. Each is small and can be revisited.
     `CompileError::Invalid`) or every loop. `Options::debug` exists but has
     no effect until the simplify passes (#26) land; until then every
     authored net is observable.
+13. **State carry-over (M3).**
+    - **Snapshot contents.** `StateSnapshot` carries the tick count, one word
+      per state element keyed by `NodePath`, and each RAM's contents with its
+      geometry.
+    - **Import.** `import_state` restores the tick count and masks words to
+      the current width. Unmatched elements reset, and so does a RAM whose
+      `addr_bits` or width changed. It then re-settles, so nets are
+      consistent immediately.
+    - **Root inputs** are not part of the snapshot; the engine (M4) reapplies
+      them.
+    - **`StateKey` has a `width` field**, which the import needs for
+      masking.
+14. **`Sim::try_new` validates every index in the program.** This lets the
+    per-block loops skip bounds checks. `Sim::new` panics on a malformed
+    program; programs from `compile` never fail this check.

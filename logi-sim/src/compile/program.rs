@@ -248,6 +248,8 @@ pub enum StateLoc {
 pub struct StateKey {
     pub path: NodePath,
     pub loc: StateLoc,
+    /// Word width (for `StateLoc::Slot`) or memory word width.
+    pub width: u8,
 }
 
 #[derive(Debug, Clone)]
