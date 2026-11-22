@@ -24,7 +24,10 @@
 //!   the loop in the open view ([`LoopHighlight`]) until a later compile
 //!   succeeds;
 //! - a [`Theme`] change recolours the shared materials, wires and texts
-//!   once.
+//!   once;
+//! - the gate being dragged comes to the front, with its wires above the
+//!   other wires, and stays there after the drop until another gate is
+//!   dragged ([`OnTop`]).
 //!
 //! [`SimulationVisualsPlugin`] has no rendering, window or egui
 //! dependencies (it creates the mesh and material stores when they are
@@ -47,7 +50,7 @@ use super::shapes::{Shape, corner_radius, round_corners};
 use super::view::CircuitView;
 use super::{
     CircuitLibrary, DisplayConfig, GateIdentity, GateKind, GateLabel, GateType, GateValues,
-    LogicDisplay, SelectedGate, SimDiagnostics, WireEndpoints, WireState, format_value,
+    LogicDisplay, Selected, SelectedGate, SimDiagnostics, WireEndpoints, WireState, format_value,
 };
 use crate::theme::Theme;
 
@@ -249,6 +252,16 @@ pub fn wire_label_text(value: u64, width: u8) -> String {
         digits = usize::from(width.max(1)).div_ceil(4)
     )
 }
+
+/// z of the [`OnTop`] gate. Every other gate sits at 0, and a tile's art
+/// spans local z -0.7 (the selection halo) to 0.5 (texts), so the lifted
+/// tile with all its pins, labels and caption draws above every other.
+pub const ON_TOP_Z: f32 = 2.0;
+
+/// The gate last dragged: drawn in front of the others (z [`ON_TOP_Z`]),
+/// its wires above the other wires. At most one gate has it.
+#[derive(Component, Debug)]
+pub struct OnTop;
 
 /// Value of a gate's main signal: the output of an input, the input of
 /// anything else.
@@ -741,6 +754,84 @@ pub fn apply_loop_highlight_system(
     }
 }
 
+/// A gate being dragged: it has [`Selected`] and moved.
+type BeingDragged = (With<Selected>, Changed<Transform>);
+/// The gate in front, when it is not the one being dragged.
+type InFrontNotDragged = (With<OnTop>, Without<Selected>);
+
+/// Bring the gate being dragged (it has [`Selected`] and moved) to the
+/// front: z [`ON_TOP_Z`] and [`OnTop`]; the gate that was in front goes
+/// back to z 0. The order holds after the drop ("last dragged on top").
+pub fn bring_dragged_gate_to_front_system(
+    mut commands: Commands,
+    mut dragged: Query<(Entity, &mut Transform), BeingDragged>,
+    mut on_top: Query<(Entity, &mut Transform), InFrontNotDragged>,
+) {
+    let mut lifted = false;
+    for (entity, mut transform) in &mut dragged {
+        if transform.translation.z != ON_TOP_Z {
+            transform.translation.z = ON_TOP_Z;
+            commands.entity(entity).try_insert(OnTop);
+            lifted = true;
+        }
+    }
+    if !lifted {
+        return;
+    }
+    for (entity, mut transform) in &mut on_top {
+        transform.translation.z = 0.0;
+        commands.entity(entity).try_remove::<OnTop>();
+    }
+}
+
+/// Lift the wires of the [`OnTop`] gate above the other wires, and put
+/// those of a gate that left the front back. Runs only when the front
+/// gate changes.
+pub fn lift_front_wires_system(
+    added: Query<&GateIdentity, Added<OnTop>>,
+    mut removed: RemovedComponents<OnTop>,
+    identities: Query<&GateIdentity>,
+    front: Query<&GateIdentity, With<OnTop>>,
+    routing: Res<WireRouting>,
+    mut wires: Query<(Entity, &WireEndpoints, &mut Transform), Without<GateIdentity>>,
+) {
+    let dropped: HashSet<Uuid> = removed
+        .read()
+        .filter_map(|e| identities.get(e).ok().map(|id| id.uuid))
+        .collect();
+    if added.is_empty() && dropped.is_empty() {
+        return;
+    }
+    let lifted: HashSet<Uuid> = front.iter().map(|id| id.uuid).collect();
+    let touched: HashSet<NetKey> = wires
+        .iter()
+        .filter(|(_, ep, _)| {
+            [ep.source_gate, ep.sink_gate]
+                .iter()
+                .any(|id| lifted.contains(id) || dropped.contains(id))
+        })
+        .map(|(_, ep, _)| (ep.source_gate, ep.source_pin))
+        .collect();
+    for key in touched {
+        let Some(net) = routing.nets.get(&key) else {
+            continue;
+        };
+        let sinks: Vec<(SinkKey, Entity)> = wires
+            .iter()
+            .filter(|(_, ep, _)| (ep.source_gate, ep.source_pin) == key)
+            .map(|(e, ep, _)| ((ep.sink_gate, ep.sink_pin), e))
+            .collect();
+        let z = depth_of(&key, &sinks, &lifted)(net.slot);
+        for (_, entity) in &sinks {
+            if let Ok((_, _, mut transform)) = wires.get_mut(*entity)
+                && transform.translation.z != z
+            {
+                transform.translation.z = z;
+            }
+        }
+    }
+}
+
 /// Draw a halo behind the selected gate (the one whose properties are
 /// open). Runs only when the selection changes.
 pub fn update_selection_halo_system(
@@ -936,6 +1027,28 @@ fn net_depth(slot: u32) -> f32 {
     crate::temp::CONNECTION_Z_LEVEL - slot as f32 * NET_STAGGER
 }
 
+/// Depth of a net with an end on the [`OnTop`] gate: above every other
+/// net (still distinct per slot), below the value pills and the tiles.
+fn lifted_net_depth(slot: u32) -> f32 {
+    crate::temp::CONNECTION_Z_LEVEL + 2.0 - slot as f32 * (1.0 / NET_SLOTS as f32)
+}
+
+/// The depth of a net's wires, lifted when it touches a front gate.
+fn depth_of(
+    key: &NetKey,
+    sinks: &[(SinkKey, Entity)],
+    front: &HashSet<Uuid>,
+) -> impl Fn(u32) -> f32 {
+    let lifted = front.contains(&key.0) || sinks.iter().any(|((g, _), _)| front.contains(g));
+    move |slot| {
+        if lifted {
+            lifted_net_depth(slot)
+        } else {
+            net_depth(slot)
+        }
+    }
+}
+
 /// A free depth slot for a net, starting from a hash of its key so a net
 /// keeps its depth while others come and go.
 fn free_slot(key: &NetKey, used: &HashSet<u32>) -> u32 {
@@ -1014,8 +1127,12 @@ pub fn route_wires_system(
         Without<GateIdentity>,
     >,
     gaps: Query<&Mesh2d, With<WireGaps>>,
-    work: Option<Res<EntityWorkCounter>>,
+    (work, front): (
+        Option<Res<EntityWorkCounter>>,
+        Query<&GateIdentity, With<OnTop>>,
+    ),
 ) {
+    let front: HashSet<Uuid> = front.iter().map(|id| id.uuid).collect();
     let removed = removed_gates.read().count() + removed_wires.read().count() > 0;
     let moving = moved.iter().any(|id| !id.is_added());
     let structural = view.is_changed()
@@ -1121,7 +1238,7 @@ pub fn route_wires_system(
                 slot
             }
         };
-        let z = net_depth(slot);
+        let z = depth_of(key, sinks, &front)(slot);
         depths.push(z);
         let pill = buses[ni]
             .then(|| route.longest_horizontal())
@@ -1520,6 +1637,8 @@ impl Plugin for SimulationVisualsPlugin {
                     (attach_gate_visuals_system, attach_wire_visuals_system),
                     apply_loop_highlight_system,
                     update_selection_halo_system,
+                    bring_dragged_gate_to_front_system,
+                    lift_front_wires_system,
                     (
                         update_gate_state_system,
                         update_logic_displays_system,

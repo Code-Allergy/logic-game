@@ -38,9 +38,37 @@ pill), on a dot-grid bench. Wires are routed on the grid in horizontal and
 vertical runs with rounded corners, a dot where a net branches and a gap
 where one wire passes over another (`src/sim/routing.rs`). Every colour comes from the `Theme` resource
 (`src/theme.rs`), with a day and a night palette; press `T` or use the
-Day/Night card to switch. `cargo run --example screenshot -- <id> out.png
-[--night] [--fit] [--definition NAME]` saves a screenshot of a demo, a
-gallery item or a version 6 file (optionally one of its definitions).
+sun/moon button on the file card to switch.
+
+## The editor
+
+The canvas fills the window; everything else floats over it as cards,
+anchored to the window edges (`HudLayout` in `src/ui_style.rs`, compact
+below 1600 x 900):
+
+| Where | Card |
+|---|---|
+| Top left | File card: workspace or demo name, origin and view path, saved/unsaved/read-only. `☰ Library` opens the drawer with save, new, import RTL, copy a demo, the demos, gallery, saved workspaces and the definition table. |
+| Top centre | Transport: run, pause, step, reset (back to tick 0, inputs kept), speed chips (1 Hz, 60 Hz, 1 kHz, Max; `…` for an exact rate), tick. |
+| Top right | Build status: built and part count, or the loop/build error (click for details). |
+| Right | Inspector of the selected part: label, width, parameters, live values (Q/D/EN for a register), input drive, readout format, Watch, Open inside, Delete, wires. |
+| Bottom left | Minimap (click or drag to move the view) and zoom; the percentage fits the circuit. |
+| Bottom centre | Parts bar: Logic, Memory, In & out, Routing, Arithmetic and Chips (saved workspaces, demos and gallery items as cells); the width of new parts; the wire tool. |
+| Bottom right | Signals: live values of watched parts, inputs, clocks, registers and outputs. |
+
+Keys (ignored while a text field has focus): `1`–`9` arm a part from the
+open tab (then click the canvas, or drag a slot onto it), `Esc` drops it
+(or the wire tool, or closes the Library; with nothing to drop it clears
+the selection), `W` wire tool, `F` fit, `R` reset to tick 0, `Delete`
+deletes the selected part, `T` day or night. Mouse: left-click selects
+(on empty canvas: deselects), right-drag moves a part, middle-drag pans,
+the wheel zooms about the cursor.
+
+`cargo run --example screenshot -- <id> out.png [--night] [--size WxH]
+[--select LABEL] [--set LABEL=VALUE] [--tab NAME] [--library] [--editable]
+[--fit] [--definition NAME]` saves a screenshot of a demo, a gallery item
+(or `empty`, a new workspace, or `loop`, a build error) or a version 6
+file (optionally one of its definitions).
 
 ## Documentation
 

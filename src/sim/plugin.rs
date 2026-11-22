@@ -147,6 +147,7 @@ impl Plugin for SimulationViewPlugin {
 
         app.add_plugins(SimulationVisualsPlugin)
             .init_resource::<SelectedGate>()
+            .add_message::<crate::camera::FitView>()
             .insert_resource(SpatialGrid::new(100.0))
             .register_type::<crate::sim::LogicDisplay>()
             .register_type::<crate::sim::GateKind>()
