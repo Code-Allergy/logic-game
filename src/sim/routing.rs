@@ -432,7 +432,7 @@ impl Grid {
         rows.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         let mut ys: Vec<f32> = Vec::with_capacity(rows.len());
         let mut row_nets: Vec<Vec<u32>> = Vec::with_capacity(rows.len());
-        let mut row_on_grid = Vec::with_capacity(rows.len());
+        let mut row_on_grid: Vec<bool> = Vec::with_capacity(rows.len());
         for (y, net) in rows {
             if let Some(&last) = ys.last()
                 && (y - last).abs() < 1e-3
