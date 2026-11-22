@@ -1,7 +1,10 @@
 # MCP server
 
-Status: design agreed (#104); milestone 1 in progress. Each section says
-which milestone it belongs to.
+Status: design agreed (#104). Milestones 1 (#122) and 2 (#123) are
+implemented: the batch editor, the views, stored tests, experiment
+scripts, the `workspace`, `view`, `edit`, `test` and `run` tools and the
+`gatequest-mcp` program. Each section says which milestone it belongs to;
+"Running it" and "Where milestone 1 stands" are at the end.
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server lets an
 AI assistant build circuits, test them and look at the result, at the
@@ -114,9 +117,12 @@ indices and bit ranges are those of version 6 references
 - Every part made through the server gets a label, unique in its
   circuit. Element `i` of an array `fa` is labelled `fa[i]`, so arrays
   can be addressed as arrays again later (`fa[0..7].cout`).
-- Parts made in the editor may have no label, or share one. Views list
-  them with a short id (`#3fa2c1`, the first hex digits of the UUID, as
-  many as make it unique); `#id` is accepted wherever a label is.
+- A label made in the editor that is not a name (letters, digits, `_`)
+  is used with every run of other characters as `_`: `data RAM` is
+  `data_RAM`, `Out value` is `Out_value`. Views show that form.
+- Parts with no label, or sharing one, are listed with a short id
+  (`#3fa2c1`, the first hex digits of the UUID, as many as make it
+  unique); `#id` is accepted wherever a label is.
 - A circuit is named by its definition name; `main` (or the workspace
   name) is the root.
 
@@ -127,8 +133,8 @@ Seven tools in the first stage. Each takes its bulk argument inline or as
 
 | Tool | Tier | Milestone | Does |
 |---|---|---|---|
-| `workspace` | document | 1 | `list`, `open`, `new`, `save`, `status` |
-| `view` | document | 1 | Text views of a circuit: outline, one part, diagnostics, stats, version 6 source |
+| `workspace` | document | 1 | `list`, `open`, `new`, `save`, `status`, `demos`, `open_demo` |
+| `view` | document | 1 | Text views of a circuit: outline, diagnostics, stats |
 | `edit` | document | 1 | Apply a batch of operations atomically |
 | `test` | document | 2 | Run stored tests of one chip or the whole workspace |
 | `run` | document | 2 | Run an experiment script on a private simulation |
@@ -142,17 +148,30 @@ examples (`demo://<id>`).
 
 ### `view`
 
-`view {circuit, what}`. The default, `outline`, is one line per part:
-label or id, kind and parameters, and for each input pin what drives it.
-Arrays are folded into one line when their elements are wired alike.
-Then the ports, the chips used with counts, and the build status. Large
-circuits are cut at a line limit with a count of what was left out;
-`filter` narrows by label prefix or kind.
+`view {circuit, what, filter, limit}`. The default, `outline`, starts
+with the circuit's size, its ports in pin order and the chips it uses
+with counts. Then one line per part: how to refer to it, its kind and
+parameters, and for each input pin what drives it:
 
-`diagnostics` gives build errors with the parts involved (a
-combinational loop lists its path), unconnected inputs, width mismatches
-and the layout advisory. `stats` gives part counts by kind, flattened
-size, state bits and logic depth.
+```
+circuit "main" (root): 13 parts + 17 generated adapters, 50 wires
+ports: in A[8] B[8] Cin | out Cout Sum[8]
+chips: full_adder x8
+parts:
+  A  Input w=8
+  fa[1]  full_adder  A<-A:1  B<-B:1  Cin<-fa[0].Cout
+  Sum  Output w=8  in<-{fa[0].Sum, fa[1].Sum, …}
+```
+
+Generated `Split`/`Merge` adapters are not listed; a pin fed through
+them reads as the bits it gets (`A:1`, `{lo, hi}` with the low bits
+first), which is how the wiring was written. Parts are cut at `limit`
+lines (200) with a count of what was left out; `filter` keeps the parts
+whose name or kind starts with it.
+
+`diagnostics` gives the build result, the inputs nothing drives and the
+layout advisory. `stats` gives part counts by kind and the flattened
+size.
 
 ### `edit`
 
@@ -180,7 +199,12 @@ demos are examples of the syntax and one parser serves both. Differences:
 
 - `at` is optional. Parts without it are placed by the auto-layout
   (below). `step` defaults to a column.
-- `name` becomes the label.
+- `name` becomes the label (so `label` is not given), and every part
+  gets one, not only ports and chips.
+- A port cannot be an array (its label is a pin name); give one port a
+  width instead.
+- `use` names a chip of the workspace, or `"demo/circuit"` from the
+  demos and gallery, which then joins the workspace.
 
 | Op | Meaning |
 |---|---|
@@ -188,7 +212,7 @@ demos are examples of the syntax and one parser serves both. Differences:
 | `wire` | Wire entries: one source, then sinks; arrays and bit fields deal out as in version 6, with `Split`/`Merge` adapters generated. An input bit that is already driven is an error. |
 | `unwire` | Sink references; removes what drives them. |
 | `remove` | Parts by reference, with their wires. |
-| `set` | `{"part": ref, …parameters, "label": …}`: change parameters or the label of parts. Wires to pins that no longer exist or changed width are reported and removed. |
+| `set` | `{"part": ref, …parameters, "label": …, "at": …, "use": …}`, or an array of these: change parameters, the label, the position or (for a chip) the definition. Each entry is checked when it is applied: wires to pins that no longer exist or whose width no longer matches the other end are removed and reported. To change the width of a whole path, remove and add. |
 | `layout` | Lay out the circuit again, or only the parts named. |
 | `make_chip` (3) | `{"parts": [refs], "name": …}`: the editor's "make chip" (`sim/chip.rs`). |
 | `expand` (3) | `{"part": ref}` or `{"circuit": name, "as": name}`: a gate-level copy of a word-level part or chip (`logi_sim::testkit::bitblast`, made hierarchical), as an editable chip. |
@@ -215,19 +239,32 @@ the design grows. A test has a `name` and one of:
 
 | Kind | Meaning |
 |---|---|
-| `table`, `formula`, `sequence` | As challenge tests (`docs/save-format.md`, "Challenges"). |
-| `equivalent` | `{"to": chip, "samples": n, "ticks": t, "seed": s}`: the same random inputs into both chips, every output compared each tick. This checks a gate-level chip against its word-level or imported reference. |
-| `script` | A `run` script (below) with `expect` steps, inline or a file beside the manifest. |
+| `table`, `formula`, `sequence` | As challenge tests (`docs/save-format.md`, "Challenges"), on the chip's own ports. |
+| `equivalent` | `{"to": chip, "samples": n, "seed": s, "hold": k}`: the same random inputs into both chips, every output compared after every tick, both from power-on. This checks a gate-level chip against its word-level or imported reference. The chips must have the same ports. |
+| `script` | A `run` script (below): it passes when no `expect`, `until` or `compare` fails. |
 
-`test {}` runs every test of every chip reachable from the root, each
-chip compiled alone as a root, in parallel. `test {circuit}` runs one
-chip's. The result lists only failures (the first failing case of each,
-with inputs, expected and got) and a count of what passed.
+The `edit` ops `{"tests": [...]}` (set or replace by name) and
+`{"remove_tests": [names]}` (or `true` for all) change them. A test is
+checked when it is set: its shape, and that the ports and chips it names
+exist.
 
-Save format: an optional `tests` array on a circuit, in version 5 and
-version 6. The root circuit's tests are kept beside the ECS in a
-resource, since the ECS holds only parts and wires. Challenges keep their
-test in the demo manifest.
+`test {}` runs every test of every circuit of the workspace, each on a
+fresh simulation of its chip compiled alone, side by side on the
+machine's cores. `test {circuit}` runs one chip's, `name` only the tests
+of that name. The result lists each failure with its first failing case,
+then one line of counts and the circuits that have no tests:
+
+```
+FAILED half_adder / truth: Case 2: inputs A=0, B=1; expected Sum=1, Carry=0, got Sum=1, Carry=1.
+4 of 5 tests passed in 3 circuit(s) (215 cases)
+```
+
+A failed suite is a tool error, so a client sees it as one.
+
+Save format: `docs/save-format.md`, "Stored tests". In the game the
+tests of the open workspace are kept in the `WorkspaceTests` resource
+beside the ECS, which holds only parts and wires, and are written back
+on save.
 
 ### `run`: one call, one experiment (milestone 2)
 
@@ -235,45 +272,93 @@ test in the demo manifest.
 {
   "circuit": "cpu",
   "session": "boot",
+  "signals": {"pc": "core/pc.q", "a": "core/acc.q", "sync": "core/control.Fetch"},
   "steps": [
-    {"load": {"part": "rom", "file": "tests/nestest.bin"}},
+    {"load": {"part": "rom", "file": "tests/nestest.nes", "skip": 16, "length": 16384}},
     {"set": {"reset": 1}}, {"ticks": 2}, {"set": {"reset": 0}},
-    {"record": ["pc", "a", "x", "y", "p", "sp"], "when": "sync == 1"},
-    {"compare": {"file": "tests/nestest.trace", "context": 5}},
+    {"record": ["pc", "a"], "when": "sync"},
+    {"compare": {"file": "tests/nestest.log", "radix": 16, "columns": ["pc"], "context": 5}},
     {"until": "pc == 0xC66E", "max_ticks": 200000},
     {"snapshot": "after_boot"},
-    {"read": ["ram:0x00..0x10", "alu/sum.y"]}
+    {"read": ["a", "ram@0x00..0x10", "core/alu/sum.y"]}
   ],
-  "trace": "out/boot.vcd"
+  "trace": "out/boot.vcd",
+  "max_ticks": 500000
 }
 ```
 
 | Step | Meaning |
 |---|---|
-| `set` | Root inputs by label. |
+| `set` | Root inputs by label. A value that does not fit the input is an error. |
 | `ticks` | Run that many ticks. |
-| `until` | Run until an expression over signals is non-zero (`challenges::expr` syntax), at most `max_ticks`. |
-| `expect` | Signals and values; a mismatch fails the run at that tick. |
-| `read` | Return signals or memory ranges now. |
-| `load`, `store` | Memory contents from or to a file (binary, or hex text) or inline. |
-| `record` | From here on, record these signals each tick (or each tick `when` holds). |
-| `compare` | Check the recorded rows against a file (one row per line, columns as recorded; a 6502 trace log after a column mapping). The run stops at the **first difference** and returns that row with `context` rows before it. |
-| `snapshot`, `restore` | Save or restore the whole simulator state under a name (`Sim::export_state`). |
+| `until` | Run until an expression over signals is non-zero (`challenges::expr` syntax), at most `max_ticks`; not reaching it fails the run. |
+| `expect` | Signals and values; a mismatch fails the run and says what it saw. |
+| `read` | Return signals, or up to 256 words of a memory (`ram@0x00..0x10`). |
+| `load` | Words into a memory, for this simulation only (below). |
+| `store` | A memory's words to a file: binary, or hex text for `.hex` and `.txt`. |
+| `record` | From here on, record these signals after each tick, or each tick `when` holds. |
+| `compare` | Check the rows recorded from here on against expected rows (below). The run stops at the **first difference**. |
+| `snapshot`, `restore` | Save or restore the whole simulator state under a name. |
+| `reset` | Back to power-on. |
 
-Signals are paths: a root port, any part's output pin, a register's
-state, a memory cell or range. The result holds the `read` values, the
-tick reached, why it stopped, and at most a few dozen recorded rows
-(first, last, around a failure); the full record goes to `trace` as VCD
-or CSV, change-only.
+**Signals** are paths of labels from the circuit down: `core/alu/sum.y`
+is output pin `y` of part `sum` in the chip placed as `alu` in the chip
+placed as `core`. The pin may be left out when the part has one output;
+`:0..4` picks bits; an `Output` or `Display` names what drives it;
+`ram@0x10` is one word of a memory. Expressions take names only, so
+`signals` gives paths short names; a root-level label is a name already.
 
-With `session`, the simulation and its snapshots stay alive on the
-server after the call, and the next `run` with the same session
-continues from there. That is how an assistant bisects to a failing
+Every signal of a script is resolved before anything runs, so a misspelt
+name costs no simulation, and the simulation is compiled keeping exactly
+those nets readable.
+
+**Loading memories.** `{"part": memory, "file": path}` cuts a binary file
+into words of the memory's width (`word_bytes`, `big_endian` to override),
+or reads hex words from a `.hex` or `.txt` file; `"data": [..]` gives
+words inline. `skip` drops leading words (a 16-byte iNES header),
+`length` takes that many, `at` is the address of the first. Into a `Ram`
+it writes the simulation's state; into a `Rom` it replaces contents for
+this simulation (in every placement of the chip the ROM is in). The same
+description as `"load"` in an `edit` `set` op changes the part itself, so
+it is saved with the workspace: that is how a ROM gets a program for
+good.
+
+**Comparing.** `compare` takes `{"file": path}` or `{"rows": [[..]]}`.
+Each expected row holds values for recorded columns; a column with no
+value (`null`, or absent from the line) is not checked. In a file, values
+are separated by spaces or commas and `#` starts a comment. Which column
+a value belongs to is given by, in order: a `NAME:value` token whose name
+is a recorded signal (`A:1F`, as CPU logs write registers); `columns`, a
+list of signal names for the leading values with `null` to skip one; a
+first line of signal names; else the order of the `record` step. `radix`
+16 reads bare hex; `skip_lines` skips a header. The failure shows the
+differing signals and the `context` rows before:
+
+```
+first difference at row 4 of tests/nestest.log (tick 31):
+  a: expected 0x1F, got 0x1E
+rows before it (and the differing one):
+  tick 24: pc=0xC000 a=0x00
+  ...
+```
+
+**Results.** The result holds what `read` and `until` saw, the first and
+last five recorded rows with their count, the comparison's verdict, the
+tick reached, and `ok` or `FAILED` with the step. All recorded rows go to
+`trace`: a `.csv` file (tick, then the columns), or a `.vcd` file with
+changes only. A failed experiment is a tool error.
+
+**Sessions.** With `session`, the simulation, its snapshots and its
+signal names stay on the server, and the next `run` with the same name
+continues from there; that is how an assistant bisects to a failing
 cycle without running from reset each time. A session is dropped when
-its circuit changes; the next call says so.
+the workspace changes (the next call says so), and at most eight are
+kept.
 
-Limits: `max_ticks` per call (default 1,000,000), recorded rows, trace
-bytes, live sessions.
+**Limits.** A call runs at most `max_ticks` ticks (1,000,000 unless the
+script asks for more, up to 1,000,000,000), records at most 5,000,000
+rows, and reads memory files up to 64 MB. File paths are used as given,
+relative to the server's working directory.
 
 ### `import_rtl` (milestone 3)
 
@@ -339,12 +424,59 @@ op is the server's hook into the same expansion.
    `set`, `layout`; label paths; `view`; `workspace`; `gatequest-mcp`
    over stdio; tests through an in-process client.
 2. **Testing.** Stored tests and the save format addition; `test`;
-   `run` with sessions, traces, compare and snapshots.
+   `run` with sessions, traces, compare, snapshots and memory loading.
 3. **Scale.** `import_rtl` with Yosys; `make_chip`; `expand`; the layout
    advisory's grouping; a benchmark of `apply` and `view` on a
    10,000-part workspace in `perf/`.
 4. **The game as host.** `--mcp`, the exclusive system, edits by
    difference as undo steps, `transport`, `app state`.
+
+## Running it
+
+```sh
+cargo run -p gate_quest --features mcp --bin gatequest-mcp
+```
+
+It speaks MCP on standard input and output and works in the player's
+workspace folder; set `GATEQUEST_DATA_DIR` to a scratch folder to keep
+it away from real workspaces. For Claude Code, in `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "gatequest": {
+      "command": "cargo",
+      "args": ["run", "-q", "-p", "gate_quest", "--features", "mcp", "--bin", "gatequest-mcp"],
+      "env": {"GATEQUEST_DATA_DIR": "/tmp/gatequest-mcp"}
+    }
+  }
+}
+```
+
+The code is in `src/mcp/`: `batch.rs` (the edit function), `view.rs`,
+`testing.rs` (stored tests), `rig.rs` (a private simulation with signals
+by name), `run.rs` (experiment scripts), `memfile.rs` (memory files),
+`session.rs` (the tools as plain functions on one open workspace) and
+`server.rs` (the same over `rmcp`). Only `server.rs` and the program
+need the `mcp` feature.
+
+## Where milestone 1 stands
+
+Done: everything listed under milestones 1 and 2 below. Known gaps, to
+close in later milestones:
+
+- A combinational loop is reported with the simulator's node ids, not
+  with part names.
+- A `Split` adapter made by an earlier request is not reused by a later
+  one that needs the same bits; a second one is made.
+- `record` has no "when this signal changes"; `when` takes an
+  expression over the current values only.
+- Stored tests are not shown in the editor.
+- A circuit of the open workspace cannot be deleted or renamed, and
+  resources (the format documents, the demos as examples) are not
+  served yet.
+- New parts in a placed circuit are laid out as one block below it;
+  they are not fitted near the parts they connect to.
 
 ## Testing the server
 

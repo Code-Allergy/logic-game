@@ -30,6 +30,7 @@ use bevy::math::Vec2;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use super::{memfile, testing};
 use crate::sim::layout::{self, LayoutNode};
 use crate::sim::source::{
     self, Context, Dir, Element, Externals, NodeBody, NodeEntry, NodeTable, SourceError,
@@ -83,6 +84,11 @@ pub struct CircuitReport {
     pub laid_out: usize,
     /// Wires taken out because a `set` changed the pin they were on.
     pub dropped_wires: Vec<String>,
+    /// Stored tests set and removed.
+    pub tests_set: usize,
+    pub tests_removed: usize,
+    /// Stored tests of the circuit afterwards.
+    pub tests: usize,
     /// Parts (adapters included) and wires of the circuit afterwards.
     pub parts: usize,
     pub wires: usize,
@@ -119,7 +125,17 @@ impl fmt::Display for Report {
             if c.laid_out > 0 {
                 write!(f, " ({} laid out)", c.laid_out)?;
             }
-            writeln!(f, " -> {} parts, {} wires", c.parts, c.wires)?;
+            if c.tests_set > 0 {
+                write!(f, " +{} tests", c.tests_set)?;
+            }
+            if c.tests_removed > 0 {
+                write!(f, " -{} tests", c.tests_removed)?;
+            }
+            write!(f, " -> {} parts, {} wires", c.parts, c.wires)?;
+            if c.tests > 0 {
+                write!(f, ", {} tests", c.tests)?;
+            }
+            writeln!(f)?;
             for d in &c.dropped_wires {
                 writeln!(f, "  dropped wire {d}")?;
             }
@@ -211,6 +227,9 @@ fn merge_report(all: &mut Vec<CircuitReport>, one: CircuitReport) {
             have.adapters_added += one.adapters_added;
             have.laid_out += one.laid_out;
             have.dropped_wires.extend(one.dropped_wires);
+            have.tests_set += one.tests_set;
+            have.tests_removed += one.tests_removed;
+            have.tests = one.tests;
             have.parts = one.parts;
             have.wires = one.wires;
         }
@@ -362,10 +381,32 @@ pub struct Names {
     pub reference: HashMap<Uuid, String>,
 }
 
+/// A label that is not a name, as one: every run of other characters
+/// becomes `_` (`"data RAM"` is `data_RAM`), so that parts labelled in
+/// the editor can be named in references and expressions.
+fn as_name(label: &str) -> Option<String> {
+    let mut name = String::new();
+    for c in label.trim().chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            name.push(c);
+        } else if !name.ends_with('_') {
+            name.push('_');
+        }
+    }
+    let name = name.trim_end_matches('_');
+    let name = if name.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("_{name}")
+    } else {
+        name.to_string()
+    };
+    source::valid_name(&name).then_some(name)
+}
+
 /// Name the parts of `doc`: by label where the label is a name
 /// (letters, digits, `_`) that only one part has, as arrays where parts
-/// are labelled `base[0]`, `base[1]`, ... and have the same pins, and
-/// always by short id.
+/// are labelled `base[0]`, `base[1]`, ... and have the same pins, by the
+/// label made a name ([`as_name`]) where that is free, and always by
+/// short id.
 pub fn names_of(doc: &CircuitDocument, library: &CircuitLibrary) -> Names {
     let ids = short_ids(doc);
     let entry = |nodes: &[&DocNode], names: Vec<String>, is_array: bool| {
@@ -415,6 +456,27 @@ pub fn names_of(doc: &CircuitDocument, library: &CircuitLibrary) -> Names {
             reference.insert(nodes[0].id, (*label).to_string());
         } else if let Some((base, i)) = array_label(label) {
             arrays.entry(base).or_default().insert(i, nodes[0]);
+        }
+    }
+    // Labels with spaces or punctuation, as names, where no part has
+    // that name and no two labels give the same one.
+    let mut renamed: BTreeMap<String, Vec<&DocNode>> = BTreeMap::new();
+    for (label, nodes) in &by_label {
+        if nodes.len() == 1
+            && !source::valid_name(label)
+            && array_label(label).is_none()
+            && let Some(name) = as_name(label)
+        {
+            renamed.entry(name).or_default().push(nodes[0]);
+        }
+    }
+    for (name, nodes) in renamed {
+        if nodes.len() == 1
+            && !by_label.contains_key(name.as_str())
+            && !arrays.contains_key(name.as_str())
+        {
+            reference.insert(nodes[0].id, name.clone());
+            table.insert(name.clone(), entry(&nodes, vec![name], false));
         }
     }
     for (base, elements) in arrays {
@@ -511,6 +573,9 @@ struct Group<'a> {
     used: RefCell<HashSet<Uuid>>,
     /// Parts waiting for the auto-layout.
     unplaced: HashSet<Uuid>,
+    /// Stored tests to set (by name) and names to remove (`None`: all).
+    tests_set: Vec<Value>,
+    tests_removed: Vec<Option<String>>,
     report: CircuitReport,
 }
 
@@ -592,6 +657,8 @@ fn apply_group(
         externals,
         used: RefCell::new(used),
         unplaced: HashSet::new(),
+        tests_set: Vec::new(),
+        tests_removed: Vec::new(),
         report,
     };
     for (oi, op) in ops.iter().enumerate() {
@@ -606,6 +673,8 @@ fn apply_group(
         mut doc,
         library,
         mut report,
+        tests_set,
+        tests_removed,
         ..
     } = g;
     report.parts = doc.nodes.len();
@@ -613,6 +682,7 @@ fn apply_group(
     if doc != before {
         doc.revision = before.revision + 1;
     }
+    let circuit_id = doc.id;
     // Chips of the catalog that the circuit now uses become part of the
     // workspace.
     for (id, def) in library.reachable_from(&doc) {
@@ -623,6 +693,38 @@ fn apply_group(
         Place::Definition(id) => {
             ws.definitions.insert(id, Arc::new(doc));
         }
+    }
+
+    // Stored tests: removals first, then tests set by name, each checked
+    // against the circuit as the ops left it.
+    let mut tests = ws.tests.remove(&circuit_id).unwrap_or_default();
+    let count = tests.len();
+    for removed in &tests_removed {
+        match removed {
+            None => tests.clear(),
+            Some(name) => {
+                let before = tests.len();
+                tests.retain(|t| testing::name_of(t) != name);
+                if tests.len() == before {
+                    return err(format!("{context}: remove_tests: no test \"{name}\""));
+                }
+            }
+        }
+    }
+    report.tests_removed = count - tests.len();
+    for test in tests_set {
+        testing::validate(ws, place, &test)
+            .map_err(|e| SourceError(format!("{context}: tests: {e}")))?;
+        let name = testing::name_of(&test).to_string();
+        match tests.iter_mut().find(|t| testing::name_of(t) == name) {
+            Some(have) => *have = test,
+            None => tests.push(test),
+        }
+        report.tests_set += 1;
+    }
+    report.tests = tests.len();
+    if !tests.is_empty() {
+        ws.tests.insert(circuit_id, tests);
     }
     Ok(report)
 }
@@ -685,8 +787,31 @@ impl Group<'_> {
             "remove" => self.remove(arg),
             "set" => self.set(arg),
             "layout" => self.layout(arg),
+            "tests" => match arg {
+                Value::Array(tests) => {
+                    self.tests_set.extend(tests.iter().cloned());
+                    Ok(())
+                }
+                one @ Value::Object(_) => {
+                    self.tests_set.push(one.clone());
+                    Ok(())
+                }
+                _ => err("takes an array of tests: {\"name\": ..., \"table\": {...}}"),
+            },
+            "remove_tests" => match arg {
+                Value::Bool(true) => {
+                    self.tests_removed.push(None);
+                    Ok(())
+                }
+                names => {
+                    let names = strings(names, "remove_tests")?;
+                    self.tests_removed.extend(names.into_iter().map(Some));
+                    Ok(())
+                }
+            },
             other => err(format!(
-                "unknown op \"{other}\" (ops: add, wire, unwire, remove, set, layout)"
+                "unknown op \"{other}\" (ops: add, wire, unwire, remove, set, layout, tests, \
+                 remove_tests)"
             )),
         }
         .context(name)
@@ -888,7 +1013,11 @@ impl Group<'_> {
         };
         let names = self.names();
         let ids = names.parts(&part)?;
-        let is_array = ids.len() > 1 || part.ends_with(']') && !part.starts_with('#');
+        // A whole array keeps its indices under a new label; one element
+        // of it (`fa[3]`) takes the label as it is.
+        let whole = source::parse_ref(&part)?;
+        let is_array =
+            whole.index.is_none() && names.table.get(whole.node).is_some_and(|e| e.is_array);
         let label = match params.shift_remove("label") {
             None => None,
             Some(Value::String(l)) if source::valid_name(&l) => Some(l),
@@ -912,6 +1041,8 @@ impl Group<'_> {
         if params.contains_key("type") {
             return err("a part's type cannot be set; remove it and add the new one");
         }
+        // Memory contents from a file or inline words.
+        let load = params.shift_remove("load");
         if let Some(label) = &label
             && (names.table.contains_key(label) || names.ambiguous.contains(label))
         {
@@ -941,7 +1072,7 @@ impl Group<'_> {
                     return err(format!("\"{part}\" is not a chip; \"use\" does not apply"));
                 }
                 GateKind::SubCircuit { definition }
-            } else if params.is_empty() {
+            } else if params.is_empty() && load.is_none() {
                 continue;
             } else {
                 let Ok(Value::Object(mut have)) = serde_json::to_value(&node.kind) else {
@@ -956,7 +1087,53 @@ impl Group<'_> {
                 for (k, v) in &params {
                     have.insert(k.clone(), v.clone());
                 }
-                source::primitive_kind(&ty, &have)?
+                let kind = source::primitive_kind(&ty, &have)?;
+                match (&load, kind) {
+                    (None, kind) => kind,
+                    (
+                        Some(spec),
+                        GateKind::Rom {
+                            addr_bits,
+                            w,
+                            mut contents,
+                        },
+                    ) => {
+                        let load = memfile::read(spec, w).map_err(SourceError)?;
+                        memfile::place(&mut contents, addr_bits, &load).map_err(SourceError)?;
+                        GateKind::Rom {
+                            addr_bits,
+                            w,
+                            contents,
+                        }
+                    }
+                    (
+                        Some(spec),
+                        GateKind::Ram2 {
+                            addr_bits,
+                            w,
+                            reads,
+                            mask,
+                            mut init,
+                        },
+                    ) => {
+                        let load = memfile::read(spec, w).map_err(SourceError)?;
+                        memfile::place(&mut init, addr_bits, &load).map_err(SourceError)?;
+                        GateKind::Ram2 {
+                            addr_bits,
+                            w,
+                            reads,
+                            mask,
+                            init,
+                        }
+                    }
+                    (Some(_), other) => {
+                        return err(format!(
+                            "\"load\" sets the contents of a Rom or the initial contents of a \
+                             Ram2; \"{part}\" is a {}",
+                            other.display_name()
+                        ));
+                    }
+                }
             };
             if kind != node.kind {
                 node.kind = kind;

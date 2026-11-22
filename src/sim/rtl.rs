@@ -1358,5 +1358,6 @@ fn import_module(
         title: (title != circuit_name).then(|| title.to_string()),
         nodes: source_nodes,
         wires,
+        tests: Vec::new(),
     })
 }

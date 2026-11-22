@@ -122,6 +122,7 @@ fn blocks(demo: &Demo) {
         let w = WorkspaceDocument {
             root: (**doc).clone(),
             definitions: demo.workspace.definitions.clone(),
+            tests: Default::default(),
         };
         let design = design_of(&w).expect("design");
         let p = program(&design, &Options::default());

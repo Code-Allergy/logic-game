@@ -17,11 +17,27 @@ use uuid::Uuid;
 
 use super::{CircuitDocument, GateKind, WorkspaceDocument};
 
+/// Where the parts of a workspace are in its design: for reading a
+/// part's nets and state in a simulation (`crate::mcp::rig`).
+#[derive(Debug, Clone, Default)]
+pub struct DesignMap {
+    /// Circuit id -> its definition (the root included).
+    pub defs: HashMap<Uuid, DefId>,
+    /// Circuit id -> part id -> node. A `Display` inside a chip has no
+    /// node (it is not simulated there).
+    pub nodes: HashMap<Uuid, HashMap<Uuid, NodeId>>,
+}
+
 /// The design of `workspace`, its root circuit as the design's root.
 pub fn design_of(workspace: &WorkspaceDocument) -> Result<Design, String> {
+    design_map_of(workspace).map(|(design, _)| design)
+}
+
+/// [`design_of`], with the map from parts to nodes.
+pub fn design_map_of(workspace: &WorkspaceDocument) -> Result<(Design, DesignMap), String> {
     let mut design = Design::new(workspace.root.name.clone());
     let root = design.root;
-    let mut built: HashMap<Uuid, DefId> = HashMap::new();
+    let mut built = DesignMap::default();
     let mut stack = Vec::new();
     fill(
         &mut design,
@@ -32,17 +48,18 @@ pub fn design_of(workspace: &WorkspaceDocument) -> Result<Design, String> {
         &mut built,
         &mut stack,
     )?;
-    Ok(design)
+    built.defs.insert(workspace.root.id, root);
+    Ok((design, built))
 }
 
 fn definition(
     design: &mut Design,
     id: Uuid,
     workspace: &WorkspaceDocument,
-    built: &mut HashMap<Uuid, DefId>,
+    built: &mut DesignMap,
     stack: &mut Vec<Uuid>,
 ) -> Result<DefId, String> {
-    if let Some(&def) = built.get(&id) {
+    if let Some(&def) = built.defs.get(&id) {
         return Ok(def);
     }
     if stack.contains(&id) {
@@ -57,7 +74,7 @@ fn definition(
     let def = design.add_definition(doc.name.clone());
     fill(design, def, &doc, false, workspace, built, stack)?;
     stack.pop();
-    built.insert(id, def);
+    built.defs.insert(id, def);
     Ok(def)
 }
 
@@ -67,7 +84,7 @@ fn fill(
     doc: &CircuitDocument,
     is_root: bool,
     workspace: &WorkspaceDocument,
-    built: &mut HashMap<Uuid, DefId>,
+    built: &mut DesignMap,
     stack: &mut Vec<Uuid>,
 ) -> Result<(), String> {
     let what = |e: &dyn std::fmt::Display| format!("{}: {e}", doc.name);
@@ -115,5 +132,6 @@ fn fill(
             .connect_pins(def, (src, w.from.pin), (dst, w.to.pin))
             .map_err(|e| what(&e))?;
     }
+    built.nodes.insert(doc.id, nodes);
     Ok(())
 }

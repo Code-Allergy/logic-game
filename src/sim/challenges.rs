@@ -371,13 +371,29 @@ impl Challenge {
             Ok(s) => s,
             Err(e) => return fail(Failure::Build(e.0)),
         };
-        self.run(sim)
+        PortTest {
+            inputs: &self.inputs,
+            outputs: &self.outputs,
+            test: &self.test,
+        }
+        .run(sim)
     }
+}
 
+/// A test with the ports it drives and reads: what a challenge runs on
+/// the player's circuit, and what a stored test runs on a chip
+/// (`crate::mcp::testing`).
+pub struct PortTest<'a> {
+    pub inputs: &'a [Port],
+    pub outputs: &'a [Port],
+    pub test: &'a ChallengeTest,
+}
+
+impl PortTest<'_> {
     fn width(&self, name: &str) -> u8 {
         self.inputs
             .iter()
-            .chain(&self.outputs)
+            .chain(self.outputs)
             .find(|p| p.name == name)
             .map_or(64, |p| p.w)
     }
@@ -393,7 +409,8 @@ impl Challenge {
             .collect()
     }
 
-    fn run(&self, mut sim: logi_sim::sim::Sim) -> CheckReport {
+    /// Run the test on a simulation at power-on.
+    pub fn run(&self, mut sim: logi_sim::sim::Sim) -> CheckReport {
         let read = |sim: &logi_sim::sim::Sim, names: &[String]| -> Vec<(String, u64)> {
             names.iter().map(|n| (n.clone(), sim.get(n))).collect()
         };
@@ -441,7 +458,7 @@ impl Challenge {
                 samples,
                 seed,
             } => {
-                for values in formula_cases(&self.inputs, *samples, *seed) {
+                for values in formula_cases(self.inputs, *samples, *seed) {
                     cases += 1;
                     let ins: Vec<(String, u64)> = self
                         .inputs
@@ -497,6 +514,125 @@ impl Challenge {
             failure: None,
         }
     }
+}
+
+/// Read a test written as `{"table": {…}}`, `{"formula": {…}}` or
+/// `{"sequence": {…}}` (see `docs/save-format.md`) for a circuit with
+/// these ports.
+pub fn load_test(spec: Value, inputs: &[Port], outputs: &[Port]) -> Result<ChallengeTest, String> {
+    let spec: TestSpec = serde_json::from_value(spec).map_err(|e| e.to_string())?;
+    load_spec(spec, inputs, outputs)
+}
+
+fn load_spec(spec: TestSpec, inputs: &[Port], outputs: &[Port]) -> Result<ChallengeTest, String> {
+    let place = |e: String| e;
+    let find = |name: &str, list: &[Port], what: &str| -> Result<(), String> {
+        if list.iter().any(|p| p.name == name) {
+            Ok(())
+        } else {
+            Err(format!("there is no {what} \"{name}\""))
+        }
+    };
+    let test = match spec {
+        TestSpec::Table {
+            inputs: ins,
+            outputs: outs,
+            rows,
+        } => {
+            for n in &ins {
+                find(n, inputs, "input")?;
+            }
+            for n in &outs {
+                find(n, outputs, "output")?;
+            }
+            let rows = rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    if row.len() != ins.len() + outs.len() {
+                        return Err(place(format!(
+                            "row {} has {} values, not {}",
+                            i + 1,
+                            row.len(),
+                            ins.len() + outs.len()
+                        )));
+                    }
+                    row.iter()
+                        .map(|v| value(v).map_err(|e| place(format!("row {}: {e}", i + 1))))
+                        .collect()
+                })
+                .collect::<Result<Vec<Vec<u64>>, String>>()?;
+            if rows.is_empty() {
+                return Err(place("the table has no rows".into()));
+            }
+            ChallengeTest::Table {
+                inputs: ins,
+                outputs: outs,
+                rows,
+            }
+        }
+        TestSpec::Formula {
+            expect,
+            samples,
+            seed,
+        } => {
+            let mut list = Vec::new();
+            for (name, text) in &expect {
+                find(name, outputs, "output")?;
+                let Value::String(text) = text else {
+                    return Err(place(format!("\"{name}\": write the formula as a string")));
+                };
+                let e =
+                    Expr::parse(text).map_err(|e| place(format!("\"{name}\": \"{text}\": {e}")))?;
+                for n in e.names() {
+                    find(n, inputs, "input")?;
+                }
+                list.push((name.clone(), e));
+            }
+            if list.is_empty() {
+                return Err(place("the formula test expects nothing".into()));
+            }
+            let bits: u32 = inputs.iter().map(|p| u32::from(p.w)).sum();
+            if samples.is_none() && bits > MAX_EXHAUSTIVE_BITS {
+                return Err(place(format!(
+                    "{bits} input bits are too many to try them all; give \"samples\""
+                )));
+            }
+            ChallengeTest::Formula {
+                expect: list,
+                samples,
+                seed,
+            }
+        }
+        TestSpec::Sequence { steps } => {
+            let pairs = |map: &Map<String, Value>,
+                         list: &[Port],
+                         what: &str|
+             -> Result<Vec<(String, u64)>, String> {
+                map.iter()
+                    .map(|(n, v)| {
+                        find(n, list, what)?;
+                        Ok((n.clone(), value(v).map_err(place)?))
+                    })
+                    .collect()
+            };
+            let steps = steps
+                .iter()
+                .map(|s| {
+                    Ok(Step {
+                        set: pairs(&s.set, inputs, "input")?,
+                        ticks: s.ticks,
+                        expect: pairs(&s.expect, outputs, "output")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            if !steps.iter().any(|s| !s.expect.is_empty()) {
+                return Err(place("the sequence expects nothing".into()));
+            }
+            ChallengeTest::Sequence { steps }
+        }
+    };
+    Ok(test)
 }
 
 fn mask(w: u8) -> u64 {
@@ -746,13 +882,6 @@ pub(super) fn load(
         if inputs.is_empty() || outputs.is_empty() {
             return Err(place("the starter needs inputs and outputs".into()));
         }
-        let find = |name: &str, list: &[Port], what: &str| -> Result<(), String> {
-            if list.iter().any(|p| p.name == name) {
-                Ok(())
-            } else {
-                Err(place(format!("the starter has no {what} \"{name}\"")))
-            }
-        };
 
         // Parts rules.
         for t in entry.allowed.iter().flatten() {
@@ -779,105 +908,7 @@ pub(super) fn load(
             }
         }
 
-        let test = match entry.test {
-            TestSpec::Table {
-                inputs: ins,
-                outputs: outs,
-                rows,
-            } => {
-                for n in &ins {
-                    find(n, &inputs, "input")?;
-                }
-                for n in &outs {
-                    find(n, &outputs, "output")?;
-                }
-                let rows = rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, row)| {
-                        if row.len() != ins.len() + outs.len() {
-                            return Err(place(format!(
-                                "row {} has {} values, not {}",
-                                i + 1,
-                                row.len(),
-                                ins.len() + outs.len()
-                            )));
-                        }
-                        row.iter()
-                            .map(|v| value(v).map_err(|e| place(format!("row {}: {e}", i + 1))))
-                            .collect()
-                    })
-                    .collect::<Result<Vec<Vec<u64>>, String>>()?;
-                if rows.is_empty() {
-                    return Err(place("the table has no rows".into()));
-                }
-                ChallengeTest::Table {
-                    inputs: ins,
-                    outputs: outs,
-                    rows,
-                }
-            }
-            TestSpec::Formula {
-                expect,
-                samples,
-                seed,
-            } => {
-                let mut list = Vec::new();
-                for (name, text) in &expect {
-                    find(name, &outputs, "output")?;
-                    let Value::String(text) = text else {
-                        return Err(place(format!("\"{name}\": write the formula as a string")));
-                    };
-                    let e = Expr::parse(text)
-                        .map_err(|e| place(format!("\"{name}\": \"{text}\": {e}")))?;
-                    for n in e.names() {
-                        find(n, &inputs, "input")?;
-                    }
-                    list.push((name.clone(), e));
-                }
-                if list.is_empty() {
-                    return Err(place("the formula test expects nothing".into()));
-                }
-                let bits: u32 = inputs.iter().map(|p| u32::from(p.w)).sum();
-                if samples.is_none() && bits > MAX_EXHAUSTIVE_BITS {
-                    return Err(place(format!(
-                        "{bits} input bits are too many to try them all; give \"samples\""
-                    )));
-                }
-                ChallengeTest::Formula {
-                    expect: list,
-                    samples,
-                    seed,
-                }
-            }
-            TestSpec::Sequence { steps } => {
-                let pairs = |map: &Map<String, Value>,
-                             list: &[Port],
-                             what: &str|
-                 -> Result<Vec<(String, u64)>, String> {
-                    map.iter()
-                        .map(|(n, v)| {
-                            find(n, list, what)?;
-                            Ok((n.clone(), value(v).map_err(place)?))
-                        })
-                        .collect()
-                };
-                let steps = steps
-                    .iter()
-                    .map(|s| {
-                        Ok(Step {
-                            set: pairs(&s.set, &inputs, "input")?,
-                            ticks: s.ticks,
-                            expect: pairs(&s.expect, &outputs, "output")?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                if !steps.iter().any(|s| !s.expect.is_empty()) {
-                    return Err(place("the sequence expects nothing".into()));
-                }
-                ChallengeTest::Sequence { steps }
-            }
-        };
+        let test = load_spec(entry.test, &inputs, &outputs).map_err(place)?;
 
         catalog.challenges.push(Challenge {
             id: entry.id,

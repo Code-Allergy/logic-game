@@ -6,7 +6,7 @@
 //! are its only source of truth; a document is produced from them on demand
 //! (save, opening a subcircuit) and never kept in sync per frame.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -291,12 +291,20 @@ impl CircuitDocument {
     }
 }
 
+/// The stored tests of a workspace's circuits, by circuit id: each test
+/// is a JSON object with a `name` and one test kind
+/// (`docs/save-format.md`, "Stored tests"; run by `crate::mcp::testing`).
+pub type CircuitTests = BTreeMap<Uuid, Vec<serde_json::Value>>;
+
 /// A workspace: the root circuit plus the definitions it (transitively)
-/// instances.
+/// instances, and the tests stored with them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceDocument {
     pub root: CircuitDocument,
     pub definitions: HashMap<Uuid, Arc<CircuitDocument>>,
+    /// Tests of the root and of definitions. An entry whose circuit is
+    /// not in the workspace is dropped when it is saved.
+    pub tests: CircuitTests,
 }
 
 impl WorkspaceDocument {
@@ -304,6 +312,7 @@ impl WorkspaceDocument {
         Self {
             root,
             definitions: HashMap::new(),
+            tests: CircuitTests::new(),
         }
     }
 
@@ -314,11 +323,26 @@ impl WorkspaceDocument {
         id
     }
 
-    /// Register every definition of `other`.
+    /// Register every definition of `other`, with its tests.
     pub fn absorb(&mut self, other: &WorkspaceDocument) {
         for (id, def) in &other.definitions {
             self.definitions.insert(*id, Arc::clone(def));
+            if let Some(tests) = other.tests.get(id) {
+                self.tests.insert(*id, tests.clone());
+            }
         }
+    }
+
+    /// The tests of circuits that are in the workspace (the root and the
+    /// definitions), without empty entries.
+    pub fn kept_tests(&self) -> CircuitTests {
+        self.tests
+            .iter()
+            .filter(|(id, tests)| {
+                !tests.is_empty() && (**id == self.root.id || self.definitions.contains_key(id))
+            })
+            .map(|(id, tests)| (*id, tests.clone()))
+            .collect()
     }
 }
 

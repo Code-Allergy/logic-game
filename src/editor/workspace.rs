@@ -45,6 +45,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::sim::document::CircuitTests;
 use crate::sim::source::{self, Externals};
 use crate::sim::{CircuitDocument, CircuitLibrary, WorkspaceDocument, demos};
 use crate::{DEFAULT_WORKSPACE_EXT, WORKSPACE_DIR};
@@ -127,6 +128,9 @@ struct WorkspaceFile {
     name: String,
     root: Uuid,
     circuits: Vec<CircuitDocument>,
+    /// Stored tests by circuit id (left out when there are none).
+    #[serde(default, skip_serializing_if = "CircuitTests::is_empty")]
+    tests: CircuitTests,
 }
 
 /// Environment variable that overrides the player's data folder (the
@@ -458,7 +462,12 @@ impl WorkspaceStore {
     ) -> Result<Saved, String> {
         let plan = self.plan_save(requested, current, workspace.root.id, on_conflict)?;
         if plan.fresh_root {
+            let old = workspace.root.id;
             workspace.root.id = Uuid::new_v4();
+            // The root's tests follow it to its new id.
+            if let Some(tests) = workspace.tests.remove(&old) {
+                workspace.tests.insert(workspace.root.id, tests);
+            }
         }
         workspace.root.name = plan.name.clone();
         let report = self
@@ -653,13 +662,15 @@ pub fn read_workspace_at(folder: &Path, name: &str) -> Result<WorkspaceDocument,
             }
         }
     }
-    let workspace = WorkspaceDocument {
+    let mut workspace = WorkspaceDocument {
         root,
         definitions: circuits
             .into_iter()
             .map(|(id, c)| (id, Arc::new(c)))
             .collect(),
+        tests: file.tests,
     };
+    workspace.tests = workspace.kept_tests();
     let library = CircuitLibrary {
         definitions: workspace.definitions.clone(),
     };
@@ -781,6 +792,7 @@ fn workspace_json(name: &str, workspace: &WorkspaceDocument) -> Result<String, W
         circuits: std::iter::once(workspace.root.clone())
             .chain(definitions.into_iter().map(|d| (**d).clone()))
             .collect(),
+        tests: workspace.kept_tests(),
     };
     Ok(serde_json::to_string_pretty(&file)?)
 }

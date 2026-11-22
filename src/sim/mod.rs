@@ -67,8 +67,8 @@ pub use bridge::{CompileFailure, LoopNode, SimBridge, SimDiagnostics, SimRuntime
 pub use chip::{ChipPlan, MakeChip, plan_chip};
 pub use demos::{Demo, DemoCatalog};
 pub use document::{
-    CircuitDocument, CircuitLibrary, DEFAULT_LAYER_UUID, DocNode, DocWire, Incoming, MergeReport,
-    PinAddr, WorkspaceDocument,
+    CircuitDocument, CircuitLibrary, CircuitTests, DEFAULT_LAYER_UUID, DocNode, DocWire, Incoming,
+    MergeReport, PinAddr, WorkspaceDocument,
 };
 pub use history::{HISTORY_LIMIT, HistoryCommand, UndoHistory};
 pub use kind::{GateKind, MAX_SCREEN_SCALE, SCREEN_BEZEL, ScreenMode, ScreenPalette, TEXT_CELL};
