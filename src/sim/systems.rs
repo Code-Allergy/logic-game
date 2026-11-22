@@ -9,7 +9,7 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use uuid::Uuid;
 
-use crate::camera::{FIT_PADDING, FitView, fit_view, scale_for_wpp};
+use crate::camera::{FIT_PADDING, FitView, fit_view_around, scale_for_wpp};
 use crate::editor::parts::{kind_blurb, kind_title};
 use crate::theme::{Family, Theme};
 use crate::ui_style::{
@@ -110,17 +110,20 @@ pub fn fit_camera_to_circuit_system(
     else {
         return;
     };
-    let Some(content) = gates
-        .iter()
-        .map(|(t, ty)| Rect::from_center_size(t.translation.truncate(), ty.kind.size()))
-        .reduce(|a, b| a.union(b))
-    else {
+    let bounds = |input_only: bool| {
+        gates
+            .iter()
+            .filter(|(_, ty)| !input_only || ty.kind.is_input())
+            .map(|(t, ty)| Rect::from_center_size(t.translation.truncate(), ty.kind.size()))
+            .reduce(|a, b| a.union(b))
+    };
+    let Some(content) = bounds(false) else {
         return;
     };
     let screen = window.size();
     let scale = crate::ui_style::ui_scale_for(settings.as_deref(), screen);
     let free = HudLayout::scaled(screen, scale).free_area_in_window(scale);
-    let (centre, wpp) = fit_view(content, screen, free, FIT_PADDING);
+    let (centre, wpp) = fit_view_around(content, bounds(true), screen, free, FIT_PADDING);
     if let Projection::Orthographic(ortho) = projection.as_mut() {
         ortho.scale = scale_for_wpp(ortho, screen.y, wpp);
         ortho.near = -10_000.0;

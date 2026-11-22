@@ -190,6 +190,7 @@ impl Plugin for SimulationViewPlugin {
                     fit_camera_to_circuit_system
                         .after(load_workspace_system)
                         .after(view_navigation_system),
+                    crate::camera::track_canvas_zoom_system,
                     workspace_io_system,
                     sync_bench_theme_system,
                 ),

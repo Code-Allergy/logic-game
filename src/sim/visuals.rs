@@ -42,8 +42,9 @@ use bevy::transform::TransformSystems;
 use uuid::Uuid;
 
 use super::art::{
-    BIT_CORE, BUS_CORE, CanvasArt, EDGE, Glyph, MeshKey, OUTLINE, Paint, PinLayout, Tone,
-    casing_for, family, pill_size, shorten, tile_caption, tile_radius,
+    BIT_CORE, BUS_CORE, CANVAS_TEXT_SIZE, CanvasArt, CaptionMode, EDGE, Glyph, MeshKey, OUTLINE,
+    Paint, PinLayout, SIMPLE_LABEL_SCALE, Tone, caption_mode, caption_size, casing_for, family,
+    pill_size, shorten, simple_caption, simple_caption_size, tile_caption, tile_radius,
 };
 use super::bridge::sync_design_system;
 use super::routing::{self, NetRoute, NetSpec, RouteProblem, RouteStats, SinkPath};
@@ -210,6 +211,8 @@ pub struct TileSpec {
     pub inputs: Vec<u8>,
     pub outputs: Vec<u8>,
     pub caption: Option<String>,
+    /// The caption when zoomed out ([`super::art::simple_caption`]).
+    pub simple_caption: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -308,18 +311,21 @@ type Piece = (Mesh2d, MeshMaterial2d<ColorMaterial>, Transform);
 /// The pin widths and caption of a tile.
 fn tile_spec(kind: &GateKind, library: &CircuitLibrary) -> TileSpec {
     let (ins, outs) = library.pins(kind).unwrap_or_default();
+    let name = match kind {
+        GateKind::SubCircuit { definition } => library.get(*definition).map(|d| d.name.as_str()),
+        _ => None,
+    };
     let caption = match kind {
-        GateKind::SubCircuit { definition } => Some(
-            library
-                .get(*definition)
-                .map_or_else(|| "?".to_string(), |d| shorten(&d.name, 7)),
-        ),
+        GateKind::SubCircuit { .. } => {
+            Some(name.map_or_else(|| "?".to_string(), |n| shorten(n, 7)))
+        }
         k => tile_caption(k),
     };
     TileSpec {
         inputs: ins.iter().copied().collect(),
         outputs: outs.iter().copied().collect(),
         caption,
+        simple_caption: simple_caption(kind, name),
     }
 }
 
@@ -415,19 +421,31 @@ fn build_tile(
         );
         child(commands, piece);
     } else if let Some(caption) = &spec.caption {
-        let chars = caption.chars().count().max(1) as f32;
-        let font_size = ((size.x - 14.0) / (chars * 0.66)).clamp(9.0, 13.0);
-        let font = if matches!(kind, GateKind::Const { .. }) {
-            art.fonts.mono(font_size)
+        let full_size = caption_size(caption, size);
+        let mono = matches!(kind, GateKind::Const { .. });
+        let simple = spec
+            .simple_caption
+            .clone()
+            .unwrap_or_else(|| caption.clone());
+        let tile_caption = TileCaption {
+            full_size,
+            simple_size: simple_caption_size(&simple, size, mono),
+            full: caption.clone(),
+            simple,
+        };
+        let font = if mono {
+            art.fonts.mono(full_size)
         } else {
-            art.fonts.name(font_size)
+            art.fonts.name(full_size)
         };
         commands.spawn((
             Text2d::new(caption.clone()),
             font,
+            TextLayout::justify(Justify::Center),
             TextColor(Color::WHITE),
             Tone(Paint::family_text(fam)),
             Transform::from_xyz(0.0, 0.0, 0.5),
+            tile_caption,
             TileArt,
             ChildOf(entity),
         ));
@@ -547,7 +565,7 @@ fn build_tile(
             art.fonts.name(13.0),
             TextColor(Color::WHITE),
             Tone(Paint::Text),
-            Transform::from_xyz(0.0, -size.y * 0.5 - EDGE - 13.0, 0.5),
+            Transform::from_xyz(0.0, name_tag_y(size.y, 1.0), 0.5),
             NameTag,
             TileArt,
             ChildOf(entity),
@@ -1079,6 +1097,120 @@ pub fn update_logic_displays_system(
             if text.0 != formatted {
                 text.0 = formatted;
             }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Caption modes
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The canvas zoom (screen pixels per world unit), kept by the app's
+/// camera ([`crate::camera::track_canvas_zoom_system`]); 1 without one.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct CanvasZoom(pub f32);
+
+impl Default for CanvasZoom {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+/// A tile's caption text in both modes ([`CaptionMode`]).
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct TileCaption {
+    pub full: String,
+    pub full_size: f32,
+    pub simple: String,
+    pub simple_size: f32,
+}
+
+impl TileCaption {
+    /// The text and size shown at `zoom`.
+    pub fn at(&self, zoom: f32) -> (&str, f32) {
+        match caption_mode(zoom, self.full_size) {
+            CaptionMode::Full => (&self.full, self.full_size),
+            CaptionMode::Simple => (&self.simple, self.simple_size),
+        }
+    }
+}
+
+/// Where a name tag sits below a tile `height` tall, drawn `scale` times
+/// its size.
+fn name_tag_y(height: f32, scale: f32) -> f32 {
+    -height * 0.5 - EDGE - 13.0 * scale
+}
+
+/// The scale of name tags and value pills at `zoom`.
+pub fn label_scale(zoom: f32) -> f32 {
+    match caption_mode(zoom, CANVAS_TEXT_SIZE) {
+        CaptionMode::Full => 1.0,
+        CaptionMode::Simple => SIMPLE_LABEL_SCALE,
+    }
+}
+
+type NewLabel = Or<(Added<NameTag>, Added<WireValueLabel>)>;
+
+/// Switch tile captions, name tags and value pills between their full and
+/// simplified ([`CaptionMode`]) look when the zoom crosses a threshold,
+/// and give new ones the current look. Idle (no zoom change, nothing new)
+/// it touches nothing.
+#[allow(clippy::type_complexity)]
+pub fn apply_caption_mode_system(
+    zoom: Option<Res<CanvasZoom>>,
+    mut captions: ParamSet<(
+        Query<(&TileCaption, &mut Text2d, &mut TextFont)>,
+        Query<(&TileCaption, &mut Text2d, &mut TextFont), Added<TileCaption>>,
+    )>,
+    mut labels: ParamSet<(
+        Query<
+            (&mut Transform, Option<&ChildOf>, Has<NameTag>),
+            Or<(With<NameTag>, With<WireValueLabel>)>,
+        >,
+        Query<(&mut Transform, Option<&ChildOf>, Has<NameTag>), NewLabel>,
+    )>,
+    gates: Query<&GateType>,
+    mut shown: Local<Option<f32>>,
+) {
+    let zoom = zoom.map_or(1.0, |z| z.0);
+    // Captions switch at thresholds of their own: look at every one when
+    // the zoom moved (zooming is a step at a time, not every frame).
+    let changed = *shown != Some(zoom);
+    *shown = Some(zoom);
+    let set_caption = |caption: &TileCaption, mut text: Mut<Text2d>, mut font: Mut<TextFont>| {
+        let (want, size) = caption.at(zoom);
+        if text.0 != want {
+            text.0 = want.to_string();
+        }
+        if font.font_size != FontSize::Px(size) {
+            font.font_size = FontSize::Px(size);
+        }
+    };
+    let scale = label_scale(zoom);
+    let set_label = |mut transform: Mut<Transform>, parent: Option<&ChildOf>, tag: bool| {
+        if transform.scale.x != scale {
+            transform.scale = Vec3::new(scale, scale, 1.0);
+        }
+        if tag && let Some(gate) = parent.and_then(|p| gates.get(p.parent()).ok()) {
+            let y = name_tag_y(gate.kind.size().y, scale);
+            if transform.translation.y != y {
+                transform.translation.y = y;
+            }
+        }
+    };
+    if changed {
+        for (caption, text, font) in &mut captions.p0() {
+            set_caption(caption, text, font);
+        }
+        for (transform, parent, tag) in &mut labels.p0() {
+            set_label(transform, parent, tag);
+        }
+    } else {
+        for (caption, text, font) in &mut captions.p1() {
+            set_caption(caption, text, font);
+        }
+        for (transform, parent, tag) in &mut labels.p1() {
+            set_label(transform, parent, tag);
         }
     }
 }
@@ -1750,6 +1882,7 @@ impl Plugin for SimulationVisualsPlugin {
         }
         app.init_resource::<Theme>()
             .init_resource::<CanvasArt>()
+            .init_resource::<CanvasZoom>()
             .init_resource::<WireRouting>()
             .register_type::<LoopHighlight>()
             .add_systems(
@@ -1768,6 +1901,7 @@ impl Plugin for SimulationVisualsPlugin {
                     ),
                     route_wires_system,
                     update_wire_visuals_system,
+                    apply_caption_mode_system,
                     (colour_new_texts_system, apply_theme_to_canvas_system).chain(),
                 )
                     .chain()
