@@ -39,7 +39,7 @@ embed-resource = "1"
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 [workspace]
 resolver = "3"
-members = ["logi-sim", "mobile"]
+members = ["logi-sim", "mobile", "perf", "perf/metrics", "xtask"]
 
 [profile.dev]
 opt-level = 1
