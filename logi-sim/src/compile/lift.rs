@@ -116,6 +116,11 @@ enum Opd {
 
 type Key = (Op, [Opd; 3]);
 
+/// One way to read an operand: its descriptor, its payload (a constant
+/// bit or a `Var` slot), the bit it reads (for `Word`) and the slot's
+/// fan-out (for `Word`).
+type OperandOption = (Opd, u32, u8, u32);
+
 struct Group {
     op: Op,
     opds: [Opd; 3],
@@ -984,7 +989,7 @@ fn run_round(ctx: &Ctx<'_>, widths: &mut Vec<u8>, banks: &[Bank], rejected: &[bo
                         continue;
                     }
                     // Options per operand: (descriptor, payload).
-                    let mut opts: [SmallVec<[(Opd, u32, u8, u32); 2]>; 3] = Default::default();
+                    let mut opts: [SmallVec<[OperandOption; 2]>; 3] = Default::default();
                     for (p, &(is, x)) in slots.iter().enumerate() {
                         if !is {
                             opts[p].push((Opd::None, 0, 0, 0));

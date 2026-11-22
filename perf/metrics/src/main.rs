@@ -325,7 +325,7 @@ fn breakdown(name: &str, options: &str) {
     );
     let sorted = |m: BTreeMap<String, usize>| {
         let mut v: Vec<_> = m.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|a| std::cmp::Reverse(a.1));
         v
     };
     println!("\nby op:");
@@ -334,7 +334,7 @@ fn breakdown(name: &str, options: &str) {
     }
     println!("\nby definition:");
     let mut defs: Vec<_> = by_def.into_iter().collect();
-    defs.sort_by(|a, b| b.1.cmp(&a.1));
+    defs.sort_by_key(|a| std::cmp::Reverse(a.1));
     for (def, n) in defs {
         let ops: Vec<String> = {
             let mut v: Vec<_> = by_def_op
@@ -342,7 +342,7 @@ fn breakdown(name: &str, options: &str) {
                 .filter(|((d, _), _)| *d == def)
                 .map(|((_, op), n)| (op.clone(), *n))
                 .collect();
-            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.sort_by_key(|a| std::cmp::Reverse(a.1));
             v.into_iter().map(|(op, n)| format!("{op} {n}")).collect()
         };
         println!("  {n:6}  {def}: {}", ops.join(", "));
