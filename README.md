@@ -60,16 +60,63 @@ Keys (ignored while a text field has focus): `1`–`9` arm a part from the
 open tab (then click the canvas, or drag a slot onto it), `Esc` drops it
 (or the wire tool, or closes the Library; with nothing to drop it clears
 the selection), `W` wire tool, `F` fit, `R` reset to tick 0, `Delete`
-deletes the selected part, `T` day or night. Mouse: left-click selects
+deletes the selected part, `T` day or night, `Ctrl+S` (`Cmd+S` on macOS)
+saves. Mouse: left-click selects
 (on empty canvas: deselects), right-drag moves a part, middle-drag pans,
 the wheel zooms about the cursor.
 
 `cargo run --example screenshot -- <id> out.png [--night] [--size WxH]
 [--select LABEL] [--set LABEL=VALUE] [--tab NAME] [--library] [--editable]
-[--fit] [--definition NAME]` saves a screenshot of a demo, a gallery item
+[--fit] [--definition NAME] [--confirm]` saves a screenshot of a demo, a gallery item
 (or `empty`, a new workspace, or `loop`, a build error) or a version 6
 file (optionally one of its definitions); `--map [--opened ID,ID,...]
-[--level N]` shows the demo map instead, with that progress (in memory).
+[--level N]` shows the demo map instead, with that progress (in memory);
+`--confirm` shows the unsaved-changes question. Run it with
+`GATEQUEST_DATA_DIR` set to a scratch folder.
+
+## Saving
+
+Workspaces are saved in the player's data folder, not the folder the game
+was started from:
+
+| System | Folder |
+|---|---|
+| Linux and other Unix | `$XDG_DATA_HOME/gatequest/workspaces`, else `~/.local/share/gatequest/workspaces` |
+| macOS | `~/Library/Application Support/GateQuest/workspaces` |
+| Windows | `%APPDATA%\GateQuest\workspaces` |
+
+`GATEQUEST_DATA_DIR=<folder>` overrides it (workspaces go in
+`<folder>/workspaces`; tests and tools use a scratch folder). Without any
+of these variables the game falls back to `./workspaces`. Earlier versions
+saved to `./workspaces` in the launch folder: when that folder exists, its
+workspaces (and demo progress) are still listed and opened, and the next
+save of one writes it to the new folder (the old copy is left alone).
+
+- Each workspace is a folder `<name>/manifest.json`; every save writes a
+  temporary file, flushes it to disk and renames it into place, keeping
+  the previous save as `manifest.json.bak`.
+- Names are made safe for every system: no `/ \ : * ? " < > |`, no
+  leading dot (so no `..`), no trailing dot or space, no Windows device
+  names (`CON`, `NUL`, `COM1`, ...). Names that differ only in case are
+  the same workspace.
+- Save in the Library (or `Ctrl+S`) saves the open workspace. Typing
+  another name makes it "Save as new": a copy with its own identity
+  (chips are keyed by it), which becomes the open workspace; the old one
+  stays as it was. A save never replaces a different workspace of the
+  same name: pick another name, or load that one.
+- "Copy to my workspace" saves the copy at once as `<title> (copy)`, then
+  `(copy 2)`, ...; a new empty workspace is `workspace`, `workspace (2)`,
+  ...
+- Unlabelled Inputs, Outputs and Readouts are named `in0`, `out0`,
+  `display0`, ... in the saved file.
+- Opening something else (a demo, a saved workspace, New, Import RTL, a
+  copy) over unsaved changes asks first: Save, Discard or Cancel.
+- Closing the window or Exit saves unsaved changes to the open
+  workspace (under a free name if a different workspace has taken its
+  name). Read-only demos and untouched or never-saved empty workspaces are
+  not saved.
+- The web build has no file system yet: Save, Load and saved chips are
+  hidden there, and a copied demo is editable for the session only.
 
 ## The demo map
 
@@ -91,9 +138,11 @@ returns to the editor. The app still starts on the title menu.
 
 Opened demos are recorded whenever a demo or gallery item is open, however
 it was opened. Native builds keep the record in
-`workspaces/.demo-progress.json` (`{"format": "gatequest-progress",
-"version": 1, "opened": [...], "last": "..."}`, written atomically; hidden
-files are not listed as workspaces). The web build keeps it in memory for
+`.demo-progress.json` in the workspaces folder (see Saving;
+`{"format": "gatequest-progress", "version": 1, "opened": [...], "last":
+"..."}`, written atomically with a `.bak` of the previous one; a file that
+cannot be read is kept as `.demo-progress.json.corrupt` before starting
+over; hidden files are not listed as workspaces). The web build keeps it in memory for
 the session.
 
 ## Documentation
