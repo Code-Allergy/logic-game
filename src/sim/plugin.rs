@@ -214,7 +214,10 @@ impl Plugin for SimulationViewPlugin {
                 bevy_egui::EguiPrimaryContextPass,
                 (simulation_config_ui_system, ui_for_selected_gate),
             )
-            .add_systems(Last, save_on_exit_system.after(bevy::window::ExitSystems));
+            .add_systems(
+                Last,
+                save_on_exit_system.in_set(bevy::app::OnAppExitSystems),
+            );
     }
 }
 

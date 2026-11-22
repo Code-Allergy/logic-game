@@ -1,4 +1,6 @@
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui_widgets::{Activate, ActivateOnPress, Button};
 
 use crate::GameSettings;
 use crate::theme::Theme;
@@ -60,32 +62,36 @@ pub fn show_settings_menu(
                 "VSync: {}",
                 if settings.vsync { "Yes" } else { "No" }
             )));
-            parent.spawn((Button, Text::new("Close"), SettingsMenuCloseButton));
+            parent
+                .spawn((
+                    Button,
+                    ActivateOnPress,
+                    Hovered::default(),
+                    Text::new("Close"),
+                    SettingsMenuCloseButton,
+                ))
+                .observe(close_settings_menu);
             // Add more UI elements as needed
         });
 }
 
+fn close_settings_menu(_activate: On<Activate>, mut settings_open: ResMut<SettingsMenuOpen>) {
+    settings_open.0 = false;
+}
+
+/// Colour the settings menu's Close button by its hovered state.
 pub fn settings_menu_button_system(
-    mut interaction_query: Query<
-        (&Interaction, &mut BackgroundColor, &SettingsMenuCloseButton),
-        Changed<Interaction>,
-    >,
-    mut settings_open: ResMut<SettingsMenuOpen>,
+    mut buttons: Query<(&Hovered, &mut BackgroundColor), With<SettingsMenuCloseButton>>,
     theme: Res<Theme>,
 ) {
     let palette = theme.palette;
-    for (interaction, mut color, _) in &mut interaction_query {
-        match *interaction {
-            Interaction::Pressed => {
-                settings_open.0 = false;
-            }
-            Interaction::Hovered => {
-                *color = palette.hover.into();
-            }
-            Interaction::None => {
-                *color = palette.raised.into();
-            }
-        }
+    for (hovered, mut color) in &mut buttons {
+        let want = if hovered.get() {
+            palette.hover
+        } else {
+            palette.raised
+        };
+        color.set_if_neq(want.into());
     }
 }
 

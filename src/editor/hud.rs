@@ -1354,7 +1354,11 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::ui_style::workshop_fonts());
         for _ in 0..2 {
-            let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+            // No renderer here: drop the font atlas uploads on purpose
+            // (egui asserts that a texture delta is not dropped unapplied).
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .textures_delta
+                .clear();
         }
         assert!(crate::ui_style::workshop_fonts_ready(&ctx));
         ctx
