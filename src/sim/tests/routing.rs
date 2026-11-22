@@ -102,3 +102,47 @@ fn every_demo_and_gallery_circuit_routes_cleanly() {
     assert!(circuits > 50, "the demos and the gallery are all there");
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// The rubber band of a wire drag ([`band_route`]) is routed like a wire
+/// with only the tiles near its ends: it joins the two pins with
+/// horizontal and vertical runs, in the biggest circuit too. (Timing is
+/// printed with `--nocapture`: it is routed once per target pin.)
+#[test]
+fn the_rubber_band_routes_between_the_pins_of_any_net() {
+    use crate::sim::wiring::band_route;
+    let demo = demos().get("cpu16").expect("the 16-bit CPU");
+    let mut library = CircuitLibrary {
+        definitions: demo.workspace.definitions.clone(),
+    };
+    for (_, doc) in &demo.circuits {
+        library.definitions.insert(doc.id, Arc::clone(doc));
+    }
+    let (_, doc) = demo
+        .circuits
+        .iter()
+        .find(|(name, _)| name == "cpu16")
+        .expect("the top level");
+    let nets = document_nets(doc, &library);
+    let (mut bands, mut worst, mut total) = (0, Duration::ZERO, Duration::ZERO);
+    for net in &nets.problem.nets {
+        for &sink in &net.sinks {
+            let start = Instant::now();
+            let path = band_route(&nets.problem.boxes, net.driver, sink);
+            let took = start.elapsed();
+            worst = worst.max(took);
+            total += took;
+            bands += 1;
+            assert_eq!(path.first(), Some(&net.driver));
+            assert_eq!(path.last(), Some(&sink));
+            for w in path.windows(2) {
+                assert!(w[0].x == w[1].x || w[0].y == w[1].y, "{path:?}");
+            }
+        }
+    }
+    assert!(bands > 50);
+    eprintln!(
+        "{bands} bands over {} tiles: worst {worst:?}, mean {:?}",
+        nets.problem.boxes.len(),
+        total / bands
+    );
+}

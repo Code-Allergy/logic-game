@@ -25,6 +25,7 @@ use bevy_egui::{
 use uuid::Uuid;
 
 use crate::camera::{FitView, MAX_WPP, MIN_WPP, scale_for_wpp, visible_world, world_per_pixel};
+use crate::sim::systems::CanvasPointer;
 use crate::sim::{
     ActiveCircuit, AuthoringFeedback, CircuitLibrary, CreateGate, Demo, GateIdentity, GateKind,
     GateLabel, GateType, GateValues, RegisterDefinitions, SelectedGate, SimDiagnostics,
@@ -1331,7 +1332,8 @@ pub fn escape(state: &mut EditorState, selected: &mut SelectedGate) {
 }
 
 /// `Esc` drops the armed part, the wire tool and the Library drawer, or
-/// with none of those clears the selection (see [`escape`]); `W`
+/// with none of those clears the selection (see [`escape`]); during a
+/// wire drag it only drops the wire; `W`
 /// toggles the wire tool; `F` fits the view. Ignored while a text field
 /// has the keyboard. (`1`–`9` are handled by the parts bar, `T` by the
 /// theme, `Delete` by the inspector.)
@@ -1342,6 +1344,7 @@ pub fn editor_keys_system(
     mut fit: MessageWriter<FitView>,
     game_state: Res<State<GameState>>,
     mut selected: Option<ResMut<SelectedGate>>,
+    canvas: Option<Res<CanvasPointer>>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -1353,7 +1356,10 @@ pub fn editor_keys_system(
     if ctx.egui_wants_keyboard_input() {
         return Ok(());
     }
-    if keys.just_pressed(KeyCode::Escape) {
+    // `Esc` during a wire drag drops the wire (the canvas pointer sees to
+    // it) and nothing else.
+    let wiring = canvas.is_some_and(|c| c.wiring());
+    if keys.just_pressed(KeyCode::Escape) && !wiring {
         let mut next = selected.as_deref().copied().unwrap_or_default();
         escape(&mut state, &mut next);
         if let Some(selected) = selected.as_mut() {
