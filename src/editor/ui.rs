@@ -11,9 +11,10 @@ use bevy_egui::{
 };
 use uuid::Uuid;
 
+use crate::settings::{Settings, UiScale, effective_ui_scale};
 use crate::theme::{Theme, ThemeMode};
 use crate::ui_style::{
-    HudIcon, HudLayout, ICON_BUTTON_WIDTH, TOP_CARD_HEIGHT, caption, card, chunky_button,
+    HudIcon, HudLayout, ICON_BUTTON_WIDTH, TOP_CARD_HEIGHT, caption, card, chip, chunky_button,
     chunky_button_width, chunky_icon_button, day_night_button, egui_color, heavy, stroke,
 };
 use crate::{
@@ -345,6 +346,7 @@ pub fn editor_ui_system(
     mut theme: ResMut<Theme>,
     mut next_state: ResMut<NextState<GameState>>,
     mut seen_active: Local<Option<(Uuid, String)>>,
+    mut settings: Option<ResMut<Settings>>,
 ) -> Result<(), BevyError> {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -658,6 +660,13 @@ pub fn editor_ui_system(
             }
                 });
 
+            egui::CollapsingHeader::new(egui::RichText::new("Display").font(heavy(15.0)))
+                .show(ui, |ui| {
+                    if let Some(settings) = settings.as_deref_mut() {
+                        display_settings(ui, &palette, settings, window.size());
+                    }
+                });
+
             egui::CollapsingHeader::new(egui::RichText::new("Keys and mouse").font(heavy(15.0)))
                 .show(ui, |ui| {
             for tip in [
@@ -940,6 +949,41 @@ pub fn editor_ui_system(
 }
 
 /// The armed part's name beside the cursor over the canvas.
+/// The Display section of the library drawer: the UI scale (Auto and
+/// the presets), and what is in effect when the window limits it.
+pub fn display_settings(
+    ui: &mut egui::Ui,
+    palette: &crate::theme::Palette,
+    settings: &mut Settings,
+    window: Vec2,
+) {
+    ui.label(caption(palette, "UI size"));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        for choice in UiScale::choices() {
+            if chip(ui, palette, choice.label(), settings.ui_scale == choice).clicked()
+                && settings.ui_scale != choice
+            {
+                settings.ui_scale = choice;
+            }
+        }
+    });
+    let asked = settings.ui_scale.requested_percent(window);
+    let shown = (effective_ui_scale(settings.ui_scale, window) * 100.0).round() as u16;
+    let note = if shown < asked {
+        format!("{shown}%: the window is too small for {asked}%.")
+    } else if settings.ui_scale == UiScale::Auto {
+        format!("{shown}% for this window.")
+    } else {
+        "Cards and text grow or shrink together.".to_string()
+    };
+    ui.label(
+        egui::RichText::new(note)
+            .size(13.0)
+            .color(egui_color(palette.text_secondary)),
+    );
+}
+
 fn ui_armed_hint(
     ctx: &egui::Context,
     palette: &crate::theme::Palette,
@@ -1059,6 +1103,31 @@ mod tests {
                     );
                     assert!((rect.height() - TOP_CARD_HEIGHT).abs() < 0.5);
                 }
+            }
+        }
+    }
+
+    /// The Display section's chips wrap inside the library drawer, in
+    /// both layouts, at every setting.
+    #[test]
+    fn display_settings_fit_the_library_drawer() {
+        let theme = Theme::night();
+        let ctx = crate::ui_style::test_ui::ctx(&theme);
+        for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0)] {
+            let window = Vec2::new(w, h);
+            let layout = HudLayout::new(window);
+            // The drawer's card padding.
+            let room = layout.library_width - 2.0 * 14.0;
+            for choice in UiScale::choices() {
+                let mut settings = Settings::in_memory();
+                settings.ui_scale = choice;
+                let rect = crate::ui_style::test_ui::measure(&ctx, |ui| {
+                    ui.set_max_width(room);
+                    display_settings(ui, &theme.palette, &mut settings, window);
+                });
+                assert!(rect.width() <= room + 0.5, "{} at {w}x{h}", rect.width());
+                assert!(rect.height() < 160.0, "{} at {w}x{h}", rect.height());
+                assert_eq!(settings.ui_scale, choice, "drawing changes nothing");
             }
         }
     }
