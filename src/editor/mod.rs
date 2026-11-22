@@ -18,6 +18,7 @@
 //! - `hud`: the parts bar, minimap, zoom, build pill, signals and toasts.
 //! - `parts`: the parts bar's catalogue (tabs, number keys, names).
 //! - `systems`: wire-building selection.
+//! - `undo`: the undo shortcuts and the file card's Undo and Redo buttons.
 //! - `workspace`: on-disk workspace helpers (the player's data folder,
 //!   safe names, Save As, atomic writes).
 //! - `files`: replacing the open circuit, behind the unsaved-changes
@@ -34,6 +35,7 @@ pub mod hud;
 pub mod parts;
 mod systems;
 mod ui;
+pub mod undo;
 
 pub mod workspace;
 
@@ -168,6 +170,7 @@ impl Plugin for EditorPlugin {
                     hud::signals_card_system,
                     hud::toast_system,
                     hud::editor_keys_system,
+                    undo::undo_keys_system,
                 ),
             );
     }

@@ -33,6 +33,7 @@ use crate::sim::{
     },
     visuals::SimulationVisualsPlugin,
 };
+use crate::sim::{HistoryCommand, UndoHistory, history::edit_history_system};
 
 use super::demos;
 use super::spatial_grid::SpatialGrid;
@@ -93,6 +94,8 @@ impl Plugin for SimulationRuntimePlugin {
             .init_resource::<AuthoringFeedback>()
             .init_resource::<SimulationConfig>()
             .init_resource::<TickRateMeter>()
+            .init_resource::<UndoHistory>()
+            .add_message::<HistoryCommand>()
             .add_message::<CreateGate>()
             .add_message::<CreateWire>()
             .add_message::<DeleteGate>()
@@ -138,6 +141,8 @@ impl Plugin for SimulationRuntimePlugin {
                 )
                     .chain(),
             )
+            // After every edit of the frame, including a view's write-back.
+            .add_systems(Update, edit_history_system.after(write_back_view_system))
             .add_systems(PostUpdate, sync_design_system);
     }
 }

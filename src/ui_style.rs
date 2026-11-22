@@ -199,6 +199,9 @@ pub enum HudIcon {
     Moon,
     /// A folded map (the demo map).
     Map,
+    /// A hooked arrow back (undo) or forward (redo).
+    Undo,
+    Redo,
 }
 
 /// A square chunky button with a painted icon.
@@ -264,6 +267,24 @@ pub fn paint_icon(
             painter.add(egui::Shape::closed_line(outline, stroke(2.0, colour)));
             painter.line_segment([p(-3.0, -9.0), p(-3.0, 6.0)], stroke(2.0, colour));
             painter.line_segment([p(3.0, -6.0), p(3.0, 9.0)], stroke(2.0, colour));
+        }
+        HudIcon::Undo | HudIcon::Redo => {
+            // Undo: an arrowhead pointing left at the top, the shaft
+            // hooking round to the right and back; redo is its mirror.
+            let sx = if icon == HudIcon::Undo { 1.0 } else { -1.0 };
+            let p = |x: f32, y: f32| c + EVec2::new(sx * x, y);
+            let mut shaft = vec![p(-5.0, -4.0), p(2.0, -4.0)];
+            shaft.extend((1..=12).map(|i| {
+                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 12.0;
+                p(2.0 + 5.0 * a.cos(), 1.0 + 5.0 * a.sin())
+            }));
+            shaft.push(p(-4.0, 6.0));
+            painter.add(egui::Shape::line(shaft, stroke(2.5, colour)));
+            painter.add(egui::Shape::convex_polygon(
+                vec![p(-10.0, -4.0), p(-4.0, -9.0), p(-4.0, 1.0)],
+                colour,
+                Stroke::NONE,
+            ));
         }
     }
 }

@@ -65,11 +65,22 @@ impl ActiveCircuit {
 pub struct WorkspaceRevision {
     pub current: u64,
     pub saved: u64,
+    /// The highest revision handed out. Undo moves `current` back to an
+    /// earlier revision; the next edit still gets a revision never used
+    /// before, so it cannot pass for the saved one.
+    issued: u64,
 }
 
 impl WorkspaceRevision {
     pub fn mark_dirty(&mut self) {
-        self.current = self.current.wrapping_add(1);
+        self.issued = self.issued.max(self.current).wrapping_add(1);
+        self.current = self.issued;
+    }
+    /// Go back (or forward) to `revision`, one handed out earlier for the
+    /// circuit as it is now (undo and redo).
+    pub fn restore(&mut self, revision: u64) {
+        self.issued = self.issued.max(self.current);
+        self.current = revision;
     }
     pub fn mark_saved(&mut self) {
         self.saved = self.current;
