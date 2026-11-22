@@ -493,6 +493,7 @@ fn make_chip_is_refused_in_a_read_only_demo() {
         name: "demo".into(),
         workspace: Arc::new(ws),
         read_only: true,
+        unsaved: false,
     });
     settle(&mut app);
     send(

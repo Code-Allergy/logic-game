@@ -11,22 +11,20 @@ use uuid::Uuid;
 
 use crate::camera::{FIT_PADDING, FitView, fit_view, scale_for_wpp};
 use crate::editor::parts::{kind_blurb, kind_title};
+use crate::editor::workspace::{OnConflict, WEB_SAVE_UNAVAILABLE, WorkspaceStore, exit_save_plan};
 use crate::theme::{Family, Theme};
 use crate::ui_style::{
-    HudIcon, HudLayout, TOP_CARD_HEIGHT, caption, card, chip, chip_sized, chunky_button,
-    chunky_icon_button, egui_color, format_live_value, heavy, rule, stroke,
+    HudIcon, HudLayout, caption, card, chip, chip_sized, chunky_button, chunky_icon_button,
+    egui_color, format_live_value, heavy, rule, stroke,
 };
-use crate::{
-    MainCamera, UiPointerState, editor::workspace::save_workspace,
-    temp::GateComponentSelectionEvent,
-};
+use crate::{MainCamera, UiPointerState, temp::GateComponentSelectionEvent};
 
 use super::{
-    AuthoringFeedback, CircuitLibrary, CircuitReader, DeleteGate, DeleteWire, DisplayConfig,
-    DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind, GateLabel, GateLabelChanged,
-    GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected, SelectedGate, SetGateKind,
-    SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, TickRateMeter, WireEndpoints,
-    WireState, WorkspaceRevision, art,
+    ActiveCircuit, AuthoringFeedback, CircuitLibrary, CircuitMember, CircuitReader, DeleteGate,
+    DeleteWire, DisplayConfig, DisplayConfigChanged, DisplayRadix, GateIdentity, GateKind,
+    GateLabel, GateLabelChanged, GateType, GateValues, InputDrive, SaveWorkspaceEvent, Selected,
+    SelectedGate, SetGateKind, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig,
+    TickRateMeter, WireEndpoints, WireState, WorkspaceRevision, art,
     spatial_grid::SpatialGrid,
     view::{CircuitView, InstanceViewItem, OpenInstanceView},
 };
@@ -183,42 +181,225 @@ pub fn canvas_click(hit: Option<Entity>, selected: &mut SelectedGate) -> Option<
     hit
 }
 
-/// Left-click selects a gate; a left click on empty canvas (not over the
-/// HUD) clears the selection. `Shift`+click is a multi-selection gesture
-/// ([`super::multi_select`]), not handled here.
-#[allow(clippy::too_many_arguments)]
-pub fn update_inputs_on_left_click(
+/// The cursor over the canvas this frame: window position (logical
+/// pixels, y down) and world position, or `None` outside the window.
+/// [`canvas_cursor_system`] fills it in; the pointer systems only read it.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct CanvasCursor {
+    pub screen: Option<Vec2>,
+    pub world: Option<Vec2>,
+}
+
+/// Track the cursor in [`CanvasCursor`] (left as it is without a window
+/// or camera, as in headless tests).
+pub fn canvas_cursor_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
-    ui_pointer: Res<UiPointerState>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-    keys: Option<Res<ButtonInput<KeyCode>>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-    query: Query<(Entity, &Transform, &GateType)>,
-    mut select_writer: MessageWriter<GateComponentSelectionEvent>,
-    mut selected: ResMut<SelectedGate>,
+    mut cursor: ResMut<CanvasCursor>,
 ) {
-    if ui_pointer.over_egui
-        || !mouse_button_input.just_pressed(MouseButton::Left)
-        || keys.is_some_and(|k| super::multi_select::shift_held(&k))
-    {
-        return;
-    }
-    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single())
+    let (Ok(window), Ok((camera, camera_transform))) = (q_window.single(), q_camera.single())
     else {
         return;
     };
-    let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
+    *cursor = CanvasCursor {
+        screen: window.cursor_position(),
+        world: cursor_world_pos(window, camera, camera_transform),
+    };
+}
+
+/// Pixels the pointer must travel with the left button held on a part
+/// before the press becomes a move instead of a click.
+pub const DRAG_THRESHOLD: f32 = 5.0;
+
+/// A press on the canvas being followed until its release.
+#[derive(Debug, Clone, Copy)]
+pub struct CanvasPress {
+    pub button: MouseButton,
+    /// The part under the pointer when pressed.
+    pub gate: Option<Entity>,
+    /// Window position of the press.
+    pub start: Vec2,
+    /// The part's position minus the pointer's world position at the press.
+    pub offset: Vec2,
+    /// The part follows the pointer (a right press on a part at once, a
+    /// left press once it moved [`DRAG_THRESHOLD`]).
+    pub dragging: bool,
+    /// The pointer travelled past [`DRAG_THRESHOLD`].
+    pub moved: bool,
+}
+
+/// The press on the canvas, if a mouse button went down on it.
+#[derive(Resource, Debug, Default)]
+pub struct CanvasPointer {
+    pub press: Option<CanvasPress>,
+}
+
+impl CanvasPointer {
+    /// A part is being dragged.
+    pub fn dragging(&self) -> bool {
+        self.press.is_some_and(|p| p.dragging)
+    }
+}
+
+/// The value a click on an input part sets: a 1-bit input toggles. A
+/// wider input is only selected (its value is set in the inspector, where
+/// each bit has a chip), so a click never changes a bus by surprise.
+pub fn input_click_value(kind: &GateKind, value: u64) -> Option<u64> {
+    match kind {
+        GateKind::Input { w: 1 } => Some(value ^ 1),
+        _ => None,
+    }
+}
+
+#[derive(SystemParam)]
+pub struct CanvasPointerWriters<'w> {
+    select: MessageWriter<'w, GateComponentSelectionEvent>,
+    inputs: MessageWriter<'w, SetInputValue>,
+}
+
+type CanvasGate = (
+    Entity,
+    &'static mut Transform,
+    &'static GateType,
+    Option<&'static InputDrive>,
+    Has<InstanceViewItem>,
+);
+
+/// Mouse buttons on the canvas (not over the HUD):
+///
+/// - a left press on a part selects it (on empty canvas, clears the
+///   selection); released without moving, it toggles a 1-bit input (also
+///   in a read-only demo: inputs may change there), see
+///   [`input_click_value`];
+/// - a left drag on a part, past [`DRAG_THRESHOLD`], moves it, and a right
+///   drag picks it up at once; it moves on the snap grid
+///   ([`SNAP`](super::layout::SNAP)), point to point;
+/// - a `Shift`+left press is a multi-selection gesture
+///   ([`super::multi_select`]) and is not handled here.
+///
+/// Nothing moves in a read-only demo, and with a part armed or the wire
+/// tool on a left click only picks (no move, no toggle). The moved part
+/// keeps [`Selected`] (drawn on top) until the next drag.
+#[allow(clippy::too_many_arguments)]
+pub fn canvas_pointer_system(
+    ui_pointer: Res<UiPointerState>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    cursor: Res<CanvasCursor>,
+    active: Res<crate::sim::ActiveCircuit>,
+    editor: Option<Res<crate::editor::EditorState>>,
+    mut pointer: ResMut<CanvasPointer>,
+    mut selected: ResMut<SelectedGate>,
+    mut gates: Query<CanvasGate, With<GateIdentity>>,
+    dragged: Query<Entity, With<Selected>>,
+    mut commands: Commands,
+    mut writers: CanvasPointerWriters,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+) {
+    let shift = keys
+        .as_ref()
+        .is_some_and(|k| super::multi_select::shift_held(k));
+    let tool_in_hand = editor
+        .as_ref()
+        .is_some_and(|e| e.connection_mode || e.selected_gate_type.is_some());
+    let start_drag = |commands: &mut Commands, gate: Entity, offset: Vec2| {
+        for e in &dragged {
+            commands.entity(e).remove::<Selected>();
+        }
+        commands.entity(gate).insert(Selected { offset });
+    };
+
+    // A new press.
+    for button in [MouseButton::Left, MouseButton::Right] {
+        if !buttons.just_pressed(button) || pointer.press.is_some() || ui_pointer.over_egui {
+            continue;
+        }
+        // Shift+left: a click adds to or takes from the group, a drag on
+        // empty canvas draws a box (`multi_select_pointer_system`).
+        if button == MouseButton::Left && shift {
+            continue;
+        }
+        let (Some(screen), Some(world)) = (cursor.screen, cursor.world) else {
+            continue;
+        };
+        let target = gates
+            .iter()
+            .find(|(_, t, ty, ..)| hit(t, &ty.kind, world))
+            .map(|(entity, t, ..)| (entity, t.translation.truncate() - world));
+        let mut press = CanvasPress {
+            button,
+            gate: target.map(|(e, _)| e),
+            start: screen,
+            offset: target.map_or(Vec2::ZERO, |(_, o)| o),
+            dragging: false,
+            moved: false,
+        };
+        if button == MouseButton::Left {
+            let mut next = *selected;
+            if let Some(entity) = canvas_click(press.gate, &mut next) {
+                writers.select.write(GateComponentSelectionEvent { entity });
+            }
+            selected.set_if_neq(next);
+        } else if let Some(gate) = press.gate
+            && !active.read_only
+        {
+            start_drag(&mut commands, gate, press.offset);
+            press.dragging = true;
+        }
+        pointer.press = Some(press);
+    }
+
+    let Some(mut press) = pointer.press else {
         return;
     };
-    let target = query
-        .iter()
-        .find(|(_, t, ty)| hit(t, &ty.kind, world))
-        .map(|(entity, ..)| entity);
-    let mut next = *selected;
-    if let Some(entity) = canvas_click(target, &mut next) {
-        select_writer.write(GateComponentSelectionEvent { entity });
+    // Movement.
+    if let Some(screen) = cursor.screen
+        && screen.distance(press.start) > DRAG_THRESHOLD
+    {
+        press.moved = true;
     }
-    selected.set_if_neq(next);
+    let held = buttons.pressed(press.button);
+    if held
+        && press.moved
+        && !press.dragging
+        && press.button == MouseButton::Left
+        && !active.read_only
+        && !tool_in_hand
+        && let Some(gate) = press.gate
+    {
+        start_drag(&mut commands, gate, press.offset);
+        press.dragging = true;
+    }
+    if press.dragging
+        && let Some(gate) = press.gate
+        && let Ok((_, mut transform, ..)) = gates.get_mut(gate)
+    {
+        // The part jumps from point to point of the snap grid as it
+        // follows the pointer; a right press without a move leaves it.
+        let at = transform.translation.truncate();
+        let to = match cursor.world {
+            Some(world) if held && press.moved => super::layout::snap_to_grid(world + press.offset),
+            _ => at,
+        };
+        if at != to {
+            transform.translation.x = to.x;
+            transform.translation.y = to.y;
+        }
+    }
+    if held {
+        pointer.press = Some(press);
+        return;
+    }
+    // Released: a click on a 1-bit input toggles it.
+    pointer.press = None;
+    if press.button == MouseButton::Left
+        && !press.moved
+        && !tool_in_hand
+        && let Some(gate) = press.gate
+        && let Ok((entity, _, ty, Some(drive), false)) = gates.get(gate)
+        && let Some(value) = input_click_value(&ty.kind, drive.value)
+    {
+        writers.inputs.write(SetInputValue { entity, value });
+    }
 }
 
 /// Update [`SelectedGate`] when a selection event fires.
@@ -228,72 +409,6 @@ pub fn update_selected_gate(
 ) {
     for event in event_reader.read() {
         selected_gate.0 = Some(event.entity);
-    }
-}
-
-/// Right-click to select and drag gates.
-#[allow(clippy::too_many_arguments)]
-pub fn gate_selection_system(
-    q_window: Query<&Window, With<PrimaryWindow>>,
-    q_camera: Query<(&Camera, &GlobalTransform)>,
-    grid: Res<SpatialGrid>,
-    ui_pointer: Res<UiPointerState>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-    query: Query<(&Transform, &GateType), With<GateIdentity>>,
-    mut commands: Commands,
-    selected_query: Query<Entity, With<Selected>>,
-    active: Res<crate::sim::ActiveCircuit>,
-) {
-    // Gates of a read-only demo cannot be dragged.
-    if ui_pointer.over_egui
-        || active.read_only
-        || !mouse_button_input.just_pressed(MouseButton::Right)
-    {
-        return;
-    }
-    for e in &selected_query {
-        commands.entity(e).remove::<Selected>();
-    }
-    let (Ok(window), Ok((camera, global_transform))) = (q_window.single(), q_camera.single())
-    else {
-        return;
-    };
-    let Some(world) = cursor_world_pos(window, camera, global_transform) else {
-        return;
-    };
-    for entity in grid.query_near(world, 100.0) {
-        if let Ok((transform, ty)) = query.get(entity)
-            && hit(transform, &ty.kind, world)
-        {
-            let offset = transform.translation.truncate() - world;
-            commands.entity(entity).insert(Selected { offset });
-            break;
-        }
-    }
-}
-
-/// Move the selected gate while the right mouse button is held.
-pub fn drag_selected_system(
-    q_window: Query<&Window, With<PrimaryWindow>>,
-    q_camera: Query<(&Camera, &GlobalTransform)>,
-    ui_pointer: Res<UiPointerState>,
-    mut query: Query<(&mut Transform, &Selected), With<GateIdentity>>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-) {
-    if ui_pointer.over_egui || !mouse_button_input.pressed(MouseButton::Right) {
-        return;
-    }
-    let (Ok((camera, camera_transform)), Ok(window)) = (q_camera.single(), q_window.single())
-    else {
-        return;
-    };
-    let Some(world) = cursor_world_pos(window, camera, camera_transform) else {
-        return;
-    };
-    for (mut transform, selected) in &mut query {
-        let new_pos = world + selected.offset;
-        transform.translation.x = new_pos.x;
-        transform.translation.y = new_pos.y;
     }
 }
 
@@ -309,7 +424,7 @@ pub fn format_tick(tick: u64) -> String {
     let digits = tick.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push('\u{2009}');
         }
         out.push(c);
@@ -317,8 +432,187 @@ pub fn format_tick(tick: u64) -> String {
     out
 }
 
+/// What the transport card shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransportState {
+    pub running: bool,
+    pub tick: u64,
+    pub unlimited: bool,
+    pub tick_rate: f64,
+    pub more_open: bool,
+}
+
+/// What was clicked on the transport card this frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TransportClicks {
+    pub run: bool,
+    pub pause: bool,
+    pub step: bool,
+    pub reset: bool,
+    /// A speed chip: `Some(hz)`, or `None` for Max.
+    pub speed: Option<Option<f64>>,
+    /// The `…` chip (the exact-rate popover).
+    pub more: bool,
+}
+
+/// The widest tick label the card shows whole (`9 999 999`): past it
+/// the count is shortened ([`tick_label`]), so the card never grows.
+const TICK_LABEL_MAX_CHARS: usize = 9;
+
+/// The tick count as the transport card shows it: [`format_tick`] up to
+/// `9 999 999`, then three decimals of millions, billions, ... (`12.346 M`)
+/// so it keeps its width. The tooltip has the whole count.
+pub fn tick_label(tick: u64) -> String {
+    let full = format_tick(tick);
+    if full.chars().count() <= TICK_LABEL_MAX_CHARS {
+        return full;
+    }
+    let mut value = tick as f64 / 1e6;
+    for unit in ["M", "G", "T", "P"] {
+        // Below 999.9995, so `{:.3}` does not round up to 1000.000.
+        if value < 999.9995 {
+            return format!("{value:.3} {unit}");
+        }
+        value /= 1e3;
+    }
+    format!("{value:.3} E")
+}
+
+/// The transport card's contents, `layout.transport` exactly: run,
+/// pause, step, reset, the speed chips and the tick. In the compact
+/// layout Run is an icon button (the label moves to its tooltip).
+pub fn transport_card(
+    ui: &mut egui::Ui,
+    palette: &crate::theme::Palette,
+    state: &TransportState,
+    measured_rate: &str,
+    layout: &HudLayout,
+) -> TransportClicks {
+    let mut clicked = TransportClicks::default();
+    let frame = card(palette).inner_margin(egui::Margin::symmetric(10, 0));
+    let margin = frame.total_margin().sum();
+    let inner = layout.transport - Vec2::new(margin.x, margin.y);
+    frame.show(ui, |ui| {
+        ui.set_width(inner.x);
+        ui.set_height(inner.y);
+        ui.horizontal_centered(|ui| {
+            // The compact card is narrower: closer items, Run as an icon,
+            // a smaller tick.
+            let (gap, chip_gap, tick_size) = if layout.compact {
+                (6.0, 5.0, 14.0)
+            } else {
+                (10.0, 6.0, 16.0)
+            };
+            ui.spacing_mut().item_spacing.x = gap;
+            let running = state.running;
+            let run = if layout.compact {
+                chunky_button(ui, palette, "▶", running).on_hover_text(if running {
+                    "Running (Space pauses)"
+                } else {
+                    "Run (Space)"
+                })
+            } else {
+                chunky_button(
+                    ui,
+                    palette,
+                    if running { "▶ Running" } else { "▶ Run" },
+                    running,
+                )
+                .on_hover_text("Run (Space)")
+            };
+            clicked.run = run.clicked();
+            clicked.pause = chunky_icon_button(ui, palette, HudIcon::Pause, false)
+                .on_hover_text("Pause (Space)")
+                .clicked();
+            clicked.step = chunky_button(ui, palette, "Step", false)
+                .on_hover_text("One tick")
+                .clicked();
+            clicked.reset = chunky_button(ui, palette, "Reset", false)
+                .on_hover_text(
+                    "Back to tick 0: registers and memories to their \
+                     initial values, inputs kept (R)",
+                )
+                .clicked();
+            rule(ui, palette, 30.0);
+            ui.spacing_mut().item_spacing.x = chip_gap;
+            for (label, hz) in SPEED_CHIPS {
+                let on = !state.unlimited && (state.tick_rate - hz).abs() < 1e-9;
+                if chip(ui, palette, label, on).clicked() {
+                    clicked.speed = Some(Some(hz));
+                }
+            }
+            if chip(ui, palette, "Max", state.unlimited)
+                .on_hover_text("As fast as the machine goes")
+                .clicked()
+            {
+                clicked.speed = Some(None);
+            }
+            let custom = !state.unlimited
+                && !SPEED_CHIPS
+                    .iter()
+                    .any(|(_, hz)| (state.tick_rate - hz).abs() < 1e-9);
+            clicked.more = chip(ui, palette, "…", custom || state.more_open)
+                .on_hover_text("Exact rate")
+                .clicked();
+            ui.spacing_mut().item_spacing.x = gap;
+            rule(ui, palette, 30.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.add_space(4.0);
+                ui.label(caption(palette, "tick"));
+                ui.label(
+                    egui::RichText::new(tick_label(state.tick))
+                        .monospace()
+                        .size(tick_size),
+                )
+                .on_hover_text(format!(
+                    "{} ticks. Measured rate: {measured_rate}",
+                    format_tick(state.tick)
+                ));
+            });
+        });
+    });
+    clicked
+}
+
+/// The exact-rate popover under the transport card, at most
+/// [`crate::ui_style::TRANSPORT_MORE_SIZE`]. Returns whether the
+/// unlimited switch changed.
+pub fn transport_more_card(
+    ui: &mut egui::Ui,
+    palette: &crate::theme::Palette,
+    config: &mut SimulationConfig,
+    measured_rate: &str,
+    running_revision: Option<u64>,
+) -> bool {
+    let frame = card(palette);
+    let inner = crate::ui_style::TRANSPORT_MORE_SIZE.x - frame.total_margin().sum().x;
+    frame
+        .show(ui, |ui| {
+            ui.set_width(inner);
+            let changed = ui
+                .checkbox(&mut config.unlimited_tick_rate, "Unlimited tick rate")
+                .changed();
+            ui.label("Tick rate (Hz)");
+            // The slider and its value box share the row.
+            ui.spacing_mut().slider_width = inner - 100.0;
+            ui.add_enabled(
+                !config.unlimited_tick_rate,
+                egui::Slider::new(&mut config.tick_rate, 0.1..=10_000_000.0).logarithmic(true),
+            );
+            ui.label(format!("Measured: {measured_rate}"));
+            match running_revision {
+                Some(rev) => ui.label(format!("Circuit revision: {rev}")),
+                None => ui.label("Circuit: compiling…"),
+            };
+            changed
+        })
+        .inner
+}
+
 /// The transport card, top centre: run, pause, step, reset (also `R`),
 /// speed chips (and a `⋯` popover with the exact rate), and the tick.
+/// `Space` runs or pauses (not while a text field has the keyboard).
 #[allow(clippy::too_many_arguments)]
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
@@ -350,87 +644,43 @@ pub fn simulation_config_ui_system(
         Some(rate) => format_si_hz(rate),
         None => "measuring…".to_owned(),
     };
-    let mut speed: Option<Option<f64>> = None;
-    let mut reset = keys.just_pressed(KeyCode::KeyR) && !ctx.egui_wants_keyboard_input();
+    // `Space` runs or pauses; not while a widget has the keyboard focus
+    // (Space would also press a focused button).
+    let typing = ctx.egui_wants_keyboard_input();
+    let focused = ctx.memory(|m| m.focused().is_some());
+    if keys.just_pressed(KeyCode::Space) && !typing && !focused {
+        let running = bridge.is_running();
+        bridge.set_running(!running);
+    }
+    let state = TransportState {
+        running: bridge.is_running(),
+        tick: tick_count,
+        unlimited: sim_config.unlimited_tick_rate,
+        tick_rate: sim_config.tick_rate,
+        more_open: *more_open,
+    };
+    let mut clicked = TransportClicks::default();
+    let rect = layout.transport_rect();
     egui::Area::new(egui::Id::new("hud_transport"))
-        .anchor(egui::Align2::CENTER_TOP, [0.0, layout.margin])
+        .fixed_pos(egui::pos2(rect.min.x, rect.min.y))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            card(&palette)
-                .inner_margin(egui::Margin::symmetric(10, 0))
-                .show(ui, |ui| {
-                    ui.set_height(TOP_CARD_HEIGHT - 5.0);
-                    ui.horizontal_centered(|ui| {
-                        ui.spacing_mut().item_spacing.x = 10.0;
-                        let running = bridge.is_running();
-                        let run = if running { "▶ Running" } else { "▶ Run" };
-                        if chunky_button(ui, &palette, run, running).clicked() && !running {
-                            bridge.set_running(true);
-                        }
-                        if chunky_icon_button(ui, &palette, HudIcon::Pause, false)
-                            .on_hover_text("Pause")
-                            .clicked()
-                            && running
-                        {
-                            bridge.set_running(false);
-                        }
-                        if chunky_button(ui, &palette, "Step", false)
-                            .on_hover_text("One tick")
-                            .clicked()
-                        {
-                            bridge.step(1);
-                        }
-                        if chunky_button(ui, &palette, "Reset", false)
-                            .on_hover_text(
-                                "Back to tick 0: registers and memories to their \
-                                 initial values, inputs kept (R)",
-                            )
-                            .clicked()
-                        {
-                            reset = true;
-                        }
-                        rule(ui, &palette, 30.0);
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        for (label, hz) in SPEED_CHIPS {
-                            let on = !sim_config.unlimited_tick_rate
-                                && (sim_config.tick_rate - hz).abs() < 1e-9;
-                            if chip(ui, &palette, label, on).clicked() {
-                                speed = Some(Some(hz));
-                            }
-                        }
-                        if chip(ui, &palette, "Max", sim_config.unlimited_tick_rate)
-                            .on_hover_text("As fast as the machine goes")
-                            .clicked()
-                        {
-                            speed = Some(None);
-                        }
-                        let custom = !sim_config.unlimited_tick_rate
-                            && !SPEED_CHIPS
-                                .iter()
-                                .any(|(_, hz)| (sim_config.tick_rate - hz).abs() < 1e-9);
-                        if chip(ui, &palette, "…", custom || *more_open)
-                            .on_hover_text("Exact rate")
-                            .clicked()
-                        {
-                            *more_open = !*more_open;
-                        }
-                        ui.spacing_mut().item_spacing.x = 10.0;
-                        rule(ui, &palette, 30.0);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.add_space(4.0);
-                            ui.label(caption(&palette, "tick"));
-                            ui.label(
-                                egui::RichText::new(format_tick(tick_count))
-                                    .monospace()
-                                    .size(16.0),
-                            )
-                            .on_hover_text(format!("Measured rate: {rate}"));
-                        });
-                        ui.add_space(4.0);
-                    });
-                });
+            clicked = transport_card(ui, &palette, &state, &rate, &layout);
         });
+    if clicked.run && !state.running {
+        bridge.set_running(true);
+    }
+    if clicked.pause && state.running {
+        bridge.set_running(false);
+    }
+    if clicked.step {
+        bridge.step(1);
+    }
+    let reset = clicked.reset || (keys.just_pressed(KeyCode::KeyR) && !typing);
+    if clicked.more {
+        *more_open = !*more_open;
+    }
+    let speed = clicked.speed;
     if reset {
         bridge.reset();
         tick_rate_meter.reset(0);
@@ -446,29 +696,16 @@ pub fn simulation_config_ui_system(
         tick_rate_meter.reset(tick_count);
     }
     if *more_open {
+        let rect = layout.transport_more_rect();
         egui::Area::new(egui::Id::new("hud_transport_more"))
-            .anchor(egui::Align2::CENTER_TOP, [0.0, layout.top_band()])
+            .fixed_pos(egui::pos2(rect.min.x, rect.min.y))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                card(&palette).show(ui, |ui| {
-                    if ui
-                        .checkbox(&mut sim_config.unlimited_tick_rate, "Unlimited tick rate")
-                        .changed()
-                    {
-                        tick_rate_meter.reset(tick_count);
-                    }
-                    ui.add_enabled(
-                        !sim_config.unlimited_tick_rate,
-                        egui::Slider::new(&mut sim_config.tick_rate, 0.1..=10_000_000.0)
-                            .logarithmic(true)
-                            .text("Tick rate (Hz)"),
-                    );
-                    ui.label(format!("Measured: {rate}"));
-                    match diagnostics.running_revision {
-                        Some(rev) => ui.label(format!("Circuit revision: {rev}")),
-                        None => ui.label("Circuit: compiling…"),
-                    };
-                });
+                let revision = diagnostics.running_revision;
+                let config = &mut *sim_config;
+                if transport_more_card(ui, &palette, config, &rate, revision) {
+                    tick_rate_meter.reset(tick_count);
+                }
             });
     }
     Ok(())
@@ -1212,47 +1449,106 @@ pub fn ui_for_selected_gate(
 // Save
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn save_on_exit_system(mut exit_events: MessageReader<AppExit>, reader: CircuitReader) {
-    // A read-only demo is not the player's work; it is never saved.
-    if exit_events.read().next().is_none() || reader.active.read_only {
+/// Save the open workspace when the app exits, if that would otherwise
+/// lose work (see [`exit_save_plan`]).
+///
+/// Runs in [`Last`] after [`bevy::window::ExitSystems`]: closing the
+/// window sends [`AppExit`] from `Last` (bevy_window's exit condition)
+/// and the title menu's Exit sends it in `Update`; the runner stops after
+/// the frame in which it was sent, so this is the last system that sees
+/// it, with the circuit still in the world.
+pub fn save_on_exit_system(
+    mut exit_events: MessageReader<AppExit>,
+    reader: CircuitReader,
+    revision: Res<WorkspaceRevision>,
+) {
+    if exit_events.read().next().is_none() {
         return;
     }
-    let name = if reader.active.name.trim().is_empty() {
-        "simulation".to_string()
-    } else {
-        reader.active.name.clone()
+    let store = WorkspaceStore::player();
+    let active = &reader.active;
+    let workspace = reader.workspace();
+    let empty = workspace.root.nodes.is_empty();
+    let Some(plan) = exit_save_plan(
+        store.as_ref(),
+        &active.name,
+        active.uuid,
+        active.read_only,
+        revision.is_dirty(),
+        empty,
+    ) else {
+        return;
     };
-    match save_workspace(&name, &reader.workspace()) {
-        Ok(()) => info!("Saved simulation workspace: {name}"),
-        Err(err) => error!("Failed to save simulation: {err}"),
+    let Some(store) = store else { return };
+    match store.save_open(&plan.name, &plan.name, workspace, OnConflict::Rename) {
+        Ok(saved) => info!(
+            "Saved workspace \"{}\" on exit in {}",
+            saved.name,
+            store.dir().display()
+        ),
+        Err(err) => error!("{err}"),
     }
 }
 
-/// Write the open circuit to disk on [`SaveWorkspaceEvent`].
+/// Write the open circuit to disk on [`SaveWorkspaceEvent`]. Saving under
+/// another name is a Save As: the saved copy gets a fresh root id and
+/// becomes the open workspace (the old file is left as it was). A name
+/// that holds a different workspace is refused.
+#[allow(clippy::too_many_arguments)]
 pub fn workspace_io_system(
     mut save_events: MessageReader<SaveWorkspaceEvent>,
-    reader: CircuitReader,
+    mut circuit: ParamSet<(CircuitReader, ResMut<ActiveCircuit>)>,
+    mut members: Query<&mut CircuitMember, Allow<bevy::ecs::entity_disabling::Disabled>>,
     mut revision: ResMut<WorkspaceRevision>,
     mut feedback: ResMut<AuthoringFeedback>,
     editor_state: Option<ResMut<crate::editor::EditorState>>,
 ) {
-    let mut saved = false;
-    for ev in save_events.read() {
-        if reader.active.read_only {
-            feedback.refuse(crate::sim::READ_ONLY_MESSAGE.into());
-            continue;
-        }
-        match save_workspace(&ev.name, &reader.workspace()) {
-            Ok(()) => {
-                revision.mark_saved();
-                feedback.message = Some(format!("Saved workspace \"{}\"", ev.name));
-                saved = true;
+    let Some(name) = save_events.read().last().map(|ev| ev.name.clone()) else {
+        return;
+    };
+    let reader = circuit.p0();
+    let previous = reader.active.name.clone();
+    let old_root = reader.active.uuid;
+    let result = if reader.active.read_only {
+        Err(crate::sim::READ_ONLY_MESSAGE.to_string())
+    } else {
+        match WorkspaceStore::player() {
+            Some(store) => {
+                store.save_open(&name, &previous, reader.workspace(), OnConflict::Refuse)
             }
-            Err(err) => feedback.message = Some(format!("Failed to save \"{}\": {err}", ev.name)),
+            None => Err(WEB_SAVE_UNAVAILABLE.to_string()),
         }
-    }
-    if saved && let Some(mut editor_state) = editor_state {
-        editor_state.saved_workspaces = None;
+    };
+    let outcome = match result {
+        Ok(saved) => {
+            revision.mark_saved();
+            if saved.root != old_root || saved.name != previous {
+                // The open workspace is now the saved one. No change
+                // detection: the camera stays where it is.
+                let mut active = circuit.p1();
+                let active = active.bypass_change_detection();
+                active.uuid = saved.root;
+                active.name = saved.name.clone();
+                for mut member in &mut members {
+                    if member.circuit_uuid == old_root {
+                        member.circuit_uuid = saved.root;
+                    }
+                }
+            }
+            let message = saved.message(&previous);
+            feedback.message = Some(message.clone());
+            Ok(message)
+        }
+        Err(err) => {
+            feedback.refuse(err.clone());
+            Err(err)
+        }
+    };
+    if let Some(mut editor_state) = editor_state {
+        if outcome.is_ok() {
+            editor_state.saved_workspaces = None;
+        }
+        editor_state.last_save = Some(outcome);
     }
 }
 
@@ -1275,6 +1571,85 @@ mod tests {
         assert_eq!(selected.0, None, "empty canvas deselects");
         assert_eq!(canvas_click(None, &mut selected), None);
         assert_eq!(selected.0, None);
+    }
+
+    #[test]
+    fn tick_labels_keep_their_width() {
+        assert_eq!(tick_label(48_213), "48\u{2009}213");
+        assert_eq!(tick_label(9_999_999), format_tick(9_999_999));
+        assert_eq!(tick_label(12_345_678), "12.346 M");
+        assert_eq!(tick_label(999_999_999), "1.000 G");
+        assert_eq!(tick_label(1_234_567_890), "1.235 G");
+        assert_eq!(tick_label(4_321_000_000_000), "4.321 T");
+        assert_eq!(tick_label(u64::MAX), "18.447 E");
+        for tick in [
+            0,
+            9_999_999,
+            10_000_000,
+            999_999_999,
+            999_999_999_999_999,
+            u64::MAX,
+        ] {
+            assert!(
+                tick_label(tick).chars().count() <= TICK_LABEL_MAX_CHARS,
+                "{tick}"
+            );
+        }
+    }
+
+    /// The transport card is exactly as wide as the layout reserves, for
+    /// every label it shows (Run or Running, the widest tick), in both
+    /// layouts and themes.
+    #[test]
+    fn transport_card_is_its_layout_size() {
+        for theme in [Theme::day(), Theme::night()] {
+            let ctx = crate::ui_style::test_ui::ctx(&theme);
+            for screen in [Vec2::new(1280.0, 720.0), Vec2::new(1920.0, 1080.0)] {
+                let layout = HudLayout::new(screen);
+                for running in [false, true] {
+                    for tick in [0, 9_999_999, 999_499_999, u64::MAX] {
+                        let state = TransportState {
+                            running,
+                            tick,
+                            unlimited: false,
+                            tick_rate: 12_345.0,
+                            more_open: true,
+                        };
+                        let rect = crate::ui_style::test_ui::measure(&ctx, |ui| {
+                            transport_card(ui, &theme.palette, &state, "12 kHz", &layout);
+                        });
+                        let size = Vec2::new(rect.width(), rect.height());
+                        assert!(
+                            (size - layout.transport).abs().max_element() < 0.5,
+                            "{size} for {:?} at {screen} (running {running}, tick {tick})",
+                            layout.transport
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The exact-rate popover keeps to the size the layout reserves.
+    #[test]
+    fn transport_more_card_fits_its_room() {
+        let theme = Theme::day();
+        let ctx = crate::ui_style::test_ui::ctx(&theme);
+        for tick_rate in [0.1, 12_345.678, 10_000_000.0] {
+            let mut config = SimulationConfig {
+                tick_rate,
+                ..Default::default()
+            };
+            let rect = crate::ui_style::test_ui::measure(&ctx, |ui| {
+                transport_more_card(ui, &theme.palette, &mut config, "9.99 MHz", Some(12_345));
+            });
+            let max = crate::ui_style::TRANSPORT_MORE_SIZE;
+            assert!(
+                rect.width() <= max.x + 0.5 && rect.height() <= max.y,
+                "{:?} at {tick_rate} Hz",
+                rect.size()
+            );
+        }
     }
 
     #[test]

@@ -352,6 +352,7 @@ fn loading_a_workspace_clears_the_history() {
         name: "demo".into(),
         workspace: Arc::new(demo("gates")),
         read_only: true,
+        unsaved: false,
     });
     settle(&mut app);
     let first = labels(&mut app)[0].clone();

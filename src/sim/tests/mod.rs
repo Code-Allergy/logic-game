@@ -1,6 +1,8 @@
 //! Integration tests for the ECS → `Design` → v2 engine path, run in a
 //! headless `App` with [`SimulationRuntimePlugin`].
 
+mod canvas_input;
+mod challenges;
 mod chips;
 mod demos;
 mod gallery;
@@ -52,6 +54,7 @@ fn load(app: &mut App, workspace: WorkspaceDocument) {
         name: workspace.root.name.clone(),
         workspace: Arc::new(workspace),
         read_only: false,
+        unsaved: false,
     });
     settle(app);
 }
@@ -236,12 +239,36 @@ fn new_wire_replaces_the_driver_of_an_input_pin() {
     let a = create_gate(&mut app, GateKind::Input { w: 1 }, "A");
     let b = create_gate(&mut app, GateKind::Input { w: 1 }, "B");
     let y = create_gate(&mut app, GateKind::Output { w: 1 }, "Y");
+    let feedback = |app: &App| {
+        app.world()
+            .resource::<crate::sim::AuthoringFeedback>()
+            .message
+            .clone()
+    };
     create_wire(&mut app, a, 0, y, 0);
+    assert_eq!(feedback(&app), None);
     create_wire(&mut app, b, 0, y, 0);
     assert_eq!(wires(&mut app).len(), 1, "one driver per input pin");
+    assert_eq!(
+        feedback(&app).as_deref(),
+        Some("Replaced the wire into Y"),
+        "the replacement is reported"
+    );
     set_input(&mut app, "B", 1);
     run(&mut app, 1);
     assert_eq!(input_value(&app, y, 0), 1);
+    // The same wire again replaces nothing.
+    create_wire(&mut app, b, 0, y, 0);
+    assert_eq!(feedback(&app), None);
+    // A gate with several inputs names the pin.
+    let and = create_gate(&mut app, GateKind::And { w: 1 }, "Gate");
+    create_wire(&mut app, a, 0, and, 1);
+    create_wire(&mut app, b, 0, and, 1);
+    let message = feedback(&app).unwrap();
+    assert!(
+        message.starts_with("Replaced the wire into Gate ("),
+        "{message}"
+    );
 }
 
 #[test]
@@ -912,13 +939,53 @@ fn old_format_workspaces_are_refused_with_a_message() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// Unlabelled ports no longer block a save (on exit that lost the work):
+/// they are named in the file, and the names are reported.
 #[test]
-fn unlabeled_ports_are_not_saved() {
+fn unlabeled_ports_are_named_when_saved() {
     let dir = temp_dir();
     let mut doc = CircuitDocument::new("bad");
     doc.add(DocNode::new(GateKind::Input { w: 1 }, Vec2::ZERO));
-    let err = save_workspace_in(&dir, "bad", &WorkspaceDocument::new(doc)).unwrap_err();
+    doc.add(DocNode::labeled(
+        GateKind::Input { w: 1 },
+        Vec2::ZERO,
+        "in0",
+    ));
+    doc.add(DocNode::new(GateKind::Output { w: 1 }, Vec2::ZERO));
+    let report = save_workspace_in(&dir, "bad", &WorkspaceDocument::new(doc.clone())).unwrap();
+    assert_eq!(
+        report.named_ports,
+        ["\"in1\" (Input in \"bad\")", "\"out0\" (Output in \"bad\")"]
+    );
+    let loaded = read_workspace_in(&dir, "bad").unwrap();
+    let mut labels: Vec<_> = loaded
+        .root
+        .nodes
+        .iter()
+        .filter_map(|n| n.label.clone())
+        .collect();
+    labels.sort();
+    assert_eq!(labels, ["in0", "in1", "out0"]);
+
+    // A file without the labels (hand-made) is refused on load, with a
+    // message for people (no ids).
+    let mut file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("bad/manifest.json")).unwrap())
+            .unwrap();
+    for node in file["circuits"][0]["nodes"].as_array_mut().unwrap() {
+        node.as_object_mut().unwrap().remove("label");
+    }
+    std::fs::write(dir.join("bad/manifest.json"), file.to_string()).unwrap();
+    let err = read_workspace_in(&dir, "bad").unwrap_err();
     assert!(matches!(err, WorkspaceError::Invalid(_)));
+    let message = err.to_string();
+    assert!(
+        message.contains("3 ports are without a label (Input in \"bad\", Output in \"bad\")"),
+        "{message}"
+    );
+    for node in &doc.nodes {
+        assert!(!message.contains(&node.id.to_string()), "{message}");
+    }
     std::fs::remove_dir_all(dir).ok();
 }
 

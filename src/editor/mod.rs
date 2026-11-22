@@ -20,16 +20,22 @@
 //! - `chips`: the selection card (Make chip, Delete for several parts),
 //!   the Make chip dialog and the chip update prompt.
 //! - `systems`: wire-building selection.
+//! - `challenge`: the open build-it challenge, its card and Check.
 //! - `undo`: the undo shortcuts and the file card's Undo and Redo buttons.
-//! - `workspace`: on-disk workspace helpers.
+//! - `workspace`: on-disk workspace helpers (the player's data folder,
+//!   safe names, Save As, atomic writes).
+//! - `files`: replacing the open circuit, behind the unsaved-changes
+//!   guard.
 //! - `demo_map`: the full-screen demo map ([`crate::GameState::DemoMap`])
 //!   and the record of opened demos.
 //!
 //! The editor never mutates the circuit directly: it sends the authoring
 //! messages of [`crate::sim::authoring`].
 
+pub mod challenge;
 pub mod chips;
 pub mod demo_map;
+pub mod files;
 pub mod hud;
 pub mod parts;
 mod systems;
@@ -88,6 +94,11 @@ pub struct EditorState {
     pub dragging_part: Option<(GateKind, Option<String>)>,
     /// Gates (by id) pinned to the top of the Signals card.
     pub watched: Vec<Uuid>,
+    /// A workspace, demo or copy waiting to replace the open circuit until
+    /// the player answers the unsaved-changes question.
+    pub pending_open: Option<files::PendingOpen>,
+    /// The outcome of the last save (set by the save system).
+    pub last_save: Option<Result<String, String>>,
 }
 
 impl Default for EditorState {
@@ -111,6 +122,8 @@ impl Default for EditorState {
             part_tab: PartTab::default(),
             dragging_part: None,
             watched: Vec::new(),
+            pending_open: None,
+            last_save: None,
         }
     }
 }
@@ -151,7 +164,10 @@ impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>()
             .init_resource::<chips::MakeChipDialog>()
+            .init_resource::<challenge::ActiveChallenge>()
             .add_plugins(demo_map::DemoMapPlugin)
+            .add_systems(Update, challenge::track_challenge_system)
+            .add_systems(EguiPrimaryContextPass, challenge::challenge_card_system)
             .add_systems(
                 EguiPrimaryContextPass,
                 (

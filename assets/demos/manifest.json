@@ -126,5 +126,146 @@
       "description": "A program counter, a program in ROM, a microcode ROM that decodes each instruction, the register file and the ALU. Instructions are 16 bits: op (bits 12-15), rd (10-11), rs (8-9), and an 8-bit immediate whose low two bits name rt. Ops: 1 LDI rd, imm; 2 JMP imm; 3 JZ rs, imm; 4 ADD, 5 SUB, 6 AND, 7 OR rd = rs op rt; 8 OUT rs; 15 HLT. One instruction runs per clock cycle. The program multiplies 5 by 7 by repeated addition and outputs 35 before it halts.",
       "uses": ["alu/alu8", "gates/and", "gates/not", "gates/or", "mux/mux2x8", "register/register8", "register_file/regfile4x8", "ripple_adder/adder8"]
     }
+  ],
+  "challenges": [
+    {
+      "id": "and_from_nand",
+      "level": 1,
+      "title": "AND from NAND",
+      "brief": "Build AND using only NAND gates: Y is 1 when both A and B are 1. Hint: a NAND with both inputs tied together is a NOT.",
+      "allowed": ["Nand"],
+      "test": {"table": {"inputs": ["A", "B"], "outputs": ["Y"], "rows": [[0, 0, 0], [0, 1, 0], [1, 0, 0], [1, 1, 1]]}}
+    },
+    {
+      "id": "xor_from_nand",
+      "level": 1,
+      "title": "XOR from NAND",
+      "brief": "Build XOR using only NAND gates: Y is 1 when exactly one of A and B is 1. Four NANDs are enough.",
+      "allowed": ["Nand"],
+      "test": {"table": {"inputs": ["A", "B"], "outputs": ["Y"], "rows": [[0, 0, 0], [0, 1, 1], [1, 0, 1], [1, 1, 0]]}}
+    },
+    {
+      "id": "half_adder",
+      "level": 2,
+      "title": "Build a half adder",
+      "brief": "Add two bits: outputs Sum and Carry from inputs A and B. 1 + 1 is 10 in binary, so Sum = 0 and Carry = 1.",
+      "forbidden": ["Add", "half_adder/half_adder"],
+      "test": {"table": {"inputs": ["A", "B"], "outputs": ["Sum", "Carry"], "rows": [[0, 0, 0, 0], [0, 1, 1, 0], [1, 0, 1, 0], [1, 1, 0, 1]]}}
+    },
+    {
+      "id": "full_adder",
+      "level": 2,
+      "title": "Build a full adder",
+      "brief": "Add three bits A, B and Cin: Sum is the low bit of the total, Cout the high bit. Two half adders and an OR will do.",
+      "forbidden": ["Add", "full_adder/full_adder"],
+      "test": {"formula": {"expect": {"Sum": "A ^ B ^ Cin", "Cout": "(A + B + Cin) >> 1"}}}
+    },
+    {
+      "id": "adder8",
+      "level": 3,
+      "title": "Build an 8-bit adder",
+      "brief": "Add two 8-bit numbers A and B plus a carry in: Sum = A + B + Cin, cut to 8 bits, and Cout is the carry out of bit 7. Chain eight full adders; the Add part is off limits.",
+      "forbidden": ["Add", "ripple_adder/adder8"],
+      "test": {"formula": {"expect": {"Sum": "A + B + Cin", "Cout": "(A + B + Cin) >> 8"}, "samples": 300, "seed": 95}}
+    },
+    {
+      "id": "mux2",
+      "level": 4,
+      "title": "Build a multiplexer",
+      "brief": "A 2-to-1 multiplexer: Y is A when Sel is 0 and B when Sel is 1. Use gates, not the Mux or Switch parts.",
+      "forbidden": ["Mux", "Switch", "mux/mux2"],
+      "test": {"formula": {"expect": {"Y": "Sel ? B : A"}}}
+    },
+    {
+      "id": "decoder2",
+      "level": 4,
+      "title": "Build a 2-to-4 decoder",
+      "brief": "The 2-bit number S picks one of four lines: Yi is 1 when S = i, the other three are 0. Split S into its bits first.",
+      "forbidden": ["Eq", "decoder/decoder2"],
+      "test": {"formula": {"expect": {"Y0": "S == 0", "Y1": "S == 1", "Y2": "S == 2", "Y3": "S == 3"}}}
+    },
+    {
+      "id": "sr_latch",
+      "level": 5,
+      "title": "Build an SR latch",
+      "brief": "Remember one bit: S sets Q to 1, R resets it to 0, and with both at 0 Q keeps its value. A loop of gates needs a Delay in it. Q may take a tick or two to follow.",
+      "forbidden": ["SrLatch", "DLatch", "Register", "sr_latch/sr_latch"],
+      "test": {
+        "sequence": {
+          "steps": [
+            {"set": {"R": 1}, "ticks": 3, "expect": {"Q": 0}},
+            {"set": {"R": 0}, "ticks": 3, "expect": {"Q": 0}},
+            {"set": {"S": 1}, "ticks": 3, "expect": {"Q": 1}},
+            {"set": {"S": 0}, "ticks": 3, "expect": {"Q": 1}},
+            {"set": {"R": 1}, "ticks": 3, "expect": {"Q": 0}},
+            {"set": {"R": 0}, "ticks": 3, "expect": {"Q": 0}},
+            {"set": {"S": 1}, "ticks": 3, "expect": {"Q": 1}},
+            {"set": {"S": 0}, "ticks": 3, "expect": {"Q": 1}}
+          ]
+        }
+      }
+    },
+    {
+      "id": "d_latch",
+      "level": 6,
+      "title": "Build a D latch",
+      "brief": "While En is 1, Q follows D; while En is 0, Q holds the last value. Q may take a tick or two to follow. The DLatch and Register parts are off limits; an SrLatch or a Delay is fine.",
+      "forbidden": ["DLatch", "Register", "d_latch/d_latch"],
+      "test": {
+        "sequence": {
+          "steps": [
+            {"set": {"En": 1, "D": 1}, "ticks": 3, "expect": {"Q": 1}},
+            {"set": {"D": 0}, "ticks": 3, "expect": {"Q": 0}},
+            {"set": {"D": 1}, "ticks": 3, "expect": {"Q": 1}},
+            {"set": {"En": 0}, "ticks": 3, "expect": {"Q": 1}},
+            {"set": {"D": 0}, "ticks": 3, "expect": {"Q": 1}},
+            {"set": {"En": 1}, "ticks": 3, "expect": {"Q": 0}},
+            {"set": {"En": 0}, "ticks": 3, "expect": {"Q": 0}},
+            {"set": {"D": 1}, "ticks": 3, "expect": {"Q": 0}}
+          ]
+        }
+      }
+    },
+    {
+      "id": "register4",
+      "level": 7,
+      "title": "Build a 4-bit register",
+      "brief": "Q holds a 4-bit number. On each tick while Load is 1 it takes the value of D; while Load is 0 it keeps its value. Build it from a Delay and a Mux, not the Register part.",
+      "forbidden": ["Register", "DLatch"],
+      "test": {
+        "sequence": {
+          "steps": [
+            {"ticks": 2, "expect": {"Q": 0}},
+            {"set": {"D": 5, "Load": 1}, "ticks": 2, "expect": {"Q": 5}},
+            {"set": {"Load": 0}, "ticks": 1, "expect": {"Q": 5}},
+            {"set": {"D": 9}, "ticks": 3, "expect": {"Q": 5}},
+            {"set": {"Load": 1}, "ticks": 2, "expect": {"Q": 9}},
+            {"set": {"D": 3}, "ticks": 2, "expect": {"Q": 3}},
+            {"set": {"Load": 0, "D": 12}, "ticks": 3, "expect": {"Q": 3}}
+          ]
+        }
+      }
+    },
+    {
+      "id": "counter4",
+      "level": 7,
+      "title": "Build a 4-bit counter",
+      "brief": "Count ticks: while En is 1, Count goes up by one every tick (after 15 comes 0); while En is 0 it stays. Feed a register its own value plus one.",
+      "test": {
+        "sequence": {
+          "steps": [
+            {"ticks": 2, "expect": {"Count": 0}},
+            {"set": {"En": 1}, "ticks": 1, "expect": {"Count": 0}},
+            {"ticks": 1, "expect": {"Count": 1}},
+            {"ticks": 1, "expect": {"Count": 2}},
+            {"ticks": 5, "expect": {"Count": 7}},
+            {"set": {"En": 0}, "ticks": 1, "expect": {"Count": 8}},
+            {"ticks": 4, "expect": {"Count": 8}},
+            {"set": {"En": 1}, "ticks": 9, "expect": {"Count": 0}},
+            {"ticks": 3, "expect": {"Count": 3}}
+          ]
+        }
+      }
+    }
   ]
 }
