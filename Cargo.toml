@@ -39,7 +39,7 @@ embed-resource = "1"
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 [workspace]
 resolver = "3"
-members = ["logi-sim", "mobile"]
+members = ["logi-sim", "mobile", "perf", "perf/metrics", "xtask"]
 
 [profile.dev]
 opt-level = 1
@@ -76,6 +76,22 @@ opt-level = 3
 lto = true
 codegen-units = 1
 debug = true
+
+# `cargo xtask perf` (bench and flamegraph): optimized like release but
+# without LTO and with many codegen units, so the benchmark crates that
+# link Bevy build in reasonable time and memory, and with line tables
+# for profiles. The simulator keeps one codegen unit.
+[profile.profiling]
+inherits = "release"
+opt-level = 3
+lto = false
+codegen-units = 16
+debug = "line-tables-only"
+strip = false
+
+[profile.profiling.package.logi-sim]
+opt-level = 3
+codegen-units = 1
 
 # Optimized native code with symbols retained for perf/cargo-flamegraph.
 [profile.flamegraph]

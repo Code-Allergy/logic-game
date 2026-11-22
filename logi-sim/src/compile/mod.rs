@@ -190,15 +190,78 @@ impl fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
+/// A compiler pass, in the order the passes run. [`compile_observed`]
+/// reports each one as it ends (a pass that is switched off still ends,
+/// at once).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Pass {
+    /// [`Design::validate`].
+    Validate,
+    /// Flattening with port unification.
+    Elaborate,
+    /// The combinational-loop check.
+    LoopCheck,
+    /// Slot assignment and lowering to instructions.
+    Lower,
+    /// Constant folding, alias elimination, CSE, dead-code elimination.
+    Simplify,
+    /// Levelizing, partitioning and slot ordering.
+    Levelize,
+    /// Lane packing and block emission.
+    Pack,
+    /// Final slot renumbering.
+    Renumber,
+}
+
+impl Pass {
+    pub const ALL: [Pass; 8] = [
+        Pass::Validate,
+        Pass::Elaborate,
+        Pass::LoopCheck,
+        Pass::Lower,
+        Pass::Simplify,
+        Pass::Levelize,
+        Pass::Pack,
+        Pass::Renumber,
+    ];
+
+    /// Short lowercase name (benchmark ids).
+    pub fn name(self) -> &'static str {
+        match self {
+            Pass::Validate => "validate",
+            Pass::Elaborate => "elaborate",
+            Pass::LoopCheck => "loop_check",
+            Pass::Lower => "lower",
+            Pass::Simplify => "simplify",
+            Pass::Levelize => "levelize",
+            Pass::Pack => "pack",
+            Pass::Renumber => "renumber",
+        }
+    }
+}
+
 /// Compile a design. Returns every validation error, or every combinational
 /// loop, found.
 pub fn compile(design: &Design, options: &Options) -> Result<Program, Vec<CompileError>> {
+    compile_observed(design, options, |_| {})
+}
+
+/// [`compile`], calling `pass_done` as each [`Pass`] ends (for timing the
+/// passes; see `benches/sim.rs`). The observer is generic, so `compile`
+/// itself pays nothing for it.
+pub fn compile_observed(
+    design: &Design,
+    options: &Options,
+    mut pass_done: impl FnMut(Pass),
+) -> Result<Program, Vec<CompileError>> {
     design.validate().map_err(|errs| {
         errs.into_iter()
             .map(CompileError::Invalid)
             .collect::<Vec<_>>()
     })?;
+    pass_done(Pass::Validate);
     let elab = elaborate::Elab::new(design);
+    pass_done(Pass::Elaborate);
     let loops = loops::find_loops(&elab);
     if !loops.is_empty() {
         return Err(loops
@@ -206,5 +269,6 @@ pub fn compile(design: &Design, options: &Options) -> Result<Program, Vec<Compil
             .map(|nodes| CompileError::CombinationalLoop { nodes })
             .collect());
     }
-    Ok(emit::emit(elab, options))
+    pass_done(Pass::LoopCheck);
+    Ok(emit::emit(elab, options, pass_done))
 }

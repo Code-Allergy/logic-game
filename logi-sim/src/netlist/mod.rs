@@ -288,6 +288,31 @@ impl Design {
         &self.defs[self.root]
     }
 
+    /// Primitive nodes of `def` with every instance expanded, ports not
+    /// counted: the size of the design after flattening. Panics if `def`
+    /// or a definition it instances does not exist, or on an instance
+    /// cycle.
+    pub fn flat_primitives(&self, def: DefId) -> u64 {
+        fn count(d: &Design, def: DefId, memo: &mut SecondaryMap<DefId, u64>, depth: usize) -> u64 {
+            assert!(depth <= d.defs.len(), "instance cycle");
+            if let Some(&n) = memo.get(def) {
+                return n;
+            }
+            let n = d.defs[def]
+                .nodes
+                .values()
+                .map(|n| match n.kind {
+                    NodeKind::Instance(child) => count(d, child, memo, depth + 1),
+                    NodeKind::Input { .. } | NodeKind::Output { .. } => 0,
+                    _ => 1,
+                })
+                .sum();
+            memo.insert(def, n);
+            n
+        }
+        count(self, def, &mut SecondaryMap::new(), 0)
+    }
+
     pub fn def(&self, id: DefId) -> Result<&Definition> {
         self.defs.get(id).ok_or(NetlistError::NoSuchDefinition(id))
     }

@@ -1066,3 +1066,28 @@ fn memory_versions_change_only_on_writes() {
     s.import_state(&snap);
     assert_ne!(s.mem_version(m), v2);
 }
+
+/// Feature `counters`: every tick executes every block and processes every
+/// commit; the counts are exact.
+#[cfg(feature = "counters")]
+#[test]
+fn counters_count_executed_work() {
+    let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
+    let mut sim = sim_of(&d);
+    let p = Arc::clone(sim.program());
+    assert_eq!(sim.counters().settles, 1);
+    sim.reset_counters();
+    sim.run(10);
+    let c = *sim.counters();
+    assert_eq!(c.ticks, 10);
+    assert_eq!(c.settles, 10);
+    assert_eq!(c.blocks, 10 * p.blocks.len() as u64);
+    assert_eq!(
+        c.instrs + c.packed_words,
+        10 * (p.instrs.len() + p.packs.len()) as u64
+    );
+    assert_eq!(c.commits, 10 * p.commits.len() as u64);
+    assert_eq!(c.ops(), c.instrs + c.packed_words + c.commits);
+    sim.reset();
+    assert_eq!(sim.counters().settles, 11);
+}

@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 
+[features]
+# Deterministic work counters on `Sim` (`Sim::counters`), for the
+# regression gate (`cargo xtask perf check`). Off by default; without it
+# the runtime has no counting code at all.
+counters = []
+
 [dependencies]
 slotmap = "1.1.1"
 smallvec = "1.15.2"
@@ -13,4 +19,8 @@ criterion = "0.5"
 
 [[bench]]
 name = "sim"
+harness = false
+
+[[bench]]
+name = "engine"
 harness = false
