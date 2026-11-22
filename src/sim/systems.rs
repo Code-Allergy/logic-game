@@ -425,6 +425,7 @@ pub fn format_tick(tick: u64) -> String {
 
 /// The transport card, top centre: run, pause, step, reset (also `R`),
 /// speed chips (and a `⋯` popover with the exact rate), and the tick.
+/// `Space` runs or pauses (not while a text field has the keyboard).
 #[allow(clippy::too_many_arguments)]
 pub fn simulation_config_ui_system(
     mut sim_config: ResMut<SimulationConfig>,
@@ -457,7 +458,15 @@ pub fn simulation_config_ui_system(
         None => "measuring…".to_owned(),
     };
     let mut speed: Option<Option<f64>> = None;
-    let mut reset = keys.just_pressed(KeyCode::KeyR) && !ctx.egui_wants_keyboard_input();
+    let typing = ctx.egui_wants_keyboard_input();
+    let mut reset = keys.just_pressed(KeyCode::KeyR) && !typing;
+    // Not while a widget has the keyboard focus (Space would also press
+    // a focused button).
+    let focused = ctx.memory(|m| m.focused().is_some());
+    if keys.just_pressed(KeyCode::Space) && !typing && !focused {
+        let running = bridge.is_running();
+        bridge.set_running(!running);
+    }
     egui::Area::new(egui::Id::new("hud_transport"))
         .anchor(egui::Align2::CENTER_TOP, [0.0, layout.margin])
         .order(egui::Order::Middle)
@@ -470,11 +479,15 @@ pub fn simulation_config_ui_system(
                         ui.spacing_mut().item_spacing.x = 10.0;
                         let running = bridge.is_running();
                         let run = if running { "▶ Running" } else { "▶ Run" };
-                        if chunky_button(ui, &palette, run, running).clicked() && !running {
+                        if chunky_button(ui, &palette, run, running)
+                            .on_hover_text("Run (Space)")
+                            .clicked()
+                            && !running
+                        {
                             bridge.set_running(true);
                         }
                         if chunky_icon_button(ui, &palette, HudIcon::Pause, false)
-                            .on_hover_text("Pause")
+                            .on_hover_text("Pause (Space)")
                             .clicked()
                             && running
                         {

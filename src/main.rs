@@ -20,7 +20,7 @@ use gate_quest::{
     GAME_TITLE, GAME_WEB_TAG, GameSettings, GameState, UiPointerState, initial_startup_system,
     update_ui_pointer_state,
 };
-use gate_quest::{pan_camera, zoom_camera};
+use gate_quest::{key_pan_camera, pan_camera, zoom_camera};
 
 fn main() {
     let disable_egui = env::var_os("GATEQUEST_DISABLE_EGUI").is_some();
@@ -80,7 +80,7 @@ fn main() {
         )
         .add_systems(
             Update,
-            (zoom_camera, pan_camera).run_if(in_state(GameState::Simulating)),
+            (zoom_camera, pan_camera, key_pan_camera).run_if(in_state(GameState::Simulating)),
         )
         .add_systems(Update, (show_settings_menu, settings_menu_button_system));
 

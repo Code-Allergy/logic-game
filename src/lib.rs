@@ -38,9 +38,11 @@ pub const GAME_WEB_TAG: &str = "#gatequest-canvas";
 #[derive(Component)]
 pub struct MainCamera;
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, PartialEq)]
 pub struct UiPointerState {
     pub over_egui: bool,
+    /// A text field has the keyboard: canvas keys (arrows) are ignored.
+    pub wants_keyboard: bool,
 }
 
 #[derive(States, Debug, Clone, Eq, PartialEq, Hash, Default)]
@@ -82,7 +84,14 @@ pub fn initial_startup_system(mut commands: Commands, mut _ctx: EguiContexts) {
 }
 
 pub fn update_ui_pointer_state(mut state: ResMut<UiPointerState>, mut contexts: EguiContexts) {
-    state.over_egui = matches!(contexts.ctx_mut(), Ok(ctx) if ctx.is_pointer_over_egui());
+    let (over_egui, wants_keyboard) = match contexts.ctx_mut() {
+        Ok(ctx) => (ctx.is_pointer_over_egui(), ctx.egui_wants_keyboard_input()),
+        Err(_) => (false, false),
+    };
+    state.set_if_neq(UiPointerState {
+        over_egui,
+        wants_keyboard,
+    });
 }
 
 pub fn configure_camera_scaling(
@@ -101,4 +110,4 @@ pub fn configure_camera_scaling(
     Ok(())
 }
 
-pub use camera::{pan_camera, zoom_camera};
+pub use camera::{key_pan_camera, pan_camera, zoom_camera};

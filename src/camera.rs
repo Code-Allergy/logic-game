@@ -1,6 +1,6 @@
 //! The canvas camera: the maths of fitting, zooming and panning an
 //! orthographic 2D camera (pure functions, tested without rendering), and
-//! the wheel-zoom and middle-drag pan systems.
+//! the wheel-zoom, middle-drag and arrow-key pan systems.
 //!
 //! Screen positions are logical pixels with y down (egui and window
 //! cursor coordinates); world positions have y up. A view is described by
@@ -171,6 +171,48 @@ pub fn pan_camera(
     Ok(())
 }
 
+/// Arrow-key pan speed, in logical pixels per second (the same on screen
+/// at any zoom).
+pub const KEY_PAN_SPEED: f32 = 900.0;
+
+/// The pan direction of the held arrow keys, x right and y up (world
+/// directions); opposite keys cancel. Diagonals are not faster.
+pub fn arrow_pan_direction(keys: &ButtonInput<KeyCode>) -> Vec2 {
+    let axis = |neg: KeyCode, pos: KeyCode| {
+        f32::from(u8::from(keys.pressed(pos))) - f32::from(u8::from(keys.pressed(neg)))
+    };
+    Vec2::new(
+        axis(KeyCode::ArrowLeft, KeyCode::ArrowRight),
+        axis(KeyCode::ArrowDown, KeyCode::ArrowUp),
+    )
+    .normalize_or_zero()
+}
+
+/// Hold the arrow keys to pan the canvas (not while a text field has the
+/// keyboard). `W`/`A`/`S`/`D` are not used: `W` is the wire tool.
+pub fn key_pan_camera(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    ui_pointer: Option<Res<UiPointerState>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut cameras: Query<(&Projection, &mut Transform), With<MainCamera>>,
+) -> Result {
+    let direction = arrow_pan_direction(&keys);
+    if direction == Vec2::ZERO || ui_pointer.is_some_and(|p| p.wants_keyboard) {
+        return Ok(());
+    }
+    let window = windows.single()?;
+    let (projection, mut transform) = cameras.single_mut()?;
+    let Projection::Orthographic(ortho) = projection else {
+        return Ok(());
+    };
+    let step =
+        direction * KEY_PAN_SPEED * time.delta_secs() * world_per_pixel(ortho, window.height());
+    transform.translation.x += step.x;
+    transform.translation.y += step.y;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +315,27 @@ mod tests {
         let burst = wheel_zoom_factor([(Pixel, 5000.0), (Line, 10.0)]);
         assert!(close(burst, ZOOM_STEP.powf(-MAX_LINES_PER_FRAME)));
         assert!(burst > MIN_WPP / MAX_WPP);
+    }
+
+    #[test]
+    fn arrow_keys_pan_in_world_directions() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        assert_eq!(arrow_pan_direction(&keys), Vec2::ZERO);
+        keys.press(KeyCode::ArrowRight);
+        assert_eq!(arrow_pan_direction(&keys), Vec2::X);
+        keys.press(KeyCode::ArrowLeft);
+        assert_eq!(arrow_pan_direction(&keys), Vec2::ZERO, "opposites cancel");
+        keys.release(KeyCode::ArrowLeft);
+        keys.press(KeyCode::ArrowUp);
+        let d = arrow_pan_direction(&keys);
+        assert!(d.x > 0.0 && d.y > 0.0 && (d.length() - 1.0).abs() < 1e-5);
+        keys.release_all();
+        keys.press(KeyCode::ArrowDown);
+        assert_eq!(arrow_pan_direction(&keys), Vec2::NEG_Y);
+        // The wire tool's key does not pan.
+        keys.release_all();
+        keys.press(KeyCode::KeyW);
+        assert_eq!(arrow_pan_direction(&keys), Vec2::ZERO);
     }
 
     #[test]

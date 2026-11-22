@@ -59,7 +59,8 @@ below 1600 x 900):
 Keys (ignored while a text field has focus): `1`–`9` arm a part from the
 open tab (then click the canvas, or drag a slot onto it), `Esc` drops it
 (or the wire tool, or closes the Library; with nothing to drop it clears
-the selection), `W` wire tool, `F` fit, `R` reset to tick 0, `Delete`
+the selection), `Space` run or pause, `W` wire tool, `F` fit, `R` reset to
+tick 0, arrow keys pan, `Delete`
 deletes the selected part, `T` day or night. Mouse: left-click selects
 (on empty canvas: deselects) and flips a 1-bit input (also in a
 read-only demo; a wider input is set in the inspector), left- or
