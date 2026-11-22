@@ -26,7 +26,9 @@
 //! opens a parts-bar tab (`logic`, `memory`, `chips`, ...); `--editable`
 //! opens the demo as an editable workspace instead of read-only. The ids
 //! `empty` and `loop` are a new empty workspace and a small editable
-//! circuit with a combinational loop.
+//! circuit with a combinational loop. `--drag LABEL:DX,DY` left-drags
+//! that part by (DX, DY) world units through the real pointer path (the
+//! window cursor and the left button) and drops it before the shot.
 //!
 //! `--map` shows the demo map instead of a demo (the id is ignored), with
 //! the demos listed by `--opened ID,ID,...` (the last one last) as the
@@ -42,6 +44,7 @@ use bevy_egui::EguiPlugin;
 
 use gate_quest::editor::demo_map::{DemoMapState, progress::DemoProgress};
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
+use gate_quest::sim::systems::canvas_cursor_system;
 use gate_quest::sim::{
     ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel,
     LoadWorkspaceEvent, OpenDefinitionView, SelectedGate, SetInputValue, SimBridge,
@@ -71,6 +74,7 @@ struct Shot {
     definition: Option<String>,
     fit: bool,
     editable: bool,
+    drag: Option<(String, Vec2)>,
     frame: u32,
 }
 
@@ -139,6 +143,7 @@ fn main() {
     let (mut map, mut opened, mut level) = (false, String::new(), None);
     let (mut definition, mut fit) = (None, false);
     let mut editable = false;
+    let mut drag = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--night" => night = true,
@@ -172,6 +177,15 @@ fn main() {
             "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "--definition" => definition = args.next(),
             "--fit" => fit = true,
+            "--drag" => {
+                let spec = args.next().unwrap_or_default();
+                let parsed = spec.rsplit_once(':').and_then(|(l, d)| {
+                    let (x, y) = d.split_once(',')?;
+                    Some((l.to_string(), Vec2::new(x.parse().ok()?, y.parse().ok()?)))
+                });
+                drag =
+                    Some(parsed.unwrap_or_else(|| panic!("--drag wants LABEL:DX,DY, got {spec}")));
+            }
             other => panic!("unknown argument {other}"),
         }
     }
@@ -211,6 +225,7 @@ fn main() {
             definition,
             fit,
             editable,
+            drag,
             frame: 0,
         })
         .add_systems(
@@ -219,6 +234,7 @@ fn main() {
         )
         .add_systems(bevy_egui::EguiPrimaryContextPass, update_ui_pointer_state)
         .add_systems(Update, drive)
+        .add_systems(Update, scripted_drag.before(canvas_cursor_system))
         .run();
 }
 
@@ -351,6 +367,49 @@ fn drive(
             active.read_only = true;
             exit.write(AppExit::Success);
         }
+        _ => {}
+    }
+}
+
+/// `--drag`: point at the part (frame 44), press the left button (45),
+/// move in steps (46-55) and release (56), before the shot at frame 70.
+fn scripted_drag(
+    shot: Res<Shot>,
+    mut windows: Query<&mut Window>,
+    cameras: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    parts: Query<(&GateLabel, &Transform)>,
+    mut buttons: ResMut<ButtonInput<MouseButton>>,
+    mut from: Local<Option<Vec2>>,
+) {
+    let Some((label, delta)) = &shot.drag else {
+        return;
+    };
+    let (Ok(mut window), Ok((camera, camera_transform))) = (windows.single_mut(), cameras.single())
+    else {
+        return;
+    };
+    let to_screen = |world: Vec2| {
+        camera
+            .world_to_viewport(camera_transform, world.extend(0.0))
+            .ok()
+    };
+    match shot.frame {
+        44 => {
+            let (_, t) = parts
+                .iter()
+                .find(|(l, _)| &l.value == label)
+                .expect("a part with the --drag label");
+            // A little off centre, as a hand would grab it.
+            *from = Some(t.translation.truncate() + Vec2::new(4.0, -3.0));
+            window.set_cursor_position(from.and_then(to_screen));
+        }
+        45 => buttons.press(MouseButton::Left),
+        46..=55 => {
+            let step = (shot.frame - 45) as f32 / 10.0;
+            let at = from.map(|f| f + *delta * step);
+            window.set_cursor_position(at.and_then(to_screen));
+        }
+        56 => buttons.release(MouseButton::Left),
         _ => {}
     }
 }
