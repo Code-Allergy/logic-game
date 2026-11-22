@@ -294,7 +294,7 @@ fn rule_line(ui: &mut egui::Ui, palette: &Palette, rule: &str) {
             ui.set_width(ui.available_width());
             ui.label(
                 egui::RichText::new(format!("Parts: {rule}."))
-                    .size(12.0)
+                    .size(13.0)
                     .color(egui_color(palette.text)),
             );
         });
@@ -350,7 +350,7 @@ fn result(
                             "\"{}\" is done; it is ticked on the demo map.",
                             challenge.title
                         ))
-                        .size(12.0)
+                        .size(13.0)
                         .color(egui_color(palette.on_ink)),
                     );
                 }
@@ -375,7 +375,7 @@ fn result(
                     let text = other.to_string();
                     ui.label(
                         egui::RichText::new(text)
-                            .size(12.0)
+                            .size(13.0)
                             .color(egui_color(palette.text)),
                     );
                 }
@@ -383,7 +383,7 @@ fn result(
             if edited {
                 ui.label(
                     egui::RichText::new("You have changed the circuit since: check again.")
-                        .size(11.0)
+                        .size(13.0)
                         .italics()
                         .color(egui_color(if passed {
                             palette.on_ink

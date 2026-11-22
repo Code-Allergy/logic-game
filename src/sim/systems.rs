@@ -9,7 +9,7 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use uuid::Uuid;
 
-use crate::camera::{FIT_PADDING, FitView, fit_view, scale_for_wpp};
+use crate::camera::{FIT_PADDING, FitView, fit_view_around, scale_for_wpp};
 use crate::editor::parts::{kind_blurb, kind_title};
 use crate::editor::workspace::{OnConflict, WEB_SAVE_UNAVAILABLE, WorkspaceStore, exit_save_plan};
 use crate::theme::{Family, Theme};
@@ -100,6 +100,7 @@ pub fn fit_camera_to_circuit_system(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<(&mut Projection, &mut Transform), With<MainCamera>>,
     gates: Query<(&Transform, &GateType), FitGate>,
+    settings: Option<Res<crate::settings::Settings>>,
 ) {
     let requested = requests.read().count() > 0;
     if !active.is_changed() && !view.is_changed() && !requested {
@@ -110,16 +111,20 @@ pub fn fit_camera_to_circuit_system(
     else {
         return;
     };
-    let Some(content) = gates
-        .iter()
-        .map(|(t, ty)| Rect::from_center_size(t.translation.truncate(), ty.kind.size()))
-        .reduce(|a, b| a.union(b))
-    else {
+    let bounds = |input_only: bool| {
+        gates
+            .iter()
+            .filter(|(_, ty)| !input_only || ty.kind.is_input())
+            .map(|(t, ty)| Rect::from_center_size(t.translation.truncate(), ty.kind.size()))
+            .reduce(|a, b| a.union(b))
+    };
+    let Some(content) = bounds(false) else {
         return;
     };
     let screen = window.size();
-    let free = HudLayout::new(screen).free_area();
-    let (centre, wpp) = fit_view(content, screen, free, FIT_PADDING);
+    let scale = crate::ui_style::ui_scale_for(settings.as_deref(), screen);
+    let free = HudLayout::scaled(screen, scale).free_area_in_window(scale);
+    let (centre, wpp) = fit_view_around(content, bounds(true), screen, free, FIT_PADDING);
     if let Projection::Orthographic(ortho) = projection.as_mut() {
         ortho.scale = scale_for_wpp(ortho, screen.y, wpp);
         ortho.near = -10_000.0;
@@ -948,7 +953,7 @@ fn edit_screen_params(ui: &mut egui::Ui, palette: &crate::theme::Palette, kind: 
     if text {
         ui.label(
             egui::RichText::new("8-bit character codes (ASCII); bit 7 inverts the cell.")
-                .size(12.0)
+                .size(13.0)
                 .color(egui_color(palette.text_secondary)),
         );
     } else {
@@ -976,7 +981,7 @@ fn edit_screen_params(ui: &mut egui::Ui, palette: &crate::theme::Palette, kind: 
     };
     ui.label(
         egui::RichText::new(hint)
-            .size(12.0)
+            .size(13.0)
             .color(egui_color(palette.text_secondary)),
     );
 }
@@ -1278,7 +1283,7 @@ pub fn ui_for_selected_gate(
                                 .on_hover_text(format!("Id {}", identity.uuid));
                                 ui.label(
                                     egui::RichText::new(kind_blurb(&ty.kind))
-                                        .size(12.0)
+                                        .size(13.0)
                                         .color(c(palette.text_secondary)),
                                 );
                             });
@@ -1572,7 +1577,7 @@ pub fn ui_for_selected_gate(
                                     } else {
                                         format!("{text} (not simulated)")
                                     };
-                                    ui.label(egui::RichText::new(text).monospace().size(12.0));
+                                    ui.label(egui::RichText::new(text).monospace().size(13.0));
                                     if editable && ui.small_button("Delete").clicked() {
                                         writers.delete_wire.write(DeleteWire { entity: wire });
                                     }
