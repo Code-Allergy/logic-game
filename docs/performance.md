@@ -129,7 +129,11 @@ from the base's lower to the head's upper one. A change is called
 `faster`/`slower` only when the whole range is beyond `--noise` (2% by
 default); otherwise `~`. Changed deterministic metrics are listed below.
 Compare runs on the same, quiet machine: a laptop on battery or a busy CI
-runner moves wall-clock times by more than 2%.
+runner moves wall-clock times by more than 2%. `--quick` samples little,
+so its intervals are optimistic: on a loaded 4-vCPU VM, `perf compare
+HEAD~ HEAD --quick --suite engine` over two revisions with the same
+simulator code called five of eleven benchmarks changed, one by 73%.
+Use full runs, and repeat a surprising result, before believing it.
 
 ## The regression gate
 
