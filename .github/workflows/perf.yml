@@ -1,0 +1,29 @@
+name: Performance
+
+# The regression gate of docs/performance.md: deterministic metrics
+# (program sizes, executed operations and allocations per tick) against
+# perf/baseline.json. Wall-clock benchmarks are not run here.
+on:
+  pull_request:
+
+jobs:
+  perf-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-cargo-perf-${{ hashFiles('**/Cargo.toml') }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install alsa and udev
+        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
+      - name: Check performance metrics against the baseline
+        run: cargo xtask perf check

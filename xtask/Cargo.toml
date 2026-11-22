@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Developer tasks: `cargo xtask perf ...` (see docs/performance.md)."
+
+# Light on purpose: it orchestrates cargo, criterion and perf, and never
+# links the game.
+[dependencies]
+serde_json = { version = "1.0", features = ["preserve_order"] }
+inferno = { version = "0.12", default-features = false }
