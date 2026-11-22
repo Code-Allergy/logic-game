@@ -17,7 +17,10 @@
 //!   placement by click.
 //! - `hud`: the parts bar, minimap, zoom, build pill, signals and toasts.
 //! - `parts`: the parts bar's catalogue (tabs, number keys, names).
+//! - `chips`: the selection card (Make chip, Delete for several parts),
+//!   the Make chip dialog and the chip update prompt.
 //! - `systems`: wire-building selection.
+//! - `challenge`: the open build-it challenge, its card and Check.
 //! - `undo`: the undo shortcuts and the file card's Undo and Redo buttons.
 //! - `workspace`: on-disk workspace helpers (the player's data folder,
 //!   safe names, Save As, atomic writes).
@@ -29,6 +32,8 @@
 //! The editor never mutates the circuit directly: it sends the authoring
 //! messages of [`crate::sim::authoring`].
 
+pub mod challenge;
+pub mod chips;
 pub mod demo_map;
 pub mod files;
 pub mod hud;
@@ -158,7 +163,11 @@ pub struct EditorPlugin;
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>()
+            .init_resource::<chips::MakeChipDialog>()
+            .init_resource::<challenge::ActiveChallenge>()
             .add_plugins(demo_map::DemoMapPlugin)
+            .add_systems(Update, challenge::track_challenge_system)
+            .add_systems(EguiPrimaryContextPass, challenge::challenge_card_system)
             .add_systems(
                 EguiPrimaryContextPass,
                 (
@@ -171,6 +180,8 @@ impl Plugin for EditorPlugin {
                     hud::toast_system,
                     hud::editor_keys_system,
                     undo::undo_keys_system,
+                    chips::selection_card_system,
+                    chips::chip_update_prompt_system,
                 ),
             );
     }

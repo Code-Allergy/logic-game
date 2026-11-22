@@ -3,15 +3,18 @@
 
 use bevy::prelude::*;
 
-use crate::sim::{CircuitLibrary, GateType};
+use crate::sim::{AuthoringFeedback, CircuitLibrary, GateType};
 use crate::temp::GateComponentSelectionEvent;
 
 use super::EditorState;
+use super::parts::kind_title;
 
 /// In connection mode, the first clicked gate is the source and the second
-/// the sink; pins are then chosen in the wire builder window.
+/// the sink; pins are then chosen in the wire builder window. A part that
+/// cannot be a source or a sink is refused with a toast.
 pub fn handle_connection_creation(
     mut editor_state: ResMut<EditorState>,
+    mut feedback: ResMut<AuthoringFeedback>,
     library: Res<CircuitLibrary>,
     gates: Query<&GateType>,
     mut selection_events: MessageReader<GateComponentSelectionEvent>,
@@ -27,10 +30,10 @@ pub fn handle_connection_creation(
         match editor_state.connection_source {
             None => {
                 if outs.is_empty() {
-                    warn!(
-                        "Cannot use {} as connection source: no output pins",
-                        ty.kind.display_name()
-                    );
+                    feedback.refuse(format!(
+                        "{} has no outputs: a wire starts at an output",
+                        kind_title(&ty.kind)
+                    ));
                     continue;
                 }
                 editor_state.clear_connection();
@@ -48,10 +51,10 @@ pub fn handle_connection_creation(
             }
             Some(_) => {
                 if ins.is_empty() {
-                    warn!(
-                        "Cannot use {} as connection sink: no input pins",
-                        ty.kind.display_name()
-                    );
+                    feedback.refuse(format!(
+                        "{} has no inputs: a wire ends at an input",
+                        kind_title(&ty.kind)
+                    ));
                     continue;
                 }
                 editor_state.connection_sink = Some(clicked);

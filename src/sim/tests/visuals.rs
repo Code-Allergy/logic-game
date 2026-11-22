@@ -291,7 +291,7 @@ fn dragging_a_gate_moves_only_its_wires_and_does_not_recompile() {
     let into_y = wire_into(&mut app, y);
     let into_z = wire_into(&mut app, z);
 
-    // Drag `and` over several frames, as `drag_selected_system` does.
+    // Drag `and` over several frames, as `canvas_pointer_system` does.
     clear_changes(&mut app);
     for step in 1..=5 {
         app.world_mut()
@@ -404,8 +404,8 @@ fn z_span(app: &App, entity: Entity, parent_z: f32) -> (f32, f32) {
     span
 }
 
-/// Right-drag `gate` one step, as `gate_selection_system` and
-/// `drag_selected_system` do.
+/// Drag `gate` one step, as `canvas_pointer_system` does (it marks the
+/// dragged part [`Selected`] and moves it).
 fn drag(app: &mut App, gate: Entity, to: Vec2) {
     let selected: Vec<Entity> = app
         .world_mut()
@@ -940,4 +940,168 @@ fn loop_inside_a_definition_is_highlighted_per_instance_and_in_its_view() {
         "root highlight cleared too"
     );
     assert_eq!(outline_count(&mut app), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Readable captions when zoomed out (issue #96)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// At the lowest fit zoom (65%), every tile caption of every demo and
+/// gallery circuit is readable: the full caption if it is large enough,
+/// else the simplified one, at least `MIN_CANVAS_TEXT_PX` on screen and
+/// within its tile. Name tags and value pills are too.
+#[test]
+fn every_demo_caption_is_readable_at_the_lowest_fit_zoom() {
+    use crate::camera::FIT_MIN_ZOOM;
+    use crate::sim::art::{
+        CANVAS_TEXT_SIZE, CAPS_EM, CaptionMode, MIN_CANVAS_TEXT_PX, MONO_EM, caption_mode,
+        caption_size, shorten, simple_caption, simple_caption_size, tile_caption,
+    };
+    use crate::sim::visuals::{TileCaption, label_scale};
+
+    let catalog = crate::sim::demos::catalog().unwrap();
+    let mut names = HashMap::new();
+    let all: Vec<_> = catalog.demos.iter().chain(&catalog.gallery).collect();
+    for demo in &all {
+        for (_, doc) in &demo.circuits {
+            names.insert(doc.id, doc.name.clone());
+        }
+        for (id, doc) in &demo.workspace.definitions {
+            names.insert(*id, doc.name.clone());
+        }
+    }
+    let zoom = FIT_MIN_ZOOM;
+    let mut checked = 0;
+    for demo in &all {
+        for (_, doc) in &demo.circuits {
+            for node in &doc.nodes {
+                let name = match &node.kind {
+                    GateKind::SubCircuit { definition } => names.get(definition).cloned(),
+                    _ => None,
+                };
+                let full = match &node.kind {
+                    GateKind::SubCircuit { .. } => Some(shorten(name.as_deref().unwrap_or("?"), 7)),
+                    k => tile_caption(k),
+                };
+                let Some(full) = full else { continue };
+                let size = node.kind.size();
+                let simple = simple_caption(&node.kind, name.as_deref()).unwrap_or(full.clone());
+                let mono = matches!(node.kind, GateKind::Const { .. });
+                let caption = TileCaption {
+                    full_size: caption_size(&full, size),
+                    simple_size: simple_caption_size(&simple, size, mono),
+                    full,
+                    simple,
+                };
+                let (text, font) = caption.at(zoom);
+                assert!(
+                    font * zoom >= MIN_CANVAS_TEXT_PX - 0.05,
+                    "{:?} in {}: {text:?} at {} px",
+                    node.kind,
+                    demo.id,
+                    font * zoom
+                );
+                let widest = text.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+                let full = caption_mode(zoom, caption.full_size) == CaptionMode::Full;
+                let em = if full {
+                    0.66
+                } else if mono {
+                    MONO_EM
+                } else {
+                    CAPS_EM
+                };
+                assert!(
+                    widest as f32 * em * font <= size.x - 8.0 + 0.01,
+                    "{text:?} overflows its tile in {}",
+                    demo.id
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 100, "{checked} captions");
+    assert!(CANVAS_TEXT_SIZE * label_scale(zoom) * zoom >= MIN_CANVAS_TEXT_PX);
+    // Full size again from 85%.
+    assert_eq!(label_scale(0.85), 1.0);
+}
+
+/// Zooming out past the threshold swaps a tile's caption for its short
+/// form at a larger size and grows name tags and value pills; zooming in
+/// restores them; tiles made while zoomed out start simplified; and an
+/// idle canvas at a steady zoom touches no text.
+#[test]
+fn captions_name_tags_and_pills_follow_the_zoom() {
+    use crate::sim::art::SIMPLE_LABEL_SCALE;
+    use crate::sim::visuals::{CanvasZoom, NameTag, TileCaption};
+
+    let mut app = visual_app();
+    let reg = create_gate(&mut app, GateKind::Register { w: 8 }, "r");
+    let input = create_gate(&mut app, GateKind::Input { w: 8 }, "in");
+    create_wire(&mut app, input, 0, reg, 1);
+    idle_frames(&mut app, 3);
+    let caption_of = |app: &mut App, gate: Entity| {
+        let children: Vec<Entity> = app.world().get::<Children>(gate).unwrap().to_vec();
+        let mut q = app
+            .world_mut()
+            .query::<(&TileCaption, &Text2d, &TextFont, &Transform)>();
+        children
+            .into_iter()
+            .find_map(|c| {
+                q.get(app.world(), c).ok().map(|(_, t, f, tr)| {
+                    let FontSize::Px(px) = f.font_size else {
+                        panic!("captions are sized in pixels")
+                    };
+                    (t.0.clone(), px, tr.scale.x)
+                })
+            })
+            .unwrap()
+    };
+    let tag_scale = |app: &mut App, gate: Entity| {
+        let children: Vec<Entity> = app.world().get::<Children>(gate).unwrap().to_vec();
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<NameTag>>();
+        children
+            .into_iter()
+            .find_map(|c| q.get(app.world(), c).ok().map(|t| t.scale.x))
+            .unwrap()
+    };
+    let pill_scale = |app: &mut App| {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<WireValueLabel>>();
+        q.iter(app.world()).next().unwrap().scale.x
+    };
+
+    assert_eq!(caption_of(&mut app, reg), ("REG8".into(), 13.0, 1.0));
+    assert_eq!(tag_scale(&mut app, input), 1.0);
+    assert_eq!(pill_scale(&mut app), 1.0);
+
+    app.world_mut().resource_mut::<CanvasZoom>().0 = 0.5;
+    idle_frames(&mut app, 2);
+    let (text, size, scale) = caption_of(&mut app, reg);
+    assert_eq!(text, "REG");
+    assert!(size > 13.0, "{size}");
+    assert_eq!(scale, 1.0, "captions grow by font size, not scale");
+    assert_eq!(tag_scale(&mut app, input), SIMPLE_LABEL_SCALE);
+    assert_eq!(pill_scale(&mut app), SIMPLE_LABEL_SCALE);
+
+    // A tile made while zoomed out starts simplified.
+    let add = create_gate(&mut app, GateKind::Add { w: 8 }, "sum");
+    idle_frames(&mut app, 2);
+    assert_eq!(caption_of(&mut app, add).0, "+");
+    assert_eq!(caption_of(&mut app, add).2, 1.0);
+
+    assert_idle_does_no_work(&mut app, "zoomed out");
+    idle_frames(&mut app, 2);
+    clear_changes(&mut app);
+    idle_frames(&mut app, 5);
+    assert!(changes(&app).texts.is_empty() && changes(&app).transforms.is_empty());
+
+    app.world_mut().resource_mut::<CanvasZoom>().0 = 1.0;
+    idle_frames(&mut app, 2);
+    assert_eq!(caption_of(&mut app, reg), ("REG8".into(), 13.0, 1.0));
+    assert_eq!(caption_of(&mut app, add).0, "ADD8");
+    assert_eq!(tag_scale(&mut app, input), 1.0);
+    assert_eq!(pill_scale(&mut app), 1.0);
 }

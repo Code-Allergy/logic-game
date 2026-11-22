@@ -389,7 +389,10 @@ fn definition_placed_twice_is_simulated_inspected_live_edited_saved_and_reloaded
     assert_eq!((out(&mut app, "S1"), out(&mut app, "C1")), (1, 0));
     assert_eq!((out(&mut app, "S2"), out(&mut app, "C2")), (1, 0));
     let n1 = out(&mut app, "N1");
-    assert!(n1 >= 6 && n1 % 2 == 0, "reloaded with the edit: {n1}");
+    assert!(
+        n1 >= 6 && n1.is_multiple_of(2),
+        "reloaded with the edit: {n1}"
+    );
     let (c1, c2) = (gate(&mut app, "cell1"), gate(&mut app, "cell2"));
     open(&mut app, c1);
     assert_eq!(view_out(&mut app, "reg"), n1);

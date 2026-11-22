@@ -25,6 +25,7 @@ use bevy_egui::{
 use uuid::Uuid;
 
 use crate::camera::{FitView, MAX_WPP, MIN_WPP, scale_for_wpp, visible_world, world_per_pixel};
+use crate::sim::systems::CanvasPointer;
 use crate::sim::{
     ActiveCircuit, AuthoringFeedback, CircuitLibrary, CreateGate, Demo, GateIdentity, GateKind,
     GateLabel, GateType, GateValues, RegisterDefinitions, SelectedGate, SimDiagnostics,
@@ -195,7 +196,7 @@ pub fn minimap_system(
                     rect.center(),
                     Align2::CENTER_CENTER,
                     "empty",
-                    FontId::proportional(12.0),
+                    FontId::proportional(13.0),
                     egui_color(palette.text_faint),
                 );
                 return;
@@ -402,6 +403,10 @@ fn paint_gate_glyph(painter: &egui::Painter, c: Pos2, kind: &GateKind, ink: Colo
     true
 }
 
+/// The key number in a slot's top-left corner: its size and offset.
+const KEY_HINT_SIZE: f32 = 12.0;
+const KEY_HINT_AT: egui::Vec2 = egui::vec2(6.0, 3.0);
+
 /// One parts-bar slot: a chunky tile with its key number, a glyph or
 /// short name, lifting on hover and marigold while armed.
 fn part_slot(
@@ -447,14 +452,14 @@ fn part_slot(
     let text_colour = egui_color(if armed { palette.on_ink } else { palette.text });
     if let Some(key) = key {
         painter.text(
-            face.min + egui::vec2(7.0, 4.0),
+            face.min + KEY_HINT_AT,
             Align2::LEFT_TOP,
             key,
-            FontId::monospace(10.0),
+            FontId::monospace(KEY_HINT_SIZE),
             egui_color(if armed {
                 palette.on_ink
             } else {
-                palette.text_faint
+                palette.text_secondary
             }),
         );
     }
@@ -620,6 +625,7 @@ pub fn parts_bar_system(
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     active: Res<ActiveCircuit>,
     game_state: Res<State<GameState>>,
+    challenge: Res<super::challenge::ActiveChallenge>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         state.dragging_part = None;
@@ -632,6 +638,21 @@ pub fn parts_bar_system(
     let palette = theme.palette;
     let layout = hud_layout(ctx);
     let items = slot_items(state.part_tab, &state);
+    // While a challenge is open, parts outside its rules are greyed out.
+    let open_challenge = challenge.challenge();
+    let refused: Vec<Option<String>> = items
+        .iter()
+        .map(|item| {
+            super::challenge::refusal(
+                open_challenge,
+                open_challenge.is_none_or(|c| match item {
+                    SlotItem::Kind(kind) => c.allows_kind(kind),
+                    SlotItem::Demo(demo) => c.allows_chip(&demo.workspace),
+                    SlotItem::Saved(_) => true,
+                }),
+            )
+        })
+        .collect();
 
     let mut activate: Option<usize> = None;
     let mut drag: Option<usize> = None;
@@ -660,7 +681,7 @@ pub fn parts_bar_system(
                         } else {
                             "drag, or press a number"
                         })
-                        .size(12.0)
+                        .size(13.0)
                         .color(egui_color(palette.text_secondary)),
                     );
                 }
@@ -674,15 +695,24 @@ pub fn parts_bar_system(
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = SLOT_GAP;
                     for (i, item) in items.iter().enumerate() {
-                        let response = part_slot(
-                            ui,
-                            &palette,
-                            slots,
-                            slot_key_label(i),
-                            item,
-                            item.is_armed(&state),
-                        )
-                        .on_hover_text(item.hover());
+                        let response = ui
+                            .add_enabled_ui(refused[i].is_none(), |ui| {
+                                part_slot(
+                                    ui,
+                                    &palette,
+                                    slots,
+                                    slot_key_label(i),
+                                    item,
+                                    item.is_armed(&state),
+                                )
+                            })
+                            .inner
+                            .on_hover_text(item.hover())
+                            .on_disabled_hover_text(format!(
+                                "{}\n\n{}",
+                                item.hover(),
+                                refused[i].as_deref().unwrap_or_default()
+                            ));
                         if response.drag_started() {
                             drag = Some(i);
                         } else if response.clicked() {
@@ -738,12 +768,15 @@ pub fn parts_bar_system(
             if keys.just_pressed(key)
                 && let Some(slot) = slot_for_key(key)
                 && slot < items.len()
+                && refused[slot].is_none()
             {
                 activate = Some(slot);
             }
         }
     }
-    let mut status = state.status.take();
+    // Only a failed slot writes a status: writing it back every frame
+    // would mark the state changed and keep the toast up for good.
+    let mut status = None;
     if let Some(i) = activate {
         let item = &items[i];
         if item.is_armed(&state) {
@@ -757,7 +790,9 @@ pub fn parts_bar_system(
     {
         state.dragging_part = Some(pick);
     }
-    state.status = status;
+    if status.is_some() {
+        state.status = status;
+    }
 
     // Drag and drop onto the canvas.
     if let Some((kind, label)) = state.dragging_part.clone() {
@@ -819,14 +854,14 @@ fn paint_tool_slot(
         StrokeKind::Inside,
     );
     painter.text(
-        face.min + egui::vec2(7.0, 4.0),
+        face.min + KEY_HINT_AT,
         Align2::LEFT_TOP,
         "W",
-        FontId::monospace(10.0),
+        FontId::monospace(KEY_HINT_SIZE),
         egui_color(if on {
             palette.on_ink
         } else {
-            palette.text_faint
+            palette.text_secondary
         }),
     );
     let c = face.center() + egui::vec2(0.0, 2.0);
@@ -848,6 +883,39 @@ fn paint_tool_slot(
 // ─────────────────────────────────────────────────────────────────────────────
 // Build status pill
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// The build status card's contents: a dot, `text`, and the `note`
+/// (`details`/`hide`) when there is an error. Clicking it toggles the
+/// details. At most [`crate::ui_style::STATUS_WIDTH`] wide.
+pub fn status_card(
+    ui: &mut Ui,
+    palette: &Palette,
+    dot: Color,
+    text: &str,
+    note: Option<&str>,
+) -> egui::Response {
+    card(palette)
+        .inner_margin(egui::Margin::symmetric(16, 0))
+        .show(ui, |ui| {
+            ui.set_height(crate::ui_style::TOP_CARD_HEIGHT - 5.0);
+            ui.horizontal_centered(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                ui.painter().circle(
+                    r.center(),
+                    6.0,
+                    egui_color(dot),
+                    stroke(2.0, egui_color(palette.ink)),
+                );
+                ui.label(egui::RichText::new(text).font(heavy(14.0)));
+                if let Some(note) = note {
+                    ui.label(caption(palette, note));
+                }
+            })
+            .response
+            .interact(Sense::click())
+        })
+        .inner
+}
 
 /// Top right: whether the circuit built, its part count, and loop or
 /// build errors (click for the details, which also open by themselves
@@ -889,68 +957,59 @@ pub fn build_pill_system(
         ),
     };
     let mut toggle = false;
+    let hover = match diagnostics.running_revision {
+        Some(rev) => format!("Running revision {rev}"),
+        None => "Compiling…".to_string(),
+    };
+    let note = error.map(|_| if *details_open { "hide" } else { "details" });
     egui::Area::new(egui::Id::new("hud_build"))
         .anchor(Align2::RIGHT_TOP, [-layout.margin, layout.margin])
         .order(Order::Middle)
         .show(ctx, |ui| {
-            card(&palette)
-                .inner_margin(egui::Margin::symmetric(16, 0))
-                .show(ui, |ui| {
-                    ui.set_height(crate::ui_style::TOP_CARD_HEIGHT - 5.0);
-                    let response = ui
-                        .horizontal_centered(|ui| {
-                            let (r, _) =
-                                ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                            ui.painter().circle(
-                                r.center(),
-                                6.0,
-                                egui_color(dot),
-                                stroke(2.0, egui_color(palette.ink)),
-                            );
-                            ui.label(egui::RichText::new(&text).font(heavy(14.0)));
-                            if error.is_some() {
-                                ui.label(caption(
-                                    &palette,
-                                    if *details_open { "hide" } else { "details" },
-                                ));
-                            }
-                        })
-                        .response
-                        .interact(Sense::click());
-                    let hover = match diagnostics.running_revision {
-                        Some(rev) => format!("Running revision {rev}"),
-                        None => "Compiling…".to_string(),
-                    };
-                    if response.on_hover_text(hover).clicked() {
-                        toggle = true;
-                    }
-                });
+            if status_card(ui, &palette, dot, &text, note)
+                .on_hover_text(hover)
+                .clicked()
+            {
+                toggle = true;
+            }
         });
     if toggle && error.is_some() {
         *details_open = !*details_open;
     }
     if let (Some(error), true) = (error, *details_open) {
         let fault = egui_color(palette.fault_text);
+        // Beside the inspector column, which a selection opens below the
+        // status card.
+        let rect = layout.build_details_rect();
+        let frame = card(&palette);
+        let inner = egui::vec2(rect.width(), rect.height()) - frame.total_margin().sum();
         egui::Area::new(egui::Id::new("hud_build_details"))
-            .anchor(Align2::RIGHT_TOP, [-layout.margin, layout.top_band()])
+            .anchor(
+                Align2::RIGHT_TOP,
+                [rect.max.x - layout.screen.x, rect.min.y],
+            )
             .order(Order::Foreground)
             .show(ctx, |ui| {
-                card(&palette).show(ui, |ui| {
-                    ui.set_max_width(layout.inspector_width);
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Edit {} not applied; the previous circuit keeps running.",
-                            error.revision
-                        ))
-                        .font(heavy(14.0))
-                        .color(fault),
-                    );
-                    for message in &error.messages {
-                        ui.colored_label(fault, message);
-                    }
-                    if error.loops.iter().any(|l| !l.is_empty()) {
-                        ui.label("The parts and wires on the loop are outlined in red.");
-                    }
+                frame.show(ui, |ui| {
+                    ui.set_max_width(inner.x);
+                    egui::ScrollArea::vertical()
+                        .max_height(inner.y)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Edit {} not applied; the previous circuit keeps running.",
+                                    error.revision
+                                ))
+                                .font(heavy(14.0))
+                                .color(fault),
+                            );
+                            for message in &error.messages {
+                                ui.colored_label(fault, message);
+                            }
+                            if error.loops.iter().any(|l| !l.is_empty()) {
+                                ui.label("The parts and wires on the loop are outlined in red.");
+                            }
+                        });
                 });
             });
     }
@@ -1082,7 +1141,7 @@ pub fn signals_card_system(
                 ui.label(
                     egui::RichText::new("live")
                         .monospace()
-                        .size(11.0)
+                        .size(12.0)
                         .color(egui_color(palette.text_secondary)),
                 );
             });
@@ -1112,7 +1171,7 @@ pub fn signals_card_system(
                     ui.allocate_exact_size(egui::vec2(name_w, row_h - 6.0), Sense::click());
                 let galley = ui.painter().layout(
                     row.name.clone(),
-                    FontId::monospace(12.0),
+                    FontId::monospace(13.0),
                     egui_color(palette.text),
                     f32::INFINITY,
                 );
@@ -1203,7 +1262,7 @@ fn paint_signal(ui: &Ui, palette: &Palette, rect: egui::Rect, width: u8, value: 
         rect.center(),
         Align2::CENTER_CENTER,
         format_live_value(width, value),
-        FontId::monospace(12.0),
+        FontId::monospace(13.0),
         egui_color(text),
     );
 }
@@ -1215,6 +1274,30 @@ fn paint_signal(ui: &Ui, palette: &Palette, rect: egui::Rect, width: u8, value: 
 /// Seconds a toast stays up.
 const TOAST_SECS: f32 = 6.0;
 
+/// One toast source (authoring feedback, workspace status): a message
+/// shows for [`TOAST_SECS`] from when it appears or changes, or is sent
+/// again, then hides until the next one.
+#[derive(Debug, Default)]
+pub struct ToastSlot {
+    last: Option<String>,
+    age: f32,
+}
+
+impl ToastSlot {
+    /// The message to show this frame. `message` is the source's current
+    /// message, `resent` whether it was written again this frame (an
+    /// identical message counts as new then), `dt` the frame time.
+    pub fn tick(&mut self, message: Option<&String>, resent: bool, dt: f32) -> Option<String> {
+        if resent || message != self.last.as_ref() {
+            self.last = message.cloned();
+            self.age = 0.0;
+        } else {
+            self.age += dt;
+        }
+        self.last.clone().filter(|_| self.age <= TOAST_SECS)
+    }
+}
+
 /// Above the parts bar: the last authoring message (a refused edit, a
 /// save) and the editor's workspace status, for a few seconds each.
 pub fn toast_system(
@@ -1224,23 +1307,25 @@ pub fn toast_system(
     mut state: ResMut<EditorState>,
     time: Res<Time>,
     game_state: Res<State<GameState>>,
-    mut shown_for: Local<f32>,
+    mut slots: Local<(ToastSlot, ToastSlot)>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
     }
-    if feedback.is_changed() || state.is_changed() && state.status.is_some() {
-        *shown_for = 0.0;
-    } else {
-        *shown_for += time.delta_secs();
-    }
-    let messages: Vec<String> = feedback
-        .message
-        .iter()
-        .chain(state.status.iter())
-        .cloned()
-        .collect();
-    if messages.is_empty() || *shown_for > TOAST_SECS {
+    let dt = time.delta_secs();
+    // Feedback is only written by authoring commands, so a change is a
+    // new message. The status is compared by value: other edits of the
+    // editor state (arming a part) must not bring an old one back.
+    let messages: Vec<String> = [
+        slots
+            .0
+            .tick(feedback.message.as_ref(), feedback.is_changed(), dt),
+        slots.1.tick(state.status.as_ref(), false, dt),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if messages.is_empty() {
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
@@ -1301,7 +1386,8 @@ pub fn escape(state: &mut EditorState, selected: &mut SelectedGate) {
 }
 
 /// `Esc` drops the armed part, the wire tool and the Library drawer, or
-/// with none of those clears the selection (see [`escape`]); `W`
+/// with none of those clears the selection (see [`escape`]); during a
+/// wire drag it only drops the wire; `W`
 /// toggles the wire tool; `F` fits the view. Ignored while a text field
 /// has the keyboard. (`1`–`9` are handled by the parts bar, `T` by the
 /// theme, `Delete` by the inspector.)
@@ -1312,6 +1398,7 @@ pub fn editor_keys_system(
     mut fit: MessageWriter<FitView>,
     game_state: Res<State<GameState>>,
     mut selected: Option<ResMut<SelectedGate>>,
+    canvas: Option<Res<CanvasPointer>>,
 ) -> Result {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -1323,7 +1410,10 @@ pub fn editor_keys_system(
     if ctx.egui_wants_keyboard_input() {
         return Ok(());
     }
-    if keys.just_pressed(KeyCode::Escape) {
+    // `Esc` during a wire drag drops the wire (the canvas pointer sees to
+    // it) and nothing else.
+    let wiring = canvas.is_some_and(|c| c.wiring());
+    if keys.just_pressed(KeyCode::Escape) && !wiring {
         let mut next = selected.as_deref().copied().unwrap_or_default();
         escape(&mut state, &mut next);
         if let Some(selected) = selected.as_mut() {
@@ -1354,11 +1444,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::ui_style::workshop_fonts());
         for _ in 0..2 {
-            // No renderer here: drop the font atlas uploads on purpose
-            // (egui asserts that a texture delta is not dropped unapplied).
-            ctx.run_ui(egui::RawInput::default(), |_| {})
-                .textures_delta
-                .clear();
+            crate::ui_style::test_ui::run(&ctx, egui::RawInput::default(), |_| {});
         }
         assert!(crate::ui_style::workshop_fonts_ready(&ctx));
         ctx
@@ -1415,6 +1501,31 @@ mod tests {
         }
     }
 
+    /// The build status card's widest texts fit the room the layout
+    /// keeps for it.
+    #[test]
+    fn status_card_fits_its_room() {
+        let theme = Theme::day();
+        let ctx = crate::ui_style::test_ui::ctx(&theme);
+        let p = theme.palette;
+        for (text, note) in [
+            ("Built · 99999 parts", None),
+            ("Building…", None),
+            ("Loop error", Some("details")),
+            ("Build error", Some("details")),
+            ("Build error", Some("hide")),
+        ] {
+            let rect = crate::ui_style::test_ui::measure(&ctx, |ui| {
+                status_card(ui, &p, p.fault, text, note);
+            });
+            assert!(
+                rect.width() <= crate::ui_style::STATUS_WIDTH,
+                "{text}: {}",
+                rect.width()
+            );
+        }
+    }
+
     #[test]
     fn chips_tab_lists_saved_workspaces_then_demos_then_the_gallery() {
         let catalog = demos::catalog().unwrap();
@@ -1440,6 +1551,34 @@ mod tests {
             .collect();
         assert_eq!(ids, want);
         assert!(ids.contains(&"cpu_fibonacci"));
+    }
+
+    #[test]
+    fn toasts_expire_and_come_back_only_for_a_new_message() {
+        let saved = "Saved \"adder\"".to_string();
+        let mut slot = ToastSlot::default();
+        assert_eq!(slot.tick(None, false, 0.1), None);
+        // Shown from when it appears, for TOAST_SECS, then hidden although
+        // the message stays set.
+        assert_eq!(slot.tick(Some(&saved), false, 0.1), Some(saved.clone()));
+        let frame = 1.0 / 60.0;
+        let mut frames = 0;
+        while slot.tick(Some(&saved), false, frame).is_some() {
+            frames += 1;
+            assert!(frames < 1000, "the toast never expires");
+        }
+        assert!((frames as f32 * frame - TOAST_SECS).abs() < 0.1);
+        assert_eq!(slot.tick(Some(&saved), false, frame), None);
+        // A different message shows again; so does the same one re-sent.
+        let other = "Cannot load".to_string();
+        assert_eq!(slot.tick(Some(&other), false, frame), Some(other.clone()));
+        for _ in 0..1000 {
+            slot.tick(Some(&other), false, frame);
+        }
+        assert_eq!(slot.tick(Some(&other), true, frame), Some(other.clone()));
+        // Cleared, then set again: shown.
+        assert_eq!(slot.tick(None, false, frame), None);
+        assert_eq!(slot.tick(Some(&other), false, frame), Some(other));
     }
 
     #[test]

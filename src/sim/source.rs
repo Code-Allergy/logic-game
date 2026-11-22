@@ -572,7 +572,7 @@ fn item_id(circuit: Uuid, what: &str) -> Uuid {
 // Node kinds
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn parse_int_text(text: &str) -> Option<u64> {
+pub(crate) fn parse_int_text(text: &str) -> Option<u64> {
     let t = text.replace('_', "");
     if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).ok()
@@ -963,6 +963,7 @@ fn expand_circuit(
             .title
             .clone()
             .unwrap_or_else(|| circuit.name.clone()),
+        revision: 0,
         nodes: Vec::new(),
         wires: Vec::new(),
     };

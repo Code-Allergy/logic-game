@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use egui::{
     Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Response, Sense,
@@ -13,6 +14,7 @@ use egui::{
 };
 
 use crate::fonts;
+use crate::settings::{Settings, effective_ui_scale};
 use crate::theme::{Palette, Theme, ThemeMode};
 
 /// The heavy face (Nunito ExtraBold), for titles, names and buttons.
@@ -151,7 +153,7 @@ pub fn workshop_style(theme: &Theme) -> egui::Style {
         (TextStyle::Heading, heavy(20.0)),
         (TextStyle::Body, prop(14.0)),
         (TextStyle::Button, heavy(14.0)),
-        (TextStyle::Small, prop(12.0)),
+        (TextStyle::Small, prop(13.0)),
         (TextStyle::Monospace, FontId::monospace(13.0)),
     ]
     .into();
@@ -179,17 +181,33 @@ pub fn chunky_button(
     label: impl Into<WidgetText>,
     primary: bool,
 ) -> Response {
-    let galley = label.into().into_galley(
-        ui,
-        Some(egui::TextWrapMode::Extend),
-        f32::INFINITY,
-        TextStyle::Button,
-    );
-    let width = (galley.size().x + 28.0).max(40.0);
+    let galley = button_galley(ui, label);
+    let width = chunky_width(&galley);
     chunky_button_with(ui, palette, width, primary, |painter, face, colour| {
         painter.galley(face.center() - galley.size() * 0.5, galley, colour);
     })
 }
+
+fn button_galley(ui: &Ui, label: impl Into<WidgetText>) -> std::sync::Arc<egui::Galley> {
+    label.into().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        TextStyle::Button,
+    )
+}
+
+fn chunky_width(galley: &egui::Galley) -> f32 {
+    (galley.size().x + 28.0).max(40.0)
+}
+
+/// How wide [`chunky_button`] makes a button labelled `label`.
+pub fn chunky_button_width(ui: &Ui, label: impl Into<WidgetText>) -> f32 {
+    chunky_width(&button_galley(ui, label))
+}
+
+/// Width of a [`chunky_icon_button`].
+pub const ICON_BUTTON_WIDTH: f32 = 40.0;
 
 /// Icons the HUD paints itself (the bundled fonts lack these glyphs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +217,10 @@ pub enum HudIcon {
     Moon,
     /// A folded map (the demo map).
     Map,
+    /// An arrow pointing left (back to the parent circuit).
+    Back,
+    /// An arrow pointing left to a bar (back to the root circuit).
+    BackToRoot,
     /// A hooked arrow back (undo) or forward (redo).
     Undo,
     Redo,
@@ -212,9 +234,15 @@ pub fn chunky_icon_button(
     primary: bool,
 ) -> Response {
     let fill = palette;
-    chunky_button_with(ui, palette, 40.0, primary, |painter, face, colour| {
-        paint_icon(painter, face.center(), icon, colour, fill);
-    })
+    chunky_button_with(
+        ui,
+        palette,
+        ICON_BUTTON_WIDTH,
+        primary,
+        |painter, face, colour| {
+            paint_icon(painter, face.center(), icon, colour, fill);
+        },
+    )
 }
 
 /// Paint `icon` centred at `c` in `colour`.
@@ -267,6 +295,24 @@ pub fn paint_icon(
             painter.add(egui::Shape::closed_line(outline, stroke(2.0, colour)));
             painter.line_segment([p(-3.0, -9.0), p(-3.0, 6.0)], stroke(2.0, colour));
             painter.line_segment([p(3.0, -6.0), p(3.0, 9.0)], stroke(2.0, colour));
+        }
+        HudIcon::Back | HudIcon::BackToRoot => {
+            // A bold arrow; the root arrow is shifted right of its bar.
+            let dx = if icon == HudIcon::BackToRoot {
+                2.5
+            } else {
+                0.0
+            };
+            let p = |x: f32, y: f32| c + EVec2::new(x + dx, y);
+            let line = stroke(2.5, colour);
+            painter.line_segment([p(-6.5, 0.0), p(7.0, 0.0)], line);
+            painter.add(egui::Shape::line(
+                vec![p(-1.0, -6.0), p(-7.0, 0.0), p(-1.0, 6.0)],
+                line,
+            ));
+            if icon == HudIcon::BackToRoot {
+                painter.line_segment([p(-10.5, -7.0), p(-10.5, 7.0)], line);
+            }
         }
         HudIcon::Undo | HudIcon::Redo => {
             // Undo: an arrowhead pointing left at the top, the shaft
@@ -339,24 +385,43 @@ pub fn chunky_button_with(
 pub fn caption(palette: &Palette, text: &str) -> egui::RichText {
     egui::RichText::new(text.to_uppercase())
         .text_style(TextStyle::Button)
-        .size(11.0)
+        .size(12.0)
         .color(egui_color(palette.text_secondary))
 }
 
-/// Install the fonts once, and the style whenever the theme changes. egui
-/// takes new fonts at the start of the next pass, so the style (whose text
-/// styles name the heavy family) is applied from the frame after.
+/// The UI scale in effect for a window of `window` logical pixels: the
+/// player's [`Settings`] limited to what the HUD layout has room for
+/// ([`effective_ui_scale`]), 100% without settings (tools, tests).
+pub fn ui_scale_for(settings: Option<&Settings>, window: Vec2) -> f32 {
+    settings.map_or(1.0, |s| effective_ui_scale(s.ui_scale, window))
+}
+
+/// Install the fonts once, the style whenever the theme changes, and the
+/// UI scale (egui's zoom factor, so every card, text and the
+/// [`HudLayout`], which is laid out in egui points, scale together). egui
+/// takes new fonts at the start of the next pass, so the style (whose
+/// text styles name the heavy family) is applied from the frame after.
 pub fn apply_workshop_ui_system(
     mut contexts: EguiContexts,
     theme: Res<Theme>,
+    settings: Option<Res<Settings>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut fonts_set: Local<bool>,
     mut applied: Local<Option<ThemeMode>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     if !*fonts_set {
         ctx.set_fonts(workshop_fonts());
+        // The scale is a setting: keep Ctrl +/- from changing it.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         *fonts_set = true;
         return Ok(());
+    }
+    if let Ok(window) = windows.single() {
+        let scale = ui_scale_for(settings.as_deref(), window.size());
+        if (ctx.zoom_factor() - scale).abs() > 1e-4 {
+            ctx.set_zoom_factor(scale);
+        }
     }
     if *applied != Some(theme.mode) || theme.is_changed() {
         let style = workshop_style(&theme);
@@ -407,6 +472,14 @@ pub fn chip_sized(
     let width = (galley.size().x + 22.0).max(min_width.unwrap_or(0.0));
     let (rect, response) = ui.allocate_exact_size(EVec2::new(width, CHIP_HEIGHT), Sense::click());
     if ui.is_rect_visible(rect) {
+        // A disabled UI paints faded; the chosen chip of a disabled row
+        // (a read-only inspector) is painted solid, so the current choice
+        // stays readable, in the night theme too.
+        let mut painter = ui.painter().clone();
+        if on && !ui.is_enabled() {
+            let undone = painter.opacity() / ui.visuals().disabled_alpha().max(0.01);
+            painter.set_opacity(undone);
+        }
         let fill = if on {
             palette.text
         } else if response.hovered() {
@@ -414,14 +487,14 @@ pub fn chip_sized(
         } else {
             palette.raised
         };
-        ui.painter().rect(
+        painter.rect(
             rect,
             CornerRadius::same(9),
             egui_color(fill),
             stroke(2.0, egui_color(palette.ink)),
             StrokeKind::Inside,
         );
-        ui.painter().galley(
+        painter.galley(
             rect.center() - galley.size() * 0.5,
             galley,
             Color32::PLACEHOLDER,
@@ -465,6 +538,30 @@ pub const PART_SLOTS: usize = 10;
 pub const SLOT_GAP: f32 = 8.0;
 pub const TOOL_GAP: f32 = 14.0;
 
+/// The transport card's width (top row) in the full and compact layouts.
+/// Its contents are fixed except the tick, which
+/// [`crate::sim::systems::tick_label`] keeps to a fixed number of
+/// characters.
+pub const TRANSPORT_WIDTH: f32 = 730.0;
+pub const TRANSPORT_WIDTH_COMPACT: f32 = 628.0;
+/// The most the build status card (top right) takes.
+pub const STATUS_WIDTH: f32 = 200.0;
+/// The least room the file card (top left) gets: the badge, a readable
+/// title and its buttons, with both back buttons of a nested view.
+pub const FILE_MIN_WIDTH: f32 = 396.0;
+/// The Undo and Redo buttons with the space before each: what the file
+/// card needs on top of [`FILE_MIN_WIDTH`] to hold them.
+pub const UNDO_BUTTONS_WIDTH: f32 = 2.0 * (ICON_BUTTON_WIDTH + 8.0);
+/// The Undo and Redo buttons' own card, when the file card has no room
+/// for them: two icon buttons (40 x 34 with a 3 px edge) 8 px apart, 8
+/// px padding and the 2.5 px outline.
+pub const UNDO_CARD: Vec2 = Vec2::new(
+    2.0 * ICON_BUTTON_WIDTH + 8.0 + 2.0 * (8.0 + 2.5),
+    34.0 + BUTTON_EDGE + 2.0 * (8.0 + 2.5),
+);
+/// The exact-rate popover under the transport card.
+pub const TRANSPORT_MORE_SIZE: Vec2 = Vec2::new(280.0, 170.0);
+
 /// Where the floating HUD cards sit for a window size (logical pixels,
 /// y down): the canvas fills the window and the cards float over it,
 /// anchored to its edges. Below 1600 x 900 the layout is compact
@@ -487,6 +584,8 @@ pub struct HudLayout {
     pub slot: f32,
     pub parts: Vec2,
     pub signals: Vec2,
+    /// The transport card (fixed size).
+    pub transport: Vec2,
 }
 
 impl HudLayout {
@@ -536,7 +635,67 @@ impl HudLayout {
             slot,
             parts,
             signals,
+            transport: Vec2::new(
+                if compact {
+                    TRANSPORT_WIDTH_COMPACT
+                } else {
+                    TRANSPORT_WIDTH
+                },
+                TOP_CARD_HEIGHT,
+            ),
         }
+    }
+
+    /// The transport card: centred, unless the file card or the build
+    /// status would not get their room beside it.
+    pub fn transport_rect(&self) -> Rect {
+        let w = self.transport.x;
+        let lo = self.margin + FILE_MIN_WIDTH + self.gap;
+        let hi = self.screen.x - self.margin - STATUS_WIDTH - self.gap - w;
+        let x = ((self.screen.x - w) * 0.5).min(hi).max(lo);
+        Rect::new(x, self.margin, x + w, self.margin + self.transport.y)
+    }
+
+    /// The room for the file card, top left: up to the transport card.
+    /// The card is as wide as its contents, at most this.
+    pub fn file_rect(&self) -> Rect {
+        Rect::new(
+            self.margin,
+            self.margin,
+            self.transport_rect().min.x - self.gap,
+            self.margin + TOP_CARD_HEIGHT,
+        )
+    }
+
+    /// The room for the build status card, top right: from the transport
+    /// card to the edge.
+    pub fn status_rect(&self) -> Rect {
+        Rect::new(
+            self.transport_rect().max.x + self.gap,
+            self.margin,
+            self.screen.x - self.margin,
+            self.margin + TOP_CARD_HEIGHT,
+        )
+    }
+
+    /// The build error details: beside the inspector column (which may
+    /// be open below the status card), clear of the library drawer, down
+    /// to the bottom row at most.
+    pub fn build_details_rect(&self) -> Rect {
+        let right = self.inspector_rect().min.x - self.gap;
+        let left = (right - self.inspector_width).max(self.margin + self.library_width + self.gap);
+        Rect::new(left, self.top_band(), right, self.bottom_band() - self.gap)
+    }
+
+    /// The exact-rate popover: under the transport card, between the
+    /// library drawer and the build error details.
+    pub fn transport_more_rect(&self) -> Rect {
+        let w = TRANSPORT_MORE_SIZE.x;
+        let lo = self.margin + self.library_width + self.gap;
+        let hi = self.build_details_rect().min.x - self.gap - w;
+        let x = self.transport_rect().min.x.min(hi).max(lo);
+        let min = Vec2::new(x, self.top_band());
+        Rect::from_corners(min, min + TRANSPORT_MORE_SIZE)
     }
 
     /// Below the top row of cards.
@@ -588,6 +747,31 @@ impl HudLayout {
         )
     }
 
+    /// Whether the Undo and Redo buttons fit in the file card: its room
+    /// holds them and still [`FILE_MIN_WIDTH`]. Else they get a card of
+    /// their own ([`Self::undo_rect`]).
+    pub fn undo_in_file_card(&self) -> bool {
+        self.file_rect().width() >= FILE_MIN_WIDTH + UNDO_BUTTONS_WIDTH
+    }
+
+    /// The Undo and Redo card: left edge, below the file card (shown
+    /// when [`Self::undo_in_file_card`] is false).
+    pub fn undo_rect(&self) -> Rect {
+        let min = Vec2::new(self.margin, self.top_band());
+        Rect::from_corners(min, min + UNDO_CARD)
+    }
+
+    /// The left column below the top row, for the library drawer or the
+    /// challenge card: [`Self::library_rect`], starting below the Undo
+    /// and Redo card when `undo_card` (that card is shown).
+    pub fn left_column_rect(&self, undo_card: bool) -> Rect {
+        let mut rect = self.library_rect();
+        if undo_card {
+            rect.min.y = self.undo_rect().max.y + self.gap;
+        }
+        rect
+    }
+
     /// The library drawer: left edge, below the file card, down to just
     /// above the minimap stack.
     pub fn library_rect(&self) -> Rect {
@@ -610,6 +794,19 @@ impl HudLayout {
         ]
         .into_iter()
         .fold(f32::INFINITY, f32::min)
+    }
+
+    /// The layout of a window `window` logical pixels large at UI scale
+    /// `scale`: the cards are laid out in egui points, `window / scale`.
+    pub fn scaled(window: Vec2, scale: f32) -> Self {
+        Self::new(window / scale.max(0.1))
+    }
+
+    /// [`Self::free_area`] in the window's logical pixels (the canvas
+    /// camera's units) at UI scale `scale`.
+    pub fn free_area_in_window(&self, scale: f32) -> Rect {
+        let free = self.free_area();
+        Rect::from_corners(free.min * scale, free.max * scale)
     }
 
     /// The canvas area no card covers: between the top and bottom rows,
@@ -639,6 +836,63 @@ impl Plugin for WorkshopUiPlugin {
     }
 }
 
+/// Laying out HUD cards in a headless egui context, to measure them.
+#[cfg(test)]
+pub(crate) mod test_ui {
+    use super::*;
+
+    /// Run one egui frame with no renderer behind it. The font atlas
+    /// uploads it returns are dropped on purpose: egui asserts that a
+    /// texture delta is not dropped unapplied.
+    pub fn run(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        ui: impl FnMut(&mut Ui),
+    ) -> egui::FullOutput {
+        let mut out = ctx.run_ui(input, ui);
+        out.textures_delta.clear();
+        out
+    }
+
+    /// A context with the Workshop fonts and `theme`'s style.
+    pub fn ctx(theme: &Theme) -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(workshop_fonts());
+        for _ in 0..2 {
+            run(&ctx, screen(), |_| {});
+        }
+        assert!(workshop_fonts_ready(&ctx));
+        ctx.all_styles_mut(|s| *s = workshop_style(theme));
+        ctx
+    }
+
+    fn screen() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(4000.0, 2000.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// The rectangle a card drawn by `card` takes in an area at the
+    /// origin (after egui's sizing pass).
+    pub fn measure(ctx: &egui::Context, mut card: impl FnMut(&mut Ui)) -> egui::Rect {
+        let mut rect = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            run(ctx, screen(), |ui| {
+                rect = egui::Area::new(egui::Id::new("measured"))
+                    .fixed_pos(egui::Pos2::ZERO)
+                    .show(ui.ctx(), |ui| card(ui))
+                    .response
+                    .rect;
+            });
+        }
+        rect
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +912,47 @@ mod tests {
         assert_eq!(heavy[0], "Nunito-ExtraBold");
         assert!(heavy.len() > 1, "symbol fallbacks kept");
         assert!(defs.font_data.contains_key("Nunito-ExtraBold"));
+    }
+
+    /// The fill of each chip painted by `add` (a row of chips), as
+    /// painted: `(on, alpha)` in paint order.
+    fn chip_fills(enabled: bool, chips: &[bool]) -> Vec<u8> {
+        let theme = Theme::night();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(workshop_fonts());
+        ctx.set_global_style(workshop_style(&theme));
+        let mut out = None;
+        for _ in 0..3 {
+            out = Some(test_ui::run(&ctx, egui::RawInput::default(), |ui| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    for (i, on) in chips.iter().enumerate() {
+                        chip(ui, &theme.palette, format!("{i}"), *on);
+                    }
+                });
+            }));
+        }
+        out.unwrap()
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(r) if r.corner_radius == CornerRadius::same(9) => {
+                    Some(r.fill.a())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_disabled_row_keeps_its_chosen_chip_solid() {
+        let enabled = chip_fills(true, &[false, true, false]);
+        assert_eq!(enabled, [255, 255, 255]);
+        // Disabled (a read-only inspector): the others fade, the chosen
+        // one does not, so the current mode or size reads at a glance.
+        let disabled = chip_fills(false, &[false, true, false]);
+        assert_eq!(disabled.len(), 3);
+        assert!(disabled[0] < 255 && disabled[2] < 255, "{disabled:?}");
+        assert_eq!(disabled[1], 255, "{disabled:?}");
     }
 
     #[test]
@@ -695,56 +990,242 @@ mod tests {
         !a.intersect(b).is_empty()
     }
 
-    #[test]
-    fn hud_cards_fit_and_do_not_overlap_from_720p_to_1440p() {
-        for (w, h) in [
+    /// The named sizes (common laptop and desktop windows) and a sweep
+    /// between 1280 x 720 and 2560 x 1440.
+    fn hud_test_sizes() -> Vec<(f32, f32)> {
+        let mut sizes = vec![
             (1280.0, 720.0),
             (1366.0, 768.0),
+            (1440.0, 900.0),
+            (1536.0, 864.0),
             (1600.0, 900.0),
+            (1600.0, 1000.0),
             (1920.0, 1080.0),
             (2560.0, 1440.0),
-        ] {
-            let screen = Vec2::new(w, h);
-            let l = HudLayout::new(screen);
-            let window = Rect::from_corners(Vec2::ZERO, screen);
-            let bottom = [
-                ("minimap", l.minimap_rect()),
-                ("zoom", l.zoom_rect()),
-                ("parts", l.parts_rect()),
-                ("signals", l.signals_rect()),
-            ];
-            for (name, r) in bottom {
-                assert!(
-                    window.contains(r.min) && window.contains(r.max),
-                    "{name} at {w}x{h}"
-                );
+        ];
+        for w in (1280..=2560).step_by(16) {
+            for h in [720, 768, 800, 864, 900, 1000, 1080, 1200, 1440] {
+                sizes.push((w as f32, h as f32));
             }
-            for (i, (a, ra)) in bottom.iter().enumerate() {
-                for (b, rb) in &bottom[i + 1..] {
-                    assert!(!overlaps(*ra, *rb), "{a} overlaps {b} at {w}x{h}");
-                }
-            }
-            let free = l.free_area();
-            assert!(
-                free.width() > 0.45 * w && free.height() > 0.5 * h,
-                "free area at {w}x{h}"
-            );
-            assert!(free.min.y >= l.top_band() && free.max.y < l.bottom_band());
-            for (name, r) in bottom.iter().chain([&("inspector", l.inspector_rect())]) {
-                assert!(!overlaps(free, *r), "free area overlaps {name} at {w}x{h}");
-            }
-            let inspector = l.inspector_rect();
-            assert!(inspector.height() > 300.0, "inspector at {w}x{h}");
-            assert!(!overlaps(inspector, l.signals_rect()));
-            let library = l.library_rect();
-            assert!(library.height() > 250.0 && !overlaps(library, l.minimap_rect()));
-            assert!(!overlaps(library, l.zoom_rect()));
-            assert_eq!(l.compact, w < 1600.0 || h < 900.0);
+        }
+        sizes
+    }
+
+    #[test]
+    fn hud_cards_fit_and_do_not_overlap_from_720p_to_1440p() {
+        for (w, h) in hud_test_sizes() {
+            assert_hud_fits(HudLayout::new(Vec2::new(w, h)), "");
         }
         // The full-size layout keeps the mockup's sizes.
         let l = HudLayout::new(Vec2::new(1920.0, 1080.0));
         assert_eq!((l.margin, l.inspector_width, l.slot), (24.0, 320.0, 64.0));
         assert!(l.zoom_beside_minimap);
         assert!(l.signals.x > 500.0);
+        assert!(l.undo_in_file_card(), "room for Undo and Redo at 1080p");
+        assert!(!HudLayout::new(Vec2::new(1280.0, 720.0)).undo_in_file_card());
+    }
+
+    /// At every UI scale (and Auto) the cards, laid out in egui points,
+    /// still fit and do not overlap, and the free canvas area maps back
+    /// into the window.
+    #[test]
+    fn hud_cards_fit_at_every_ui_scale() {
+        use crate::settings::{UiScale, effective_ui_scale};
+        for (w, h) in hud_test_sizes() {
+            let window = Vec2::new(w, h);
+            for choice in UiScale::choices() {
+                let scale = effective_ui_scale(choice, window);
+                let l = HudLayout::scaled(window, scale);
+                assert_hud_fits(l, &format!(" ({} = {scale})", choice.label()));
+                let free = l.free_area_in_window(scale);
+                let whole = Rect::from_corners(Vec2::ZERO, window);
+                assert!(
+                    whole.contains(free.min) && whole.contains(free.max),
+                    "free area at {w}x{h}, {scale}"
+                );
+            }
+        }
+        // 130% really is larger where there is room for it.
+        let l = HudLayout::scaled(Vec2::new(1920.0, 1080.0), 1.3);
+        assert!(l.screen.x < 1480.0 && l.compact);
+    }
+
+    /// The cards of `l` are inside its screen, apart, and leave the free
+    /// area its share. `what` names the case in failures.
+    fn assert_hud_fits(l: HudLayout, what: &str) {
+        let screen = l.screen;
+        let (w, h) = (screen.x, screen.y);
+        let window = Rect::from_corners(Vec2::ZERO, screen);
+        let top = [
+            ("file", l.file_rect()),
+            ("transport", l.transport_rect()),
+            ("status", l.status_rect()),
+        ];
+        let bottom = [
+            ("minimap", l.minimap_rect()),
+            ("zoom", l.zoom_rect()),
+            ("parts", l.parts_rect()),
+            ("signals", l.signals_rect()),
+        ];
+        // With the Undo and Redo buttons in a card of their own, the left
+        // column (library drawer or challenge card) starts below.
+        let undo_card = !l.undo_in_file_card();
+        let side = [
+            ("inspector", l.inspector_rect()),
+            ("library or challenge", l.left_column_rect(undo_card)),
+            ("build details", l.build_details_rect()),
+            ("exact rate", l.transport_more_rect()),
+        ];
+        let undo = undo_card.then(|| ("undo", l.undo_rect()));
+        let all: Vec<_> = top
+            .iter()
+            .chain(&bottom)
+            .chain(&side)
+            .chain(undo.as_ref())
+            .collect();
+        for (name, r) in &all {
+            assert!(
+                window.contains(r.min) && window.contains(r.max),
+                "{name} at {w}x{h}{what}"
+            );
+        }
+        for (i, (a, ra)) in all.iter().enumerate() {
+            for (b, rb) in &all[i + 1..] {
+                assert!(!overlaps(*ra, *rb), "{a} overlaps {b} at {w}x{h}{what}");
+            }
+        }
+        assert!(
+            l.file_rect().width() >= FILE_MIN_WIDTH,
+            "file card room at {w}x{h}{what}"
+        );
+        assert!(
+            l.status_rect().width() >= STATUS_WIDTH,
+            "status room at {w}x{h}{what}"
+        );
+        let details = l.build_details_rect();
+        assert!(
+            details.width() >= 250.0 && details.height() >= 200.0,
+            "build details at {w}x{h}{what}: {details:?}"
+        );
+        let free = l.free_area();
+        assert!(
+            free.width() > 0.45 * w && free.height() > 0.5 * h,
+            "free area at {w}x{h}{what}"
+        );
+        assert!(free.min.y >= l.top_band() && free.max.y < l.bottom_band());
+        for (name, r) in bottom.iter().chain([&("inspector", l.inspector_rect())]) {
+            assert!(
+                !overlaps(free, *r),
+                "free area overlaps {name} at {w}x{h}{what}"
+            );
+        }
+        let inspector = l.inspector_rect();
+        assert!(inspector.height() > 300.0, "inspector at {w}x{h}{what}");
+        let library = l.left_column_rect(undo_card);
+        assert!(library.height() > 250.0, "library at {w}x{h}{what}");
+        assert_eq!(
+            l.undo_in_file_card(),
+            l.file_rect().width() >= FILE_MIN_WIDTH + UNDO_BUTTONS_WIDTH
+        );
+        assert_eq!(l.compact, w < 1600.0 || h < 900.0);
+    }
+
+    /// The non-ASCII characters in the string literals of the app's
+    /// source (not tests or comments): what the HUD may draw.
+    fn non_ascii_in_ui_strings() -> std::collections::BTreeMap<char, String> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n != "tests") {
+                        walk(&path, out);
+                    }
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut found = std::collections::BTreeMap::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            // Stop at the unit tests.
+            let code = text.split("#[cfg(test)]").next().unwrap_or_default();
+            for (n, line) in code.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for (i, literal) in line.split('"').enumerate() {
+                    if i % 2 == 1 {
+                        for c in literal.chars().filter(|c| !c.is_ascii()) {
+                            found
+                                .entry(c)
+                                .or_insert_with(|| format!("{}:{}", file.display(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Whether `c` is drawn with its own glyph in `font`, not egui's
+    /// replacement box.
+    ///
+    /// egui 0.36's `has_glyph` compares font faces: it answers false for
+    /// every character of the face that also holds the replacement glyph
+    /// `◻`, though such a character is drawn fine (`▶` is one). So a
+    /// character `has_glyph` turns down is checked once more: it is
+    /// missing only if it is drawn as the replacement glyph itself.
+    fn draws(ctx: &egui::Context, font: &FontId, c: char) -> bool {
+        ctx.fonts_mut(|f| {
+            if f.has_glyph(font, c) {
+                return true;
+            }
+            let mut atlas_rect = |c: char| {
+                let galley = f.layout_no_wrap(c.to_string(), font.clone(), egui::Color32::WHITE);
+                let uv = galley.rows[0].row.glyphs[0].uv_rect;
+                (uv.min, uv.max)
+            };
+            atlas_rect(c) != atlas_rect('◻')
+        })
+    }
+
+    /// Every non-ASCII character the UI writes is in the bundled fonts or
+    /// egui's fallbacks for the family it is drawn in (a missing glyph is
+    /// drawn as an empty box). Arrows are only in the monospace fonts, so
+    /// proportional text uses painted [`HudIcon`]s or `‹` `«` instead.
+    #[test]
+    fn ui_glyphs_are_in_the_fonts() {
+        let ctx = test_ui::ctx(&Theme::day());
+        // Only written in monospace text (the inspector's wire list).
+        let mono_only = ['←', '→'];
+        let families = [
+            FontId::proportional(14.0),
+            heavy(14.0),
+            FontId::monospace(13.0),
+        ];
+        // The check can fail: the back arrow was an empty box.
+        assert!(!draws(&ctx, &families[1], '←'));
+        let found = non_ascii_in_ui_strings();
+        assert!(found.contains_key(&'·') && found.contains_key(&'›'));
+        for (c, place) in found {
+            let fonts: &[FontId] = if mono_only.contains(&c) {
+                &families[2..]
+            } else {
+                &families[..2]
+            };
+            for font in fonts {
+                assert!(
+                    draws(&ctx, font, c),
+                    "{c:?} ({place}) is not in {:?}",
+                    font.family
+                );
+            }
+        }
     }
 }

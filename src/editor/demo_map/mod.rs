@@ -9,7 +9,10 @@
 //!   and names the next stop.
 //! - The level panel (right): the stop's title and description, its demos
 //!   as cards with a thumbnail ([`thumbnail`]) and a visited box, and
-//!   "Open" and "Copy to my workshop".
+//!   "Open" and "Copy to my workshop"; below them its build-it challenges
+//!   ([`challenges`]), each with a done box and "Build it", which opens
+//!   the challenge in the editor. A stop with challenges wears a
+//!   "done/total" pill.
 //! - The gallery shelf (bottom): category chips and a row of cards; a
 //!   click opens the item.
 //!
@@ -18,6 +21,7 @@
 //! in [`progress::DemoProgress`] (whoever opens them). The app still starts
 //! on the title menu.
 
+pub mod challenges;
 pub mod progress;
 pub mod road;
 pub mod thumbnail;
@@ -150,6 +154,7 @@ enum Action {
     SelectDemo(String),
     Open(&'static Demo),
     Copy(&'static Demo),
+    OpenChallenge(&'static crate::sim::challenges::Challenge),
     Tick(String, bool),
     Category(Option<String>),
     Theme(ThemeMode),
@@ -422,7 +427,15 @@ pub fn demo_map_system(
             ui.set_clip_rect(full);
             paint_bench(ui.painter(), &kit, full);
             header(ui, &kit, &layout, &theme, &mut actions);
-            road_map(ui, &kit, &layout, catalog, &status, &map, &mut actions);
+            road_map(
+                ui,
+                &kit,
+                &layout,
+                catalog,
+                (&status, &progress),
+                &map,
+                &mut actions,
+            );
             level_panel(ui, &kit, &layout, catalog, &progress, &map, &mut actions);
             gallery_shelf(ui, &kit, &layout, catalog, &progress, &map, &mut actions);
         });
@@ -475,6 +488,15 @@ pub fn demo_map_system(
                     &mut load,
                     &open,
                     OpenRequest::CopyDemo(demo.id.clone()),
+                );
+                next_state.set(GameState::Simulating);
+            }
+            Action::OpenChallenge(challenge) => {
+                open_in_editor(
+                    editor.as_deref_mut(),
+                    &mut load,
+                    &open,
+                    super::challenge::challenge_request(challenge, false),
                 );
                 next_state.set(GameState::Simulating);
             }
@@ -623,7 +645,7 @@ fn road_map(
     kit: &Kit,
     layout: &MapLayout,
     catalog: &'static DemoCatalog,
-    status: &RoadStatus,
+    (status, progress): (&RoadStatus, &DemoProgress),
     map: &DemoMapState,
     actions: &mut Vec<Action>,
 ) {
@@ -727,6 +749,8 @@ fn road_map(
             stroke(kit.line(if current || last { 3.0 } else { 2.5 }), kit.ink()),
             StrokeKind::Inside,
         );
+        let (done, total) = challenges::level_count(catalog, level.level, progress);
+        challenges::stop_badge(painter, kit, face, done, total);
         let (number_colour, label_colour) = match state {
             StopState::Visited => (p.on_ink, p.text),
             StopState::Current => (p.text, p.text),
@@ -847,16 +871,16 @@ fn road_map(
         kit.text(painter, pos, align, text, font, p.text);
     }
 
-    progress_card(ui, kit, layout, catalog, status, actions);
+    progress_card(ui, kit, layout, catalog, (status, progress), actions);
 }
 
-/// "Your road so far": a bar, "N of M demos opened", the next stop.
+/// "Your road so far": a bar, "N/M demos · K/L challenges", the next stop.
 fn progress_card(
     ui: &Ui,
     kit: &Kit,
     layout: &MapLayout,
     catalog: &DemoCatalog,
-    status: &RoadStatus,
+    (status, progress): (&RoadStatus, &DemoProgress),
     actions: &mut Vec<Action>,
 ) {
     let s = kit.s;
@@ -899,8 +923,18 @@ fn progress_card(
         painter,
         at(16.0, 72.0),
         Align2::LEFT_CENTER,
-        format!("{} of {} demos opened", status.opened, status.total),
-        FontId::monospace(11.0 * s),
+        if catalog.challenges.is_empty() {
+            format!("{} of {} demos opened", status.opened, status.total)
+        } else {
+            let done = progress.completed_of(catalog.challenges.iter().map(|c| c.id.as_str()));
+            format!(
+                "{}/{} demos · {done}/{} challenges",
+                status.opened,
+                status.total,
+                catalog.challenges.len()
+            )
+        },
+        FontId::monospace(12.0 * s),
         p.text,
     );
     match next {
@@ -910,7 +944,7 @@ fn progress_card(
                 at(16.0, 100.0),
                 Align2::LEFT_CENTER,
                 "Next stop:",
-                kit.body(12.0),
+                kit.body(13.0),
                 p.text_secondary,
             );
             let name = format!("{} · {}", level.level, level.short_title());
@@ -969,7 +1003,7 @@ fn level_panel(
         *y += h + gap * s;
     };
     let stop = egui::RichText::new(format!("STOP {}", level.level))
-        .font(kit.heavy(12.0))
+        .font(kit.heavy(13.0))
         .extra_letter_spacing(1.2 * s)
         .color(kit.c(p.text_secondary));
     let galley = egui::WidgetText::from(stop).into_galley(
@@ -1053,6 +1087,20 @@ fn level_panel(
                         selected.is_some_and(|d| d.id == demo.id),
                         actions,
                     );
+                }
+                let level_challenges = challenges::of_level(catalog, level.level);
+                if !level_challenges.is_empty() {
+                    let (done, total) = challenges::level_count(catalog, level.level, progress);
+                    challenges::heading(ui, kit, done, total);
+                    for challenge in level_challenges {
+                        challenges::card(
+                            ui,
+                            kit,
+                            challenge,
+                            progress.is_completed(&challenge.id),
+                            actions,
+                        );
+                    }
                 }
                 ui.add_space((4.0 * s).round());
             });

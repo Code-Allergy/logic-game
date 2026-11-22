@@ -1,4 +1,5 @@
-//! Which demos the player has opened, for the demo map.
+//! Which demos the player has opened and which challenges they have
+//! completed, for the demo map.
 //!
 //! On native builds the record is a small JSON file next to the saved
 //! workspaces, `<workspaces>/.demo-progress.json` (the leading dot keeps it
@@ -10,12 +11,15 @@
 //! before the record starts over:
 //!
 //! ```json
-//! { "format": "gatequest-progress", "version": 1,
-//!   "opened": ["counter", "gates"], "last": "counter" }
+//! { "format": "gatequest-progress", "version": 2,
+//!   "opened": ["counter", "gates"], "last": "counter",
+//!   "completed": ["half_adder"] }
 //! ```
 //!
 //! `opened` holds demo and gallery ids (sorted); `last` is the one opened
-//! most recently. Ids that are no longer in the catalog are kept but not
+//! most recently; `completed` holds the ids of the challenges whose check
+//! passed (sorted, added in version 2; version 1 files still load, with
+//! none completed). Ids that are no longer in the catalog are kept but not
 //! counted. The web build has no file system and the app has no browser
 //! storage helper, so there the record lives in memory for the session.
 //!
@@ -32,7 +36,9 @@ use serde::{Deserialize, Serialize};
 /// The progress file, inside the workspaces folder.
 pub const PROGRESS_FILE: &str = ".demo-progress.json";
 pub const PROGRESS_FORMAT: &str = "gatequest-progress";
-pub const PROGRESS_VERSION: u32 = 1;
+pub const PROGRESS_VERSION: u32 = 2;
+/// Older versions this build still reads.
+const READABLE_VERSIONS: [u32; 2] = [1, 2];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ProgressFile {
@@ -42,6 +48,8 @@ struct ProgressFile {
     opened: Vec<String>,
     #[serde(default)]
     last: Option<String>,
+    #[serde(default)]
+    completed: Vec<String>,
 }
 
 /// The opened demos and where they are kept.
@@ -49,6 +57,8 @@ struct ProgressFile {
 pub struct DemoProgress {
     opened: BTreeSet<String>,
     last: Option<String>,
+    /// Challenges whose check passed.
+    completed: BTreeSet<String>,
     /// The file the record is saved to after every change; `None` keeps it
     /// in memory (the web build, tests, tools).
     file: Option<PathBuf>,
@@ -120,7 +130,7 @@ impl DemoProgress {
     /// Parse the file's text (the record is in memory until saved).
     pub fn from_json(text: &str) -> Result<Self, String> {
         let file: ProgressFile = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        if file.format != PROGRESS_FORMAT || file.version != PROGRESS_VERSION {
+        if file.format != PROGRESS_FORMAT || !READABLE_VERSIONS.contains(&file.version) {
             return Err(format!(
                 "expected format \"{PROGRESS_FORMAT}\" version {PROGRESS_VERSION}"
             ));
@@ -128,6 +138,7 @@ impl DemoProgress {
         Ok(Self {
             opened: file.opened.into_iter().collect(),
             last: file.last,
+            completed: file.completed.into_iter().collect(),
             file: None,
         })
     }
@@ -139,6 +150,7 @@ impl DemoProgress {
             version: PROGRESS_VERSION,
             opened: self.opened.iter().cloned().collect(),
             last: self.last.clone(),
+            completed: self.completed.iter().cloned().collect(),
         };
         serde_json::to_string_pretty(&file).unwrap_or_default()
     }
@@ -191,6 +203,31 @@ impl DemoProgress {
             self.last = None;
         }
         removed
+    }
+
+    /// Whether challenge `id` has been passed.
+    pub fn is_completed(&self, id: &str) -> bool {
+        self.completed.contains(id)
+    }
+
+    /// Record that challenge `id` passed its check. Returns whether
+    /// anything changed.
+    pub fn mark_completed(&mut self, id: &str) -> bool {
+        self.completed.insert(id.to_string())
+    }
+
+    /// Tick or untick challenge `id` (the box on a challenge card).
+    pub fn set_completed(&mut self, id: &str, completed: bool) -> bool {
+        if completed {
+            self.mark_completed(id)
+        } else {
+            self.completed.remove(id)
+        }
+    }
+
+    /// How many of `ids` are completed.
+    pub fn completed_of<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> usize {
+        ids.into_iter().filter(|id| self.is_completed(id)).count()
     }
 }
 
@@ -324,6 +361,42 @@ mod tests {
                 .is_empty()
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn completed_challenges_round_trip_and_version_1_still_loads() {
+        let dir = temp_dir();
+        let mut progress = DemoProgress::load_in(&dir);
+        assert!(progress.mark_completed("half_adder"));
+        assert!(!progress.mark_completed("half_adder"), "nothing new");
+        assert!(progress.mark_completed("and_from_nand"));
+        progress.mark_opened("gates");
+        progress.save().unwrap();
+        let again = DemoProgress::load_in(&dir);
+        assert_eq!(again, progress);
+        assert!(again.is_completed("half_adder") && !again.is_completed("mux2"));
+        assert_eq!(
+            again.completed_of(["half_adder", "mux2", "and_from_nand"]),
+            2
+        );
+        let value: serde_json::Value = serde_json::from_str(&again.to_json()).unwrap();
+        assert_eq!(value["version"], 2);
+        assert_eq!(
+            value["completed"],
+            serde_json::json!(["and_from_nand", "half_adder"])
+        );
+        let mut again = again;
+        assert!(again.set_completed("half_adder", false));
+        assert!(!again.is_completed("half_adder"));
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // A version 1 file (before challenges) loads with none completed.
+        let old = DemoProgress::from_json(
+            r#"{"format": "gatequest-progress", "version": 1, "opened": ["gates"], "last": "gates"}"#,
+        )
+        .unwrap();
+        assert!(old.is_opened("gates") && !old.is_completed("gates"));
+        assert_eq!(old.last(), Some("gates"));
     }
 
     #[test]

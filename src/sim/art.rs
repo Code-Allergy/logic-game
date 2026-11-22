@@ -467,6 +467,150 @@ pub fn tile_caption(kind: &GateKind) -> Option<String> {
     })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Caption modes (readable text when zoomed out)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The smallest canvas text, in screen pixels, that reads well.
+pub const MIN_CANVAS_TEXT_PX: f32 = 11.0;
+/// The size of name tags, bus values in pills and full captions at most.
+pub const CANVAS_TEXT_SIZE: f32 = 13.0;
+/// The largest simplified caption.
+pub const SIMPLE_CAPTION_MAX: f32 = 24.0;
+/// How much name tags and value pills grow when simplified.
+pub const SIMPLE_LABEL_SCALE: f32 = 1.5;
+
+/// How a piece of canvas text is drawn at a zoom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionMode {
+    /// As designed: the full caption, name tags and pills at 13.
+    Full,
+    /// Zoomed out: a short caption as large as its tile takes, name tags
+    /// and value pills [`SIMPLE_LABEL_SCALE`] larger.
+    Simple,
+}
+
+/// The mode of text of `size` world units at canvas zoom `zoom` (screen
+/// pixels per world unit, the HUD's percentage / 100): simplified once it
+/// would be smaller than [`MIN_CANVAS_TEXT_PX`] on screen. Name tags and
+/// pills (13) switch below 85%.
+pub fn caption_mode(zoom: f32, size: f32) -> CaptionMode {
+    if size * zoom >= MIN_CANVAS_TEXT_PX - 1e-3 {
+        CaptionMode::Full
+    } else {
+        CaptionMode::Simple
+    }
+}
+
+/// Character width of full captions (mixed case), the widest capitals of
+/// Nunito ExtraBold (`RAM`, `ADD`), JetBrains Mono, and the line height,
+/// in ems.
+const CHAR_EM: f32 = 0.66;
+pub const CAPS_EM: f32 = 0.78;
+pub const MONO_EM: f32 = 0.6;
+const LINE_EM: f32 = 1.15;
+
+/// The size of the full caption `caption` on a tile of `size`.
+pub fn caption_size(caption: &str, size: Vec2) -> f32 {
+    let chars = caption.chars().count().max(1) as f32;
+    ((size.x - 14.0) / (chars * CHAR_EM)).clamp(9.0, CANVAS_TEXT_SIZE)
+}
+
+/// The simplified caption of a tile: at most three characters a line
+/// (`+` for an adder, `R` + width, `2:4` for a slice, a subcircuit's
+/// initials), on two lines for a long slice or constant. `name` is the
+/// subcircuit's definition name.
+pub fn simple_caption(kind: &GateKind, name: Option<&str>) -> Option<String> {
+    use GateKind as G;
+    let two_lines = |a: String, b: String| {
+        if a.chars().count() + b.chars().count() <= 3 {
+            format!("{a}{b}")
+        } else {
+            format!("{a}\n{b}")
+        }
+    };
+    Some(match kind {
+        G::SubCircuit { .. } => initials(name.unwrap_or("?")),
+        G::Switch { .. } => "SW".into(),
+        G::Add { .. } => "+".into(),
+        G::ReduceOr { .. } => "OR".into(),
+        G::ReduceAnd { .. } => "AND".into(),
+        G::ReduceXor { .. } => "XOR".into(),
+        G::Split { lo, len: 1, .. } => format!("{lo}"),
+        G::Split { lo, len, .. } => two_lines(format!("{lo}:"), format!("{}", lo + len - 1)),
+        G::Extend { to, .. } => format!(">{to}"),
+        G::Register { .. } => "REG".into(),
+        G::DLatch { .. } => "DL".into(),
+        G::Const { w, value } if *w > 4 => {
+            let hex = format!("{value:X}");
+            if hex.len() <= 3 {
+                hex
+            } else {
+                let (a, b) = hex.split_at(hex.len() / 2);
+                format!("{a}\n{b}")
+            }
+        }
+        k => tile_caption(k)?,
+    })
+}
+
+/// A short tag for a name, at most three characters: one word is its
+/// first letters (`ALU16` is `ALU`); several are their initials with the
+/// first number when it fits (`Half adder` is `HA`, `16-bit register` is
+/// `R16`, `8-bit counter` is `C8`).
+pub fn initials(name: &str) -> String {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    let number: String = words
+        .iter()
+        .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))
+        .map(|w| w.chars().take_while(char::is_ascii_digit).collect())
+        .unwrap_or_default();
+    let letters: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| w.starts_with(char::is_alphabetic))
+        .collect();
+    let tag: String = match letters.as_slice() {
+        [] => number.chars().take(3).collect(),
+        [word] if words.len() == 1 => word
+            .chars()
+            .take_while(|c| c.is_alphabetic())
+            .take(3)
+            .collect(),
+        _ => {
+            let caps: String = letters
+                .iter()
+                .filter_map(|w| w.chars().next())
+                .flat_map(char::to_uppercase)
+                .take(3)
+                .collect();
+            if caps.chars().count() + number.len() <= 3 {
+                caps + &number
+            } else {
+                caps
+            }
+        }
+    };
+    if tag.is_empty() { "?".into() } else { tag }
+}
+
+/// The size of the simplified caption `caption` on a tile of `size` (in
+/// the monospace font when `mono`): as large as fits inside the outline,
+/// up to [`SIMPLE_CAPTION_MAX`].
+pub fn simple_caption_size(caption: &str, size: Vec2, mono: bool) -> f32 {
+    let lines = caption.lines().count().max(1) as f32;
+    let widest = caption
+        .lines()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let em = if mono { MONO_EM } else { CAPS_EM };
+    let by_width = (size.x - 8.0) / (widest * em);
+    let by_height = (size.y - 6.0) / (lines * LINE_EM);
+    by_width.min(by_height).min(SIMPLE_CAPTION_MAX)
+}
+
 /// `name` cut to `max` characters with an ellipsis.
 pub fn shorten(name: &str, max: usize) -> String {
     if name.chars().count() <= max {
@@ -767,6 +911,86 @@ pub fn bench_material(image: Handle<Image>) -> ColorMaterial {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caption_mode_switches_when_text_gets_too_small() {
+        // Name tags and pills (13): full down to 85%.
+        assert_eq!(caption_mode(1.0, 13.0), CaptionMode::Full);
+        assert_eq!(caption_mode(0.85, 13.0), CaptionMode::Full);
+        assert_eq!(caption_mode(0.84, 13.0), CaptionMode::Simple);
+        assert_eq!(caption_mode(0.38, 13.0), CaptionMode::Simple);
+        // A long caption (9) switches earlier, a large one later.
+        assert_eq!(caption_mode(1.0, 9.0), CaptionMode::Simple);
+        assert_eq!(caption_mode(1.25, 9.0), CaptionMode::Full);
+        assert_eq!(caption_mode(0.5, 22.0), CaptionMode::Full);
+        // Monotonic: zooming in never simplifies.
+        let mut last = CaptionMode::Simple;
+        for step in 1..400 {
+            let mode = caption_mode(step as f32 * 0.01, 13.0);
+            assert!(last == CaptionMode::Simple || mode == CaptionMode::Full);
+            last = mode;
+        }
+    }
+
+    #[test]
+    fn simple_captions_are_short() {
+        use GateKind as G;
+        let simple = |k: G| simple_caption(&k, None).unwrap();
+        assert_eq!(simple(G::Add { w: 8 }), "+");
+        assert_eq!(simple(G::Register { w: 8 }), "REG");
+        assert_eq!(
+            simple(G::Split {
+                w: 8,
+                lo: 2,
+                len: 3
+            }),
+            "2:4"
+        );
+        assert_eq!(
+            simple(G::Split {
+                w: 16,
+                lo: 8,
+                len: 8
+            }),
+            "8:\n15"
+        );
+        assert_eq!(
+            simple(G::Split {
+                w: 8,
+                lo: 3,
+                len: 1
+            }),
+            "3"
+        );
+        assert_eq!(
+            simple(G::Const {
+                w: 16,
+                value: 0xBEEF
+            }),
+            "BE\nEF"
+        );
+        assert_eq!(simple(G::Const { w: 8, value: 0x2A }), "2A");
+        assert_eq!(simple(G::Ram { w: 8, addr_bits: 4 }), "RAM");
+        assert_eq!(
+            simple_caption(
+                &G::SubCircuit {
+                    definition: uuid::Uuid::nil()
+                },
+                Some("Half adder")
+            )
+            .as_deref(),
+            Some("HA")
+        );
+        assert_eq!(initials("ALU16"), "ALU");
+        assert_eq!(initials("16-bit register"), "R16");
+        assert_eq!(initials("8-bit counter"), "C8");
+        assert_eq!(initials("Program counter"), "PC");
+        assert_eq!(initials("Register file 8"), "RF8");
+        assert_eq!(initials("Arithmetic logic unit 16"), "ALU");
+        assert_eq!(initials("16bit"), "16");
+        assert_eq!(initials(""), "?");
+        assert!(simple_caption(&G::And { w: 1 }, None).is_none());
+    }
 
     #[test]
     fn pins_sit_on_the_tile_edges_top_first() {

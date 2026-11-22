@@ -95,6 +95,22 @@ pub struct Layout {
     pub crossings: (usize, usize),
 }
 
+/// The snap grid of the canvas: a part moved or placed by hand lands
+/// with its centre on a multiple of this. Half the routing grid: most
+/// pins sit 0 or 10 units from their part's centre (one or two pins on a
+/// side), so on this grid any such pin can be lined up with any other and
+/// the wire between them runs straight, where the 20-unit grid lines up
+/// only pins with the same offset. `cargo run --example grid_survey`
+/// compares 5, 10 and 20 on the demos and gallery: 68% of their wires can
+/// be made straight with 10 (40% with 20, 92% with 5, which is close to
+/// no snap at all, at 5 pixels a step at 100%).
+pub const SNAP: f32 = 10.0;
+
+/// The nearest point of the snap grid ([`SNAP`]) to `p`.
+pub fn snap_to_grid(p: Vec2) -> Vec2 {
+    (p / SNAP).round() * SNAP
+}
+
 fn snap_down(v: f32) -> f32 {
     (v / GRID).floor() * GRID
 }

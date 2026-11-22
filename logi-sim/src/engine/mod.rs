@@ -552,6 +552,16 @@ mod threaded {
 
     impl Engine {
         pub fn spawn(options: Options) -> Self {
+            let origin = Instant::now();
+            Self::spawn_with_clock(options, Arc::new(move || origin.elapsed()))
+        }
+
+        /// [`Engine::spawn`] with the worker reading `clock` instead of
+        /// the wall clock (tests pace it by hand).
+        pub(crate) fn spawn_with_clock(
+            options: Options,
+            clock: Arc<dyn Fn() -> Duration + Send + Sync>,
+        ) -> Self {
             let (tx, rx) = channel::<Msg>();
             let (ev_tx, events) = channel();
             let (compile_tx, compile_rx) = channel::<(Arc<Design>, u64)>();
@@ -583,7 +593,7 @@ mod threaded {
             let worker_shared = Arc::clone(&shared);
             let worker = std::thread::Builder::new()
                 .name("sim-worker".into())
-                .spawn(move || worker_loop(options, rx, compile_tx, ev_tx, worker_shared))
+                .spawn(move || worker_loop(options, rx, compile_tx, ev_tx, worker_shared, &*clock))
                 .expect("spawn worker thread");
 
             Engine {
@@ -670,9 +680,8 @@ mod threaded {
         compile_tx: Sender<(Arc<Design>, u64)>,
         events: Sender<EngineEvent>,
         shared: Arc<Shared>,
+        clock: Clock<'_>,
     ) {
-        let origin = Instant::now();
-        let clock = move || origin.elapsed();
         let mut core = EngineCore::new(options);
         let mut spare: Option<Arc<ProbeFrame>> = None;
         let mut syncs: Vec<Sender<()>> = Vec::new();
@@ -725,7 +734,7 @@ mod threaded {
                     return;
                 }
             }
-            core.run(BATCH, &clock);
+            core.run(BATCH, clock);
             if core.dirty() || core.mems_stale() || !syncs.is_empty() {
                 publish(&mut core, &mut spare);
             }
@@ -733,7 +742,7 @@ mod threaded {
                 let _ = s.send(());
             }
             // Wait for the next due tick or the next command.
-            let msg = match core.wait_hint(&clock) {
+            let msg = match core.wait_hint(clock) {
                 Some(d) if d.is_zero() => continue,
                 Some(d) => match rx.recv_timeout(d) {
                     Ok(m) => m,
