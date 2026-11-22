@@ -132,6 +132,7 @@ pub struct RunArgs {
     pub session: Option<String>,
     /// The steps, in order. Each is an object:
     /// {"set": {input: value}}, {"ticks": n},
+    /// {"poke": {state: value, memory: [[address, value], ...]}} (registers, latches, chips wired straight to them, arrays of these, "ram@0x10"; settles at once, the tick stays),
     /// {"until": "expression", "max_ticks": n}, {"expect": {signal: value}},
     /// {"read": [signals, "ram@0x00..0x10"]},
     /// {"load": {"part": memory, "file": path, "skip": n, "length": n, "at": addr}},

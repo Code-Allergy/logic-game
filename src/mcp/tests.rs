@@ -4,6 +4,7 @@ mod app;
 mod chips;
 mod compiled;
 mod expand;
+mod poke;
 mod sim;
 
 use std::sync::Arc;
