@@ -10,8 +10,8 @@ use super::*;
 use crate::sim::CircuitLibrary;
 use crate::sim::layout::overlaps;
 use crate::sim::routing::{
-    check_invariants, check_invariants_but_boxes, check_trees, document_nets, route_all,
-    tile_crossings,
+    check_invariants, check_invariants_but_boxes, check_trees, close_parallels, document_nets,
+    route_all, tile_crossings,
 };
 
 /// Circuits packed so tightly that some wires find no clear way between
@@ -28,6 +28,23 @@ const CONGESTED: [&str; 4] = [
 /// level.
 const MAY_FALL_BACK: [&str; 1] = ["cpu16/cpu16"];
 const MAX_CROSSED: usize = 4;
+/// Circuits where a few wires still run too close beside another net's
+/// away from crowded pins (dense tiles packed tightly, mostly the 16-bit
+/// CPU's parts), with how many such runs they may keep: the router finds
+/// no other way there at a sensible cost. Everything else keeps the gap.
+const MAY_RUN_CLOSE: [(&str, usize); 11] = [
+    ("alu/alu8", 20),
+    ("register/register8", 1),
+    ("magnitude/mag4", 2),
+    ("cla_adder/cla4", 1),
+    ("cpu16/mux2x3", 3),
+    ("cpu16/logic16", 1),
+    ("cpu16/alu16", 1),
+    ("cpu16/regfile8x16", 6),
+    ("cpu16/control", 2),
+    ("cpu16/cpu16", 9),
+    ("cpu16_rtl/rtl_regs", 3),
+];
 
 #[test]
 fn every_demo_and_gallery_circuit_routes_cleanly() {
@@ -100,6 +117,60 @@ fn every_demo_and_gallery_circuit_routes_cleanly() {
     );
     assert!(overlapping.len() <= 3, "{overlapping:?}");
     assert!(circuits > 50, "the demos and the gallery are all there");
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Wires of different nets never run side by side so close that their
+/// casings touch (a grid track a few units from another net's off-grid
+/// pin row): the router keeps [`crate::sim::routing::WIRE_GAP`] between
+/// them, for 1-bit wires and the wider buses. Next to a crowded side of a
+/// tile (neighbouring pins of the two nets closer than that) the wires
+/// leading into the pins cannot keep it; those runs are only counted
+/// (printed with `--nocapture`). A few tightly packed circuits
+/// ([`MAY_RUN_CLOSE`]) may keep a few runs elsewhere too. Circuits whose
+/// tiles overlap are skipped as above.
+#[test]
+fn wires_of_different_nets_keep_a_gap_between_them() {
+    let mut failures = Vec::new();
+    let (mut circuits, mut tight, mut crowded) = (0, Vec::new(), 0);
+    for demo in demos().all() {
+        let mut library = CircuitLibrary {
+            definitions: demo.workspace.definitions.clone(),
+        };
+        for (_, doc) in &demo.circuits {
+            library.definitions.insert(doc.id, Arc::clone(doc));
+        }
+        for (name, doc) in &demo.circuits {
+            let boxes: Vec<(Vec2, Vec2)> = doc
+                .nodes
+                .iter()
+                .map(|n| (Vec2::new(n.x, n.y), n.kind.size()))
+                .collect();
+            if overlaps(&boxes).is_some() {
+                continue;
+            }
+            let nets = document_nets(doc, &library);
+            let routing = route_all(&nets.problem);
+            let (at_pins, close): (Vec<_>, Vec<_>) = close_parallels(&nets.problem, &routing)
+                .into_iter()
+                .partition(|c| c.crowded);
+            crowded += at_pins.len();
+            circuits += 1;
+            let id = format!("{}/{name}", demo.id);
+            let allowed = MAY_RUN_CLOSE
+                .iter()
+                .find(|(c, _)| *c == id)
+                .map_or(0, |&(_, n)| n);
+            if !close.is_empty() {
+                tight.push(format!("{id}: {}", close.len()));
+            }
+            if close.len() > allowed {
+                failures.push(format!("{id}: {} close runs {close:?}", close.len()));
+            }
+        }
+    }
+    eprintln!("{circuits} circuits; close runs: {tight:?}; next to crowded pins: {crowded}");
+    assert!(circuits > 50);
     assert!(failures.is_empty(), "{failures:#?}");
 }
 

@@ -1105,3 +1105,182 @@ fn captions_name_tags_and_pills_follow_the_zoom() {
     assert_eq!(tag_scale(&mut app, input), 1.0);
     assert_eq!(pill_scale(&mut app), 1.0);
 }
+
+/// Zoomed in, canvas text is rasterised at its size on screen: the font
+/// grows by the (quantised) zoom and the transform shrinks by as much, so
+/// the world size stays; a pill's meshes keep their size; small zoom
+/// steps within a raster step write nothing, and an idle zoomed-in canvas
+/// touches nothing.
+#[test]
+fn zoomed_in_text_is_rasterised_at_its_screen_size() {
+    use crate::sim::visuals::{
+        CanvasZoom, MAX_TEXT_RASTER_PX, NameTag, PillPiece, TextBase, TileCaption,
+        raster_scale_for, text_raster_scale,
+    };
+
+    assert_eq!(text_raster_scale(0.5), 1.0);
+    assert_eq!(text_raster_scale(1.0), 1.0);
+    assert!((text_raster_scale(2.0) - 2.0).abs() < 1e-5);
+    assert!((text_raster_scale(4.1) - 4.0).abs() < 1e-5);
+    assert_eq!(text_raster_scale(3.0), text_raster_scale(2.9), "quantised");
+    assert!(raster_scale_for(10.0, 40.0) * 40.0 <= MAX_TEXT_RASTER_PX + 1e-3);
+
+    let mut app = visual_app();
+    let reg = create_gate(&mut app, GateKind::Register { w: 8 }, "r");
+    let input = create_gate(&mut app, GateKind::Input { w: 8 }, "in");
+    let display = create_gate(&mut app, GateKind::Display { w: 8 }, "D");
+    create_wire(&mut app, input, 0, reg, 1);
+    create_wire(&mut app, reg, 0, display, 0);
+    idle_frames(&mut app, 3);
+
+    // (kind, font px, transform scale) of each text, and the pill
+    // meshes' scale relative to the wire (their own times their text's).
+    let texts = |app: &mut App| {
+        let mut q = app.world_mut().query::<(
+            &TextFont,
+            &Transform,
+            Has<TileCaption>,
+            Has<NameTag>,
+            Has<WireValueLabel>,
+            Has<TextBase>,
+        )>();
+        let mut out = Vec::new();
+        for (font, transform, caption, tag, pill, base) in q.iter(app.world()) {
+            let FontSize::Px(px) = font.font_size else {
+                panic!("canvas text is sized in pixels")
+            };
+            let kind = [caption, tag, pill, base].iter().position(|&b| b);
+            out.push((kind, px, transform.scale.x));
+        }
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        out
+    };
+    let pieces = |app: &mut App| {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&Transform, &ChildOf), With<PillPiece>>();
+        let pieces: Vec<(f32, Entity)> = q
+            .iter(app.world())
+            .map(|(t, parent)| (t.scale.x, parent.parent()))
+            .collect();
+        pieces
+            .into_iter()
+            .map(|(s, text)| s * app.world().get::<Transform>(text).unwrap().scale.x)
+            .collect::<Vec<f32>>()
+    };
+    let at_one = texts(&mut app);
+    assert!(at_one.iter().all(|&(_, _, s)| s == 1.0), "{at_one:?}");
+    assert!(
+        (0..4).all(|k| at_one.iter().any(|t| t.0 == Some(k))),
+        "captions, tags, pills and readouts: {at_one:?}"
+    );
+    let at_one_pieces = pieces(&mut app);
+    assert!(at_one_pieces.len() >= 2 && at_one_pieces.iter().all(|&s| s == 1.0));
+
+    app.world_mut().resource_mut::<CanvasZoom>().0 = 3.0;
+    idle_frames(&mut app, 2);
+    let q = text_raster_scale(3.0);
+    assert!(q > 2.5 && q < 3.5, "{q}");
+    let at_three = texts(&mut app);
+    for (before, after) in at_one.iter().zip(&at_three) {
+        assert_eq!(before.0, after.0);
+        // Rasterised q times larger, drawn 1/q as large: the same world size.
+        assert!(
+            (after.1 - before.1 * q).abs() < 1e-3,
+            "{before:?} {after:?}"
+        );
+        assert!((after.1 * after.2 - before.1).abs() < 1e-3, "{after:?}");
+    }
+    for s in pieces(&mut app) {
+        assert!((s - 1.0).abs() < 1e-5, "pill meshes keep their size: {s}");
+    }
+
+    // A small zoom step within the same raster step writes no text.
+    idle_frames(&mut app, 2);
+    clear_changes(&mut app);
+    app.world_mut().resource_mut::<CanvasZoom>().0 = 3.05;
+    idle_frames(&mut app, 3);
+    assert!(
+        changes(&app).texts.is_empty() && changes(&app).transforms.is_empty(),
+        "{:?}",
+        changes(&app)
+    );
+    assert_idle_does_no_work(&mut app, "zoomed in");
+
+    // Back at 100%, text is drawn as before.
+    app.world_mut().resource_mut::<CanvasZoom>().0 = 1.0;
+    idle_frames(&mut app, 2);
+    assert_eq!(texts(&mut app), at_one);
+}
+
+/// Where one wire passes over another, nothing is painted between them:
+/// the upper wire's own casing is the only edge the crossed wire meets. (A
+/// bench-coloured "crossing gap" used to be cut around the upper wire; at
+/// high zoom it read as a wide extra outline and cut into junction dots.)
+#[test]
+fn crossing_wires_paint_nothing_between_them() {
+    use crate::sim::art::{CanvasArt, Paint};
+
+    // 3 columns of 6 gates, each fed by two gates of the column before,
+    // the last row from the first, so wires cross.
+    let (cols, rows) = (3, 6);
+    let mut doc = CircuitDocument::new("Crossings");
+    let mut ids = Vec::new();
+    for c in 0..cols {
+        for r in 0..rows {
+            let kind = if c == 0 {
+                GateKind::Input {
+                    w: if r % 2 == 0 { 1 } else { 8 },
+                }
+            } else {
+                GateKind::And {
+                    w: if r % 2 == 0 { 1 } else { 8 },
+                }
+            };
+            let at = Vec2::new(c as f32 * 200.0, -(r as f32) * 120.0);
+            ids.push(doc.add(DocNode::labeled(kind, at, format!("g{c}_{r}"))));
+        }
+    }
+    for c in 1..cols {
+        for r in 0..rows {
+            let to = ids[c * rows + r];
+            doc.connect(ids[(c - 1) * rows + r], 0, to, 0);
+            doc.connect(ids[(c - 1) * rows + (r + 2) % rows], 0, to, 1);
+        }
+    }
+    let mut app = visual_app();
+    load(&mut app, WorkspaceDocument::new(doc));
+    idle_frames(&mut app, 3);
+
+    // The wires do cross: a horizontal run of one passes through a
+    // vertical run of another.
+    let paths: Vec<Vec<Vec2>> = wires(&mut app)
+        .iter()
+        .map(|(e, ..)| app.world().get::<WirePath>(*e).unwrap().points.clone())
+        .collect();
+    let segments = |p: &Vec<Vec2>| p.windows(2).map(|w| (w[0], w[1])).collect::<Vec<_>>();
+    let crosses = |(a, b): (Vec2, Vec2), (c, d): (Vec2, Vec2)| {
+        let horizontal = a.y == b.y && c.x == d.x;
+        horizontal
+            && c.x > a.x.min(b.x)
+            && c.x < a.x.max(b.x)
+            && a.y > c.y.min(d.y)
+            && a.y < c.y.max(d.y)
+    };
+    let crossing = paths.iter().enumerate().any(|(i, p)| {
+        paths.iter().enumerate().any(|(j, q)| {
+            i != j
+                && segments(p)
+                    .iter()
+                    .any(|s| segments(q).iter().any(|t| crosses(*s, *t)))
+        })
+    });
+    assert!(crossing, "the test circuit has a crossing");
+
+    // Nothing on the canvas is painted in the bench colour (only a drag's
+    // veils use it, and nothing is being dragged).
+    let bench = app.world().resource::<CanvasArt>().material(Paint::Bench);
+    let mut q = app.world_mut().query::<&MeshMaterial2d<ColorMaterial>>();
+    let painted = q.iter(app.world()).filter(|m| m.0 == bench).count();
+    assert_eq!(painted, 0, "bench-coloured shapes over the wires");
+}
