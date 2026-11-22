@@ -1,4 +1,10 @@
-//! Workspace files (save format version 5; see `docs/save-format.md`).
+//! Workspace files (save format versions 5 and 6; see
+//! `docs/save-format.md`).
+//!
+//! The editor writes version 5, the expanded form. Version 6, the
+//! hand-editable authoring form of the built-in demos
+//! ([`crate::sim::source`]), is also read: it is expanded on load, with
+//! `"demo/circuit"` references resolved against the built-in demos.
 //!
 //! A workspace is a folder `workspaces/<name>/` holding one
 //! `manifest.json`:
@@ -24,21 +30,22 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bevy::prelude::ResMut;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::editor::EditorState;
-use crate::sim::fixtures::fixture_workspace_catalog;
-use crate::sim::{CircuitDocument, CircuitLibrary, WorkspaceDocument};
+use crate::sim::source::{self, Externals};
+use crate::sim::{CircuitDocument, CircuitLibrary, WorkspaceDocument, demos};
 use crate::{DEFAULT_WORKSPACE_EXT, WORKSPACE_DIR};
 
 pub const WORKSPACE_MANIFEST_FILE: &str = "manifest.json";
 /// Format tag written to every manifest.
 pub const WORKSPACE_FORMAT: &str = "gatequest-workspace";
-/// Current save format version. Version 5 is the first written for the
-/// simulation v2 circuit model; earlier versions are refused.
+/// The version the editor writes: the expanded form. Version 5 is the
+/// first written for the simulation v2 circuit model; earlier versions are
+/// refused.
 pub const WORKSPACE_VERSION: u32 = 5;
+/// The hand-editable authoring form, also read (see [`crate::sim::source`]).
+pub const SOURCE_VERSION: u32 = source::SOURCE_VERSION as u32;
 
 #[derive(Debug)]
 pub enum WorkspaceError {
@@ -65,8 +72,8 @@ impl fmt::Display for WorkspaceError {
                 write!(
                     f,
                     "Workspace \"{name}\" was saved in save format {found}, which this version of \
-                     GateQuest cannot open (it reads version {WORKSPACE_VERSION}). Workspaces saved \
-                     before the simulation v2 update are not converted; rebuild the circuit and save \
+                     GateQuest cannot open (it reads versions {WORKSPACE_VERSION} and {SOURCE_VERSION}). \
+                     Workspaces saved before the simulation v2 update are not converted; rebuild the circuit and save \
                      it again."
                 )
             }
@@ -96,12 +103,6 @@ struct WorkspaceFile {
     name: String,
     root: Uuid,
     circuits: Vec<CircuitDocument>,
-}
-
-pub fn catalog_init_system(mut editor_state: ResMut<EditorState>) {
-    if editor_state.workspace_catalog.is_empty() {
-        editor_state.workspace_catalog = fixture_workspace_catalog();
-    }
 }
 
 pub fn load_saved_workspace_names() -> io::Result<Vec<String>> {
@@ -177,11 +178,14 @@ pub fn read_workspace_in(dir: &Path, name: &str) -> Result<WorkspaceDocument, Wo
         )));
     }
 
-    let value: serde_json::Value = serde_json::from_slice(&fs::read(manifest)?)?;
+    let text = fs::read_to_string(manifest)?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
     let found = version_of(&value);
-    if found != Some(u64::from(WORKSPACE_VERSION))
-        || value.get("format").and_then(|v| v.as_str()) != Some(WORKSPACE_FORMAT)
-    {
+    let format_ok = value.get("format").and_then(|v| v.as_str()) == Some(WORKSPACE_FORMAT);
+    if format_ok && found == Some(u64::from(SOURCE_VERSION)) {
+        return read_source_workspace(name, &text);
+    }
+    if !format_ok || found != Some(u64::from(WORKSPACE_VERSION)) {
         return Err(WorkspaceError::UnsupportedVersion {
             name: name.to_string(),
             found,
@@ -226,6 +230,24 @@ pub fn read_workspace_in(dir: &Path, name: &str) -> Result<WorkspaceDocument, Wo
     }
     validate_required_io_labels(&workspace)?;
     Ok(workspace)
+}
+
+/// Key that derives the ids of a version 6 workspace file.
+pub fn workspace_key(name: &str) -> String {
+    format!("workspaces/{}", sanitize_workspace_name(name))
+}
+
+/// Read a version 6 workspace: expand it, resolving `"demo/circuit"`
+/// references against the built-in demos.
+fn read_source_workspace(name: &str, text: &str) -> Result<WorkspaceDocument, WorkspaceError> {
+    let invalid = |e: source::SourceError| WorkspaceError::Invalid(e.to_string());
+    let file = source::parse(text).map_err(invalid)?;
+    let externals = demos::catalog()
+        .map(|c| c.externals())
+        .unwrap_or_else(|_| Externals::default());
+    let expansion = source::expand(&file, &workspace_key(name), &externals).map_err(invalid)?;
+    validate_required_io_labels(&expansion.workspace)?;
+    Ok(expansion.workspace)
 }
 
 pub fn save_workspace_in(

@@ -1,0 +1,31 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "full_adder",
+  "circuits": [
+    {
+      "name": "full_adder",
+      "title": "Full adder",
+      "nodes": [
+        {"name": "A", "type": "Input", "at": [-300, 100]},
+        {"name": "B", "type": "Input", "at": [-300, 0]},
+        {"name": "Cin", "type": "Input", "at": [-300, -100]},
+        {"name": "ha1", "use": "half_adder/half_adder", "at": [-120, 50]},
+        {"name": "ha2", "use": "half_adder/half_adder", "at": [40, -30]},
+        {"name": "carry", "use": "gates/or", "at": [180, -100]},
+        {"name": "Sum", "type": "Output", "at": [320, 0]},
+        {"name": "Cout", "type": "Output", "at": [320, -100]}
+      ],
+      "wires": [
+        ["A", "ha1.A"],
+        ["B", "ha1.B"],
+        ["ha1.Sum", "ha2.A"],
+        ["Cin", "ha2.B"],
+        ["ha1.Carry", "carry.A"],
+        ["ha2.Carry", "carry.B"],
+        ["ha2.Sum", "Sum"],
+        ["carry", "Cout"]
+      ]
+    }
+  ]
+}

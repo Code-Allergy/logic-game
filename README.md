@@ -35,4 +35,28 @@ For example `cargo run -p gate_quest --features dev`, or
 - `docs/app-simulation-bridge.md`: how the app maps onto the simulator.
 - `logi-sim/ARCHITECTURE.md`: the simulator crate as built, with benchmarks.
 - `logi-sim/PROFILING.md`: benchmarking and profiling the simulator.
-- `docs/save-format.md`: workspace file format.
+- `docs/save-format.md`: workspace file format (version 5, and the
+  hand-editable version 6 the demos are written in), and the demo manifest.
+
+## Demos
+
+The editor's Demos list climbs from gates to a CPU, each level built from
+instances of the ones below. The demos are files in `assets/demos/`
+(`manifest.json` gives the order); they open read-only, and "Copy to my
+workspace" makes an editable copy.
+
+| Level | Demos |
+|---|---|
+| 1 Gates | Logic gates (NOT, AND, OR, XOR, NAND, NOR); NAND and NOR are universal |
+| 2 Adding bits | Half adder; full adder |
+| 3 Adding words | 8-bit ripple-carry adder (beside `Add`) |
+| 4 Choosing | 2-to-4 decoder; 2-to-1 multiplexer (beside `Mux`); mux tree |
+| 5 Feedback | SR latch from two NORs and a Delay (beside `SrLatch`) |
+| 6 Latches and flip-flops | D latch (beside `DLatch`); rising-edge D flip-flop |
+| 7 Registers and counters | 8-bit register (beside `Register`); counter (beside a word-level one) |
+| 8 Register file | 4 x 8-bit register file, one write and two read ports |
+| 9 ALU | 8-bit ALU: add, subtract, AND, OR, carry and zero flags |
+| 10 A small CPU | Program counter, ROM program, microcode, register file and ALU; multiplies 5 by 7 |
+
+`cargo run --example demo_fmt` rewrites the demo files in canonical form
+(`-- --check` checks them).

@@ -183,8 +183,13 @@ pub fn gate_selection_system(
     query: Query<(&Transform, &GateType), With<GateIdentity>>,
     mut commands: Commands,
     selected_query: Query<Entity, With<Selected>>,
+    active: Res<crate::sim::ActiveCircuit>,
 ) {
-    if ui_pointer.over_egui || !mouse_button_input.just_pressed(MouseButton::Right) {
+    // Gates of a read-only demo cannot be dragged.
+    if ui_pointer.over_egui
+        || active.read_only
+        || !mouse_button_input.just_pressed(MouseButton::Right)
+    {
         return;
     }
     for e in &selected_query {
@@ -651,7 +656,8 @@ pub fn ui_for_selected_gate(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn save_on_exit_system(mut exit_events: MessageReader<AppExit>, reader: CircuitReader) {
-    if exit_events.read().next().is_none() {
+    // A read-only demo is not the player's work; it is never saved.
+    if exit_events.read().next().is_none() || reader.active.read_only {
         return;
     }
     let name = if reader.active.name.trim().is_empty() {
@@ -675,6 +681,10 @@ pub fn workspace_io_system(
 ) {
     let mut saved = false;
     for ev in save_events.read() {
+        if reader.active.read_only {
+            feedback.refuse(crate::sim::READ_ONLY_MESSAGE.into());
+            continue;
+        }
         match save_workspace(&ev.name, &reader.workspace()) {
             Ok(()) => {
                 revision.mark_saved();
