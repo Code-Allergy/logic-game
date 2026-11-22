@@ -393,6 +393,7 @@ on save.
 | Step | Meaning |
 |---|---|
 | `set` | Root inputs by label. A value that does not fit the input is an error. |
+| `poke` | Write state at once, without a tick: `{"poke": {"cpu/a": 18, "cpu/pc": "0x0400", "ram@0x1234": 5, "ram": [[4660, 5], [4661, 255]]}}`. Every net is settled from the new state before the next step; an input set before it still reaches the logic at the next tick. A value that does not fit is an error, and nothing is written. |
 | `ticks` | Run that many ticks. |
 | `until` | Run until an expression over signals is non-zero (`challenges::expr` syntax), at most `max_ticks`; not reaching it fails the run. |
 | `expect` | Signals and values; a mismatch fails the run and says what it saw. |
@@ -410,6 +411,44 @@ placed as `core`. The pin may be left out when the part has one output;
 `:0..4` picks bits; an `Output` or `Display` names what drives it;
 `ram@0x10` is one word of a memory. Expressions take names only, so
 `signals` gives paths short names; a root-level label is a name already.
+
+**State.** `poke` writes state named as signals are, and `read`,
+`expect` and expressions read it back:
+
+- a `Register`, `Delay`, `DLatch` or `SrLatch` (`cpu/a`, `cpu/a.q`);
+- a chip, or one of its outputs (`cpu/a`, `cpu/a.Q`), whose output is
+  wired straight to state elements, as a register built of flip-flops is;
+- an `Output` such a chip drives;
+- an array of any of these as one word, element 0 lowest (`cpu/a/bit`,
+  `cpu/a/bit[0..8]`);
+- a memory word (`ram@0x1234`), or many words of one memory as
+  `"ram": [[address, value], ...]`, the form of Tom Harte's test files.
+
+`:lo..hi` picks bits. Inputs (`set`), gates and ROM words (`load`) are
+not state, and the error says what to use. When a chip is named, the rest
+of its state is sorted by what it does; each flip-flop-sized cell is
+simulated alone for every input and state (at most 16 bits):
+
+- a latch the shown one copies from (the master of a master-slave
+  flip-flop) is written with the same value;
+- state the output never depends on (a counter beside the register) is
+  left alone;
+- any other state (an edge detector's previous clock) makes the chip
+  refused, and its state elements are then poked by path.
+
+A poke holds under every compile option: with word lifting, function
+matching and word cleanup on, a latch merged into a word or inside a chip
+compiled as a word function is still written where the program keeps it.
+
+```json
+{"signals": {"a": "cpu/a", "pc": "cpu/pc"},
+ "steps": [
+   {"poke": {"pc": "0x0400", "a": 18, "cpu/p.q:0..4": 3,
+             "ram": [[1024, 169], [1025, 66]]}},
+   {"ticks": 2},
+   {"expect": {"a": 66, "pc": "0x0402"}}
+ ]}
+```
 
 Every signal of a script is resolved before anything runs, so a misspelt
 name costs no simulation, and the simulation is compiled keeping exactly
