@@ -227,7 +227,7 @@ const KNOB_TRAVEL: f32 = 6.0;
 /// Corner radius of a wire (one grid step, less on short runs).
 pub const WIRE_CORNER: f32 = 20.0;
 /// Bench showing on each side of a wire where it passes over another.
-const GAP: f32 = 4.0;
+const GAP: f32 = 3.0;
 /// Outer radius of a junction dot (ink ring included): the design's r 9
 /// dot with a 2.5 ring, a little wider than the casing on a bus.
 fn junction_radius(core: f32) -> f32 {
@@ -1618,6 +1618,7 @@ pub fn route_wires_system(
                 .and_then(|s| s.outputs.get(usize::from(key.1)))
                 .is_some_and(|&w| w > 1),
         );
+        problem.buses.push(buses[buses.len() - 1]);
         problem.nets.push(NetSpec { driver, sinks: at });
     }
     if !strict && dirty == 0 && !structural {
@@ -1684,27 +1685,35 @@ pub fn route_wires_system(
     routing.nets = nets;
     EntityWorkCounter::add(&work, written);
 
-    // Crossing gaps: one mesh for the view, each gap at the depth just
-    // below the upper wire.
+    // Crossing gaps: one mesh for the view. Each gap is the upper wire's
+    // drawn path (its rounded corners too), stroked a little wider than
+    // its casing in the bench colour and clipped to the crossed wire's
+    // casing, at the depth just below the upper wire: it interrupts only
+    // the wire it crosses.
     let casing = |net: usize| casing_for(if buses[net] { BUS_CORE } else { BIT_CORE });
-    let rects: Vec<(Vec2, Vec2, f32)> = result
-        .crossings
-        .iter()
-        .map(|c| {
-            let (h, v) = (c.horizontal.0, c.vertical.0);
-            let h_on_top = depths[h] >= depths[v];
-            let (upper, lower) = if h_on_top { (h, v) } else { (v, h) };
-            let across = casing(upper) * 0.5 + GAP;
-            let along = casing(lower) * 0.5 + 1.0;
-            let half = if h_on_top {
-                Vec2::new(along, across)
-            } else {
-                Vec2::new(across, along)
-            };
-            (c.at, half, depths[upper] - GAP_BELOW)
-        })
-        .collect();
-    let mesh = gap_mesh(&rects);
+    let keys: Vec<NetKey> = grouped.keys().copied().collect();
+    let mut strokes: HashMap<(usize, usize), Shape> = HashMap::new();
+    let mut pieces: Vec<(Shape, f32)> = Vec::with_capacity(result.crossings.len());
+    for c in &result.crossings {
+        let (h, v) = (c.horizontal.0, c.vertical.0);
+        let h_on_top = depths[h] >= depths[v];
+        let (upper, lower) = if h_on_top {
+            (c.horizontal, c.vertical)
+        } else {
+            (c.vertical, c.horizontal)
+        };
+        let Some(net) = routing.nets.get(&keys[upper.0]) else {
+            continue;
+        };
+        let stroke = strokes.entry(upper).or_insert_with(|| {
+            let path = wire_path(&net.route, upper.1, None);
+            let round = round_corners(&path.points, WIRE_CORNER);
+            Shape::path_stroke(&round, casing(upper.0) + 2.0 * GAP)
+        });
+        let gap = crossing_gap(stroke, c.at, !h_on_top, casing(lower.0));
+        pieces.push((gap, depths[upper.0] - GAP_BELOW));
+    }
+    let mesh = gap_mesh(&pieces);
     match gaps.single() {
         Ok(handle) => {
             let _ = meshes.insert(handle.id(), mesh);
@@ -1721,20 +1730,87 @@ pub fn route_wires_system(
     }
 }
 
-/// The mesh of the crossing gaps: a rectangle per `(centre, half size,
-/// depth)`.
-fn gap_mesh(rects: &[(Vec2, Vec2, f32)]) -> Mesh {
-    if rects.is_empty() {
+/// How far from a crossing its gap may reach along the crossed wire: the
+/// widest upper stroke, with room for a rounded corner's slant.
+const GAP_REACH: f32 = 2.0 * WIRE_CORNER;
+
+/// The gap a wire cuts where it passes over another: `upper` (the upper
+/// wire's gap stroke: its drawn path stroked [`GAP`] wider than its
+/// casing on each side) clipped to the crossed wire's casing (`lower`
+/// wide, horizontal when `lower_horizontal`, plus half a unit) near the
+/// crossing `at`. So the gap follows the upper wire, corners included,
+/// and never reaches a wire beside the crossed one.
+pub fn crossing_gap(upper: &Shape, at: Vec2, lower_horizontal: bool, lower: f32) -> Shape {
+    let across = lower * 0.5 + 0.5;
+    let half = if lower_horizontal {
+        Vec2::new(GAP_REACH, across)
+    } else {
+        Vec2::new(across, GAP_REACH)
+    };
+    clip_to_rect(upper, at - half, at + half)
+}
+
+/// The triangles of `shape` clipped to the rectangle `lo`-`hi`.
+fn clip_to_rect(shape: &Shape, lo: Vec2, hi: Vec2) -> Shape {
+    let mut out = Shape::default();
+    for t in shape.indices.as_chunks::<3>().0 {
+        let tri = [0, 1, 2].map(|k| shape.positions[t[k] as usize]);
+        let (tlo, thi) = (
+            tri[0].min(tri[1]).min(tri[2]),
+            tri[0].max(tri[1]).max(tri[2]),
+        );
+        if thi.x <= lo.x || tlo.x >= hi.x || thi.y <= lo.y || tlo.y >= hi.y {
+            continue;
+        }
+        let mut poly: Vec<Vec2> = tri.to_vec();
+        // Sutherland-Hodgman against the four sides.
+        for (axis, bound, keep_below) in [
+            (0, lo.x, false),
+            (0, hi.x, true),
+            (1, lo.y, false),
+            (1, hi.y, true),
+        ] {
+            let inside = |p: Vec2| {
+                let v = if axis == 0 { p.x } else { p.y };
+                if keep_below { v <= bound } else { v >= bound }
+            };
+            let mut next = Vec::with_capacity(poly.len() + 2);
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                let (ia, ib) = (inside(a), inside(b));
+                if ia {
+                    next.push(a);
+                }
+                if ia != ib {
+                    let (va, vb) = if axis == 0 { (a.x, b.x) } else { (a.y, b.y) };
+                    let t = (bound - va) / (vb - va);
+                    next.push(a + (b - a) * t);
+                }
+            }
+            poly = next;
+            if poly.len() < 3 {
+                break;
+            }
+        }
+        if poly.len() >= 3 {
+            out.append(&Shape::convex(&poly));
+        }
+    }
+    out
+}
+
+/// The mesh of the crossing gaps: each shape at its depth.
+fn gap_mesh(pieces: &[(Shape, f32)]) -> Mesh {
+    let count: usize = pieces.iter().map(|(s, _)| s.positions.len()).sum();
+    if count == 0 {
         return empty_mesh();
     }
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(rects.len() * 4);
-    let mut indices: Vec<u32> = Vec::with_capacity(rects.len() * 6);
-    for (c, h, z) in rects {
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(count);
+    let mut indices: Vec<u32> = Vec::new();
+    for (shape, z) in pieces {
         let base = positions.len() as u32;
-        for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-            positions.push([c.x + sx * h.x, c.y + sy * h.y, *z]);
-        }
-        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        positions.extend(shape.positions.iter().map(|p| [p.x, p.y, *z]));
+        indices.extend(shape.indices.iter().map(|i| i + base));
     }
     let n = positions.len();
     Mesh::new(

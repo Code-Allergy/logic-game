@@ -1212,3 +1212,67 @@ fn zoomed_in_text_is_rasterised_at_its_screen_size() {
     idle_frames(&mut app, 2);
     assert_eq!(texts(&mut app), at_one);
 }
+
+/// The gap a wire cuts where it passes over another interrupts only the
+/// crossed wire: it spans that wire's casing (wider for a bus) and no
+/// more, so a wire running beside it is untouched; across, it is the
+/// upper wire's casing plus the gap on each side, centred on the drawn
+/// (rounded) upper wire, even next to a corner.
+#[test]
+fn a_crossing_gap_covers_only_the_crossed_wire() {
+    use crate::sim::art::{BIT_CASING, BUS_CASING};
+    use crate::sim::shapes::{Shape, round_corners};
+    use crate::sim::visuals::{WIRE_CORNER, crossing_gap};
+
+    let gap_width = BIT_CASING + 2.0 * 3.0;
+    // A straight 1-bit wire going up across a horizontal wire at y = 0.
+    let upper = Shape::path_stroke(
+        &[Vec2::new(40.0, -100.0), Vec2::new(40.0, 100.0)],
+        gap_width,
+    );
+    for lower in [BIT_CASING, BUS_CASING] {
+        let gap = crossing_gap(&upper, Vec2::new(40.0, 0.0), true, lower);
+        let (lo, hi) = gap.bounds().expect("a gap");
+        assert!((hi.y - lo.y - (lower + 1.0)).abs() < 1e-3, "{lo} {hi}");
+        assert!((hi.x - lo.x - gap_width).abs() < 1e-3, "{lo} {hi}");
+        assert!(((lo.x + hi.x) * 0.5 - 40.0).abs() < 1e-3);
+        // A wire beside the crossed one, a clearance away, is untouched.
+        let beside = (lower + BIT_CASING) * 0.5 + crate::sim::routing::WIRE_GAP;
+        assert!(hi.y < beside - BIT_CASING * 0.5, "{hi} {beside}");
+        let area = gap.area();
+        assert!((area - (lower + 1.0) * gap_width).abs() < 0.5, "{area}");
+    }
+
+    // Next to a corner: the upper wire turns 15 units below the crossing
+    // (the nearest a parallel row may be), so its drawn curve runs off
+    // its polyline there; the gap follows the curve (every point of it is
+    // near the drawn wire), not the polyline.
+    let points = [
+        Vec2::new(-100.0, -15.0),
+        Vec2::new(40.0, -15.0),
+        Vec2::new(40.0, 100.0),
+    ];
+    let round = round_corners(&points, WIRE_CORNER);
+    let upper = Shape::path_stroke(&round, gap_width);
+    let gap = crossing_gap(&upper, Vec2::new(40.0, 0.0), true, BIT_CASING);
+    let (lo, hi) = gap.bounds().expect("a gap");
+    assert!(lo.y >= -BIT_CASING * 0.5 - 0.5 - 1e-3 && hi.y <= BIT_CASING * 0.5 + 0.5 + 1e-3);
+    let distance = |p: Vec2| {
+        round
+            .windows(2)
+            .map(|w| {
+                let (a, b) = (w[0], w[1]);
+                let t = ((p - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                p.distance(a + (b - a) * t)
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    assert!(
+        gap.positions
+            .iter()
+            .all(|&p| distance(p) <= gap_width * 0.5 + 0.5),
+        "the gap hugs the drawn wire"
+    );
+    // The curve is left of the polyline's column there.
+    assert!(lo.x < 40.0 - gap_width * 0.5 - 0.5, "{lo}");
+}

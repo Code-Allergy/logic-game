@@ -274,6 +274,7 @@ pub fn band_route(boxes: &[Rect], driver: Vec2, sink: Vec2) -> Vec<Vec2> {
             driver,
             sinks: vec![sink],
         }],
+        buses: Vec::new(),
     };
     let routed = routing::route(&problem, &[], true);
     match routed.nets.first() {
