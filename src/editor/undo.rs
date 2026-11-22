@@ -68,6 +68,22 @@ pub fn undo_keys_system(
     Ok(())
 }
 
+/// Width of the two buttons in a row with `spacing` between items.
+pub fn buttons_width(spacing: f32) -> f32 {
+    2.0 * (40.0 + spacing)
+}
+
+/// Whether the buttons fit in the file card (its text keeps at least 90
+/// px), given the room the file card has for text and buttons; else
+/// they get a card of their own below it.
+pub fn fits_in_file_card(room: f32) -> bool {
+    room - buttons_width(8.0) >= 90.0
+}
+
+/// Height of the buttons' own card: a 40 px button with its 3 px edge,
+/// 8 px padding and the 2.5 px outline on each side.
+pub const UNDO_CARD_HEIGHT: f32 = 40.0 + 3.0 + 2.0 * 8.0 + 2.0 * 2.5;
+
 /// What the Undo and Redo buttons need.
 #[derive(SystemParam)]
 pub struct UndoControls<'w> {
@@ -84,7 +100,7 @@ impl UndoControls<'_> {
         if self.active.read_only {
             0.0
         } else {
-            2.0 * (40.0 + spacing)
+            buttons_width(spacing)
         }
     }
 

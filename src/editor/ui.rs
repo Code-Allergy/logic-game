@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use crate::theme::Theme;
 use crate::ui_style::{
-    HudIcon, TOP_CARD_HEIGHT, caption, card, chunky_button, chunky_icon_button, day_night_button,
-    egui_color, heavy, stroke,
+    HudIcon, HudLayout, TOP_CARD_HEIGHT, caption, card, chunky_button, chunky_icon_button,
+    day_night_button, egui_color, heavy, stroke,
 };
 use crate::{
     GameState,
@@ -245,6 +245,12 @@ pub fn file_subtitle(origin: &str, breadcrumb: &str, read_only: bool, dirty: boo
     format!("{origin} › {} · {state}", breadcrumb.replace(" / ", " › "))
 }
 
+/// Room for the file card's text and the Undo and Redo buttons: the card
+/// stops short of the transport card.
+pub fn file_card_room(layout: &HudLayout) -> f32 {
+    (layout.screen.x - 640.0) * 0.5 - layout.margin - layout.gap - 238.0
+}
+
 /// The file card (top left), the Library drawer it opens, the wire
 /// builder (in wire mode) and placement of the armed part by click.
 #[allow(clippy::too_many_arguments)]
@@ -256,8 +262,7 @@ pub fn editor_ui_system(
     q_window: Query<&Window, With<PrimaryWindow>>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     button_input: Res<ButtonInput<MouseButton>>,
-    game_state: Res<State<GameState>>,
-    active: Res<ActiveCircuit>,
+    (game_state, active): (Res<State<GameState>>, Res<ActiveCircuit>),
     files: FileParams,
     library: Res<CircuitLibrary>,
     gates: Query<(&GateIdentity, &GateType, &GateLabel)>,
@@ -265,6 +270,10 @@ pub fn editor_ui_system(
     mut next_state: ResMut<NextState<GameState>>,
     mut seen_active: Local<Option<(Uuid, String)>>,
     mut undo: super::undo::UndoControls,
+    (progress, active_challenge): (
+        Res<super::demo_map::progress::DemoProgress>,
+        Res<super::challenge::ActiveChallenge>,
+    ),
 ) -> Result<(), BevyError> {
     if game_state.get() != &GameState::Simulating {
         return Ok(());
@@ -373,6 +382,7 @@ pub fn editor_ui_system(
     let mut open_definition: Option<Uuid> = None;
     let mut theme_wanted = None;
     let mut open_map = false;
+    let mut open_challenge = None;
     let table = views.definition_table(&library);
     let breadcrumb = views.view.breadcrumb(&active.name);
     let view_note = views.view.frames().last().map(|frame| {
@@ -410,8 +420,8 @@ pub fn editor_ui_system(
     // Room for the text: the card stops short of the transport card. The
     // Undo and Redo buttons go in the card when there is room, else in a
     // card of their own below it.
-    let room = (layout.screen.x - 640.0) * 0.5 - layout.margin - layout.gap - 238.0;
-    let undo_inline = room - undo.width(8.0) >= 90.0;
+    let room = file_card_room(&layout);
+    let undo_inline = active.read_only || super::undo::fits_in_file_card(room);
     let text_width = (room - if undo_inline { undo.width(8.0) } else { 0.0 }).clamp(90.0, 300.0);
     egui::Area::new(egui::Id::new("hud_file"))
         .anchor(Align2::LEFT_TOP, [layout.margin, layout.margin])
@@ -676,6 +686,17 @@ pub fn editor_ui_system(
                 }
             }
 
+            egui::CollapsingHeader::new(egui::RichText::new("Challenges").font(heavy(15.0)))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Build it yourself: each opens the ports ready to wire, and Check tests your circuit.").size(12.0));
+                    open_challenge = super::challenge::library_list(
+                        ui,
+                        &palette,
+                        &progress,
+                        active_challenge.id.as_deref(),
+                    );
+                });
+
             egui::CollapsingHeader::new(egui::RichText::new("My workspaces").font(heavy(15.0)))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -747,6 +768,18 @@ pub fn editor_ui_system(
     if open_map {
         editor_state.library_open = false;
         next_state.set(GameState::DemoMap);
+        return Ok(());
+    }
+
+    if let Some(challenge) = open_challenge {
+        editor_state.library_open = false;
+        request_open(
+            &mut editor_state,
+            &mut writers.load,
+            &active,
+            &files.revision,
+            super::challenge::challenge_request(challenge, false),
+        );
         return Ok(());
     }
 

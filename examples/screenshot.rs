@@ -38,7 +38,17 @@
 //!
 //! `--map` shows the demo map instead of a demo (the id is ignored), with
 //! the demos listed by `--opened ID,ID,...` (the last one last) as the
-//! progress, kept in memory only; `--level N` picks a stop.
+//! progress, kept in memory only; `--level N` picks a stop;
+//! `--completed ID,ID,...` marks challenges done.
+//!
+//! `--challenge ID` opens challenge ID as the editor would: the first
+//! argument `-` is its starter, a file path a circuit to open in its place
+//! (a solution, right or wrong). `--check` then presses Check:
+//!
+//! ```sh
+//! cargo run --example screenshot -- - out.png --challenge half_adder
+//! cargo run --example screenshot -- wrong.json out.png --challenge half_adder --check
+//! ```
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,6 +58,7 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::window::WindowResolution;
 use bevy_egui::EguiPlugin;
 
+use gate_quest::editor::challenge::ActiveChallenge;
 use gate_quest::editor::demo_map::{DemoMapState, progress::DemoProgress};
 use gate_quest::editor::files::{OpenRequest, PendingOpen};
 use gate_quest::editor::{EditorPlugin, EditorState, PartTab};
@@ -55,7 +66,7 @@ use gate_quest::sim::systems::canvas_cursor_system;
 use gate_quest::sim::{
     ActiveCircuit, CircuitDocument, DocNode, DocWire, GateIdentity, GateKind, GateLabel,
     LoadWorkspaceEvent, OpenDefinitionView, SelectedGate, SetInputValue, SimBridge,
-    SimulationPlugin, WorkspaceDocument, demos, source,
+    SimulationPlugin, WorkspaceDocument, WorkspaceRevision, demos, source,
 };
 use gate_quest::temp::GateComponentSelectionEvent;
 use gate_quest::theme::{Theme, ThemeMode, ThemePlugin};
@@ -81,6 +92,8 @@ struct Shot {
     definition: Option<String>,
     fit: bool,
     editable: bool,
+    challenge: Option<String>,
+    check: bool,
     drag: Option<(String, Vec2)>,
     confirm: bool,
     frame: u32,
@@ -152,6 +165,7 @@ fn main() {
     let (mut definition, mut fit) = (None, false);
     let (mut editable, mut confirm) = (false, false);
     let mut drag = None;
+    let (mut challenge, mut check, mut completed) = (None, false, String::new());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--night" => night = true,
@@ -186,6 +200,9 @@ fn main() {
             "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "--definition" => definition = args.next(),
             "--fit" => fit = true,
+            "--challenge" => challenge = args.next(),
+            "--check" => check = true,
+            "--completed" => completed = args.next().unwrap_or_default(),
             "--drag" => {
                 let spec = args.next().unwrap_or_default();
                 let parsed = spec.rsplit_once(':').and_then(|(l, d)| {
@@ -198,7 +215,10 @@ fn main() {
             other => panic!("unknown argument {other}"),
         }
     }
-    let progress = DemoProgress::with_opened(opened.split(',').filter(|id| !id.is_empty()));
+    let mut progress = DemoProgress::with_opened(opened.split(',').filter(|id| !id.is_empty()));
+    for id in completed.split(',').filter(|id| !id.is_empty()) {
+        progress.mark_completed(id);
+    }
     App::new()
         .insert_resource(progress)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -234,6 +254,8 @@ fn main() {
             definition,
             fit,
             editable,
+            challenge,
+            check,
             drag,
             confirm,
             frame: 0,
@@ -247,6 +269,17 @@ fn main() {
         .add_systems(Update, scripted_drag.before(canvas_cursor_system))
         .run();
 }
+
+/// The map, the open circuit and challenge, the progress (grouped: a
+/// system takes at most 16 parameters).
+type MoreState<'w, 's> = (
+    ResMut<'w, DemoMapState>,
+    ResMut<'w, ActiveCircuit>,
+    ResMut<'w, ActiveChallenge>,
+    ResMut<'w, DemoProgress>,
+    Res<'w, WorkspaceRevision>,
+    Local<'s, Option<Arc<WorkspaceDocument>>>,
+);
 
 #[allow(clippy::too_many_arguments)]
 fn drive(
@@ -266,7 +299,7 @@ fn drive(
     windows: Query<&Window>,
     mut exit: MessageWriter<AppExit>,
     // Grouped: a system takes at most 16 parameters.
-    (mut map, mut active): (ResMut<DemoMapState>, ResMut<ActiveCircuit>),
+    (mut map, mut active, mut open_challenge, mut progress, revision, mut loaded): MoreState,
 ) {
     shot.frame += 1;
     if shot.map {
@@ -291,6 +324,31 @@ fn drive(
         return;
     }
     match shot.frame {
+        5 if shot.challenge.is_some() => {
+            let catalog = demos::catalog().expect("the demos load");
+            let id = shot.challenge.as_deref().unwrap_or_default();
+            let challenge = catalog.challenge(id).expect("a challenge id");
+            let name = challenge.workspace_name();
+            let workspace = if shot.id == "-" {
+                Arc::new(demos::editable_copy(&challenge.starter, &name))
+            } else {
+                let (_, workspace, all, _) = load(&shot.id);
+                *circuits = all;
+                let mut ws = (*workspace).clone();
+                ws.root.name = name.clone();
+                Arc::new(ws)
+            };
+            *loaded = Some(Arc::clone(&workspace));
+            load_workspace.write(LoadWorkspaceEvent {
+                name,
+                workspace,
+                read_only: false,
+                unsaved: false,
+            });
+            if shot.night {
+                theme.set(ThemeMode::Night);
+            }
+        }
         5 => {
             let (name, workspace, all, fixture) = load(&shot.id);
             *circuits = all;
@@ -372,6 +430,17 @@ fn drive(
                 camera.translation.y = centre.y + 40.0 * scale;
             } else if let Some(zoom) = shot.zoom {
                 ortho.scale = zoom;
+            }
+        }
+        50 if shot.check => {
+            // As the card's Check button: the circuit that was loaded.
+            if let (Some(challenge), Some(ws)) = (open_challenge.challenge(), loaded.as_ref()) {
+                let report = challenge.check(ws);
+                if report.passed() {
+                    progress.mark_completed(&challenge.id);
+                }
+                println!("{}: {}", challenge.id, report.summary());
+                open_challenge.report = Some((report, revision.current));
             }
         }
         70 => {

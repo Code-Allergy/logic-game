@@ -2,6 +2,7 @@
 //! headless `App` with [`SimulationRuntimePlugin`].
 
 mod canvas_input;
+mod challenges;
 mod demos;
 mod gallery;
 pub mod geometry_tests;
