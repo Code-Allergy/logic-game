@@ -9,7 +9,7 @@
 
 use bevy::{
     camera::ScalingMode,
-    input::mouse::{MouseMotion, MouseWheel},
+    input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     prelude::*,
     window::PrimaryWindow,
 };
@@ -85,6 +85,31 @@ pub fn zoom_about(centre: Vec2, wpp: f32, new_wpp: f32, anchor: Vec2) -> Vec2 {
     anchor - (anchor - centre) * (new_wpp / wpp)
 }
 
+/// Zoom factor of one wheel notch (one "line"): 10% per notch.
+pub const ZOOM_STEP: f32 = 1.1;
+/// Pixels of a pixel-unit scroll (web wheels, trackpads) that count as
+/// one notch. Browsers send about 100 per notch; a trackpad sends a few
+/// per event, so it zooms gradually.
+pub const PIXELS_PER_LINE: f32 = 100.0;
+/// At most this many notches per frame, so a burst of events (a fast
+/// flick, a wheel reporting several lines) cannot jump to a zoom limit.
+pub const MAX_LINES_PER_FRAME: f32 = 3.0;
+
+/// The factor on world units per pixel for one frame of wheel events
+/// (`unit`, `y`): below 1 zooms in (wheel up), above 1 zooms out. Line
+/// and pixel units are normalised to notches first, so one notch is one
+/// [`ZOOM_STEP`] whatever the device reports.
+pub fn wheel_zoom_factor(events: impl IntoIterator<Item = (MouseScrollUnit, f32)>) -> f32 {
+    let lines: f32 = events
+        .into_iter()
+        .map(|(unit, y)| match unit {
+            MouseScrollUnit::Line => y,
+            MouseScrollUnit::Pixel => y / PIXELS_PER_LINE,
+        })
+        .sum();
+    ZOOM_STEP.powf(-lines.clamp(-MAX_LINES_PER_FRAME, MAX_LINES_PER_FRAME))
+}
+
 /// Mouse wheel zoom about the cursor (not while the pointer is over a
 /// HUD card, so scrolling a card does not zoom the canvas).
 pub fn zoom_camera(
@@ -93,8 +118,8 @@ pub fn zoom_camera(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cameras: Query<(&mut Projection, &mut Transform), With<MainCamera>>,
 ) -> Result {
-    let scroll: f32 = scroll_evr.read().map(|ev| ev.y).sum();
-    if scroll == 0.0 || ui_pointer.is_some_and(|p| p.over_egui) {
+    let factor = wheel_zoom_factor(scroll_evr.read().map(|ev| (ev.unit, ev.y)));
+    if factor == 1.0 || ui_pointer.is_some_and(|p| p.over_egui) {
         return Ok(());
     }
     let window = windows.single()?;
@@ -104,7 +129,7 @@ pub fn zoom_camera(
     };
     let screen = window.size();
     let wpp = world_per_pixel(ortho, screen.y);
-    let new_wpp = (wpp * (1.0 - scroll * 0.1).max(0.1)).clamp(MIN_WPP, MAX_WPP);
+    let new_wpp = (wpp * factor).clamp(MIN_WPP, MAX_WPP);
     let centre = transform.translation.truncate();
     if let Some(cursor) = window.cursor_position() {
         let anchor = screen_to_world(cursor, screen, centre, wpp);
@@ -221,6 +246,33 @@ mod tests {
             screen_to_world(cursor, screen, moved, new_wpp),
             anchor
         ));
+    }
+
+    #[test]
+    fn a_wheel_notch_is_one_step_in_line_or_pixel_units() {
+        use MouseScrollUnit::{Line, Pixel};
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert_eq!(wheel_zoom_factor([]), 1.0);
+        // One notch up zooms in one step, one down zooms out one step.
+        let notch = wheel_zoom_factor([(Line, 1.0)]);
+        assert!(close(notch, 1.0 / ZOOM_STEP));
+        assert!(close(wheel_zoom_factor([(Line, -1.0)]), ZOOM_STEP));
+        // A browser wheel notch (about 100 pixels) is the same step,
+        // not a jump to the zoom limit.
+        assert!(close(wheel_zoom_factor([(Pixel, PIXELS_PER_LINE)]), notch));
+        // A trackpad's small pixel deltas zoom gradually, adding up to
+        // the same as one notch.
+        let small = wheel_zoom_factor([(Pixel, 4.0)]);
+        assert!(small < 1.0 && small > 0.99, "{small}");
+        let mut total = 1.0;
+        for _ in 0..25 {
+            total *= wheel_zoom_factor([(Pixel, 4.0)]);
+        }
+        assert!(close(total, notch));
+        // A burst in one frame is capped.
+        let burst = wheel_zoom_factor([(Pixel, 5000.0), (Line, 10.0)]);
+        assert!(close(burst, ZOOM_STEP.powf(-MAX_LINES_PER_FRAME)));
+        assert!(burst > MIN_WPP / MAX_WPP);
     }
 
     #[test]
