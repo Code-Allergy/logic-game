@@ -1,0 +1,138 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "reaction",
+  "circuits": [
+    {
+      "name": "countdown",
+      "title": "Countdown",
+      "nodes": [
+        {"name": "Load", "type": "Input", "at": [0, 120]},
+        {"name": "Tick", "type": "Input", "at": [0, 0]},
+        {"name": "Seed", "type": "Input", "w": 4, "at": [0, -160]},
+        {"name": "m1", "type": "Const", "w": 4, "value": 15, "at": [160, -300]},
+        {"name": "step", "type": "Or", "label": "load or tick", "at": [160, 60]},
+        {"name": "dec", "type": "Add", "w": 4, "label": "count - 1", "at": [320, -220]},
+        {"name": "next", "type": "Mux", "w": 4, "label": "Seed or count - 1", "at": [320, -80]},
+        {"name": "count", "type": "Register", "w": 4, "at": [480, 0]},
+        {"name": "left", "type": "ReduceOr", "w": 4, "label": "time left", "at": [620, 0]},
+        {"name": "over", "type": "Not", "at": [760, 0]},
+        {"name": "Zero", "type": "Output", "at": [900, 0]}
+      ],
+      "wires": [
+        ["Load", "step.a", "next.sel"],
+        ["Tick", "step.b"],
+        ["Seed", "next.b"],
+        ["m1", "dec.b"],
+        ["count", "dec.a", "left"],
+        ["dec.sum", "next.a"],
+        ["next", "count.d"],
+        ["step", "count.en"],
+        ["left", "over"],
+        ["over", "Zero"]
+      ]
+    },
+    {
+      "name": "timer2",
+      "title": "Two-digit timer",
+      "nodes": [
+        {"name": "nine", "type": "Const", "w": 4, "value": 9, "at": [0, 140]},
+        {"name": "Step", "type": "Input", "at": [0, 0]},
+        {"name": "Clear", "type": "Input", "at": [0, 280]},
+        {"name": "ones", "use": "bcd_counter/mod_counter", "label": "ones", "at": [200, 0]},
+        {"name": "tens", "use": "bcd_counter/mod_counter", "label": "tens", "at": [380, 120]},
+        {"name": "Tens", "type": "Output", "w": 4, "at": [560, 120]},
+        {"name": "Ones", "type": "Output", "w": 4, "at": [560, 0]}
+      ],
+      "wires": [
+        ["nine", "ones.Last", "tens.Last"],
+        ["Step", "ones.Step"],
+        ["Clear", "ones.Clear", "tens.Clear"],
+        ["ones.Carry", "tens.Step"],
+        ["ones.Q", "Ones"],
+        ["tens.Q", "Tens"]
+      ]
+    },
+    {
+      "name": "reaction",
+      "title": "Reaction timer",
+      "nodes": [
+        {"name": "Start", "type": "Input", "at": [0, 320]},
+        {"name": "Stop", "type": "Input", "at": [0, 160]},
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Clock",
+          "at": [0, -160]
+        },
+        {"name": "one", "type": "Const", "value": 1, "at": [320, -440]},
+        {
+          "name": "started",
+          "use": "edge_detector/rising",
+          "label": "Start pressed",
+          "at": [160, 320]
+        },
+        {
+          "name": "stopped",
+          "use": "edge_detector/rising",
+          "label": "Stop pressed",
+          "at": [160, 160]
+        },
+        {"name": "tick", "use": "edge_detector/rising", "label": "clock edge", "at": [160, -160]},
+        {"name": "rnd", "use": "lfsr/lfsr8", "label": "random", "at": [160, -320]},
+        {
+          "name": "low3",
+          "type": "Split",
+          "w": 8,
+          "lo": 0,
+          "len": 3,
+          "label": "3 random bits",
+          "at": [320, -320]
+        },
+        {"name": "seed", "type": "Merge", "widths": [3, 1], "label": "8 to 15", "at": [460, -320]},
+        {"name": "waiting", "type": "SrLatch", "label": "waiting", "at": [460, 80]},
+        {"name": "wtick", "type": "And", "label": "tick while waiting", "at": [620, -20]},
+        {"name": "early_s", "type": "And", "label": "stop while waiting", "at": [620, 400]},
+        {"name": "cd", "use": "countdown", "label": "random wait", "at": [780, -280]},
+        {"name": "early", "type": "SrLatch", "label": "too soon", "at": [780, 480]},
+        {"name": "done", "type": "And", "label": "wait over", "at": [940, 0]},
+        {"name": "wreset", "type": "Or", "label": "stop waiting", "at": [780, 160]},
+        {"name": "goreset", "type": "Or", "label": "start or stop", "at": [940, 320]},
+        {"name": "go", "type": "SrLatch", "label": "go", "at": [1100, 160]},
+        {"name": "cstep", "type": "And", "label": "count", "at": [1260, 0]},
+        {"name": "time", "use": "timer2", "label": "reaction time", "at": [1420, 240]},
+        {"name": "TooSoon", "type": "Output", "label": "Too soon!", "at": [1620, 480]},
+        {"name": "Go", "type": "Output", "label": "GO!", "at": [1620, 60]},
+        {"name": "Tens", "type": "Display", "w": 4, "label": "Time (tens)", "at": [1640, 300]},
+        {"name": "Ones", "type": "Display", "w": 4, "label": "Time (ones)", "at": [1640, 180]}
+      ],
+      "wires": [
+        ["Start", "started"],
+        ["Stop", "stopped"],
+        ["clock", "tick", "rnd"],
+        ["rnd", "low3"],
+        ["low3", "seed.a0"],
+        ["one", "seed.a1"],
+        ["started", "waiting.s", "early.r", "cd.Load", "goreset.a", "time.Clear"],
+        ["stopped", "early_s.a", "wreset.b", "goreset.b"],
+        ["waiting", "early_s.b", "wtick.a", "done.a"],
+        ["tick", "wtick.b", "cstep.b"],
+        ["wtick", "cd.Tick"],
+        ["seed", "cd.Seed"],
+        ["cd", "done.b"],
+        ["done", "wreset.a", "go.s"],
+        ["wreset", "waiting.r"],
+        ["early_s", "early.s"],
+        ["early", "TooSoon"],
+        ["goreset", "go.r"],
+        ["go", "cstep.a", "Go"],
+        ["cstep", "time.Step"],
+        ["time.Ones", "Ones"],
+        ["time.Tens", "Tens"]
+      ]
+    }
+  ]
+}

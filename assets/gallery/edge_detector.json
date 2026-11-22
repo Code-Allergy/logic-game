@@ -1,0 +1,44 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "rising",
+      "title": "Rising-edge detector",
+      "nodes": [
+        {"name": "In", "type": "Input", "at": [0, 0]},
+        {"name": "prev", "type": "Delay", "label": "last tick", "at": [140, -100]},
+        {"name": "was_low", "type": "Not", "at": [280, -100]},
+        {"name": "rise", "type": "And", "label": "now 1, was 0", "at": [420, 0]},
+        {"name": "Rise", "type": "Output", "at": [560, 0]}
+      ],
+      "wires": [
+        ["In", "rise.a", "prev"],
+        ["prev", "was_low"],
+        ["was_low", "rise.b"],
+        ["rise", "Rise"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "Edge detector",
+      "nodes": [
+        {"name": "Signal", "type": "Input", "at": [0, 0]},
+        {"name": "up", "use": "rising", "label": "rising edge", "at": [320, 100]},
+        {"name": "prev", "type": "Delay", "label": "last tick", "at": [160, -80]},
+        {"name": "now_low", "type": "Not", "label": "now 0", "at": [160, -200]},
+        {"name": "fall", "type": "And", "label": "now 0, was 1", "at": [320, -140]},
+        {"name": "Rising", "type": "Output", "label": "Rising edge", "at": [480, 100]},
+        {"name": "Falling", "type": "Output", "label": "Falling edge", "at": [480, -140]}
+      ],
+      "wires": [
+        ["Signal", "up", "prev", "now_low"],
+        ["prev", "fall.a"],
+        ["now_low", "fall.b"],
+        ["up", "Rising"],
+        ["fall", "Falling"]
+      ]
+    }
+  ]
+}

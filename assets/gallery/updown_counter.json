@@ -1,0 +1,54 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "updown8",
+      "title": "8-bit up/down counter",
+      "nodes": [
+        {"name": "plus1", "type": "Const", "w": 8, "value": 1, "at": [140, 340]},
+        {"name": "minus1", "type": "Const", "w": 8, "value": "0xFF", "at": [140, 260]},
+        {"name": "Up", "type": "Input", "at": [0, 120]},
+        {"name": "Enable", "type": "Input", "at": [0, 0]},
+        {"name": "Clk", "type": "Input", "at": [0, -120]},
+        {"name": "step", "use": "mux/mux2x8", "label": "+1 or -1", "at": [280, 260]},
+        {"name": "zc", "type": "Const", "value": 0, "at": [440, 60]},
+        {"name": "add", "use": "ripple_adder/adder8", "label": "Q + step", "at": [440, 140]},
+        {"name": "reg", "use": "register/register8", "label": "register", "at": [600, 0]},
+        {"name": "Q", "type": "Output", "w": 8, "at": [760, 0]}
+      ],
+      "wires": [
+        ["Up", "step.Sel"],
+        ["minus1", "step.A"],
+        ["plus1", "step.B"],
+        ["step", "add.B"],
+        ["zc", "add.Cin"],
+        ["reg", "add.A", "Q"],
+        ["add.Sum", "reg.D"],
+        ["Enable", "reg.Load"],
+        ["Clk", "reg.Clk"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "Up/down counter",
+      "nodes": [
+        {"name": "Up", "type": "Input", "at": [0, 120]},
+        {"name": "Enable", "type": "Input", "at": [0, 0]},
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Clock",
+          "at": [0, -120]
+        },
+        {"name": "cnt", "use": "updown8", "label": "up/down counter", "at": [220, 0]},
+        {"name": "show", "type": "Display", "w": 8, "label": "Count", "at": [440, 0]}
+      ],
+      "wires": [["Up", "cnt.Up"], ["Enable", "cnt.Enable"], ["clock", "cnt.Clk"], ["cnt", "show"]]
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "mod_counter",
+      "title": "Counter 0 to Last",
+      "nodes": [
+        {"name": "zero", "type": "Const", "w": 4, "value": 0, "at": [0, 440]},
+        {"name": "one", "type": "Const", "w": 4, "value": 1, "at": [0, 320]},
+        {"name": "Last", "type": "Input", "w": 4, "at": [0, 200]},
+        {"name": "Step", "type": "Input", "at": [0, 0]},
+        {"name": "Clear", "type": "Input", "at": [0, -120]},
+        {"name": "at_last", "type": "Eq", "w": 4, "label": "Q = Last", "at": [200, 200]},
+        {"name": "inc", "type": "Add", "w": 4, "label": "Q + 1", "at": [200, 320]},
+        {"name": "wrap", "type": "Or", "label": "back to 0", "at": [360, 80]},
+        {"name": "next", "type": "Mux", "w": 4, "at": [360, 320]},
+        {"name": "carry", "type": "And", "at": [360, -40]},
+        {"name": "load", "type": "Or", "label": "change", "at": [360, -160]},
+        {"name": "reg", "type": "Register", "w": 4, "at": [520, 200]},
+        {"name": "Q", "type": "Output", "w": 4, "at": [680, 200]},
+        {"name": "Carry", "type": "Output", "at": [680, -40]}
+      ],
+      "wires": [
+        ["reg", "at_last.a", "inc.a", "Q"],
+        ["Last", "at_last.b"],
+        ["one", "inc.b"],
+        ["inc.sum", "next.a"],
+        ["zero", "next.b"],
+        ["at_last", "wrap.a", "carry.b"],
+        ["Clear", "wrap.b", "load.b"],
+        ["wrap", "next.sel"],
+        ["Step", "carry.a", "load.a"],
+        ["next", "reg.d"],
+        ["load", "reg.en"],
+        ["carry", "Carry"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "BCD counter",
+      "nodes": [
+        {"name": "nine", "type": "Const", "w": 4, "value": 9, "at": [0, 240]},
+        {"name": "Reset", "type": "Input", "at": [0, 120]},
+        {"name": "Enable", "type": "Input", "at": [0, 0]},
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Clock",
+          "at": [0, -160]
+        },
+        {"name": "edge", "use": "edge_detector/rising", "label": "rising edge", "at": [160, -160]},
+        {"name": "step", "type": "And", "label": "count", "at": [300, -80]},
+        {"name": "ones", "use": "mod_counter", "label": "ones digit", "at": [460, 0]},
+        {"name": "tens", "use": "mod_counter", "label": "tens digit", "at": [640, 120]},
+        {"name": "Tens", "type": "Display", "w": 4, "at": [840, 120]},
+        {"name": "Ones", "type": "Display", "w": 4, "at": [840, 0]}
+      ],
+      "wires": [
+        ["clock", "edge"],
+        ["edge", "step.a"],
+        ["Enable", "step.b"],
+        ["step", "ones.Step"],
+        ["ones.Carry", "tens.Step"],
+        ["nine", "ones.Last", "tens.Last"],
+        ["Reset", "ones.Clear", "tens.Clear"],
+        ["ones.Q", "Ones"],
+        ["tens.Q", "Tens"]
+      ]
+    }
+  ]
+}

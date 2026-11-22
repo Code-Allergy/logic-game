@@ -2,6 +2,7 @@
 //! headless `App` with [`SimulationRuntimePlugin`].
 
 mod demos;
+mod gallery;
 pub mod geometry_tests;
 mod instance_views;
 mod rtl;

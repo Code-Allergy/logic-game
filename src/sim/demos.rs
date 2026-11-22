@@ -13,6 +13,13 @@
 //! A demo's circuits get ids derived from `demos/<id>/<circuit>` (UUID v5,
 //! [`super::source::circuit_id`]), so loading a demo twice, or a demo and
 //! another demo that uses it, yields the same shared definitions.
+//!
+//! Beside the curriculum, `assets/gallery/` holds the gallery: more
+//! circuits, simple to complex, grouped in categories instead of levels.
+//! Its `manifest.json` has the same shape with `categories` and `items`;
+//! an item may use any curriculum demo and any gallery item listed before
+//! it (`"<id>/<circuit>"` references share one namespace, so gallery ids
+//! differ from demo ids). Its ids derive from `gallery/<id>/<circuit>`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
@@ -25,20 +32,25 @@ use super::{CircuitDocument, CircuitLibrary, GateKind, WorkspaceDocument};
 
 /// Folder of the demo files, relative to the working directory.
 pub const DEMO_DIR: &str = "assets/demos";
+/// Folder of the gallery files, relative to the working directory.
+pub const GALLERY_DIR: &str = "assets/gallery";
 pub const MANIFEST_FILE: &str = "manifest.json";
-/// Format tag of `manifest.json`.
+/// Format tag of the demos' `manifest.json`.
 pub const MANIFEST_FORMAT: &str = "gatequest-demos";
+/// Format tag of the gallery's `manifest.json`.
+pub const GALLERY_FORMAT: &str = "gatequest-gallery";
 pub const MANIFEST_VERSION: u32 = 1;
 
 macro_rules! embed {
-    ($($file:literal),* $(,)?) => {
-        &[$(($file, include_str!(concat!("../../assets/demos/", $file)))),*]
+    ($dir:literal: $($file:literal),* $(,)?) => {
+        &[$(($file, include_str!(concat!("../../assets/", $dir, "/", $file)))),*]
     };
 }
 
 /// Every file of `assets/demos/`, embedded (a test checks that this list
 /// matches the folder).
 pub const EMBEDDED: &[(&str, &str)] = embed!(
+    "demos":
     "manifest.json",
     "gates.json",
     "universal.json",
@@ -56,6 +68,39 @@ pub const EMBEDDED: &[(&str, &str)] = embed!(
     "register_file.json",
     "alu.json",
     "cpu.json",
+);
+
+/// Every file of `assets/gallery/`, embedded (checked like [`EMBEDDED`]).
+pub const GALLERY_EMBEDDED: &[(&str, &str)] = embed!(
+    "gallery":
+    "manifest.json",
+    "majority.json",
+    "comparator.json",
+    "magnitude.json",
+    "parity.json",
+    "gray_code.json",
+    "priority_encoder.json",
+    "seven_segment.json",
+    "bcd_to_binary.json",
+    "barrel_shifter.json",
+    "cla_adder.json",
+    "multiplier.json",
+    "edge_detector.json",
+    "shift_register.json",
+    "johnson_counter.json",
+    "lfsr.json",
+    "clock_divider.json",
+    "updown_counter.json",
+    "bcd_counter.json",
+    "debouncer.json",
+    "pwm.json",
+    "sequence_detector.json",
+    "traffic_light.json",
+    "stopwatch.json",
+    "stack.json",
+    "uart_tx.json",
+    "reaction_timer.json",
+    "cpu_fibonacci.json",
 );
 
 #[derive(Debug, Deserialize)]
@@ -86,11 +131,42 @@ struct ManifestDemo {
     uses: Vec<String>,
 }
 
-/// One loaded demo.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GalleryFile {
+    format: String,
+    version: u32,
+    categories: Vec<Category>,
+    items: Vec<GalleryItem>,
+}
+
+/// A group of the gallery.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Category {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GalleryItem {
+    id: String,
+    category: String,
+    title: String,
+    description: String,
+    #[serde(default)]
+    uses: Vec<String>,
+}
+
+/// One loaded demo or gallery item.
 #[derive(Debug, Clone)]
 pub struct Demo {
     pub id: String,
+    /// Its curriculum level; 0 for a gallery item.
     pub level: u32,
+    /// Its gallery category (`None` for a curriculum demo).
+    pub category: Option<String>,
     pub title: String,
     pub description: String,
     /// The `"demo/circuit"` definitions from other demos it instances.
@@ -104,12 +180,16 @@ pub struct Demo {
     pub circuits: Vec<(String, Arc<CircuitDocument>)>,
 }
 
-/// The demos in manifest (pyramid) order.
+/// The demos in manifest (pyramid) order, then the gallery.
 #[derive(Debug, Default)]
 pub struct DemoCatalog {
     pub levels: Vec<Level>,
     pub demos: Vec<Demo>,
-    /// `"demo/circuit"` -> definition id, for every circuit of every demo.
+    pub categories: Vec<Category>,
+    /// The gallery items in manifest order (grouped by category).
+    pub gallery: Vec<Demo>,
+    /// `"demo/circuit"` -> definition id, for every circuit of every demo
+    /// and gallery item.
     names: HashMap<String, Uuid>,
     library: CircuitLibrary,
 }
@@ -119,28 +199,47 @@ pub fn demo_key(id: &str) -> String {
     format!("demos/{id}")
 }
 
+/// The key that derives a gallery item's ids.
+pub fn gallery_key(id: &str) -> String {
+    format!("gallery/{id}")
+}
+
+fn embedded_file(files: &[(&str, &str)], file: &str) -> Result<String, String> {
+    files
+        .iter()
+        .find(|(name, _)| *name == file)
+        .map(|(_, text)| (*text).to_string())
+        .ok_or_else(|| format!("{file} is not embedded"))
+}
+
 impl DemoCatalog {
     /// Load from the embedded files.
     pub fn embedded() -> Result<Self, String> {
-        Self::load(|file| {
-            EMBEDDED
-                .iter()
-                .find(|(name, _)| *name == file)
-                .map(|(_, text)| (*text).to_string())
-                .ok_or_else(|| format!("{file} is not embedded"))
-        })
+        Self::load(
+            |file| embedded_file(EMBEDDED, file),
+            |file| embedded_file(GALLERY_EMBEDDED, file),
+        )
     }
 
-    /// Load from a folder (native only).
+    /// Load from the demo and gallery folders (native only).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn from_dir(dir: &std::path::Path) -> Result<Self, String> {
-        Self::load(|file| {
-            std::fs::read_to_string(dir.join(file)).map_err(|e| format!("{file}: {e}"))
-        })
+    pub fn from_dir(demos: &std::path::Path, gallery: &std::path::Path) -> Result<Self, String> {
+        let reader = |dir: &std::path::Path| {
+            let dir = dir.to_path_buf();
+            move |file: &str| {
+                std::fs::read_to_string(dir.join(file))
+                    .map_err(|e| format!("{}: {e}", dir.join(file).display()))
+            }
+        };
+        Self::load(reader(demos), reader(gallery))
     }
 
-    /// Load with `read` giving the text of a file by name.
-    pub fn load(read: impl Fn(&str) -> Result<String, String>) -> Result<Self, String> {
+    /// Load with `read` giving the text of a demo file by name, and
+    /// `read_gallery` that of a gallery file.
+    pub fn load(
+        read: impl Fn(&str) -> Result<String, String>,
+        read_gallery: impl Fn(&str) -> Result<String, String>,
+    ) -> Result<Self, String> {
         let manifest: ManifestFile = serde_json::from_str(&read(MANIFEST_FILE)?)
             .map_err(|e| format!("{MANIFEST_FILE}: {e}"))?;
         if manifest.format != MANIFEST_FORMAT || manifest.version != MANIFEST_VERSION {
@@ -207,6 +306,7 @@ impl DemoCatalog {
             catalog.demos.push(Demo {
                 id: entry.id,
                 level: entry.level,
+                category: None,
                 title: entry.title,
                 description: entry.description,
                 uses: entry.uses,
@@ -215,16 +315,107 @@ impl DemoCatalog {
                 circuits: expansion.circuits,
             });
         }
+        catalog.load_gallery(read_gallery)?;
         Ok(catalog)
     }
 
-    pub fn get(&self, id: &str) -> Option<&Demo> {
-        self.demos.iter().find(|d| d.id == id)
+    /// Load the gallery on top of the curriculum.
+    fn load_gallery(
+        &mut self,
+        read: impl Fn(&str) -> Result<String, String>,
+    ) -> Result<(), String> {
+        let place = |e: String| format!("gallery {MANIFEST_FILE}: {e}");
+        let manifest: GalleryFile =
+            serde_json::from_str(&read(MANIFEST_FILE)?).map_err(|e| place(e.to_string()))?;
+        if manifest.format != GALLERY_FORMAT || manifest.version != MANIFEST_VERSION {
+            return Err(place(format!(
+                "expected format \"{GALLERY_FORMAT}\" version {MANIFEST_VERSION}"
+            )));
+        }
+        self.categories = manifest.categories;
+        let mut last_category = 0;
+        for entry in manifest.items {
+            let file = format!("{}.json", entry.id);
+            let place = |e: String| format!("gallery item \"{}\" ({file}): {e}", entry.id);
+            if self.get(&entry.id).is_some() {
+                return Err(place(
+                    "the id is taken by another demo or gallery item".into(),
+                ));
+            }
+            let Some(category) = self.categories.iter().position(|c| c.id == entry.category) else {
+                return Err(place(format!(
+                    "category \"{}\" is not in \"categories\"",
+                    entry.category
+                )));
+            };
+            if category < last_category {
+                return Err(place(
+                    "items of a category must be listed together, in category order".into(),
+                ));
+            }
+            last_category = category;
+
+            let source = source::parse(&read(&file)?).map_err(|e| place(e.to_string()))?;
+            // `uses` lists exactly what the file instances: curriculum demos
+            // and gallery items listed before it.
+            let used = source.external_uses();
+            let listed: BTreeSet<String> = entry.uses.iter().cloned().collect();
+            if used != listed || listed.len() != entry.uses.len() {
+                return Err(place(format!(
+                    "\"uses\" in the manifest is {:?} but the file uses {:?}",
+                    entry.uses, used
+                )));
+            }
+            for r in &used {
+                let demo = r.split('/').next().unwrap_or_default();
+                if self.get(demo).is_none() {
+                    return Err(place(format!(
+                        "\"{r}\": \"{demo}\" is not a demo or a gallery item listed before it"
+                    )));
+                }
+            }
+
+            let expansion = source::expand(&source, &gallery_key(&entry.id), &self.externals())
+                .map_err(|e| place(e.to_string()))?;
+            for (name, doc) in &expansion.circuits {
+                self.names.insert(format!("{}/{name}", entry.id), doc.id);
+                self.library.definitions.insert(doc.id, Arc::clone(doc));
+            }
+            self.gallery.push(Demo {
+                id: entry.id,
+                level: 0,
+                category: Some(entry.category),
+                title: entry.title,
+                description: entry.description,
+                uses: entry.uses,
+                source,
+                workspace: Arc::new(expansion.workspace),
+                circuits: expansion.circuits,
+            });
+        }
+        Ok(())
     }
 
-    /// The demo whose root circuit has this id.
+    /// Every demo, then every gallery item.
+    pub fn all(&self) -> impl Iterator<Item = &Demo> {
+        self.demos.iter().chain(&self.gallery)
+    }
+
+    /// The demo or gallery item `id`.
+    pub fn get(&self, id: &str) -> Option<&Demo> {
+        self.all().find(|d| d.id == id)
+    }
+
+    /// The demo or gallery item whose root circuit has this id.
     pub fn by_root(&self, root: Uuid) -> Option<&Demo> {
-        self.demos.iter().find(|d| d.workspace.root.id == root)
+        self.all().find(|d| d.workspace.root.id == root)
+    }
+
+    pub fn category_title(&self, id: &str) -> &str {
+        self.categories
+            .iter()
+            .find(|c| c.id == id)
+            .map_or("", |c| c.title.as_str())
     }
 
     pub fn level_title(&self, level: u32) -> &str {
@@ -243,21 +434,25 @@ impl DemoCatalog {
     }
 }
 
-/// The demo catalog, loaded once: on native from [`DEMO_DIR`] when it has a
-/// manifest (falling back to the embedded files on error), otherwise from
-/// the embedded files.
+/// The demo catalog, loaded once: on native from [`DEMO_DIR`] and
+/// [`GALLERY_DIR`] when they have a manifest (falling back to the embedded
+/// files on error), otherwise from the embedded files.
 pub fn catalog() -> Result<&'static DemoCatalog, &'static str> {
     static CATALOG: OnceLock<Result<DemoCatalog, String>> = OnceLock::new();
     CATALOG
         .get_or_init(|| {
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let dir = std::path::Path::new(DEMO_DIR);
-                if dir.join(MANIFEST_FILE).exists() {
-                    match DemoCatalog::from_dir(dir) {
+                let (dir, gallery) = (
+                    std::path::Path::new(DEMO_DIR),
+                    std::path::Path::new(GALLERY_DIR),
+                );
+                if dir.join(MANIFEST_FILE).exists() && gallery.join(MANIFEST_FILE).exists() {
+                    match DemoCatalog::from_dir(dir, gallery) {
                         Ok(catalog) => return Ok(catalog),
                         Err(e) => bevy::log::warn!(
-                            "Cannot load the demos in {DEMO_DIR}: {e}; using the built-in copies"
+                            "Cannot load the demos in {DEMO_DIR} and {GALLERY_DIR}: {e}; \
+                             using the built-in copies"
                         ),
                     }
                 }

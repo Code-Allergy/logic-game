@@ -1,0 +1,114 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "uart_tx",
+      "title": "UART transmitter",
+      "nodes": [
+        {"name": "zero", "type": "Const", "value": 0, "at": [160, 400]},
+        {"name": "one", "type": "Const", "value": 1, "at": [160, 120]},
+        {"name": "Data", "type": "Input", "w": 8, "at": [0, 280]},
+        {"name": "Send", "type": "Input", "at": [0, 40]},
+        {"name": "Clk", "type": "Input", "at": [0, -120]},
+        {"name": "bit", "use": "edge_detector/rising", "label": "bit edge", "at": [160, -120]},
+        {
+          "name": "frame",
+          "type": "Merge",
+          "widths": [1, 8, 1],
+          "label": "start, data, stop",
+          "at": [300, 280]
+        },
+        {"name": "want", "type": "Or", "label": "busy or send", "at": [300, 40]},
+        {"name": "load", "type": "And", "label": "step", "at": [440, -40]},
+        {"name": "shn", "type": "Mux", "w": 10, "label": "load or shift", "at": [440, 280]},
+        {"name": "sh", "type": "Register", "w": 10, "label": "shift register", "at": [600, 280]},
+        {
+          "name": "rest",
+          "type": "Split",
+          "w": 10,
+          "lo": 1,
+          "len": 9,
+          "label": "bits 1-9",
+          "at": [760, 400]
+        },
+        {
+          "name": "shifted",
+          "type": "Merge",
+          "widths": [9, 1],
+          "label": "shifted, 1 in",
+          "at": [600, 440]
+        },
+        {
+          "name": "b0",
+          "type": "Split",
+          "w": 10,
+          "lo": 0,
+          "len": 1,
+          "label": "bit 0",
+          "at": [760, 280]
+        },
+        {"name": "ten", "type": "Const", "w": 4, "value": 10, "at": [300, -200]},
+        {"name": "m1", "type": "Const", "w": 4, "value": 15, "at": [440, -280]},
+        {"name": "cntn", "type": "Mux", "w": 4, "label": "10 or count - 1", "at": [440, -160]},
+        {"name": "cnt", "type": "Register", "w": 4, "label": "bits left", "at": [600, -160]},
+        {"name": "dec", "type": "Add", "w": 4, "label": "count - 1", "at": [600, -320]},
+        {"name": "busy", "type": "ReduceOr", "w": 4, "label": "busy", "at": [760, -360]},
+        {"name": "tx", "type": "Mux", "label": "idle is 1", "at": [900, 160]},
+        {"name": "TX", "type": "Output", "at": [1040, 160]},
+        {"name": "Busy", "type": "Output", "at": [1040, -360]}
+      ],
+      "wires": [
+        ["zero", "frame.a0"],
+        ["Data", "frame.a1"],
+        ["one", "frame.a2", "shifted.a1", "tx.a"],
+        ["Clk", "bit"],
+        ["busy", "want.a", "shn.sel", "cntn.sel", "tx.sel", "Busy"],
+        ["Send", "want.b"],
+        ["bit", "load.a"],
+        ["want", "load.b"],
+        ["frame", "shn.a"],
+        ["shifted", "shn.b"],
+        ["shn", "sh.d"],
+        ["load", "sh.en", "cnt.en"],
+        ["sh", "rest", "b0"],
+        ["rest", "shifted.a0"],
+        ["b0", "tx.b"],
+        ["ten", "cntn.a"],
+        ["dec.sum", "cntn.b"],
+        ["cntn", "cnt.d"],
+        ["cnt", "dec.a", "busy"],
+        ["m1", "dec.b"],
+        ["tx", "TX"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "UART transmitter",
+      "nodes": [
+        {"name": "Data", "type": "Input", "w": 8, "at": [0, 120]},
+        {"name": "Send", "type": "Input", "at": [0, 0]},
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Bit clock",
+          "at": [0, -120]
+        },
+        {"name": "uart", "use": "uart_tx", "label": "transmitter", "at": [220, 0]},
+        {"name": "TX", "type": "Output", "label": "TX line", "at": [420, 60]},
+        {"name": "Busy", "type": "Output", "at": [420, -60]}
+      ],
+      "wires": [
+        ["Data", "uart.Data"],
+        ["Send", "uart.Send"],
+        ["clock", "uart.Clk"],
+        ["uart.TX", "TX"],
+        ["uart.Busy", "Busy"]
+      ]
+    }
+  ]
+}

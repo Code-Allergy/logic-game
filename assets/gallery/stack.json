@@ -1,0 +1,101 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "stack8",
+      "title": "8-entry stack",
+      "nodes": [
+        {"name": "Push", "type": "Input", "at": [0, 200]},
+        {"name": "Pop", "type": "Input", "at": [0, 80]},
+        {"name": "Data", "type": "Input", "w": 8, "at": [0, -400]},
+        {"name": "nfull", "type": "Not", "label": "not full", "at": [180, 320]},
+        {"name": "do_push", "type": "And", "label": "push", "at": [180, 200]},
+        {"name": "do_pop", "type": "And", "label": "pop", "at": [180, 80]},
+        {"name": "p1", "type": "Const", "w": 4, "value": 1, "at": [180, -20]},
+        {"name": "m1", "type": "Const", "w": 4, "value": 15, "at": [180, -100]},
+        {"name": "move", "type": "Or", "label": "move", "at": [340, 260]},
+        {"name": "delta", "type": "Mux", "w": 4, "label": "+1 or -1", "at": [340, -40]},
+        {"name": "spn", "type": "Add", "w": 4, "label": "new depth", "at": [500, -40]},
+        {"name": "sp", "type": "Register", "w": 4, "label": "depth", "at": [660, 140]},
+        {"name": "m1b", "type": "Const", "w": 4, "value": 15, "at": [660, -120]},
+        {
+          "name": "full",
+          "type": "Split",
+          "w": 4,
+          "lo": 3,
+          "len": 1,
+          "label": "depth 8",
+          "at": [820, 320]
+        },
+        {"name": "any", "type": "ReduceOr", "w": 4, "label": "not empty", "at": [820, 220]},
+        {"name": "dec", "type": "Add", "w": 4, "label": "top index", "at": [820, 0]},
+        {"name": "empty", "type": "Not", "at": [980, 220]},
+        {"name": "addr", "type": "Mux", "w": 4, "label": "address", "at": [980, 0]},
+        {
+          "name": "mem",
+          "type": "Ram",
+          "addr_bits": 4,
+          "w": 8,
+          "label": "memory",
+          "at": [1140, -200]
+        },
+        {"name": "top", "type": "Switch", "w": 8, "label": "0 if empty", "at": [1300, -200]},
+        {"name": "Full", "type": "Output", "at": [1460, 320]},
+        {"name": "Empty", "type": "Output", "at": [1460, 220]},
+        {"name": "Depth", "type": "Output", "w": 4, "at": [1460, 140]},
+        {"name": "Top", "type": "Output", "w": 8, "at": [1460, -200]}
+      ],
+      "wires": [
+        ["Push", "do_push.a"],
+        ["Pop", "do_pop.a"],
+        ["full", "nfull", "Full"],
+        ["nfull", "do_push.b"],
+        ["any", "do_pop.b", "empty", "top.en"],
+        ["do_push", "move.a", "delta.sel", "addr.sel", "mem.we"],
+        ["do_pop", "move.b"],
+        ["m1", "delta.a"],
+        ["p1", "delta.b"],
+        ["delta", "spn.b"],
+        ["sp", "spn.a", "full", "any", "dec.a", "addr.b", "Depth"],
+        ["spn.sum", "sp.d"],
+        ["move", "sp.en"],
+        ["m1b", "dec.b"],
+        ["dec.sum", "addr.a"],
+        ["addr", "mem.addr"],
+        ["Data", "mem.wdata"],
+        ["mem", "top.d"],
+        ["top", "Top"],
+        ["empty", "Empty"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "Stack",
+      "nodes": [
+        {"name": "Push", "type": "Input", "at": [0, 160]},
+        {"name": "Pop", "type": "Input", "at": [0, 40]},
+        {"name": "Data", "type": "Input", "w": 8, "at": [0, -120]},
+        {"name": "push_e", "use": "edge_detector/rising", "label": "pressed", "at": [160, 160]},
+        {"name": "pop_e", "use": "edge_detector/rising", "label": "pressed", "at": [160, 40]},
+        {"name": "st", "use": "stack8", "label": "stack", "at": [360, 40]},
+        {"name": "Top", "type": "Display", "w": 8, "at": [600, 200]},
+        {"name": "Depth", "type": "Display", "w": 4, "at": [600, 80]},
+        {"name": "Empty", "type": "Output", "at": [580, -40]},
+        {"name": "Full", "type": "Output", "at": [580, -120]}
+      ],
+      "wires": [
+        ["Push", "push_e"],
+        ["Pop", "pop_e"],
+        ["push_e", "st.Push"],
+        ["pop_e", "st.Pop"],
+        ["Data", "st.Data"],
+        ["st.Top", "Top"],
+        ["st.Depth", "Depth"],
+        ["st.Empty", "Empty"],
+        ["st.Full", "Full"]
+      ]
+    }
+  ]
+}

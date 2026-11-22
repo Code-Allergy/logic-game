@@ -1,13 +1,13 @@
 //! Rewrite save format version 6 files in canonical form, or check them.
 //!
 //! ```sh
-//! cargo run --example demo_fmt                  # every demo in assets/demos
+//! cargo run --example demo_fmt                  # assets/demos and assets/gallery
 //! cargo run --example demo_fmt -- --check       # fail if one is not canonical
 //! cargo run --example demo_fmt -- a.json b.json # these files
 //! ```
 //!
 //! Canonical form is what `gate_quest::sim::source::to_text` prints (see
-//! `docs/save-format.md`). The manifest is left alone.
+//! `docs/save-format.md`). The manifests are left alone.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,17 +24,19 @@ fn main() -> ExitCode {
         }
     }
     if files.is_empty() {
-        let dir = PathBuf::from(gate_quest::sim::demos::DEMO_DIR);
-        let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .expect("assets/demos (run from the repository root)")
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.extension().is_some_and(|e| e == "json")
-                    && p.file_name().is_some_and(|n| n != "manifest.json")
-            })
-            .collect();
-        found.sort();
-        files = found;
+        use gate_quest::sim::demos::{DEMO_DIR, GALLERY_DIR};
+        for dir in [DEMO_DIR, GALLERY_DIR] {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("{dir} (run from the repository root): {e}"))
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension().is_some_and(|e| e == "json")
+                        && p.file_name().is_some_and(|n| n != "manifest.json")
+                })
+                .collect();
+            found.sort();
+            files.extend(found);
+        }
     }
     let mut failed = false;
     for path in files {
