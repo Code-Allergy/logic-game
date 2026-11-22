@@ -250,10 +250,12 @@ impl Challenge {
             let names: Vec<String> = self
                 .forbidden
                 .iter()
-                .map(|f| match self.forbidden_defs.iter().find(|(r, ..)| r == f) {
-                    Some((_, _, label)) => label.clone(),
-                    None => display(f),
-                })
+                .map(
+                    |f| match self.forbidden_defs.iter().find(|(r, ..)| r == f) {
+                        Some((_, _, label)) => label.clone(),
+                        None => display(f),
+                    },
+                )
                 .collect();
             parts.push(format!("No {}", names.join(", ")));
         }
@@ -268,10 +270,7 @@ impl Challenge {
         let Some(name) = type_name(kind) else {
             return true; // chips: checked by what is inside
         };
-        self.allowed
-            .as_ref()
-            .is_none_or(|a| a.iter().any(|t| *t == name))
-            && !self.forbidden.contains(&name)
+        self.allowed.as_ref().is_none_or(|a| a.contains(&name)) && !self.forbidden.contains(&name)
     }
 
     /// The first part of `workspace` the rules refuse: (what, where).
@@ -859,7 +858,7 @@ pub(super) fn load(
                     map.iter()
                         .map(|(n, v)| {
                             find(n, list, what)?;
-                            Ok((n.clone(), value(v).map_err(&place)?))
+                            Ok((n.clone(), value(v).map_err(place)?))
                         })
                         .collect()
                 };

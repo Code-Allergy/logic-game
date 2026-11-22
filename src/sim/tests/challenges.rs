@@ -462,7 +462,7 @@ fn parts_outside_the_rules_are_refused() {
     assert!(c.allows_kind(&GateKind::Input { w: 1 }));
     assert!(!c.allows_kind(&GateKind::And { w: 1 }));
     let catalog = demos();
-    assert!(c.allows_chip(&catalog.get("universal").unwrap().workspace) == false);
+    assert!(!c.allows_chip(&catalog.get("universal").unwrap().workspace));
     let c = challenge("adder8");
     assert!(c.allows_chip(&catalog.get("full_adder").unwrap().workspace));
     assert!(!c.allows_chip(&catalog.get("ripple_adder").unwrap().workspace));
