@@ -235,12 +235,36 @@ fn new_wire_replaces_the_driver_of_an_input_pin() {
     let a = create_gate(&mut app, GateKind::Input { w: 1 }, "A");
     let b = create_gate(&mut app, GateKind::Input { w: 1 }, "B");
     let y = create_gate(&mut app, GateKind::Output { w: 1 }, "Y");
+    let feedback = |app: &App| {
+        app.world()
+            .resource::<crate::sim::AuthoringFeedback>()
+            .message
+            .clone()
+    };
     create_wire(&mut app, a, 0, y, 0);
+    assert_eq!(feedback(&app), None);
     create_wire(&mut app, b, 0, y, 0);
     assert_eq!(wires(&mut app).len(), 1, "one driver per input pin");
+    assert_eq!(
+        feedback(&app).as_deref(),
+        Some("Replaced the wire into Y"),
+        "the replacement is reported"
+    );
     set_input(&mut app, "B", 1);
     run(&mut app, 1);
     assert_eq!(input_value(&app, y, 0), 1);
+    // The same wire again replaces nothing.
+    create_wire(&mut app, b, 0, y, 0);
+    assert_eq!(feedback(&app), None);
+    // A gate with several inputs names the pin.
+    let and = create_gate(&mut app, GateKind::And { w: 1 }, "Gate");
+    create_wire(&mut app, a, 0, and, 1);
+    create_wire(&mut app, b, 0, and, 1);
+    let message = feedback(&app).unwrap();
+    assert!(
+        message.starts_with("Replaced the wire into Gate ("),
+        "{message}"
+    );
 }
 
 #[test]

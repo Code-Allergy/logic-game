@@ -621,14 +621,19 @@ pub fn apply_create_wire_system(
     library: Res<CircuitLibrary>,
     mut revision: ResMut<WorkspaceRevision>,
     mut feedback: ResMut<AuthoringFeedback>,
-    gates: Query<(&GateIdentity, &GateType)>,
+    gates: Query<(&GateIdentity, &GateType, Option<&GateLabel>)>,
     wires: Query<(Entity, &WireEndpoints)>,
 ) {
     for event in events.read() {
         if active.refuse_edit(&mut feedback) {
             continue;
         }
-        let find = |uuid: Uuid| gates.iter().find(|(id, _)| id.uuid == uuid).map(|(_, t)| t);
+        let find = |uuid: Uuid| {
+            gates
+                .iter()
+                .find(|(id, ..)| id.uuid == uuid)
+                .map(|(_, t, _)| t)
+        };
         let (Some(source), Some(sink)) = (find(event.source_gate), find(event.sink_gate)) else {
             feedback.refuse("Cannot create wire: gate not found".into());
             continue;
@@ -658,10 +663,14 @@ pub fn apply_create_wire_system(
             ));
             continue;
         }
-        // One driver per input pin: a new wire replaces the old one.
+        // One driver per input pin: a new wire replaces the old one (and
+        // says so, unless it is the same wire again).
+        let mut replaced = false;
         for (entity, ep) in &wires {
             if ep.sink_gate == event.sink_gate && ep.sink_pin == event.sink_pin {
                 commands.entity(entity).despawn();
+                replaced |=
+                    (ep.source_gate, ep.source_pin) != (event.source_gate, event.source_pin);
             }
         }
         let wire = DocWire::new(
@@ -675,8 +684,40 @@ pub fn apply_create_wire_system(
         if !view.is_root() {
             commands.entity(entity).insert(InstanceViewItem);
         }
-        feedback.message = None;
+        feedback.message = replaced.then(|| {
+            let label = gates
+                .iter()
+                .find(|(id, ..)| id.uuid == event.sink_gate)
+                .and_then(|(.., label)| label);
+            replaced_wire_message(&sink.kind, label, event.sink_pin, sink_ins.len())
+        });
         revision.mark_dirty();
+    }
+}
+
+/// The toast when a new wire takes over an input pin: the sink by its
+/// label (else its kind), and the pin when it has more than one.
+pub fn replaced_wire_message(
+    kind: &GateKind,
+    label: Option<&GateLabel>,
+    pin: u8,
+    inputs: usize,
+) -> String {
+    let name = label
+        .map(|l| l.value.trim())
+        .filter(|l| !l.is_empty())
+        .map_or_else(
+            || crate::editor::parts::kind_title(kind).to_owned(),
+            str::to_owned,
+        );
+    if inputs > 1 {
+        let pin_name = kind
+            .input_pin_names()
+            .get(usize::from(pin))
+            .map_or_else(|| format!("input {pin}"), |p| p.to_uppercase());
+        format!("Replaced the wire into {name} ({pin_name})")
+    } else {
+        format!("Replaced the wire into {name}")
     }
 }
 
