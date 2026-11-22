@@ -17,6 +17,8 @@
 //!   placement by click.
 //! - `hud`: the parts bar, minimap, zoom, build pill, signals and toasts.
 //! - `parts`: the parts bar's catalogue (tabs, number keys, names).
+//! - `chips`: the selection card (Make chip, Delete for several parts),
+//!   the Make chip dialog and the chip update prompt.
 //! - `systems`: wire-building selection.
 //! - `undo`: the undo shortcuts and the file card's Undo and Redo buttons.
 //! - `workspace`: on-disk workspace helpers.
@@ -26,6 +28,7 @@
 //! The editor never mutates the circuit directly: it sends the authoring
 //! messages of [`crate::sim::authoring`].
 
+pub mod chips;
 pub mod demo_map;
 pub mod hud;
 pub mod parts;
@@ -147,6 +150,7 @@ pub struct EditorPlugin;
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EditorState>()
+            .init_resource::<chips::MakeChipDialog>()
             .add_plugins(demo_map::DemoMapPlugin)
             .add_systems(
                 EguiPrimaryContextPass,
@@ -160,6 +164,8 @@ impl Plugin for EditorPlugin {
                     hud::toast_system,
                     hud::editor_keys_system,
                     undo::undo_keys_system,
+                    chips::selection_card_system,
+                    chips::chip_update_prompt_system,
                 ),
             );
     }
