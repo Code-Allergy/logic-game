@@ -1,13 +1,13 @@
 //! Mouse input on the canvas ([`canvas_pointer_system`]): click to select
-//! and toggle a 1-bit input, left or right drag to move a part, snapped to
-//! the grid on drop. The cursor is set in [`CanvasCursor`] directly (there
+//! and toggle a 1-bit input, left or right drag to move a part on the
+//! snap grid. The cursor is set in [`CanvasCursor`] directly (there
 //! is no window in a headless app).
 
 use bevy::prelude::*;
 
 use super::*;
 use crate::editor::EditorState;
-use crate::sim::layout::GRID;
+use crate::sim::layout::SNAP;
 use crate::sim::systems::{CanvasCursor, CanvasPointer, DRAG_THRESHOLD, canvas_pointer_system};
 use crate::sim::{ActiveCircuit, InputDrive, Selected, SelectedGate};
 use crate::temp::GateComponentSelectionEvent;
@@ -189,20 +189,24 @@ fn a_left_drag_moves_a_part_and_drops_it_on_the_grid() {
     assert_eq!(selected(&app), Some(and), "pressing selects");
     move_to(&mut app, Vec2::new(3.0 + DRAG_THRESHOLD - 1.0, 2.0));
     assert_eq!(position(&app, and), Vec2::ZERO);
-    // Past the threshold, it follows the pointer at the grab offset.
+    // Past the threshold, it follows the pointer at the grab offset, from
+    // point to point of the snap grid: (47, 31) lands on (50, 30).
     move_to(&mut app, Vec2::new(50.0, 33.0));
-    assert_eq!(position(&app, and), Vec2::new(47.0, 31.0));
+    assert_eq!(position(&app, and), Vec2::new(5.0 * SNAP, 3.0 * SNAP));
     assert!(app.world().get::<Selected>(and).is_some(), "drawn on top");
+    // A small move within a grid cell does not move it.
+    move_to(&mut app, Vec2::new(52.0, 35.0));
+    assert_eq!(position(&app, and), Vec2::new(50.0, 30.0));
     move_to(&mut app, Vec2::new(70.0, 37.0));
-    assert_eq!(position(&app, and), Vec2::new(67.0, 35.0));
+    assert_eq!(position(&app, and), Vec2::new(70.0, 40.0));
     release(&mut app, MouseButton::Left, Vec2::new(70.0, 37.0));
-    assert_eq!(position(&app, and), Vec2::new(3.0 * GRID, 2.0 * GRID));
+    assert_eq!(position(&app, and), Vec2::new(70.0, 40.0));
     assert_eq!(selected(&app), Some(and));
 
     // Dragging an input moves it without toggling it.
     press(&mut app, MouseButton::Left, Vec2::new(-200.0, 0.0));
-    move_to(&mut app, Vec2::new(-200.0, -45.0));
-    release(&mut app, MouseButton::Left, Vec2::new(-200.0, -45.0));
+    move_to(&mut app, Vec2::new(-200.0, -44.0));
+    release(&mut app, MouseButton::Left, Vec2::new(-200.0, -44.0));
     assert_eq!(position(&app, a), Vec2::new(-200.0, -40.0));
     assert_eq!(drive(&app, a), 0);
     assert!(app.world().get::<Selected>(and).is_none());
@@ -210,20 +214,41 @@ fn a_left_drag_moves_a_part_and_drops_it_on_the_grid() {
 }
 
 #[test]
-fn a_right_drag_still_moves_a_part_at_once_and_snaps() {
+fn a_right_drag_still_moves_a_part_on_the_snap_grid() {
     let mut app = pointer_app();
-    let and = place(&mut app, GateKind::And { w: 1 }, "And", Vec2::new(1.0, 1.0));
+    let and = place(&mut app, GateKind::And { w: 1 }, "And", Vec2::ZERO);
     press(&mut app, MouseButton::Right, Vec2::new(1.0, 1.0));
-    move_to(&mut app, Vec2::new(4.0, 1.0));
-    assert_eq!(position(&app, and), Vec2::new(4.0, 1.0));
     move_to(&mut app, Vec2::new(-29.0, 52.0));
+    assert_eq!(position(&app, and), Vec2::new(-30.0, 50.0));
     release(&mut app, MouseButton::Right, Vec2::new(-29.0, 52.0));
-    assert_eq!(position(&app, and), Vec2::new(-20.0, 60.0));
-    // A right click without a move leaves the part where it is.
-    let b = place(&mut app, GateKind::Or { w: 1 }, "Or", Vec2::new(203.0, 7.0));
+    assert_eq!(position(&app, and), Vec2::new(-30.0, 50.0));
+    // A right click without a move leaves a part where it is, even off
+    // the grid (as an older file may have it).
+    let b = place(&mut app, GateKind::Or { w: 1 }, "Or", Vec2::new(200.0, 0.0));
+    app.world_mut().get_mut::<Transform>(b).unwrap().translation = Vec3::new(203.0, 7.0, 0.0);
     press(&mut app, MouseButton::Right, Vec2::new(203.0, 7.0));
-    release(&mut app, MouseButton::Right, Vec2::new(203.0, 7.0));
+    move_to(&mut app, Vec2::new(205.0, 7.0));
+    release(&mut app, MouseButton::Right, Vec2::new(205.0, 7.0));
     assert_eq!(position(&app, b), Vec2::new(203.0, 7.0));
+}
+
+#[test]
+fn placed_parts_land_on_the_snap_grid() {
+    let mut app = pointer_app();
+    let a = place(
+        &mut app,
+        GateKind::Not { w: 1 },
+        "N",
+        Vec2::new(23.0, -36.0),
+    );
+    assert_eq!(position(&app, a), Vec2::new(20.0, -40.0));
+    let b = place(
+        &mut app,
+        GateKind::Not { w: 1 },
+        "M",
+        Vec2::new(105.0, 14.9),
+    );
+    assert_eq!(position(&app, b), Vec2::new(110.0, 10.0));
 }
 
 #[test]

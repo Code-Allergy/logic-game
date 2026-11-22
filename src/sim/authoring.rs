@@ -420,6 +420,8 @@ impl CircuitReader<'_, '_> {
 // Commands (messages) and their handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Place a part; its centre goes to the nearest point of the snap grid
+/// ([`SNAP`](super::layout::SNAP)).
 #[derive(Message, Debug, Clone)]
 pub struct CreateGate {
     pub kind: GateKind,
@@ -588,7 +590,9 @@ pub fn apply_create_gate_system(
                 continue;
             }
         }
-        let mut node = DocNode::new(event.kind.clone(), event.position);
+        // Placed by hand: onto the snap grid, like a moved part.
+        let at = super::layout::snap_to_grid(event.position);
+        let mut node = DocNode::new(event.kind.clone(), at);
         node.label = event.label.clone().filter(|l| !l.trim().is_empty());
         if node.label.is_none() && event.kind.is_port() {
             let base = title_case(event.kind.display_name());

@@ -274,8 +274,8 @@ type CanvasGate = (
 ///   in a read-only demo: inputs may change there), see
 ///   [`input_click_value`];
 /// - a left drag on a part, past [`DRAG_THRESHOLD`], moves it, and a right
-///   drag moves it at once; dropped, it snaps to the editor grid
-///   ([`GRID`](super::layout::GRID)).
+///   drag picks it up at once; it moves on the snap grid
+///   ([`SNAP`](super::layout::SNAP)), point to point.
 ///
 /// Nothing moves in a read-only demo, and with a part armed or the wire
 /// tool on a left click only picks (no move, no toggle). The moved part
@@ -364,11 +364,11 @@ pub fn canvas_pointer_system(
         && let Some(gate) = press.gate
         && let Ok((_, mut transform, ..)) = gates.get_mut(gate)
     {
+        // The part jumps from point to point of the snap grid as it
+        // follows the pointer; a right press without a move leaves it.
         let at = transform.translation.truncate();
         let to = match cursor.world {
-            Some(world) if held => world + press.offset,
-            // Dropped after a move: onto the grid.
-            _ if !held && press.moved => super::layout::snap_to_grid(at),
+            Some(world) if held && press.moved => super::layout::snap_to_grid(world + press.offset),
             _ => at,
         };
         if at != to {

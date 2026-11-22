@@ -64,8 +64,9 @@ tick 0, arrow keys pan, `Delete`
 deletes the selected part, `T` day or night. Mouse: left-click selects
 (on empty canvas: deselects) and flips a 1-bit input (also in a
 read-only demo; a wider input is set in the inspector), left- or
-right-drag moves a part (it lands on the 20-unit grid), middle-drag
-pans, the wheel zooms about the cursor.
+right-drag moves a part (on a 10-unit snap grid, half the wire grid,
+so pins line up; new parts land on it too), middle-drag pans, the
+wheel zooms about the cursor.
 
 `cargo run --example screenshot -- <id> out.png [--night] [--size WxH]
 [--select LABEL] [--set LABEL=VALUE] [--tab NAME] [--library] [--editable]
