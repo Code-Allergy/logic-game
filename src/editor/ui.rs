@@ -725,9 +725,11 @@ pub fn editor_ui_system(
                 .show(ui, |ui| {
             for tip in [
                 "1–9: pick a part from the open tab; click or drag it onto the canvas",
-                "Left-click: select a part (inspector: toggle inputs, edit, delete); \
-                 empty canvas: deselect",
-                "Right-drag: move a part · Middle-drag: pan · Wheel: zoom",
+                "Left-click: select a part and flip a 1-bit input (inspector: edit, \
+                 delete, set wider inputs); empty canvas: deselect",
+                "Left- or right-drag: move a part · Middle-drag or arrow keys: pan · \
+                 Wheel: zoom",
+                "Space: run or pause",
                 "Delete: delete the selected part",
                 "W: wire tool (click source, then sink, choose pins)",
                 "F: fit the circuit · R: reset to tick 0",

@@ -407,6 +407,14 @@ pub fn chip_sized(
     let width = (galley.size().x + 22.0).max(min_width.unwrap_or(0.0));
     let (rect, response) = ui.allocate_exact_size(EVec2::new(width, CHIP_HEIGHT), Sense::click());
     if ui.is_rect_visible(rect) {
+        // A disabled UI paints faded; the chosen chip of a disabled row
+        // (a read-only inspector) is painted solid, so the current choice
+        // stays readable, in the night theme too.
+        let mut painter = ui.painter().clone();
+        if on && !ui.is_enabled() {
+            let undone = painter.opacity() / ui.visuals().disabled_alpha().max(0.01);
+            painter.set_opacity(undone);
+        }
         let fill = if on {
             palette.text
         } else if response.hovered() {
@@ -414,14 +422,14 @@ pub fn chip_sized(
         } else {
             palette.raised
         };
-        ui.painter().rect(
+        painter.rect(
             rect,
             CornerRadius::same(9),
             egui_color(fill),
             stroke(2.0, egui_color(palette.ink)),
             StrokeKind::Inside,
         );
-        ui.painter().galley(
+        painter.galley(
             rect.center() - galley.size() * 0.5,
             galley,
             Color32::PLACEHOLDER,
@@ -658,6 +666,47 @@ mod tests {
         assert_eq!(heavy[0], "Nunito-ExtraBold");
         assert!(heavy.len() > 1, "symbol fallbacks kept");
         assert!(defs.font_data.contains_key("Nunito-ExtraBold"));
+    }
+
+    /// The fill of each chip painted by `add` (a row of chips), as
+    /// painted: `(on, alpha)` in paint order.
+    fn chip_fills(enabled: bool, chips: &[bool]) -> Vec<u8> {
+        let theme = Theme::night();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(workshop_fonts());
+        ctx.set_global_style(workshop_style(&theme));
+        let mut out = None;
+        for _ in 0..3 {
+            out = Some(ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    for (i, on) in chips.iter().enumerate() {
+                        chip(ui, &theme.palette, format!("{i}"), *on);
+                    }
+                });
+            }));
+        }
+        out.unwrap()
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(r) if r.corner_radius == CornerRadius::same(9) => {
+                    Some(r.fill.a())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_disabled_row_keeps_its_chosen_chip_solid() {
+        let enabled = chip_fills(true, &[false, true, false]);
+        assert_eq!(enabled, [255, 255, 255]);
+        // Disabled (a read-only inspector): the others fade, the chosen
+        // one does not, so the current mode or size reads at a glance.
+        let disabled = chip_fills(false, &[false, true, false]);
+        assert_eq!(disabled.len(), 3);
+        assert!(disabled[0] < 255 && disabled[2] < 255, "{disabled:?}");
+        assert_eq!(disabled[1], 255, "{disabled:?}");
     }
 
     #[test]
