@@ -139,6 +139,22 @@ over one opcode. A tick allocates nothing.
   versions and the tick count evolve exactly as tick by tick; the last
   tick settles everything. `Sim::tick` always settles everything.
 
+- **JIT** (`sim/jit/`, feature `jit`, native only; `SimOptions::jit`,
+  off by default). Cranelift compiles each body the `Sim` runs (the
+  program's own, each clock-phase variant, each fused-run body) into
+  straight-line native settle chunks of at most `jit::CHUNK`
+  instructions, `fn(slots, mems, tick)`, plus commit chunks. Within a
+  chunk every slot is loaded once and every result stays in an SSA value;
+  literal fields are immediates; results are stored to their slots (in a
+  fused-run body only those its commits or a later chunk read). It runs
+  single-threaded only (a pool runs the interpreter), skips bodies no tick
+  uses or larger than `jit::MAX_BODY`, and leaves a body with a `MemClear`
+  commit to the interpreter's commit. `Sim::compile_jit` builds the code
+  without touching the `Sim`'s state and `Sim::install_jit` swaps it in at
+  any time, which the threaded `Engine` uses to tier: an edit runs
+  interpreted at once and native when the compile thread is done.
+  `testkit::diff::check_jit` compares it with the interpreter every tick.
+
 ### `engine`: pacing, probes and edits
 
 - `EngineCore` owns the `Sim`: tick-rate pacing (`Rate`), single steps,

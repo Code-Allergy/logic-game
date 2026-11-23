@@ -17,6 +17,9 @@
 //! are identical.
 
 mod code;
+// The Cranelift JIT backend (feature `jit`, native only; issue #117).
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+pub mod jit;
 #[cfg(not(target_arch = "wasm32"))]
 mod pool;
 /// No threads on wasm. `Pool` is uninhabited, so a `Sim`'s pool is always
@@ -97,6 +100,11 @@ pub struct SimOptions {
     /// it has them. Single-threaded only: a pool runs the unspecialized
     /// program.
     pub phases: bool,
+    /// Run every body as native code compiled by Cranelift (`sim/jit/`)
+    /// instead of the block interpreter. Needs the crate feature `jit` on
+    /// a native target, and one thread; otherwise (or if compiling fails)
+    /// the interpreter runs. Off by default.
+    pub jit: bool,
 }
 
 /// Default [`SimOptions::par_min`] (see the design doc, section 13).
@@ -110,6 +118,7 @@ impl Default for SimOptions {
             par_min: DEFAULT_PAR_MIN,
             fuse: true,
             phases: true,
+            jit: false,
         }
     }
 }
@@ -121,6 +130,14 @@ impl SimOptions {
             stream: false,
             fuse: false,
             phases: false,
+            ..Self::default()
+        }
+    }
+
+    /// The defaults with the JIT on (see [`SimOptions::jit`]).
+    pub fn jit() -> Self {
+        Self {
+            jit: true,
             ..Self::default()
         }
     }
@@ -255,6 +272,14 @@ pub struct Sim {
     tick: u64,
     /// Root input values, applied to their slots at the start of each settle.
     inputs: Vec<u64>,
+    /// Native code for every body (`SimOptions::jit`), indexed like
+    /// `full`/`fused` (0 the program's own, `k` `runs[k - 1]`).
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    jit: Option<Arc<jit::JitProgram>>,
+    /// One pointer per memory, for the JIT'd code (refreshed before each
+    /// call; `usize` keeps `Sim` `Send`).
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    mem_ptrs: Vec<usize>,
     #[cfg(feature = "counters")]
     counters: Counters,
     /// What one settle of the program's own body executes (`blocks`,
@@ -358,11 +383,20 @@ impl Sim {
             tick: 0,
             inputs: vec![0; program.ports.inputs.len()],
             program,
+            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            jit: None,
+            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            mem_ptrs: Vec::new(),
             #[cfg(feature = "counters")]
             counters: Counters::default(),
             #[cfg(feature = "counters")]
             per_settle: Counters::default(),
         };
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        if sim.options.jit && sim.pool.is_none() {
+            // A program the JIT cannot compile runs interpreted.
+            sim.jit = sim.compile_jit().ok().map(Arc::new);
+        }
         #[cfg(feature = "counters")]
         for b in &sim.code.blocks {
             sim.per_settle.blocks += 1;
@@ -384,6 +418,77 @@ impl Sim {
 
     pub fn options(&self) -> &SimOptions {
         &self.options
+    }
+
+    /// Whether the bodies run as JIT-compiled native code.
+    pub fn jit_active(&self) -> bool {
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        return self.jit.is_some();
+        #[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+        false
+    }
+
+    /// Compile every body this `Sim` runs (the program's own and each run)
+    /// with the JIT, without installing it. Thread-safe and independent of
+    /// the `Sim`'s state, so it can run off the hot path; see
+    /// [`Sim::install_jit`].
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    pub fn compile_jit(&self) -> Result<jit::JitProgram, jit::JitError> {
+        let p = &*self.program;
+        let mut bodies = Vec::with_capacity(self.runs.len() + 1);
+        let in_full = |k: usize| self.full.iter().any(|&f| f as usize == k);
+        let used = |k: usize| in_full(k) || self.fused.iter().any(|&f| f as usize == k);
+        bodies.push(jit::BodyRef {
+            blocks: &p.blocks,
+            instrs: &p.instrs,
+            imms: &p.imms,
+            commits: &p.commits,
+            used: used(0),
+            fused_only: false,
+        });
+        for (k, r) in self.runs.iter().enumerate() {
+            let (blocks, instrs, imms) = parts(p, r.body.as_ref());
+            let commits = r.body.as_ref().map_or(&p.commits[..], |b| &b.commits[..]);
+            bodies.push(jit::BodyRef {
+                blocks,
+                instrs,
+                imms,
+                commits,
+                used: used(k + 1),
+                fused_only: !in_full(k + 1),
+            });
+        }
+        let mut code = jit::JitProgram::compile(p, &bodies)?;
+        code.key = Some(jit::RunKey {
+            program: Arc::downgrade(&self.program),
+            full: self.full.clone(),
+            fused: self.fused.clone(),
+        });
+        Ok(code)
+    }
+
+    /// Run from `code` from now on, or interpret again with `None`.
+    /// Results are the same either way, so this can happen at any time
+    /// (tiering: start interpreted, swap native code in when it is ready).
+    /// `code` must come from [`Sim::compile_jit`] of a `Sim` of the same
+    /// `Arc<Program>` with the same run layout (the same fusion and phase
+    /// options, no thread pool); otherwise nothing changes and this
+    /// returns `false`.
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    pub fn install_jit(&mut self, code: Option<Arc<jit::JitProgram>>) -> bool {
+        if let Some(c) = &code {
+            let fits = c.key.as_ref().is_some_and(|k| {
+                std::ptr::eq(k.program.as_ptr(), Arc::as_ptr(&self.program))
+                    && k.full == self.full
+                    && k.fused == self.fused
+            }) && c.bodies.len() == self.runs.len() + 1
+                && self.pool.is_none();
+            if !fits {
+                return false;
+            }
+        }
+        self.jit = code;
+        true
     }
 
     /// Threads each settle uses (1 when no worker threads were started).
@@ -566,6 +671,36 @@ impl Sim {
         {
             self.counters.commits += commits.len() as u64;
         }
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        if let Some(fs) = self
+            .jit
+            .as_ref()
+            .and_then(|j| j.bodies[run as usize].as_ref()?.commit.as_ref())
+        {
+            #[cfg(feature = "counters")]
+            let before: u64 = self.mem_writes.iter().sum();
+            self.mem_ptrs.clear();
+            self.mem_ptrs
+                .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+            // SAFETY: the code was compiled from this body, which passed
+            // `check`; `slots` has `slot_count` entries, `mem_ptrs` one
+            // pointer per memory (each `2^addr_bits` words) and
+            // `mem_writes` one counter per memory.
+            for f in fs {
+                unsafe {
+                    f(
+                        self.slots.as_mut_ptr(),
+                        self.mem_ptrs.as_ptr() as *const *mut u64,
+                        self.mem_writes.as_mut_ptr(),
+                    )
+                };
+            }
+            #[cfg(feature = "counters")]
+            {
+                self.counters.mem_writes += self.mem_writes.iter().sum::<u64>() - before;
+            }
+            return;
+        }
         for c in commits {
             match *c {
                 Commit::Copy { state, next } => {
@@ -648,6 +783,23 @@ impl Sim {
             c.blocks += per.blocks;
             c.instrs += per.instrs;
             c.packed_words += per.packed_words;
+        }
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        if let Some(j) = self
+            .jit
+            .as_ref()
+            .and_then(|j| j.bodies[run as usize].as_ref())
+        {
+            self.mem_ptrs.clear();
+            self.mem_ptrs
+                .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+            let s = self.slots.as_mut_ptr();
+            for f in &j.settle {
+                // SAFETY: as in `commit`; settle code reads memories only.
+                unsafe { f(s, self.mem_ptrs.as_ptr() as *const *mut u64, self.tick) };
+            }
+            debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+            return;
         }
         let p = &*self.program;
         if let Some(pool) = &self.pool {

@@ -9,12 +9,33 @@ edition = "2024"
 # regression gate (`cargo xtask perf check`). Off by default; without it
 # the runtime has no counting code at all.
 counters = []
+# A Cranelift JIT backend for the settle loop (`sim/jit/`, issues #117 and
+# #111). Native only: on wasm the feature compiles to nothing and the
+# interpreter runs. Even with the feature, it runs only when
+# `SimOptions::jit` asks for it.
+jit = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+]
 
 [dependencies]
 blake3 = "1.8"
 foldhash = "0.2"
 slotmap = "1.1.1"
 smallvec = "1.15.2"
+
+# The JIT (feature `jit`): exact versions, since Cranelift's API changes
+# with every release. Only what a host-only JIT needs: no timing, no other
+# architectures (`cranelift-jit` itself turns on `unwind`).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cranelift-codegen = { version = "=0.138.0", optional = true, default-features = false, features = ["std", "host-arch"] }
+cranelift-frontend = { version = "=0.138.0", optional = true, default-features = false, features = ["std"] }
+cranelift-jit = { version = "=0.138.0", optional = true, default-features = false }
+cranelift-module = { version = "=0.138.0", optional = true, default-features = false, features = ["std"] }
+cranelift-native = { version = "=0.138.0", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
 criterion = "0.8"

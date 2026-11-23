@@ -249,6 +249,11 @@ pub fn standard_configs() -> Vec<GenConfig> {
 
 // ── Batches (tick fusion, clock-phase variants) ──────────────────────────
 
+/// The JIT backend (`SimOptions::jit`) is compiled in: logi-sim feature
+/// `jit` on a native target. Without it, the JIT checks below compare the
+/// interpreter with itself.
+pub const JIT: bool = cfg!(all(feature = "jit", not(target_arch = "wasm32")));
+
 /// Tick, outputs, state, every net, memories and memory versions.
 type Observed = (
     u64,
@@ -300,23 +305,33 @@ pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
         ..SimOptions::default()
     };
     let mut want = Sim::with_options(Arc::clone(p), plain);
-    let mut sims = [
-        Sim::new(Arc::clone(p)),
-        Sim::with_options(
-            Arc::clone(p),
-            SimOptions {
-                phases: false,
-                ..SimOptions::default()
-            },
-        ),
-        Sim::with_options(
-            Arc::clone(p),
-            SimOptions {
-                fuse: false,
-                ..SimOptions::default()
-            },
-        ),
+    let variants = [
+        SimOptions::default(),
+        SimOptions {
+            phases: false,
+            ..SimOptions::default()
+        },
+        SimOptions {
+            fuse: false,
+            ..SimOptions::default()
+        },
     ];
+    // With the JIT compiled in, every variant also runs JIT-compiled.
+    let jit = variants.iter().filter(|_| JIT).map(|o| SimOptions {
+        jit: true,
+        ..o.clone()
+    });
+    let mut sims: Vec<Sim> = variants
+        .iter()
+        .cloned()
+        .chain(jit)
+        .map(|o| Sim::with_options(Arc::clone(p), o))
+        .collect();
+    for s in &sims {
+        if s.options().jit && !s.jit_active() {
+            return Err("the JIT did not compile the program".into());
+        }
+    }
     let mut rng = Rng::new(seed);
     let lens = [1u64, 2, 3, 5, 8, 7, 1, 1, 16, 9, 4, 6, 11, 2, 3];
     let mut saved = None;
@@ -364,6 +379,122 @@ pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
             }
             want.import_state(&snap);
         }
+    }
+    Ok(())
+}
+
+/// The JIT backend against the interpreter, tick by tick: random inputs
+/// every tick, and everything observable (tick, outputs, state, every net
+/// in the debug map, memories, memory versions) compared after every tick,
+/// with `run` batches of random lengths, state and memory pokes followed
+/// by `resettle`, a reset and a state import mixed in. Both run the
+/// runtime's defaults (phase variants, fusion); `options` adds the
+/// runtime switches to compare under (`jit` is forced on for one side and
+/// off for the other).
+///
+/// Errors if the JIT is compiled in but did not compile the program.
+pub fn check_jit(
+    p: &Arc<Program>,
+    ticks: u64,
+    seed: u64,
+    options: &SimOptions,
+) -> Result<(), String> {
+    let mut want = Sim::with_options(
+        Arc::clone(p),
+        SimOptions {
+            jit: false,
+            ..options.clone()
+        },
+    );
+    let mut got = Sim::with_options(
+        Arc::clone(p),
+        SimOptions {
+            jit: true,
+            ..options.clone()
+        },
+    );
+    if JIT && options.threads <= 1 && !got.jit_active() {
+        return Err("the JIT did not compile the program".into());
+    }
+    let mut rng = Rng::new(seed);
+    let same = |want: &Sim, got: &Sim, at: &str| {
+        if observe(want) == observe(got) {
+            Ok(())
+        } else {
+            Err(format!(
+                "JIT differs from the interpreter {at} (tick {})",
+                want.tick_count()
+            ))
+        }
+    };
+    same(&want, &got, "after construction")?;
+    let mut saved = None;
+    let mut t = 0;
+    while t < ticks {
+        for (port, q) in p.ports.inputs.iter().enumerate() {
+            let v = rng.next_u64() & mask(q.width);
+            want.set_input(port, v);
+            got.set_input(port, v);
+        }
+        match rng.below(40) {
+            0..=4 => {
+                let n = 1 + rng.below(20) as u64;
+                want.run(n);
+                got.run(n);
+                t += n;
+                same(&want, &got, &format!("after run({n})"))?;
+                continue;
+            }
+            5 if !p.state_keys.is_empty() => {
+                let k = rng.below(p.state_keys.len());
+                let v = rng.next_u64();
+                match p.state_keys[k].loc {
+                    StateLoc::Slot(_) => {
+                        want.set_state(k, v);
+                        got.set_state(k, v);
+                    }
+                    StateLoc::Mem(m) => {
+                        let a = rng.below(want.mem(m).len());
+                        want.set_mem_word(m, a, v);
+                        got.set_mem_word(m, a, v);
+                    }
+                }
+                want.resettle();
+                got.resettle();
+                same(&want, &got, "after a state poke and resettle")?;
+            }
+            6 if t % 3 == 0 => {
+                saved = Some(want.export_state());
+            }
+            7 => {
+                if let Some(snap) = &saved {
+                    want.import_state(snap);
+                    got.import_state(snap);
+                    same(&want, &got, "after import_state")?;
+                }
+            }
+            8 if rng.below(4) == 0 => {
+                want.reset();
+                got.reset();
+                same(&want, &got, "after reset")?;
+            }
+            _ => {}
+        }
+        want.tick();
+        got.tick();
+        t += 1;
+        same(&want, &got, "after a tick")?;
+    }
+    Ok(())
+}
+
+/// [`check_jit`] for a design, under the default and `Options::debug`
+/// compile options, plus [`check_batches`] (which runs the JIT too).
+pub fn check_jit_design(d: &Design, ticks: u64, seed: u64) -> Result<(), String> {
+    for options in [Options::default(), Options::debug()] {
+        let p = Arc::new(compile(d, &options).map_err(|e| format!("{e:?}"))?);
+        check_jit(&p, ticks, seed, &SimOptions::default())?;
+        check_batches(&p, seed)?;
     }
     Ok(())
 }
