@@ -716,3 +716,55 @@ fn both_cpus_print_the_primes_and_a_trace_pins_one_down() {
     assert!(!out.failed, "{}", out.text);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_run_can_compile_without_the_optimising_passes() {
+    let dir = scratch("off");
+    let mut s = Session::new(WorkspaceStore::in_dir(&dir));
+    s.workspace_tool("open_demo", Some("cpu16"), false).unwrap();
+    let steps = json!([{"until": "Halted", "max_ticks": 1000000}, {"expect": {"Out_value": 241}}]);
+    let on = s
+        .run_tool(
+            None,
+            None,
+            object(json!({"max_ticks": 2000000, "steps": steps})),
+            None,
+        )
+        .unwrap();
+    let off = s
+        .run_tool(
+            None,
+            None,
+            object(json!({"max_ticks": 2000000, "off": true, "steps": steps})),
+            None,
+        )
+        .unwrap();
+    assert!(
+        off.starts_with("compiled with func_match, lift, words off\n"),
+        "{off}"
+    );
+    // The same answer at the same tick, either way.
+    assert_eq!(
+        off.trim_start_matches("compiled with func_match, lift, words off\n"),
+        on
+    );
+    let one = s
+        .run_tool(
+            None,
+            None,
+            object(json!({"off": ["lift"], "steps": [{"ticks": 3}]})),
+            None,
+        )
+        .unwrap();
+    assert!(one.starts_with("compiled with lift off\n"), "{one}");
+    let e = s
+        .run_tool(
+            None,
+            None,
+            object(json!({"off": ["fast"], "steps": []})),
+            None,
+        )
+        .unwrap_err();
+    assert!(e.contains("\"off\" takes true, or passes of"), "{e}");
+    let _ = std::fs::remove_dir_all(dir);
+}

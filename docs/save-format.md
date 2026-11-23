@@ -107,6 +107,8 @@ A test has a `name` (unique in its circuit) and one of:
 | `table`, `formula`, `sequence` | As a challenge's test ("Challenges", below), on the circuit's own ports. |
 | `equivalent` | `{"to": chip, "samples": n, "seed": s, "hold": k}`: the same random inputs into this circuit and the chip named `to` (they must have the same ports), every output compared after every tick, both from power-on. `samples` defaults to 1000 and `seed` to 1; each input is held for `hold` ticks (1). |
 | `script` | An experiment script (`docs/mcp-server.md`, "`run`"): it passes when no `expect`, `until` or `compare` step fails. |
+| `compiled` | What the compiler must make of the circuit: chips that must (or must not) be recognised as word functions, and bounds on the instruction count (`docs/mcp-server.md`, "`test` and stored tests"). |
+| `unoptimized` | The circuit compiled as usual against itself with function matching, lifting and word cleanup off, on the same random inputs. |
 
 ### Versions of a definition
 

@@ -41,7 +41,10 @@ pub struct ViewArgs {
     /// The circuit: a chip's name, or leave out for the root ("main").
     pub circuit: Option<String>,
     /// One of: outline (default), diagnostics, stats, groups (parts that
-    /// would make chips, as lists for make_chip).
+    /// would make chips, as lists for make_chip), compiled (which chips
+    /// the compiler recognised as word functions, the program's size with
+    /// and without its word-level passes, and a "compiled" test that pins
+    /// it).
     pub what: Option<String>,
     /// Outline: only parts whose name or kind starts with this.
     pub filter: Option<String>,
@@ -57,7 +60,8 @@ pub struct EditArgs {
     /// Operations, applied in order. Each is an object with one field:
     /// {"add": [node entries]}, {"wire": [[source, sink, ...], ...]},
     /// {"unwire": [sink references]}, {"remove": [part references]},
-    /// {"set": {"part": reference, ...parameters}}, {"layout": true}.
+    /// {"set": {"part": reference, ...parameters}}, {"layout": true},
+    /// {"expand": true | [refs] | {"parts": true | [refs], "deep": true}}.
     /// A node entry is {"name": n, "type": kind, ...parameters} or
     /// {"name": n, "use": chip}, with "count" for an array. A reference
     /// is name[index].pin:bits, e.g. "fa[0..7].Cout" or "a:0..4".
@@ -128,6 +132,7 @@ pub struct RunArgs {
     pub session: Option<String>,
     /// The steps, in order. Each is an object:
     /// {"set": {input: value}}, {"ticks": n},
+    /// {"poke": {state: value, memory: [[address, value], ...]}} (registers, latches, chips wired straight to them, arrays of these, "ram@0x10"; settles at once, the tick stays),
     /// {"until": "expression", "max_ticks": n}, {"expect": {signal: value}},
     /// {"read": [signals, "ram@0x00..0x10"]},
     /// {"load": {"part": memory, "file": path, "skip": n, "length": n, "at": addr}},
@@ -144,6 +149,11 @@ pub struct RunArgs {
     pub trace: Option<String>,
     /// The most ticks this call may run (default 1,000,000).
     pub max_ticks: Option<u64>,
+    /// Compile without optimising passes, to tell a fault of the design
+    /// from one of the compiler: true (all), or some of
+    /// ["func_match", "lift", "words"]. It applies when the simulation is
+    /// made (not to a session that continues).
+    pub off: Option<Value>,
     /// Read the script (steps, signals, ...) from this JSON file.
     pub file: Option<String>,
 }
@@ -185,7 +195,8 @@ impl Server {
     #[tool(
         description = "Read a circuit of the open workspace as text: one line per part with what \
                        drives each input (outline), build errors and unconnected inputs \
-                       (diagnostics), or part counts (stats)."
+                       (diagnostics), part counts (stats), or what the compiler made of it: \
+                       chips recognised as word functions and the program's size (compiled)."
     )]
     fn view(&self, Parameters(args): Parameters<ViewArgs>) -> Result<String, String> {
         self.session().view_tool(
@@ -236,8 +247,12 @@ impl Server {
 
     #[tool(
         description = "Run the tests stored with the chips of the open workspace (set them with \
-                       edit: {\"tests\": [...]}). Reports each failure with its first failing \
-                       case, and a count of what passed."
+                       edit: {\"tests\": [...]}). Kinds: table, formula, sequence, equivalent \
+                       {\"to\": chip}, script {\"steps\": [...]}, compiled {\"matched\": [chips], \
+                       \"instructions\": {\"max\": n}} (pins what the compiler does; view \
+                       compiled prints one), unoptimized {\"samples\": n, \"off\": [\"func_match\", \
+                       \"lift\", \"words\"]} (the same with those compiler passes off). Reports \
+                       each failure with its first failing case, and a count of what passed."
     )]
     fn test(&self, Parameters(args): Parameters<TestArgs>) -> Result<String, String> {
         self.session()
@@ -296,6 +311,9 @@ impl Server {
         }
         if let Some(max) = args.max_ticks {
             script.insert("max_ticks".into(), max.into());
+        }
+        if let Some(off) = args.off {
+            script.insert("off".into(), off);
         }
         let file = args.file.map(PathBuf::from);
         self.session().run_tool(

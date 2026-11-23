@@ -88,8 +88,12 @@ pub struct CircuitReport {
     pub laid_out: usize,
     /// Wires taken out because a `set` changed the pin they were on.
     pub dropped_wires: Vec<String>,
-    /// Parts replaced by their gate-level chips.
+    /// Parts replaced by their gate-level chips (and, with `deep`, chip
+    /// instances pointed at their gate-level copies).
     pub expanded: usize,
+    /// Chips `expand` made or made again: gate chips, their cells, and
+    /// gate-level copies of chips.
+    pub chips_made: usize,
     /// Stored tests set and removed.
     pub tests_set: usize,
     pub tests_removed: usize,
@@ -132,7 +136,11 @@ impl fmt::Display for Report {
                 write!(f, " ({} laid out)", c.laid_out)?;
             }
             if c.expanded > 0 {
-                write!(f, " ({} expanded to gates)", c.expanded)?;
+                write!(f, " ({} expanded to gates", c.expanded)?;
+                if c.chips_made > 0 {
+                    write!(f, ", {} chips made", c.chips_made)?;
+                }
+                write!(f, ")")?;
             }
             if c.tests_set > 0 {
                 write!(f, " +{} tests", c.tests_set)?;
@@ -237,6 +245,7 @@ fn merge_report(all: &mut Vec<CircuitReport>, one: CircuitReport) {
             have.laid_out += one.laid_out;
             have.dropped_wires.extend(one.dropped_wires);
             have.expanded += one.expanded;
+            have.chips_made += one.chips_made;
             have.tests_set += one.tests_set;
             have.tests_removed += one.tests_removed;
             have.tests = one.tests;
@@ -251,12 +260,7 @@ fn merge_report(all: &mut Vec<CircuitReport>, one: CircuitReport) {
 /// checked too). The root's flattened part count, or the errors.
 pub fn build(ws: &WorkspaceDocument) -> Result<usize, Vec<String>> {
     let options = logi_sim::compile::Options::default();
-    let compile = |ws: &WorkspaceDocument| -> Result<(), Vec<String>> {
-        let design = crate::sim::netlist::design_of(ws).map_err(|e| vec![e])?;
-        logi_sim::compile::compile(&design, &options)
-            .map(|_| ())
-            .map_err(|errors| errors.iter().map(ToString::to_string).collect())
-    };
+    let compile = |ws: &WorkspaceDocument| super::compiled::compile(ws, &options).map(|_| ());
     let mut errors = compile(ws).err().unwrap_or_default();
     let library = CircuitLibrary {
         definitions: ws.definitions.clone(),
@@ -910,6 +914,16 @@ fn group_ops(group: &Map<String, Value>) -> usize {
         .map_or(0, Vec::len)
 }
 
+/// What `expand` with `deep` has found out in one request, shared by
+/// the groups it makes chips in.
+#[derive(Default)]
+struct Expansion {
+    /// The gate-level copy of each chip (`None`: nothing to expand).
+    copies: HashMap<Uuid, Option<Uuid>>,
+    /// Whether each chip has a word-level part at any depth.
+    word_parts: HashMap<Uuid, bool>,
+}
+
 struct Group<'a> {
     doc: CircuitDocument,
     library: CircuitLibrary,
@@ -924,6 +938,8 @@ struct Group<'a> {
     root_id: Uuid,
     /// Chips made by the ops (`make_chip`, `expand`), for the workspace.
     new_defs: Vec<Arc<CircuitDocument>>,
+    /// What `expand` with `deep` found out so far.
+    expansion: Expansion,
     /// Stored tests to set (by name) and names to remove (`None`: all).
     tests_set: Vec<Value>,
     tests_removed: Vec<Option<String>>,
@@ -1040,6 +1056,7 @@ fn apply_group(
         unplaced: HashSet::new(),
         root_id: ws.root.id,
         new_defs: Vec::new(),
+        expansion: Expansion::default(),
         tests_set: Vec::new(),
         tests_removed: Vec::new(),
         report,
@@ -1067,8 +1084,12 @@ fn apply_group(
         doc.revision = before.revision + 1;
     }
     let circuit_id = doc.id;
+    // A gate-level copy made again replaces the old one in place.
+    let mut replaced = Vec::new();
     for def in new_defs {
-        ws.definitions.insert(def.id, def);
+        if let Some(old) = ws.definitions.insert(def.id, Arc::clone(&def)) {
+            replaced.push((old, def));
+        }
     }
     // Chips of the catalog that the circuit now uses become part of the
     // workspace.
@@ -1084,6 +1105,11 @@ fn apply_group(
                 .extend(rebind_instances(ws, &before, &doc));
             ws.definitions.insert(id, Arc::new(doc));
         }
+    }
+    for (old, new) in replaced {
+        report
+            .dropped_wires
+            .extend(rebind_instances(ws, &old, &new));
     }
 
     // Stored tests: removals first, then tests set by name, each checked
@@ -1594,7 +1620,10 @@ impl Group<'_> {
     /// Register a chip the ops made, so later ops can use it.
     fn define(&mut self, def: CircuitDocument) -> Uuid {
         let def = Arc::new(def);
-        self.chips.entry(def.name.clone()).or_default().push(def.id);
+        let named = self.chips.entry(def.name.clone()).or_default();
+        if !named.contains(&def.id) {
+            named.push(def.id);
+        }
         self.library.definitions.insert(def.id, Arc::clone(&def));
         self.new_defs.retain(|d| d.id != def.id);
         let id = def.id;
@@ -1739,17 +1768,33 @@ impl Group<'_> {
         Ok(())
     }
 
-    /// `true`, or references: word-level parts become instances of
-    /// their gate-level chips ([`chips::gate_chip`]), made on first use.
+    /// `expand`: word-level parts become instances of their gate-level
+    /// chips, made on first use ([`chips::gate_chip_plans`]). The
+    /// argument is `true` (every part that has one), references, or
+    /// `{"parts": true or references, "deep": true}`: with `deep`, chips
+    /// placed here are pointed at gate-level copies of themselves
+    /// ([`Group::gates_copy`]).
     fn expand(&mut self, arg: &Value) -> Result<(), SourceError> {
-        let targets: Vec<Uuid> = match arg {
-            Value::Bool(true) => self
-                .doc
-                .nodes
-                .iter()
-                .filter(|n| chips::expandable(&n.kind))
-                .map(|n| n.id)
-                .collect(),
+        let all = Value::Bool(true);
+        let (parts, deep) = match arg {
+            Value::Object(o) => {
+                if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "parts" | "deep")) {
+                    return err(format!(
+                        "unknown field \"{k}\" (expand takes {{\"parts\": true or references, \
+                         \"deep\": true}})"
+                    ));
+                }
+                let deep = match o.get("deep") {
+                    None => false,
+                    Some(Value::Bool(deep)) => *deep,
+                    Some(_) => return err("\"deep\" is true or false"),
+                };
+                (o.get("parts").unwrap_or(&all), deep)
+            }
+            parts => (parts, false),
+        };
+        let targets: Vec<Uuid> = match parts {
+            Value::Bool(true) => self.expandable_parts(deep),
             Value::Bool(false) => Vec::new(),
             parts => {
                 let names = self.names();
@@ -1760,29 +1805,48 @@ impl Group<'_> {
                 ids
             }
         };
-        for id in targets {
+        self.expand_parts(&targets, deep)
+    }
+
+    /// The word-level parts of the circuit, and with `deep` its chips.
+    fn expandable_parts(&self, deep: bool) -> Vec<Uuid> {
+        self.doc
+            .nodes
+            .iter()
+            .filter(|n| {
+                chips::expandable(&n.kind)
+                    || (deep && matches!(n.kind, GateKind::SubCircuit { .. }))
+            })
+            .map(|n| n.id)
+            .collect()
+    }
+
+    fn expand_parts(&mut self, targets: &[Uuid], deep: bool) -> Result<(), SourceError> {
+        for &id in targets {
             let node = self.doc.node(id).expect("named parts are in the document");
             let kind = node.kind.clone();
+            if let GateKind::SubCircuit { definition } = kind {
+                if !deep {
+                    return err(
+                        "a chip has no gate-level form of its own; expand the chips inside it \
+                         with {\"parts\": ..., \"deep\": true}",
+                    );
+                }
+                // A chip with nothing to expand stays as it is.
+                if let Some(copy) = self.gates_copy(definition)? {
+                    self.node_mut(id).kind = GateKind::SubCircuit { definition: copy };
+                    self.report.expanded += 1;
+                }
+                continue;
+            }
             if !chips::expandable(&kind) {
-                let what = match &kind {
-                    GateKind::SubCircuit { .. } => "chip".to_string(),
-                    k => k.display_name().to_string(),
-                };
                 return err(format!(
-                    "a {what} has no gate-level form (it is a gate, a memory, wiring or a chip \
-                     already)"
+                    "a {} has no gate-level form (it is a gate, a memory, wiring or a chip \
+                     already)",
+                    kind.display_name()
                 ));
             }
-            let name = chips::gate_chip_name(&kind);
-            let def_id = match self.chips.get(&name).map(Vec::as_slice) {
-                Some([id]) => *id,
-                Some(_) => return err(format!("several chips are named \"{name}\"")),
-                None => {
-                    let def_id = self.chip_id(&name)?;
-                    let chip = chips::gate_chip(&kind, def_id).map_err(SourceError)?;
-                    self.define(chip)
-                }
-            };
+            let def_id = self.gate_chip(&kind)?;
             let chip = Arc::clone(&self.library.definitions[&def_id]);
             let (in_map, out_map) = chips::pin_maps(&kind, &chip);
             for wire in &mut self.doc.wires {
@@ -1796,16 +1860,195 @@ impl Group<'_> {
                         .unwrap_or(0);
                 }
             }
-            let node = self
-                .doc
-                .nodes
-                .iter_mut()
-                .find(|n| n.id == id)
-                .expect("checked above");
-            node.kind = GateKind::SubCircuit { definition: def_id };
+            self.node_mut(id).kind = GateKind::SubCircuit { definition: def_id };
             self.report.expanded += 1;
         }
         Ok(())
+    }
+
+    fn node_mut(&mut self, id: Uuid) -> &mut DocNode {
+        self.doc
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .expect("the part is in the document")
+    }
+
+    /// The gate-level chip of an expandable `kind`: the workspace's chip
+    /// of that name ([`chips::gate_chip_name`]) when there is one, else
+    /// made now, with the cells and chunk chips it places that the
+    /// workspace does not have yet (those it has are used as they are).
+    fn gate_chip(&mut self, kind: &GateKind) -> Result<Uuid, SourceError> {
+        let name = chips::gate_chip_name(kind);
+        if let Some(id) = self.chip_named(&name)? {
+            return Ok(id);
+        }
+        for plan in chips::gate_chip_plans(kind).map_err(SourceError)? {
+            if self.chip_named(&plan.name)?.is_none() {
+                self.build_chip(&plan)?;
+            }
+        }
+        Ok(self
+            .chip_named(&name)?
+            .expect("the plan ends with the chip asked for"))
+    }
+
+    /// The chip of the workspace named `name`, if there is one.
+    fn chip_named(&self, name: &str) -> Result<Option<Uuid>, SourceError> {
+        match self.chips.get(name).map(Vec::as_slice) {
+            None | Some([]) => Ok(None),
+            Some([id]) => Ok(Some(*id)),
+            Some(_) => err(format!("several chips are named \"{name}\"")),
+        }
+    }
+
+    /// Make the chip `plan` describes by applying its ops to a new, empty
+    /// circuit, as an `edit` of a new chip would.
+    fn build_chip(&mut self, plan: &chips::ChipPlan) -> Result<Uuid, SourceError> {
+        let id = self.chip_id(&plan.name)?;
+        let mut doc = CircuitDocument::new(plan.name.clone());
+        doc.id = id;
+        doc.revision = 1;
+        let doc = self
+            .nested(doc, |g| {
+                for (i, op) in plan.ops.iter().enumerate() {
+                    g.op(op).context(format_args!("ops[{i}]"))?;
+                }
+                Ok(())
+            })
+            .context(format_args!("making chip \"{}\"", plan.name))?;
+        self.report.chips_made += 1;
+        Ok(self.define(doc))
+    }
+
+    /// Run `f` on circuit `doc` as a group of its own that shares this
+    /// group's library, chip names, new chips and expansion state; then
+    /// lay out what it added and return the circuit.
+    fn nested(
+        &mut self,
+        doc: CircuitDocument,
+        f: impl FnOnce(&mut Group<'_>) -> Result<(), SourceError>,
+    ) -> Result<CircuitDocument, SourceError> {
+        let used = doc
+            .nodes
+            .iter()
+            .map(|n| n.id)
+            .chain(doc.wires.iter().map(|w| w.id))
+            .collect();
+        let mut sub = Group {
+            doc,
+            library: std::mem::take(&mut self.library),
+            chips: std::mem::take(&mut self.chips),
+            externals: self.externals,
+            used: RefCell::new(used),
+            unplaced: HashSet::new(),
+            root_id: self.root_id,
+            new_defs: std::mem::take(&mut self.new_defs),
+            expansion: std::mem::take(&mut self.expansion),
+            tests_set: Vec::new(),
+            tests_removed: Vec::new(),
+            report: CircuitReport::default(),
+        };
+        let done = f(&mut sub);
+        self.library = std::mem::take(&mut sub.library);
+        self.chips = std::mem::take(&mut sub.chips);
+        self.new_defs = std::mem::take(&mut sub.new_defs);
+        self.expansion = std::mem::take(&mut sub.expansion);
+        self.report.chips_made += sub.report.chips_made;
+        done?;
+        sub.place_unplaced();
+        source::check_port_labels(&sub.doc)?;
+        Ok(sub.doc)
+    }
+
+    /// The gate-level copy of chip `source`, for `expand` with `deep`:
+    /// `None` when the chip has nothing to expand at any depth.
+    ///
+    /// The copy is the source with its word-level parts expanded and its
+    /// chips replaced by their own copies, the same way. The source is
+    /// not changed: it stays the word-level reference to test the copy
+    /// against. The copy's id is derived from the source's id
+    /// ([`chips::gates_copy_id`]), so a chip a person made under the same
+    /// name is never taken for it; its name is `<source>_gates`
+    /// ([`chips::gates_copy_name`]), or `<source>_gates_2`, ... when
+    /// another chip has that name.
+    ///
+    /// Staleness: the copy is made again from the source every time a
+    /// request expands the source, and compared with the copy the
+    /// workspace has (by id). When they are the same, the workspace's copy
+    /// is used as it is; when they differ (the source, or a chip inside
+    /// it, changed since), the copy is replaced in place, keeping its id
+    /// and name, and its placements keep their wires by port. So a copy
+    /// follows its source, and edits made by hand to a copy are lost the
+    /// next time its source is expanded: to keep them, copy it under
+    /// another name (`copy_of`).
+    fn gates_copy(&mut self, source: Uuid) -> Result<Option<Uuid>, SourceError> {
+        if let Some(done) = self.expansion.copies.get(&source) {
+            return Ok(*done);
+        }
+        let Some(def) = self.library.definitions.get(&source).cloned() else {
+            return err("a chip whose definition is missing cannot be expanded");
+        };
+        if !self.has_word_parts(source) {
+            self.expansion.copies.insert(source, None);
+            return Ok(None);
+        }
+        let copy_id = chips::gates_copy_id(self.root_id, source);
+        let existing = self.library.definitions.get(&copy_id).cloned();
+        let name = match &existing {
+            Some(have) => have.name.clone(),
+            None => {
+                let base = chips::gates_copy_name(&def.name);
+                let mut name = base.clone();
+                let mut n = 2;
+                while self.chips.contains_key(&name) || name == self.doc.name {
+                    name = format!("{base}_{n}");
+                    n += 1;
+                }
+                name
+            }
+        };
+        // Known before its insides are expanded, so that a chip placed
+        // several times below it is copied once.
+        self.expansion.copies.insert(source, Some(copy_id));
+        let mut doc = (*def).clone();
+        doc.id = copy_id;
+        doc.name = name.clone();
+        doc.revision = existing.as_ref().map_or(1, |have| have.revision + 1);
+        let doc = self
+            .nested(doc, |g| {
+                let targets = g.expandable_parts(true);
+                g.expand_parts(&targets, true)
+            })
+            .context(format_args!("making chip \"{name}\""))?;
+        match existing {
+            Some(have) if have.same_content(&doc) => {}
+            _ => {
+                self.report.chips_made += 1;
+                self.define(doc);
+            }
+        }
+        Ok(Some(copy_id))
+    }
+
+    /// Whether chip `id` has a word-level part, itself or in a chip it
+    /// places at any depth.
+    fn has_word_parts(&mut self, id: Uuid) -> bool {
+        if let Some(&known) = self.expansion.word_parts.get(&id) {
+            return known;
+        }
+        // A chip inside itself is refused at the end of the request;
+        // until then the inner placement counts as having nothing.
+        self.expansion.word_parts.insert(id, false);
+        let Some(def) = self.library.definitions.get(&id).cloned() else {
+            return false;
+        };
+        let found = def.nodes.iter().any(|n| chips::expandable(&n.kind))
+            || def
+                .instanced_definitions()
+                .any(|inner| self.has_word_parts(inner));
+        self.expansion.word_parts.insert(id, found);
+        found
     }
 
     /// Lay out the parts without a place as one block: the whole circuit

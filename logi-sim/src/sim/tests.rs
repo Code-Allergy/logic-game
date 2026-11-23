@@ -466,6 +466,114 @@ fn reset_returns_to_power_on_and_keeps_inputs() {
 }
 
 #[test]
+fn single_state_writes_settle_without_a_tick() {
+    let d = stateful(false);
+    for options in [Options::default(), Options::unoptimized()] {
+        let mut s = Sim::new(Arc::new(compile(&d, &options).unwrap()));
+        s.run(3);
+        let keys = &s.program().state_keys;
+        let reg = keys
+            .iter()
+            .position(|k| matches!(k.loc, StateLoc::Slot(_)))
+            .unwrap();
+        let ram = keys
+            .iter()
+            .find_map(|k| match k.loc {
+                StateLoc::Mem(m) => Some(m),
+                _ => None,
+            })
+            .unwrap();
+        s.set_state(reg, 42 | 0x100);
+        assert_eq!(s.state(reg), 42, "masked to the width");
+        let version = s.mem_version(ram);
+        s.set_mem_word(ram, 42 & 15, 99);
+        assert_ne!(s.mem_version(ram), version);
+        s.resettle();
+        assert_eq!(s.tick_count(), 3);
+        assert_eq!(s.get("q"), 42);
+        assert_eq!(s.get("ram"), 99, "the read sees the new word");
+        s.tick();
+        assert_eq!(s.get("q"), 43, "the commit starts from the written state");
+    }
+}
+
+/// Two registers read as one word, and the low one also alone: word
+/// cleanup merges their state, and the low one's bits are both a field
+/// of the merged word and an instruction's result. A state key must name
+/// the state, so that a write through it (an import, `set_state`) holds.
+#[test]
+fn state_keys_of_merged_words_name_the_state_itself() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let en = b.input("en", 1);
+    let x = b.input("x", 16);
+    let mut q = Vec::new();
+    for lo in [0, 8] {
+        let (reg, out) = b.state_placeholder(NodeKind::Register { w: 8 });
+        let part = b.split(x, lo, 8);
+        b.connect(en, (reg, 0));
+        b.connect(part, (reg, 1));
+        q.push(out);
+    }
+    let word = b.merge(&q);
+    b.output("word", word);
+    let low = b.split(word, 0, 8);
+    let n = b.not(low);
+    b.output("low_n", n);
+    for options in [Options::default(), Options::unoptimized()] {
+        let program = Arc::new(compile(&d, &options).unwrap());
+        let mut s = Sim::new(Arc::clone(&program));
+        s.set("en", 1);
+        s.set("x", 0x1234);
+        s.run(2);
+        s.set("en", 0);
+        s.tick();
+        assert_eq!(s.get("word"), 0x1234);
+        let snap = s.export_state();
+        let mut t = Sim::new(Arc::clone(&program));
+        t.import_state(&snap);
+        assert_eq!(t.get("word"), 0x1234, "imported");
+        t.tick();
+        assert_eq!(t.get("word"), 0x1234, "the import holds a tick on");
+        for k in 0..t.program().state_keys.len() {
+            t.set_state(k, 0x56);
+        }
+        t.resettle();
+        assert_eq!(t.get("low_n"), 0xA9);
+        t.tick();
+        assert_eq!(t.get("word"), 0x5656, "written state holds");
+    }
+}
+
+#[test]
+fn resettle_leaves_staged_inputs_for_the_next_tick() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 4);
+    let dx = b.delay(x);
+    b.output("x", x);
+    b.output("dx", dx);
+    let program = Arc::new(compile(&d, &Options::default()).unwrap());
+    let mut plain = Sim::new(Arc::clone(&program));
+    let mut settled = Sim::new(program);
+    for s in [&mut plain, &mut settled] {
+        s.set("x", 3);
+    }
+    settled.resettle();
+    assert_eq!(settled.get("x"), 0, "not applied yet");
+    for _ in 0..3 {
+        plain.tick();
+        settled.tick();
+        assert_eq!(
+            [plain.get("x"), plain.get("dx")],
+            [settled.get("x"), settled.get("dx")]
+        );
+    }
+}
+
+#[test]
 fn unmatched_state_resets() {
     let d1 = stateful(false);
     let mut s1 = sim_of(&d1);

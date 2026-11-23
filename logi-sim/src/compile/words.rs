@@ -456,6 +456,8 @@ struct Attempt {
     widths: Vec<u8>,
     /// New slot (plain or view) of each old slot or view, or `NONE`.
     remap: Vec<u32>,
+    /// New slot of each state key's slot: the state word, or a view of it.
+    key_remap: FastMap<u32, u32>,
     /// Slot of each root output.
     port_slots: Vec<u32>,
     views: Vec<(u32, Seg)>,
@@ -913,6 +915,36 @@ fn attempt(inp: &Input<'_>, groups: &[Vec<u32>]) -> (Attempt, Vec<(u32, u32)>) {
             }
         };
     }
+    // State keys name the state word itself, never an emitted copy of
+    // its bits (which `locate` may find first, as for a slice of a merged
+    // word that is also read alone): a write through a key, such as
+    // `Sim::import_state`, must reach the state, or the next settle
+    // recomputes the copy from the old state.
+    let mut key_remap: FastMap<u32, u32> = FastMap::default();
+    for key in &em.state_keys {
+        let StateLoc::Slot(s) = key.loc else {
+            continue;
+        };
+        let (base, off, len) = match inp.view_of.get(&s) {
+            Some(seg) => (seg.base, seg.off, seg.len),
+            None => (s, 0, key.width),
+        };
+        let (base, off) = match merged_at.get(&base) {
+            Some(&(k, o)) => (group_slot[k as usize], o + off),
+            None => (base, off),
+        };
+        let new = if off == 0 && len >= sl.width(em, base) {
+            base
+        } else {
+            let seg = Seg { base, off, len };
+            *view_slot.entry(seg).or_insert_with(|| {
+                let f = sl.new_slot(len);
+                views.push((f, seg));
+                f
+            })
+        };
+        key_remap.insert(s, new);
+    }
     let port_slots: Vec<u32> = inp
         .ports
         .outputs
@@ -929,6 +961,7 @@ fn attempt(inp: &Input<'_>, groups: &[Vec<u32>]) -> (Attempt, Vec<(u32, u32)>) {
             commits: commits_final,
             widths: sl.widths_new,
             remap,
+            key_remap,
             port_slots,
             views,
         },
@@ -1093,7 +1126,7 @@ fn apply(
     }
     for key in &mut em.state_keys {
         if let StateLoc::Slot(s) = &mut key.loc {
-            let r = remap[*s as usize];
+            let r = att.key_remap.get(s).copied().unwrap_or(remap[*s as usize]);
             debug_assert_ne!(r, NONE, "a state key resolves");
             *s = r;
         }

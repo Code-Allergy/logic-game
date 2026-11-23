@@ -6,6 +6,7 @@
 //!  "steps": [
 //!    {"load": {"part": "rom", "file": "test.bin"}},
 //!    {"set": {"reset": 1}}, {"ticks": 2}, {"set": {"reset": 0}},
+//!    {"poke": {"cpu/a": 0x12, "ram": [[0x1234, 5]]}},
 //!    {"record": ["pc", "acc"], "when": "sync"},
 //!    {"compare": {"file": "expected.log", "radix": 16}},
 //!    {"until": "pc == 0x40", "max_ticks": 100000},
@@ -27,7 +28,7 @@ use logi_sim::sim::StateSnapshot;
 use serde_json::{Map, Value};
 
 use super::memfile;
-use super::rig::{Memory, Rig, Signal};
+use super::rig::{Memory, Rig, Signal, StateTarget};
 use crate::sim::challenges::expr::Expr;
 use crate::sim::source::{parse_int_text, valid_name};
 
@@ -110,6 +111,8 @@ struct Expected {
 
 enum Step {
     Set(Vec<(String, u64)>),
+    /// State targets and their values, written together.
+    Poke(Vec<(StateTarget, u64)>),
     Ticks(u64),
     Until {
         cond: Cond,
@@ -227,6 +230,48 @@ impl Reader<'_> {
                 .map(|(k, v)| Ok((k.clone(), number(v)?)))
                 .collect::<Result<_, String>>()?;
             Ok(Step::Set(pairs))
+        } else if let Some(v) = take(&mut map, "poke") {
+            done(&map)?;
+            let Value::Object(pairs) = v else {
+                return Err(
+                    "\"poke\" takes {state: value, ..., memory: [[address, value], ...]}".into(),
+                );
+            };
+            let mut list = Vec::new();
+            for (name, v) in &pairs {
+                let path = self
+                    .state
+                    .aliases
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone());
+                if let Value::Array(words) = v {
+                    let memory = self.state.rig.memory(&path)?;
+                    for (i, pair) in words.iter().enumerate() {
+                        let at = |e: String| format!("\"{name}\"[{i}]: {e}");
+                        let (Some(addr), Some(value), 2) = (
+                            pair.get(0),
+                            pair.get(1),
+                            pair.as_array().map_or(0, Vec::len),
+                        ) else {
+                            return Err(at("a word is [address, value]".into()));
+                        };
+                        let addr = number(addr).map_err(at)? as usize;
+                        let mut target = self.state.rig.word_target(&memory, addr).map_err(at)?;
+                        target.text = format!("{name}@0x{addr:X}");
+                        let value = number(value).map_err(at)?;
+                        target.fits(value)?;
+                        list.push((target, value));
+                    }
+                } else {
+                    let mut target = self.state.rig.target(&path)?;
+                    target.text = name.clone();
+                    let value = number(v).map_err(|e| format!("\"{name}\": {e}"))?;
+                    target.fits(value)?;
+                    list.push((target, value));
+                }
+            }
+            Ok(Step::Poke(list))
         } else if let Some(v) = take(&mut map, "ticks") {
             done(&map)?;
             Ok(Step::Ticks(number(&v)?))
@@ -319,8 +364,8 @@ impl Reader<'_> {
             Ok(Step::Reset)
         } else {
             Err(
-                "unknown step (steps: set, ticks, until, expect, read, load, store, record, \
-                 compare, snapshot, restore, reset)"
+                "unknown step (steps: set, poke, ticks, until, expect, read, load, store, \
+                 record, compare, snapshot, restore, reset)"
                     .into(),
             )
         }
@@ -791,6 +836,16 @@ impl Runner<'_> {
                 for (name, value) in pairs {
                     self.state.rig.set(&name, value)?;
                 }
+            }
+            Step::Poke(list) => {
+                let pokes: Vec<(&StateTarget, u64)> = list.iter().map(|(t, v)| (t, *v)).collect();
+                self.state.rig.poke(&pokes)?;
+                let _ = writeln!(
+                    self.out,
+                    "poked {} value(s) at tick {}",
+                    pokes.len(),
+                    self.state.rig.tick_count()
+                );
             }
             Step::Ticks(n) => {
                 if let Err(f) = self.advance(n, None)? {
