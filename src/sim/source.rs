@@ -113,6 +113,9 @@ pub struct SourceNode {
     pub at: [f32; 2],
     /// `count` and `step` of an array node.
     pub array: Option<NodeArray>,
+    /// The keyboard key bound to an `Input` (`sim::keybind`), stored as the
+    /// node property `key`.
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -324,6 +327,15 @@ pub(crate) fn parse_node_entry(
         let ty = take_string(&mut map, "type")?;
         let use_ = take_string(&mut map, "use")?;
         let label = take_string(&mut map, "label")?;
+        let key = take_string(&mut map, "key")?;
+        if let Some(k) = &key {
+            if ty.as_deref() != Some("Input") {
+                return err("\"key\" binds a keyboard key to an Input; this is not one");
+            }
+            if crate::sim::keybind::key_code(k).is_none() {
+                return err(format!("\"key\": \"{k}\" is not a key (ArrowUp, KeyZ, Enter, Space, ...)"));
+            }
+        }
         let (at, placed) = match map.shift_remove("at") {
             Some(v) => (parse_point(v, "at")?, true),
             None if need_at => return err("missing \"at\" (its position, [x, y])"),
@@ -372,6 +384,7 @@ pub(crate) fn parse_node_entry(
                 label,
                 at,
                 array,
+                key,
             },
             placed,
         ))
@@ -478,6 +491,9 @@ fn node_to_value(node: &SourceNode) -> Value {
     }
     if let Some(label) = &node.label {
         map.insert("label".into(), label.clone().into());
+    }
+    if let Some(key) = &node.key {
+        map.insert("key".into(), key.clone().into());
     }
     map.insert("at".into(), point(node.at));
     if let Some(array) = node.array {
@@ -1139,6 +1155,10 @@ pub(crate) fn add_node(
             node.at[1] + step[1] * i as f32,
         ];
         let node_id = new_id(&format!("node/{name}"));
+        let mut properties = HashMap::new();
+        if let Some(key) = &node.key {
+            properties.insert(crate::sim::keybind::KEY_PROPERTY.to_string(), key.clone());
+        }
         doc.nodes.push(DocNode {
             id: node_id,
             kind,
@@ -1147,7 +1167,7 @@ pub(crate) fn add_node(
             y: pos[1],
             layer: DEFAULT_LAYER_UUID,
             layer_order: 0,
-            properties: HashMap::new(),
+            properties,
         });
         elements.push(Element {
             id: node_id,

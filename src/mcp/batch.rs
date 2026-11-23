@@ -1462,6 +1462,16 @@ impl Group<'_> {
         if params.contains_key("type") {
             return err("a part's type cannot be set; remove it and add the new one");
         }
+        // A keyboard key for an input (`sim::keybind`); null removes it.
+        let key = match params.shift_remove("key") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(k)) if crate::sim::keybind::key_code(&k).is_some() => Some(Some(k)),
+            Some(Value::String(k)) => {
+                return err(format!("\"key\": \"{k}\" is not a key (ArrowUp, KeyZ, Enter, Space, ...)"));
+            }
+            Some(_) => return err("\"key\" must be a key name, or null to remove it"),
+        };
         // Memory contents from a file or inline words.
         let load = params.shift_remove("load");
         if let Some(label) = &label
@@ -1487,6 +1497,17 @@ impl Group<'_> {
             }
             if let Some((x, y)) = at {
                 (node.x, node.y) = (x, y);
+            }
+            if let Some(key) = &key {
+                if !matches!(node.kind, GateKind::Input { .. }) {
+                    return err(format!("\"{part}\" is not an Input; \"key\" does not apply"));
+                }
+                let prop = crate::sim::keybind::KEY_PROPERTY.to_string();
+                match key {
+                    Some(k) => node.properties.insert(prop, k.clone()),
+                    None => node.properties.remove(&prop),
+                };
+                changed.insert(*id);
             }
             let kind = if let Some(definition) = chip {
                 if !matches!(node.kind, GateKind::SubCircuit { .. }) {

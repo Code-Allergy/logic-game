@@ -260,7 +260,7 @@ demos are examples of the syntax and one parser serves both. Differences:
 | `wire` | Wire entries: one source, then sinks; arrays and bit fields deal out as in version 6, with `Split`/`Merge` adapters generated. An input bit that is already driven is an error. |
 | `unwire` | Sink references; removes what drives them. |
 | `remove` | Parts by reference, with their wires. |
-| `set` | `{"part": ref, …parameters, "label": …, "at": …, "use": …}`, or an array of these: change parameters, the label, the position or (for a chip) the definition. Each entry is checked when it is applied: wires to pins that no longer exist or whose width no longer matches the other end are removed and reported. To change the width of a whole path, remove and add. |
+| `set` | `{"part": ref, …parameters, "label": …, "at": …, "use": …, "key": …}` (`key`: a keyboard key for an `Input`, or `null` to remove it; see `docs/save-format.md`), or an array of these: change parameters, the label, the position or (for a chip) the definition. Each entry is checked when it is applied: wires to pins that no longer exist or whose width no longer matches the other end are removed and reported. To change the width of a whole path, remove and add. |
 | `layout` | Lay out the circuit again, or only the parts named. |
 | `make_chip` (3) | `{"parts": [refs], "name": chip}`: the parts become a new chip and are replaced by one instance of it, wired the same way (the editor's "make chip", `sim/chip.rs`). Ports are named after what they connect to. |
 | `copy_of` (3) | `"circuit name"`, as the first op of a chip that does not exist yet: the chip starts as a copy of that circuit. |

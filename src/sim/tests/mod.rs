@@ -9,6 +9,7 @@ mod gallery;
 pub mod geometry_tests;
 mod history;
 mod instance_views;
+mod keybind;
 mod routing;
 mod rtl;
 mod rtl_cells;

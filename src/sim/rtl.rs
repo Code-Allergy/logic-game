@@ -1336,6 +1336,7 @@ fn import_module(
                 label: cell.label.clone(),
                 at: [p.x, p.y],
                 array: None,
+                key: None,
             }
         })
         .collect();

@@ -331,6 +331,7 @@ rarely matters.
 | `label` | string, optional | Shown in the editor. For ports it is the port name; it defaults to the node's `name` (and to `name` followed by the index for array elements). Instances also default to their name (`fa[3]`); other primitives have no label unless given. In an array, `{i}` in the label is replaced by the index. |
 | `at` | `[x, y]` | Position (required). |
 | `count`, `step` | integer, `[dx, dy]` | An array of `count` nodes (1 to 4096). Element `i` is named `name[i]` and placed at `at + i * step`. |
+| `key` | string, optional | `Input` only: a keyboard key bound to the input (`sim::keybind`). While the simulation runs, the input is 1 while the key is held and 0 otherwise, and the editor's shortcut for that key is off. A Bevy key name (`ArrowUp`, `KeyZ`, `Enter`, `Space`, `ShiftRight`, `Digit1`, …) or a short form (`Up`, `Z`, `1`, `Shift`). In version 5 it is the node property `key`. |
 
 Parameter conveniences: in an array, `{i}` in a string parameter is
 replaced by the element's index, and a value that is then an integer is

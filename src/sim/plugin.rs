@@ -196,6 +196,13 @@ impl Plugin for SimulationViewPlugin {
             .register_type::<crate::sim::WireState>()
             .register_type::<InstanceViewItem>()
             .init_resource::<RunOnReturn>()
+            .init_resource::<crate::sim::keybind::HeldKeys>()
+            .add_systems(
+                PreUpdate,
+                crate::sim::keybind::key_binding_system
+                    .after(bevy::input::InputSystems)
+                    .run_if(resource_exists::<ButtonInput<KeyCode>>),
+            )
             .add_systems(Startup, pause_bridge_system)
             .add_systems(
                 OnEnter(state.clone()),
