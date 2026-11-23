@@ -99,16 +99,53 @@ pub struct BodyRef<'a> {
 /// One compiled body: its settle chunks in order, and its commit chunks
 /// in order (`None`: the interpreter commits, for a body with a
 /// `MemClear`).
+///
+/// The function pointers point into the code owned by the
+/// [`JitProgram`] that holds this body, so they are private to the crate:
+/// safe code outside it can neither read them nor move a body to another
+/// program (which could outlive the code it points into).
 pub struct JitBody {
-    pub settle: Vec<SettleFn>,
-    pub commit: Option<Vec<CommitFn>>,
+    pub(crate) settle: Vec<SettleFn>,
+    pub(crate) commit: Option<Vec<CommitFn>>,
+}
+
+impl JitBody {
+    /// Settle chunks.
+    pub fn settle_chunks(&self) -> usize {
+        self.settle.len()
+    }
+
+    /// Commit chunks (`None`: the interpreter commits this body).
+    pub fn commit_chunks(&self) -> Option<usize> {
+        self.commit.as_ref().map(Vec::len)
+    }
 }
 
 /// Every body of one `Sim`, indexed as `Sim`'s run numbers; `None` for a
 /// body that was not compiled (not used, or larger than [`MAX_BODY`]),
 /// which the interpreter runs.
+///
+/// The bodies are private (read them with [`JitProgram::body`]), so that
+/// their function pointers cannot be separated from the module that owns
+/// their code. Moving bodies between programs does not compile:
+///
+/// ```compile_fail,E0616
+/// use logi_sim::sim::jit::JitProgram;
+/// fn steal(a: &mut JitProgram, b: &mut JitProgram) {
+///     std::mem::swap(&mut a.bodies, &mut b.bodies);
+/// }
+/// ```
+///
+/// while reading them does:
+///
+/// ```
+/// use logi_sim::sim::jit::JitProgram;
+/// fn chunks(a: &JitProgram) -> usize {
+///     (0..a.len()).filter_map(|i| a.body(i)).map(|b| b.settle_chunks()).sum::<usize>() + a.instrs
+/// }
+/// ```
 pub struct JitProgram {
-    pub bodies: Vec<Option<JitBody>>,
+    pub(crate) bodies: Vec<Option<JitBody>>,
     /// Instructions compiled (packed words count one each).
     pub instrs: usize,
     /// Which `Sim` layout this was compiled for (set by
@@ -157,6 +194,21 @@ impl Drop for Owned {
 pub struct JitError(pub String);
 
 impl JitProgram {
+    /// Body `run` (as `Sim`'s run numbers), if it was compiled.
+    pub fn body(&self, run: usize) -> Option<&JitBody> {
+        self.bodies.get(run)?.as_ref()
+    }
+
+    /// Bodies, compiled or not.
+    pub fn len(&self) -> usize {
+        self.bodies.len()
+    }
+
+    /// No bodies at all.
+    pub fn is_empty(&self) -> bool {
+        self.bodies.is_empty()
+    }
+
     /// Compile `bodies` of `p`, which passed `Sim`'s `check` (so did every
     /// body).
     pub fn compile(p: &Program, bodies: &[BodyRef<'_>]) -> Result<Self, JitError> {
