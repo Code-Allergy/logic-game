@@ -39,3 +39,22 @@ To watch a ROM in the game, give the saved cartridge memories its contents
 
 and set the root input `vertical` to the header's mirroring (flags 6 bit 0;
 nestest is horizontal, 0).
+
+## The committed workspace
+
+`nes/workspace/manifest.json` is the whole `nes` workspace, the result of
+the steps above plus everything since (the editor's version 5 file), with
+nestest in the NROM cartridge and the MMC3 cartridge empty. It is the
+copy to trust: a game window that saves an older copy on exit cannot lose
+work that is committed. `cartridge.py` moves between it and a playable
+copy:
+
+```sh
+python3 nes/gen/cartridge.py install --into .gatequest/workspaces/nes   # then open "nes" in the game
+python3 nes/gen/cartridge.py insert .gatequest/workspaces/nes nes/roms/smb3.nes
+python3 nes/gen/cartridge.py strip .gatequest/workspaces/nes --rom nes/roms/other/nestest.nes   # after changes
+```
+
+`examples/nes_bench.rs` measures a workspace (interpreter, JIT, clock-phase
+variants, tick fusion) and with `--compare` checks the JIT against the
+interpreter.
