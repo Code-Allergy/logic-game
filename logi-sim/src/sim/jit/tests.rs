@@ -284,8 +284,8 @@ fn counters_are_the_same_with_the_jit() {
         assert!(got.jit_active());
         for k in 0..200u64 {
             for port in 0..p.ports.inputs.len() {
-                want.set_input(port, k * 2654435761 >> 3);
-                got.set_input(port, k * 2654435761 >> 3);
+                want.set_input(port, (k * 2654435761) >> 3);
+                got.set_input(port, (k * 2654435761) >> 3);
             }
             if k % 5 == 0 {
                 want.run(7);

@@ -300,13 +300,18 @@ fn jit_compare(name: &str, options: &str, secs: f64) {
         println!("{name} {options}: the JIT is not available (build with --features jit)");
         return;
     }
-    let mut best_jit = f64::MAX;
-    for _ in 0..5 {
-        let t = std::time::Instant::now();
-        let code = probe.compile_jit().expect("JIT");
-        best_jit = best_jit.min(t.elapsed().as_secs_f64() * 1e3);
-        std::hint::black_box(code.instrs);
-    }
+    // JIT compile time: building a `Sim` with the JIT less building one
+    // without (best of 5 each).
+    let build = |o: &SimOptions| {
+        (0..5)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                std::hint::black_box(Sim::with_options(Arc::clone(&p), o.clone()));
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let best_jit = build(&jit) - build(&interp);
     println!(
         "{name} {options}: {} instrs, {} commits; program compile {compile_ms:.2} ms, JIT compile {best_jit:.2} ms (every body)",
         p.instrs.len(),

@@ -342,7 +342,7 @@ impl Item {
             }
             Item::Pack { op, k } => {
                 let pk = &p.packs[k as usize];
-                for o in &operands(op, pk)[..arity(op)] {
+                for o in &operands(pk)[..arity(op)] {
                     f(o.base);
                     f(o.splat);
                     let g = o.gather_start as usize;
@@ -379,7 +379,7 @@ fn arity(op: Op) -> usize {
     a as usize + b as usize + c as usize
 }
 
-fn operands(_op: Op, pk: &Pack) -> [&PackOperand; 3] {
+fn operands(pk: &Pack) -> [&PackOperand; 3] {
     [&pk.a, &pk.b, &pk.c]
 }
 
@@ -586,7 +586,7 @@ fn build_settle(
                 let pk = p.packs[k as usize];
                 let n = arity(op);
                 let mut v = [slots; 3];
-                for (j, o) in operands(op, &pk).into_iter().enumerate().take(n) {
+                for (j, o) in operands(&pk).into_iter().enumerate().take(n) {
                     v[j] = pack_operand(&mut b, &mut sl, p, o);
                 }
                 let [a, bv, c] = v;
