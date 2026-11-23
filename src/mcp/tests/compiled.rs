@@ -80,10 +80,16 @@ fn the_gate_cpu_has_chips_that_match_and_chips_that_do_not() {
         &i.chips["16-bit 2-to-1 multiplexer"],
         Match::Matched(n) if n.contains("Mux")
     ));
-    assert!(matches!(
-        &i.chips["D flip-flop (rising edge)"],
-        Match::Matched(n) if n.starts_with("state [Seq")
-    ));
+    // A master latch on the clock's low phase, a slave on its high phase.
+    assert!(
+        matches!(
+            &i.chips["D flip-flop (rising edge)"],
+            Match::Matched(n) if n == "state [1-bit Register { en: !In(0), d: In(1) }, \
+                1-bit Register { en: In(0), d: r0 }], outputs [r1]"
+        ),
+        "{:?}",
+        i.chips["D flip-flop (rising edge)"]
+    );
     assert!(
         matches!(&i.chips["16-bit ALU"], Match::Unmatched(why) if why.contains("no catalogue function fits"))
     );
@@ -469,4 +475,78 @@ fn the_compiled_view_of_a_loop_says_so() {
         e.starts_with("it does not build: a loop of gates with no state in it: a -> b -> a"),
         "{e}"
     );
+}
+
+/// An 8-bit register of eight `dffe` chips (a `Delay` behind an enable
+/// from gates), as a player builds one, used by `main`.
+fn reg8_of_dffe_chips() -> WorkspaceDocument {
+    let (ws, report) = edit(
+        &empty(),
+        json!({"edits": [
+            {"circuit": "dffe", "ops": [
+                {"add": [
+                    {"name": "D", "type": "Input"}, {"name": "En", "type": "Input"},
+                    {"name": "q", "type": "Delay"}, {"name": "ne", "type": "Not"},
+                    {"name": "load", "type": "And"}, {"name": "keep", "type": "And"},
+                    {"name": "next", "type": "Or"}, {"name": "Q", "type": "Output"}
+                ]},
+                {"wire": [["D", "load.a"], ["En", "load.b", "ne"], ["q", "keep.a", "Q"],
+                          ["ne", "keep.b"], ["load", "next.a"], ["keep", "next.b"], ["next", "q"]]}
+            ]},
+            {"circuit": "reg8", "ops": [
+                {"add": [
+                    {"name": "D", "type": "Input", "w": 8}, {"name": "Load", "type": "Input"},
+                    {"name": "ff", "use": "dffe", "count": 8},
+                    {"name": "Q", "type": "Output", "w": 8}
+                ]},
+                {"wire": [["D", "ff.D"], ["Load", "ff.En"], ["ff.Q", "Q"]]}
+            ]},
+            {"ops": [
+                {"add": [
+                    {"name": "D", "type": "Input", "w": 8}, {"name": "Load", "type": "Input"},
+                    {"name": "r", "use": "reg8"}, {"name": "Q", "type": "Output", "w": 8}
+                ]},
+                {"wire": [["D", "r.D"], ["Load", "r.Load"], ["r", "Q"]]}
+            ]}
+        ]}),
+    );
+    assert!(report.build.is_ok(), "{report}");
+    ws
+}
+
+#[test]
+fn a_register_of_flip_flop_chips_is_reported_and_pinned_as_a_register() {
+    // The report of issue #117: `reg8` of `dffe` chips was "not matched:
+    // state element 0: not a register".
+    let ws = reg8_of_dffe_chips();
+    let text = compiled::view(&ws, Place::Root).unwrap();
+    for said in [
+        "  dffe: matched as state [1-bit Register { en: In(1), d: In(0) }], outputs [r0]\n",
+        "  reg8: matched as state [8-bit Register { en: In(1), d: In(0) }], outputs [r0]\n",
+    ] {
+        assert!(text.contains(said), "{said}: {text}");
+    }
+    // What a player would pin passes: by kind, by kind and width, and the
+    // test the view prints.
+    let i = compiled::insight(&ws, Place::Root).unwrap();
+    let ws = with_tests(
+        &ws,
+        "main",
+        json!([
+            {"name": "a register", "compiled": {"matched": {"reg8": "Register"}}},
+            {"name": "8 bits", "compiled": {"matched": {"reg8": "8-bit Register", "dffe": true}}},
+            i.pinning_test()
+        ]),
+    );
+    assert_eq!(
+        suite(&ws, "main"),
+        "3 of 3 tests passed in 1 circuit(s) (6 cases)\n"
+    );
+    // The register behaves as its gates do.
+    let ws = with_tests(
+        &ws,
+        "main",
+        json!([{"name": "same", "unoptimized": {"samples": 500, "hold": 2}}]),
+    );
+    assert!(suite(&ws, "main").starts_with("4 of 4 tests passed"));
 }
