@@ -395,14 +395,14 @@ on save.
 | `set` | Root inputs by label. A value that does not fit the input is an error. |
 | `poke` | Write state at once, without a tick: `{"poke": {"cpu/a": 18, "cpu/pc": "0x0400", "ram@0x1234": 5, "ram": [[4660, 5], [4661, 255]]}}`. Every net is settled from the new state before the next step; an input set before it still reaches the logic at the next tick. A value that does not fit is an error, and nothing is written. |
 | `ticks` | Run that many ticks. |
-| `until` | Run until an expression over signals is non-zero (`challenges::expr` syntax), at most `max_ticks`; not reaching it fails the run. |
+| `until` | Run until an expression over signals is non-zero (`challenges::expr` syntax), at most `max_ticks`; not reaching it fails the run. Only the ticks it ran count towards the limit of the call. |
 | `expect` | Signals and values; a mismatch fails the run and says what it saw. |
 | `read` | Return signals, or up to 256 words of a memory (`ram@0x00..0x10`). |
 | `load` | Words into a memory, for this simulation only (below). |
 | `store` | A memory's words to a file: binary, or hex text for `.hex` and `.txt`. |
-| `record` | From here on, record these signals after each tick, or each tick `when` holds. |
+| `record` | From here on, record these signals after each tick, or each tick `when` holds. Another `record` ends the recording before it, which is reported with its own columns. |
 | `compare` | Check the rows recorded from here on against expected rows (below). The run stops at the **first difference**. |
-| `snapshot`, `restore` | Save or restore the whole simulator state under a name. |
+| `snapshot`, `restore` | Save or restore the whole simulator state under a name: registers, memories, the tick, and the inputs as they were set. |
 | `reset` | Back to power-on. |
 
 **Signals** are paths of labels from the circuit down: `core/alu/sum.y`
@@ -473,7 +473,8 @@ a value belongs to is given by, in order: a `NAME:value` token whose name
 is a recorded signal (`A:1F`, as CPU logs write registers); `columns`, a
 list of signal names for the leading values with `null` to skip one; a
 first line of signal names; else the order of the `record` step. `radix`
-16 reads bare hex; `skip_lines` skips a header. The failure shows the
+16 reads bare hex; `skip_lines` skips a header. A value that cannot be
+read in a column that is checked is an error, as are no rows at all. The failure shows the
 differing signals and the `context` rows before:
 
 ```

@@ -768,3 +768,161 @@ fn a_run_can_compile_without_the_optimising_passes() {
     assert!(e.contains("\"off\" takes true, or passes of"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn an_until_is_charged_the_ticks_it_ran() {
+    let ws = machine();
+    // Reached after 2 of its 10 ticks: the 5 after it fit a budget of 10.
+    let out = script(
+        &ws,
+        json!({"max_ticks": 10, "steps": [
+            {"set": {"Go": 1}}, {"until": "Count == 1", "max_ticks": 10}, {"ticks": 5}
+        ]}),
+    );
+    assert!(out.text.contains("ran 7 ticks"), "{}", out.text);
+    // The budget still ends a wait that is not reached.
+    let e = script_error(
+        &ws,
+        json!({"max_ticks": 10, "steps": [
+            {"ticks": 4}, {"until": "Count == 1", "max_ticks": 10}
+        ]}),
+    );
+    assert!(e.contains("limit of ticks (0 left)"), "{e}");
+}
+
+#[test]
+fn each_recording_is_reported_with_its_own_columns() {
+    let ws = machine();
+    let out = script(
+        &ws,
+        json!({"steps": [
+            {"set": {"Go": 1}}, {"record": ["Count"]}, {"ticks": 2},
+            {"record": ["Data", "Go"]}, {"ticks": 3}
+        ]}),
+    );
+    let text = &out.text;
+    assert!(
+        text.contains("recorded 2 rows:") && text.contains("recorded 3 rows:"),
+        "{text}"
+    );
+    assert!(text.contains("tick 1: Count=0x0000\n"), "{text}");
+    assert!(text.contains("tick 3: Data=0x00 Go=1\n"), "{text}");
+    assert!(!text.contains("tick 1: Data="), "{text}");
+}
+
+#[test]
+fn expected_rows_are_read_strictly() {
+    let ws = machine();
+    let dir = scratch("compare-strict");
+    let run = |compare: Value| {
+        json!({"signals": {"A": "Count", "B": "Data"}, "steps": [
+            {"set": {"Go": 1}}, {"record": ["A", "B"]}, {"compare": compare}, {"ticks": 3}
+        ]})
+    };
+    // No rows: refused, where it used to panic at the first recorded row.
+    let e = script_error(&ws, run(json!({"rows": []})));
+    assert!(e.contains("\"rows\" is empty"), "{e}");
+    // A header of names that read as hex values is still a header.
+    let log = dir.join("named.log");
+    std::fs::write(&log, "A B\n0000 00\n0001 00\n").unwrap();
+    let out = script(&ws, run(json!({"file": log, "radix": 16})));
+    assert!(!out.failed, "{}", out.text);
+    assert!(out.text.contains("compared 2 rows with"), "{}", out.text);
+    // A value that cannot be read is an error, not a column left unchecked.
+    std::fs::write(&log, "A:GG B:00\n").unwrap();
+    let e = script_error(&ws, run(json!({"file": log, "radix": 16})));
+    assert!(e.contains("\"A:GG\" is not a value"), "{e}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_bad_set_or_load_costs_no_simulation() {
+    let ws = machine();
+    let mut state = RunState::new(Rig::build(&ws, Place::Root).unwrap());
+    for set in [json!({"Nope": 1}), json!({"Go": 2})] {
+        let e = run::run(
+            &mut state,
+            &object(json!({"steps": [{"ticks": 5}, {"set": set}]})),
+        )
+        .unwrap_err();
+        assert!(e.starts_with("steps[1]: "), "{e}");
+        assert_eq!(state.rig.tick_count(), 0, "{e}");
+    }
+    // An address at the end of the address space is refused, not a panic.
+    let e = script_error(
+        &ws,
+        json!({"steps": [{"load": {"part": "ram", "data": [1], "at": "0xFFFFFFFFFFFFFFFF"}}]}),
+    );
+    assert!(e.contains("past the memory's 16 words"), "{e}");
+}
+
+#[test]
+fn inputs_keep_their_timing_over_a_recompile_and_a_restore() {
+    let ws = machine();
+    let mut state = RunState::new(Rig::build(&ws, Place::Root).unwrap());
+    let mut run = |steps: Value| {
+        let out = run::run(&mut state, &object(json!({"steps": steps}))).unwrap();
+        assert!(!out.failed, "{}", out.text);
+    };
+    // `Go` is set but not seen yet. Reading a new net recompiles: the
+    // counter must still not count at the next tick.
+    run(json!([{"set": {"Go": 1}}]));
+    run(json!([
+        {"read": ["lo/inc.sum"]},
+        {"ticks": 1}, {"expect": {"Count": 0}},
+        {"ticks": 1}, {"expect": {"Count": 1}}
+    ]));
+    // A snapshot holds the inputs: restored, the counter counts again.
+    run(json!([
+        {"snapshot": "counting"}, {"set": {"Go": 0}}, {"ticks": 3}, {"expect": {"Count": 2}},
+        {"restore": "counting"}, {"expect": {"Count": 1}},
+        {"ticks": 2}, {"expect": {"Count": 3}}
+    ]));
+}
+
+#[test]
+fn an_equivalence_test_fails_when_the_ports_no_longer_match() {
+    let chip = |name: &str| {
+        json!({"circuit": name, "ops": [
+            {"add": [{"name": "A", "type": "Input"}, {"name": "X", "type": "Output"},
+                     {"name": "Y", "type": "Output"}]},
+            {"wire": [["A", "X", "Y"]]}
+        ]})
+    };
+    let (ws, _) = edit(&empty(), json!({"edits": [chip("ref"), chip("dut")]}));
+    let (ws, _) = edit(
+        &ws,
+        json!({"circuit": "dut", "ops": [{"tests": [{"name": "same", "equivalent": {"to": "ref"}}]}]}),
+    );
+    let text = testing::run_suite(&ws, Some("dut"), None).unwrap().text();
+    assert!(text.starts_with("1 of 1 tests passed"), "{text}");
+    // The tested chip loses an output: the test no longer covers it.
+    let (ws, _) = edit(&ws, json!({"circuit": "dut", "ops": [{"remove": ["Y"]}]}));
+    let text = testing::run_suite(&ws, Some("dut"), None).unwrap().text();
+    assert!(
+        text.starts_with("FAILED dut / same: the ports differ"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_roots_tests_follow_a_save_as() {
+    let dir = scratch("save-as-tests");
+    let mut s = Session::new(WorkspaceStore::in_dir(&dir));
+    s.workspace_tool("new", Some("first"), false).unwrap();
+    let request = json!({"ops": [
+        {"add": [{"name": "A", "type": "Input"}, {"name": "Y", "type": "Output"}]},
+        {"wire": [["A", "Y"]]},
+        {"tests": [{"name": "wire", "table": {"inputs": ["A"], "outputs": ["Y"], "rows": [[0, 0], [1, 1]]}}]}
+    ]});
+    s.edit_tool(object(request), None, false).unwrap();
+    s.workspace_tool("save", None, false).unwrap();
+    s.workspace_tool("save", Some("second"), false).unwrap();
+    let out = s.test_tool(None, None).unwrap();
+    assert!(out.starts_with("1 of 1 tests passed"), "{out}");
+    // And they are in the next save too.
+    s.workspace_tool("save", None, false).unwrap();
+    let saved = WorkspaceStore::in_dir(&dir).read("second").unwrap();
+    assert_eq!(saved.tests.get(&saved.root.id).map(Vec::len), Some(1));
+    let _ = std::fs::remove_dir_all(dir);
+}

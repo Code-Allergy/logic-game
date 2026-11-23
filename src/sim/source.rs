@@ -841,7 +841,7 @@ fn parse_range(text: &str) -> Option<(u32, u32)> {
         }
         None => {
             let i: u32 = text.trim().parse().ok()?;
-            Some((i, i + 1))
+            Some((i, i.checked_add(1)?))
         }
     }
 }

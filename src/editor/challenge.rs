@@ -91,10 +91,27 @@ pub fn challenge_workspace(challenge: &Challenge, fresh: bool) -> (Arc<Workspace
     {
         return (Arc::new(saved), true);
     }
-    (
-        Arc::new(demos::editable_copy(&challenge.starter, &name)),
-        false,
-    )
+    let mut starter = demos::editable_copy(&challenge.starter, &name);
+    // "Start over" on a saved challenge: the starter takes the place of
+    // the saved work, so it is the same workspace (the same root id).
+    // With an id of its own its saves would be refused, as the name holds
+    // another workspace, and the road would go on opening the old work.
+    if let Some(store) = super::workspace::WorkspaceStore::player()
+        && let super::workspace::Stored::Root(saved) = store.stored(&name)
+    {
+        take_root_id(&mut starter, saved);
+    }
+    (Arc::new(starter), false)
+}
+
+/// Give the root of `workspace` the id `id`; its tests follow it.
+fn take_root_id(workspace: &mut WorkspaceDocument, id: Uuid) {
+    let old = std::mem::replace(&mut workspace.root.id, id);
+    if old != id
+        && let Some(tests) = workspace.tests.remove(&old)
+    {
+        workspace.tests.insert(id, tests);
+    }
 }
 
 /// Opening `challenge` (from the road or the Library), as a request for
@@ -245,6 +262,9 @@ pub fn challenge_card_system(
     if restart {
         if challenge.confirm_restart {
             challenge.confirm_restart = false;
+            // The starter keeps the root id of saved work, so the tracking
+            // system does not see another workspace: forget the check here.
+            challenge.report = None;
             open_challenge(current, true, Some(&mut editor), &mut load);
         } else {
             challenge.confirm_restart = true;

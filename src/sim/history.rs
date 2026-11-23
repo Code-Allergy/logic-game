@@ -30,7 +30,10 @@
 //! just the real changes). Unchanged gates keep their entities and their
 //! simulator nodes; the bridge applies the whole restore as one
 //! structural edit, and register and memory state carries over as for any
-//! edit. Definitions that differ are put back into the library.
+//! edit. Definitions that differ are put back into the library; one the
+//! snapshot does not have stays there (the library also holds chips that
+//! are picked to place but not placed yet), where nothing reaches it and
+//! it is not saved. The stored tests are part of a snapshot too.
 //!
 //! In a subcircuit view the view stays open when it still exists and the
 //! root needs no new entities (the usual case: the undone edit was made in
@@ -50,12 +53,12 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use uuid::Uuid;
 
-use super::document::{CircuitDocument, CircuitLibrary};
+use super::document::{CircuitDocument, CircuitLibrary, CircuitTests};
 use super::view::{CircuitView, InstanceViewItem, spawn_view};
 use super::{
     ActiveCircuit, CircuitLayer, DisplayConfig, DocumentQueries, GateIdentity, GateKind, GateLabel,
     GateType, InputDrive, PersistentGateData, RootItems, SelectedGate, WireEndpoints, WireIdentity,
-    WorkspaceRevision, spawn_gate, spawn_wire,
+    WorkspaceRevision, WorkspaceTests, spawn_gate, spawn_wire,
 };
 
 /// Steps kept for undo; older ones are dropped.
@@ -74,28 +77,34 @@ pub(crate) struct Snapshot {
     /// The root circuit (its name left empty: renaming is not an edit).
     root: CircuitDocument,
     definitions: HashMap<Uuid, Arc<CircuitDocument>>,
+    /// The stored tests ([`WorkspaceTests`]): the ECS does not hold them,
+    /// and an edit of only them is an edit all the same.
+    tests: CircuitTests,
     /// The [`WorkspaceRevision`] the circuit had.
     revision: u64,
 }
 
 impl Snapshot {
-    /// The circuit `root` with `definitions`, as it should be after a
-    /// restore (the MCP server's edits, `crate::mcp::app`).
+    /// The circuit `root` with `definitions` and `tests`, as it should be
+    /// after a restore (the MCP server's edits, `crate::mcp::app`).
     pub(crate) fn of(
         mut root: CircuitDocument,
         definitions: HashMap<Uuid, Arc<CircuitDocument>>,
+        tests: CircuitTests,
         revision: u64,
     ) -> Self {
         root.name = String::new();
         Self {
             root,
             definitions,
+            tests,
             revision,
         }
     }
 
     pub(crate) fn same_circuit(&self, other: &Snapshot) -> bool {
         self.root == other.root
+            && self.tests == other.tests
             && self.definitions.len() == other.definitions.len()
             && self.definitions.iter().all(|(id, def)| {
                 other
@@ -240,6 +249,7 @@ pub struct HistoryWorld<'w, 's> {
     active: Res<'w, ActiveCircuit>,
     view: ResMut<'w, CircuitView>,
     library: ResMut<'w, CircuitLibrary>,
+    tests: Option<ResMut<'w, WorkspaceTests>>,
     selected: Option<ResMut<'w, SelectedGate>>,
     items: ParamSet<'w, 's, (DocumentQueries<'w, 's, RootItems>, RestoreQueries<'w, 's>)>,
 }
@@ -249,12 +259,25 @@ impl HistoryWorld<'_, '_> {
         Snapshot {
             root: self.items.p0().document(self.active.uuid, String::new()),
             definitions: self.library.definitions.clone(),
+            tests: self.tests.as_ref().map(|t| t.0.clone()).unwrap_or_default(),
             revision,
         }
     }
 
     /// Make the open circuit `target`, in one frame.
     pub(crate) fn restore(&mut self, target: &Snapshot) {
+        if let Some(tests) = self.tests.as_mut() {
+            // A Save As gives the root a new id: its tests follow it.
+            let mut wanted = target.tests.clone();
+            if target.root.id != self.active.uuid
+                && let Some(root_tests) = wanted.remove(&target.root.id)
+            {
+                wanted.insert(self.active.uuid, root_tests);
+            }
+            if tests.0 != wanted {
+                tests.0 = wanted;
+            }
+        }
         let library_before = self.library.definitions.clone();
         let changed_defs: Vec<Uuid> = target
             .definitions
@@ -487,6 +510,7 @@ mod tests {
         Snapshot {
             root: root.clone(),
             definitions: HashMap::new(),
+            tests: CircuitTests::new(),
             revision,
         }
     }

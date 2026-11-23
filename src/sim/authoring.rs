@@ -85,6 +85,13 @@ impl WorkspaceRevision {
     pub fn mark_saved(&mut self) {
         self.saved = self.current;
     }
+    /// The circuit as it is now is saved nowhere (a workspace opened from
+    /// an import, or a copy that could not be saved). `current` does not
+    /// move: opening is not an edit, so there is nothing to undo, and no
+    /// undo makes the workspace count as saved.
+    pub fn mark_never_saved(&mut self) {
+        self.saved = u64::MAX;
+    }
     pub fn is_dirty(&self) -> bool {
         self.current != self.saved
     }
@@ -846,7 +853,9 @@ pub fn apply_delete_system(
 
 pub fn apply_set_input_system(
     mut events: MessageReader<SetInputValue>,
-    mut inputs: Query<(&GateType, &mut InputDrive, Has<InstanceViewItem>)>,
+    // The root's inputs are parked (disabled) while a chip's view is open;
+    // a key bound to one, or the MCP server, still drives them.
+    mut inputs: Query<(&GateType, &mut InputDrive, Has<InstanceViewItem>), Allow<Disabled>>,
     mut feedback: ResMut<AuthoringFeedback>,
 ) {
     for event in events.read() {
@@ -1199,6 +1208,6 @@ pub fn load_workspace_system(
     spawn_document(&mut commands, root, root.id);
     *revision = WorkspaceRevision::default();
     if event.unsaved && !event.read_only {
-        revision.mark_dirty();
+        revision.mark_never_saved();
     }
 }

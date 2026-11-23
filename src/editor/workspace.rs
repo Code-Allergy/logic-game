@@ -491,14 +491,28 @@ pub fn unique_name_among(base: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(base) {
         return base.to_string();
     }
-    let copy = base.strip_suffix(" (copy)");
-    (2..)
-        .map(|n| match copy {
-            Some(stem) => format!("{stem} (copy {n})"),
-            None => format!("{base} ({n})"),
+    let (stem, copy) = match base.strip_suffix(" (copy)") {
+        Some(stem) => (stem, true),
+        None => (base, false),
+    };
+    // A saved name keeps its first `MAX_NAME_CHARS` characters
+    // (`sanitize_workspace_name`): a long stem is cut so that the number
+    // is kept, or every candidate would be the same saved name.
+    let candidate = |suffix: String| {
+        let room = MAX_NAME_CHARS.saturating_sub(suffix.chars().count());
+        let stem: String = stem.chars().take(room).collect();
+        format!("{}{suffix}", stem.trim_end())
+    };
+    (2..=u32::MAX)
+        .map(|n| {
+            candidate(if copy {
+                format!(" (copy {n})")
+            } else {
+                format!(" ({n})")
+            })
         })
         .find(|name| !taken(name))
-        .unwrap_or_else(|| format!("{base} ({})", Uuid::new_v4()))
+        .unwrap_or_else(|| candidate(format!(" ({})", Uuid::new_v4())))
 }
 
 /// Whether the open workspace must be saved when the app exits, and
@@ -1148,6 +1162,12 @@ mod tests {
             "Counter (copy 3)"
         );
         assert_eq!(unique_name_among("  ", taken), "workspace");
+        // A name as long as a saved name may be: the number still fits.
+        let long = "n".repeat(MAX_NAME_CHARS);
+        let saved = |name: &str| name_key(name) == name_key(&long);
+        let free = unique_name_among(&long, saved);
+        assert_eq!(free, format!("{} (2)", "n".repeat(MAX_NAME_CHARS - 4)));
+        assert_eq!(sanitize_workspace_name(&free), free);
     }
 
     #[test]

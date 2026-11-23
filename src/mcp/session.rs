@@ -324,7 +324,14 @@ impl Session {
                     open.workspace.clone(),
                     OnConflict::Refuse,
                 )?;
-                open.workspace.root.id = saved.root;
+                // A Save As gave the root a new id: its tests follow it, as
+                // in the saved file.
+                let old_root = std::mem::replace(&mut open.workspace.root.id, saved.root);
+                if old_root != saved.root
+                    && let Some(tests) = open.workspace.tests.remove(&old_root)
+                {
+                    open.workspace.tests.insert(saved.root, tests);
+                }
                 open.workspace.root.name = saved.name.clone();
                 open.name = saved.name.clone();
                 open.unsaved = false;

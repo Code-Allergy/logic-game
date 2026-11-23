@@ -271,8 +271,7 @@ fn serve(world: &mut World, inbox: &mut McpInbox, request: AppRequest) {
                     .run_system_once(
                         move |active: Res<ActiveCircuit>,
                               mut history: HistoryWorld,
-                              mut revision: ResMut<WorkspaceRevision>,
-                              mut tests: ResMut<WorkspaceTests>|
+                              mut revision: ResMut<WorkspaceRevision>|
                               -> Result<(), String> {
                             let Some(ws) = workspace.take() else {
                                 return Ok(());
@@ -280,8 +279,12 @@ fn serve(world: &mut World, inbox: &mut McpInbox, request: AppRequest) {
                             if active.read_only {
                                 return Err(crate::sim::READ_ONLY_MESSAGE.to_string());
                             }
-                            tests.0 = ws.kept_tests();
-                            let target = Snapshot::of(ws.root, ws.definitions, revision.current);
+                            // The tests go in with the circuit, so that an
+                            // edit of only them is a step of the history
+                            // too and the workspace stays unsaved.
+                            let tests = ws.kept_tests();
+                            let target =
+                                Snapshot::of(ws.root, ws.definitions, tests, revision.current);
                             history.restore(&target);
                             revision.mark_dirty();
                             Ok(())

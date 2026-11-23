@@ -24,11 +24,10 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use logi_sim::sim::StateSnapshot;
 use serde_json::{Map, Value};
 
 use super::memfile;
-use super::rig::{Memory, Rig, Signal, StateTarget};
+use super::rig::{Memory, Rig, Signal, Snapshot, StateTarget};
 use crate::sim::challenges::expr::Expr;
 use crate::sim::source::{parse_int_text, valid_name};
 
@@ -47,7 +46,7 @@ const EXCERPT: usize = 5;
 /// signal names.
 pub struct RunState {
     pub rig: Rig,
-    pub snapshots: HashMap<String, StateSnapshot>,
+    pub snapshots: HashMap<String, Snapshot>,
     pub aliases: HashMap<String, String>,
 }
 
@@ -227,7 +226,12 @@ impl Reader<'_> {
             };
             let pairs = pairs
                 .iter()
-                .map(|(k, v)| Ok((k.clone(), number(v)?)))
+                .map(|(k, v)| {
+                    let value = number(v).map_err(|e| format!("\"{k}\": {e}"))?;
+                    // Checked now, so that a bad `set` costs no simulation.
+                    self.state.rig.check_input(k, value)?;
+                    Ok((k.clone(), value))
+                })
                 .collect::<Result<_, String>>()?;
             Ok(Step::Set(pairs))
         } else if let Some(v) = take(&mut map, "poke") {
@@ -484,11 +488,13 @@ pub(crate) fn expected(spec: &Value, columns: &[Signal]) -> Result<Expected, Str
                     continue;
                 }
                 // A first line of signal names says what the columns are.
+                // A recorded signal's name is a name even where it reads
+                // as a value (`A` in hex).
                 if positions.is_none()
                     && out.is_empty()
                     && tokens
                         .iter()
-                        .all(|t| value(t).is_none() && !t.contains(':'))
+                        .all(|t| !t.contains(':') && (value(t).is_none() || column(t).is_some()))
                 {
                     let named: Vec<Option<usize>> = tokens.iter().map(|t| column(t)).collect();
                     if named.iter().all(Option::is_none) {
@@ -508,8 +514,11 @@ pub(crate) fn expected(spec: &Value, columns: &[Signal]) -> Result<Expected, Str
                     if let Some((name, v)) = token.split_once(':')
                         && let Some(c) = column(name)
                     {
-                        if let Some(v) = value(v) {
-                            row[c] = Some(v);
+                        // `PPU:  0` leaves its value to the next token.
+                        if !v.is_empty() {
+                            row[c] = Some(value(v).ok_or_else(|| {
+                                format!("{path}: line {}: \"{token}\" is not a value", n + 1)
+                            })?);
                             seen = true;
                         }
                         continue;
@@ -553,6 +562,9 @@ pub(crate) fn expected(spec: &Value, columns: &[Signal]) -> Result<Expected, Str
                     }
                 }
                 out.push(row);
+            }
+            if out.is_empty() {
+                return Err("\"rows\" is empty: there is nothing to compare with".into());
             }
             Ok(Expected {
                 what: "rows".into(),
@@ -694,13 +706,58 @@ impl Trace {
 struct Recording {
     signals: Vec<Signal>,
     when: Option<Cond>,
+    /// Rows of this recording, and of every recording of the call.
     rows: u64,
+    total: u64,
     first: Vec<(u64, Vec<u64>)>,
     recent: VecDeque<(u64, Vec<u64>)>,
     expected: Option<Expected>,
     /// The next expected row.
     at: usize,
     compared: Vec<String>,
+}
+
+impl Recording {
+    /// Say what was compared and recorded, then forget the rows: the next
+    /// `record` step starts a recording of its own, with its own columns.
+    /// `ended` says why a comparison stopped short, if it may have.
+    fn report(&mut self, text: &mut String, ended: Option<&str>) {
+        for line in self.compared.drain(..) {
+            let _ = writeln!(text, "{line}");
+        }
+        if let (Some(expected), Some(ended)) = (&self.expected, ended) {
+            let _ = writeln!(
+                text,
+                "compared {} of {} rows of {}: all match so far ({ended})",
+                self.at,
+                expected.rows.len(),
+                expected.what
+            );
+        }
+        if self.rows > 0 {
+            let _ = writeln!(text, "recorded {} rows:", self.rows);
+            for (t, r) in &self.first {
+                let _ = writeln!(text, "  {}", row_text(&self.signals, *t, r));
+            }
+            let shown = self.first.len() as u64;
+            let tail: Vec<_> = self
+                .recent
+                .iter()
+                .filter(|(t, _)| self.first.last().is_none_or(|(ft, _)| t > ft))
+                .collect();
+            let tail = &tail[tail.len().saturating_sub(EXCERPT)..];
+            if self.rows > shown + tail.len() as u64 {
+                let _ = writeln!(text, "  ...");
+            }
+            for (t, r) in tail {
+                let _ = writeln!(text, "  {}", row_text(&self.signals, *t, r));
+            }
+        }
+        self.rows = 0;
+        self.first.clear();
+        self.recent.clear();
+        self.expected = None;
+    }
 }
 
 fn row_text(signals: &[Signal], tick: u64, row: &[u64]) -> String {
@@ -736,7 +793,8 @@ impl Runner<'_> {
         let tick = rig.tick_count();
         let row: Vec<u64> = rec.signals.iter().map(|s| rig.value(s)).collect();
         rec.rows += 1;
-        if rec.rows > MAX_ROWS {
+        rec.total += 1;
+        if rec.total > MAX_ROWS {
             return Err(format!(
                 "more than {MAX_ROWS} rows recorded; narrow the recording with \"when\""
             ));
@@ -805,20 +863,28 @@ impl Runner<'_> {
         if until.is_some_and(|c| c.eval(&self.state.rig) != 0) {
             return Ok(Ok(true));
         }
-        if ticks > self.budget {
-            return Err(format!(
-                "the call would pass its limit of ticks ({} left); raise \"max_ticks\" of the \
-                 script (at most {MAX_TICKS})",
-                self.budget
-            ));
+        let over = |left: u64| {
+            format!(
+                "the call would pass its limit of ticks ({left} left); raise \"max_ticks\" of \
+                 the script (at most {MAX_TICKS})"
+            )
+        };
+        // An `until` may stop early, so only the ticks it runs count: it
+        // starts even when its own maximum is more than what is left.
+        if until.is_none() && ticks > self.budget {
+            return Err(over(self.budget));
         }
-        self.budget -= ticks;
         if until.is_none() && self.recording.signals.is_empty() {
+            self.budget -= ticks;
             self.state.rig.run(ticks);
             self.ran += ticks;
             return Ok(Ok(false));
         }
         for _ in 0..ticks {
+            if self.budget == 0 {
+                return Err(over(0));
+            }
+            self.budget -= 1;
             self.state.rig.tick();
             self.ran += 1;
             if let Err(failure) = self.record()? {
@@ -972,11 +1038,11 @@ impl Runner<'_> {
                 if let (Some(trace), false) = (&mut self.trace, signals.is_empty()) {
                     trace.columns(&signals)?;
                 }
+                // The rows so far have the columns of the recording before.
                 let rec = &mut self.recording;
+                rec.report(&mut self.out, Some("another recording began"));
                 rec.signals = signals;
                 rec.when = when;
-                rec.expected = None;
-                rec.recent.clear();
             }
             Step::Compare(expected) => {
                 self.recording.expected = Some(expected);
@@ -984,7 +1050,11 @@ impl Runner<'_> {
             }
             Step::Snapshot(name) => {
                 let snapshot = self.state.rig.snapshot();
-                let _ = writeln!(self.out, "snapshot \"{name}\" at tick {}", snapshot.tick);
+                let _ = writeln!(
+                    self.out,
+                    "snapshot \"{name}\" at tick {}",
+                    snapshot.state.tick
+                );
                 self.state.snapshots.insert(name, snapshot);
             }
             Step::Restore(name) => {
@@ -1002,7 +1072,11 @@ impl Runner<'_> {
                     ));
                 };
                 self.state.rig.restore(snapshot);
-                let _ = writeln!(self.out, "restored \"{name}\" (tick {})", snapshot.tick);
+                let _ = writeln!(
+                    self.out,
+                    "restored \"{name}\" (tick {})",
+                    snapshot.state.tick
+                );
             }
             Step::Reset => self.state.rig.reset(),
         }
@@ -1087,38 +1161,8 @@ pub fn run(state: &mut RunState, script: &Map<String, Value>) -> Result<Outcome,
     }
 
     let mut text = std::mem::take(&mut runner.out);
-    let rec = &runner.recording;
-    for line in &rec.compared {
-        let _ = writeln!(text, "{line}");
-    }
-    if let (Some(expected), None) = (&rec.expected, &failure) {
-        let _ = writeln!(
-            text,
-            "compared {} of {} rows of {}: all match so far (the run ended first)",
-            rec.at,
-            expected.rows.len(),
-            expected.what
-        );
-    }
-    if rec.rows > 0 {
-        let _ = writeln!(text, "recorded {} rows:", rec.rows);
-        for (t, r) in &rec.first {
-            let _ = writeln!(text, "  {}", row_text(&rec.signals, *t, r));
-        }
-        let shown = rec.first.len() as u64;
-        let tail: Vec<_> = rec
-            .recent
-            .iter()
-            .filter(|(t, _)| rec.first.last().is_none_or(|(ft, _)| t > ft))
-            .collect();
-        let tail = &tail[tail.len().saturating_sub(EXCERPT)..];
-        if rec.rows > shown + tail.len() as u64 {
-            let _ = writeln!(text, "  ...");
-        }
-        for (t, r) in tail {
-            let _ = writeln!(text, "  {}", row_text(&rec.signals, *t, r));
-        }
-    }
+    let ended = failure.is_none().then_some("the run ended first");
+    runner.recording.report(&mut text, ended);
     if let Some(path) = &trace_path {
         let _ = writeln!(text, "trace: {}", path.display());
     }
