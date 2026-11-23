@@ -574,6 +574,19 @@ refused unless `discard`), and `save` is the editor's save, with its
 rules and its message. A demo the player opened read-only cannot be
 edited; `open_demo` makes the editable copy.
 
+### Big suites: the native runner
+
+Suites of millions of cases do not go through MCP calls. `cargo run
+--example nes_suite -- <workspace> <config.json>` runs them natively on
+every core, on the same simulation rig and with the same signal and state
+names as `run`: Tom Harte's single-step tests (poke registers and RAM,
+run the cycles, compare the bus and the final state), a log comparison as
+for nestest, Klaus Dormann's trap protocol and blargg's status protocol.
+A config file maps the suite's registers, memory and bus to the design.
+It writes a scoreboard, the full story of each file's first failing case,
+the compiler summary, and a `run` script that replays the first failure
+through this server. `docs/suite-runner.md` has the config format.
+
 ## Auto-layout
 
 Parts added without `at` are placed by `sim::layout` (layered, by logic
@@ -690,7 +703,7 @@ cargo build -p gate_quest --features mcp --bin gatequest-mcp
 The code is in `src/mcp/`: `batch.rs` (the edit function), `view.rs`,
 `chips.rs` (gate-level chips), `compiled.rs` (what the compiler did,
 build errors with parts named, the `compiled` and `unoptimized` tests),
-`import.rs` (Verilog and netlists),
+`import.rs` (Verilog and netlists), `suite/` (the native suite runner),
 `testing.rs` (stored tests), `rig.rs` (a private simulation with signals
 by name), `run.rs` (experiment scripts), `memfile.rs` (memory files),
 `session.rs` (the tools as plain functions on one open workspace, its
