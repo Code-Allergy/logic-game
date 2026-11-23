@@ -1,0 +1,26 @@
+{
+  "_comment": "nestest in automation mode ($C000) on cpu_tb, against nestest.log. Paths are placeholders; see README.md.",
+  "kind": "nestest",
+  "circuit": "cpu_tb",
+  "signals": {"sync": "cpu.sync"},
+  "registers": {
+    "pc": "cpu/pc_unit/pc",
+    "sp": "cpu/regs/s",
+    "a": "cpu/regs/a",
+    "x": "cpu/regs/x",
+    "y": "cpu/regs/y",
+    "p": "cpu/status/p"
+  },
+  "inputs": {"res_n": 1, "ce": 1, "rdy": 1, "irq_n": 1, "nmi_n": 1},
+  "start": [
+    {"load": {"part": "prg_rom", "file": "../roms/other/nestest.nes", "skip": 16, "length": 16384}},
+    {"poke": {"pc": "0xC000", "sp": "0xFD", "p": "0x24", "cpu/timing/t": 0}}
+  ],
+  "boundary": "sync",
+  "timing": {"ticks_per_cycle": 1, "sample": 0},
+  "log": "../roms/other/nestest.log",
+  "record": ["pc", "a", "x", "y", "p", "sp"],
+  "compare": {"columns": ["pc"], "radix": 16, "context": 8},
+  "cycle_column": {"name": "cyc", "start": 7},
+  "max_cycles": 30000000
+}

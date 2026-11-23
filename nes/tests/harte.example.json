@@ -1,0 +1,34 @@
+{
+  "_comment": "Tom Harte's nes6502 single-step tests on cpu_tb. Every path is a placeholder until the 6502 exists; see README.md.",
+  "kind": "harte",
+  "circuit": "cpu_tb",
+  "cases": "../roms/harte/nes6502/v1",
+  "chunk": 250,
+  "signals": {
+    "addr": "cpu.addr",
+    "dout": "cpu.dout",
+    "din": "ram",
+    "rw": "cpu.rw"
+  },
+  "registers": {
+    "pc": "cpu/pc_unit/pc",
+    "s": "cpu/regs/s",
+    "a": "cpu/regs/a",
+    "x": "cpu/regs/x",
+    "y": "cpu/regs/y",
+    "p": "cpu/status/p"
+  },
+  "fixed": {
+    "cpu/timing/t": 0
+  },
+  "memory": {"part": "ram"},
+  "bus": {
+    "addr": "addr",
+    "read_data": "din",
+    "write_data": "dout",
+    "rw": "rw",
+    "read_value": 1
+  },
+  "inputs": {"res_n": 1, "ce": 1, "rdy": 1, "irq_n": 1, "nmi_n": 1},
+  "timing": {"ticks_per_cycle": 1, "sample": 0, "before": 0, "after": 0}
+}
