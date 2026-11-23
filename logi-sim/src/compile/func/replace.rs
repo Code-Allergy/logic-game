@@ -1,5 +1,5 @@
 //! Word implementations of matched definitions: the catalogue's functions
-//! ([`Fun`], [`Seq`]) and their lowering to a few primitive nodes
+//! ([`Fun`], [`Word`]) and their lowering to a few primitive nodes
 //! ([`Replacement`]) wired to the definition's ports.
 
 use smallvec::{SmallVec, smallvec};
@@ -23,19 +23,34 @@ pub(crate) struct RNode {
     pub kind: NodeKind,
     pub ins: SmallVec<[Ref; 3]>,
     pub outs: SmallVec<[Ref; 2]>,
-    /// For a state node: its index in `Replacement::states`.
+    /// For a state node: its index in `Replacement::words`.
     pub state: Option<u16>,
+}
+
+/// One original state element held in a state word: element `state` (an
+/// index into `Replacement::states`) is bits `off..off + width` of the
+/// word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Field {
+    pub state: u16,
+    pub off: u8,
+    pub width: u8,
 }
 
 /// A definition's word implementation: primitive nodes over its ports and
 /// temporaries. State nodes take the identity of the original state
 /// elements (`states`, relative paths), so state keys, the reference's
-/// view of state, and carry-over across recompiles are unchanged.
+/// view of state, and carry-over across recompiles are unchanged. A state
+/// node may hold several original elements (`words`): each keeps its
+/// identity as a bit field of the word (emit makes its state key a view).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Replacement {
     pub nodes: Vec<RNode>,
     pub temps: Vec<u8>,
     pub states: Vec<(Vec<NodeId>, NodeId)>,
+    /// Per state node (`RNode::state`): the original elements it holds,
+    /// low bits first.
+    pub words: Vec<SmallVec<[Field; 1]>>,
     /// What it was matched as (diagnostics, reports).
     pub desc: String,
     /// A truth table (`super::matcher::table`) rather than a catalogue
@@ -80,9 +95,6 @@ pub(crate) enum Src {
     In(u16),
     NotIn(u16),
     Const(u64),
-    /// Sequential only: state element `k`, or its complement.
-    State(u16),
-    NotState(u16),
 }
 
 /// The 2-input bitwise ops.
@@ -135,7 +147,6 @@ impl Fun {
             Src::In(p) => ins[p as usize],
             Src::NotIn(p) => !ins[p as usize] & mask(wi[p as usize]),
             Src::Const(c) => c,
-            Src::State(_) | Src::NotState(_) => unreachable!("combinational"),
         };
         match *self {
             Fun::Src(s) => src(s) & mask(w),
@@ -237,14 +248,6 @@ impl Fun {
             Fun::Eq { a, b, .. } | Fun::LtU { a, b, .. } => all(a) | all(b),
         }
     }
-}
-
-/// One state element's tick-level behaviour: `next = en ? d : state`
-/// (`en` `None` means always: a `Delay`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Seq {
-    pub en: Option<Src>,
-    pub d: Src,
 }
 
 /// Lower a combinational match: `funs[j]` drives output port `j`.
@@ -360,80 +363,203 @@ fn src_ref(r: &mut Replacement, s: Src, w: u8) -> Ref {
             r.node(NodeKind::Const { w, value: c }, smallvec![], smallvec![t]);
             t
         }
-        Src::State(_) | Src::NotState(_) => unreachable!("combinational source"),
     }
 }
 
-/// Lower a sequential match: state element `k` (width `ws[k]`, identity
-/// `paths[k]`) becomes a `Register` (or `Delay`) per `seqs[k]`; output
-/// port `j` is `outs[j]`.
+/// The enable of a state word: always (a `Delay`), or bit `bit` of input
+/// port `port`, complemented when `neg`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum En {
+    Always,
+    Bit { port: u16, bit: u8, neg: bool },
+}
+
+/// A word a state word's data or an output reads from: an input port or
+/// another state word (its current value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum Base {
+    Port(u16),
+    Word(u16),
+}
+
+/// One state word: `next = en ? d : state` with `d` bits
+/// `lo..lo + width` of `base`; it holds the original elements `fields`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Word {
+    pub en: En,
+    pub base: Base,
+    pub lo: u8,
+    pub width: u8,
+    pub fields: SmallVec<[Field; 1]>,
+}
+
+/// A run of bits of an output port, low bits first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Run {
+    Const {
+        len: u8,
+        value: u64,
+    },
+    /// Bits `lo..lo + len` of `base`, complemented when `neg`.
+    Bits {
+        base: Base,
+        lo: u8,
+        len: u8,
+        neg: bool,
+    },
+}
+
+impl Run {
+    pub fn len(&self) -> u8 {
+        match *self {
+            Run::Const { len, .. } | Run::Bits { len, .. } => len,
+        }
+    }
+}
+
+/// `In(p)`, `In(p)[3]`, `In(p)[0..8]`, `r1`, `r1[4..8]`, `!...`: a slice
+/// of a base, for [`Replacement::desc`].
+pub(crate) fn slice_text(base: Base, lo: u8, len: u8, whole: u8, neg: bool) -> String {
+    let b = match base {
+        Base::Port(p) => format!("In({p})"),
+        Base::Word(g) => format!("r{g}"),
+    };
+    let not = if neg { "!" } else { "" };
+    if lo == 0 && len == whole {
+        format!("{not}{b}")
+    } else if len == 1 {
+        format!("{not}{b}[{lo}]")
+    } else {
+        format!("{not}{b}[{lo}..{}]", lo + len)
+    }
+}
+
+/// Lower a sequential match: each state word `words[g]` becomes one
+/// `Register` (or `Delay`) of its width holding its original elements as
+/// bit fields (identities `paths`); output port `j` is the concatenation
+/// of `outs[j]`. `wi` and `wo` are the port widths.
 pub(crate) fn lower_seq(
-    seqs: &[Seq],
-    ws: &[u8],
+    words: &[Word],
     paths: Vec<(Vec<NodeId>, NodeId)>,
-    outs: &[Src],
+    outs: &[Vec<Run>],
+    wi: &[u8],
     wo: &[u8],
 ) -> Replacement {
     let mut r = Replacement {
         states: paths,
         ..Default::default()
     };
-    // The state value of each element: an output port that is exactly it,
+    let whole = |b: Base| match b {
+        Base::Port(p) => wi[p as usize],
+        Base::Word(g) => words[g as usize].width,
+    };
+    // The state value of each word: an output port that is exactly it,
     // else a temporary.
-    let mut sref: Vec<Ref> = Vec::with_capacity(seqs.len());
     let mut port_done = vec![false; outs.len()];
-    for (k, &w) in ws.iter().enumerate() {
-        match outs.iter().position(|&o| o == Src::State(k as u16)) {
+    let mut wref: Vec<Ref> = Vec::with_capacity(words.len());
+    for (g, w) in words.iter().enumerate() {
+        let exact = |runs: &Vec<Run>| {
+            matches!(runs.as_slice(), [Run::Bits { base: Base::Word(h), lo: 0, len, neg: false }]
+                if *h as usize == g && *len == w.width)
+        };
+        match (0..outs.len()).find(|&j| !port_done[j] && exact(&outs[j])) {
             Some(j) => {
                 port_done[j] = true;
-                sref.push(Ref::Out(j as u16));
+                wref.push(Ref::Out(j as u16));
             }
-            None => sref.push(r.temp(w)),
+            None => wref.push(r.temp(w.width)),
         }
     }
-    let operand = |r: &mut Replacement, s: Src, w: u8, sref: &[Ref]| match s {
-        Src::State(m) => sref[m as usize],
-        Src::NotState(m) => {
-            let t = r.temp(w);
-            r.node(
-                NodeKind::Not { w },
-                smallvec![sref[m as usize]],
-                smallvec![t],
-            );
-            t
+    // Bits `lo..lo + len` of `base` as an operand.
+    let slice = |r: &mut Replacement, base: Base, lo: u8, len: u8, wref: &[Ref]| {
+        let (x, w) = match base {
+            Base::Port(p) => (Ref::In(p), wi[p as usize]),
+            Base::Word(g) => (wref[g as usize], words[g as usize].width),
+        };
+        if lo == 0 && len == w {
+            return x;
         }
-        other => src_ref(r, other, w),
+        let t = r.temp(len);
+        r.node(NodeKind::Split { w, lo, len }, smallvec![x], smallvec![t]);
+        t
     };
-    for (k, seq) in seqs.iter().enumerate() {
-        let w = ws[k];
-        let d = operand(&mut r, seq.d, w, &sref);
-        let (kind, ins): (NodeKind, SmallVec<[Ref; 3]>) = match seq.en {
-            None => (NodeKind::Delay { w }, smallvec![d]),
-            Some(en) => {
-                let e = operand(&mut r, en, 1, &sref);
-                (NodeKind::Register { w }, smallvec![e, d])
+    let mut text = Vec::with_capacity(words.len());
+    for (g, w) in words.iter().enumerate() {
+        let d = slice(&mut r, w.base, w.lo, w.width, &wref);
+        let dtext = slice_text(w.base, w.lo, w.width, whole(w.base), false);
+        let (kind, ins, t): (NodeKind, SmallVec<[Ref; 3]>, String) = match w.en {
+            En::Always => (
+                NodeKind::Delay { w: w.width },
+                smallvec![d],
+                format!("{}-bit Delay {{ d: {dtext} }}", w.width),
+            ),
+            En::Bit { port, bit, neg } => {
+                let mut e = slice(&mut r, Base::Port(port), bit, 1, &wref);
+                if neg {
+                    let t = r.temp(1);
+                    r.node(NodeKind::Not { w: 1 }, smallvec![e], smallvec![t]);
+                    e = t;
+                }
+                let etext = slice_text(Base::Port(port), bit, 1, wi[port as usize], neg);
+                (
+                    NodeKind::Register { w: w.width },
+                    smallvec![e, d],
+                    format!("{}-bit Register {{ en: {etext}, d: {dtext} }}", w.width),
+                )
             }
         };
+        text.push(t);
+        r.words.push(w.fields.clone());
         r.nodes.push(RNode {
             kind,
             ins,
-            outs: smallvec![sref[k]],
-            state: Some(k as u16),
+            outs: smallvec![wref[g]],
+            state: Some(g as u16),
         });
     }
-    for (j, &o) in outs.iter().enumerate() {
+    let mut otext = Vec::with_capacity(outs.len());
+    for (j, runs) in outs.iter().enumerate() {
+        let parts: Vec<String> = runs
+            .iter()
+            .map(|run| match *run {
+                Run::Const { value, .. } => format!("{value}"),
+                Run::Bits { base, lo, len, neg } => slice_text(base, lo, len, whole(base), neg),
+            })
+            .collect();
+        otext.push(parts.join(" ++ "));
         if port_done[j] {
             continue;
         }
-        let x = operand(&mut r, o, wo[j], &sref);
+        let mut ops: SmallVec<[Ref; 3]> = SmallVec::new();
+        let mut widths: SmallVec<[u8; 4]> = SmallVec::new();
+        for run in runs {
+            let x = match *run {
+                Run::Const { len, value } => src_ref(&mut r, Src::Const(value), len),
+                Run::Bits { base, lo, len, neg } => {
+                    let x = slice(&mut r, base, lo, len, &wref);
+                    if neg {
+                        let t = r.temp(len);
+                        r.node(NodeKind::Not { w: len }, smallvec![x], smallvec![t]);
+                        t
+                    } else {
+                        x
+                    }
+                }
+            };
+            ops.push(x);
+            widths.push(run.len());
+        }
+        debug_assert_eq!(widths.iter().map(|&w| w as u32).sum::<u32>(), wo[j] as u32);
         r.node(
-            NodeKind::Merge {
-                widths: smallvec![wo[j]],
-            },
-            smallvec![x],
+            NodeKind::Merge { widths },
+            ops,
             smallvec![Ref::Out(j as u16)],
         );
     }
-    r.desc = format!("state {seqs:?}, outputs {outs:?}");
+    r.desc = format!(
+        "state [{}], outputs [{}]",
+        text.join(", "),
+        otext.join(", ")
+    );
     r
 }
