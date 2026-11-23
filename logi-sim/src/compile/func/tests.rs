@@ -680,3 +680,319 @@ fn tables_are_cached_per_definition() {
     assert_eq!(cache.analysed, analysed, "nothing analysed again");
     assert_eq!(q.mems.len(), 3);
 }
+
+// ── Registers of flip-flop chips ─────────────────────────────────────────
+
+/// How a `dffe` (a 1-bit register with enable, `Q' = En ? D : Q`) is
+/// built.
+#[derive(Clone, Copy, Debug)]
+enum Dffe {
+    /// AND/OR/NOT gates.
+    Gates,
+    /// NAND gates only.
+    Nand,
+    /// A 2-to-1 multiplexer chip (itself matched as a `Mux`).
+    Mux,
+}
+
+/// A 1-bit register with enable as a player builds it: a `Delay` holding
+/// the bit, fed back through an enable from gates or a mux chip.
+fn dffe_def(d: &mut Design, how: Dffe) -> DefId {
+    let mux = matches!(how, Dffe::Mux).then(|| mux2_def(d, false));
+    let def = d.add_definition("dffe");
+    let mut b = Builder::new(d, def);
+    let dd = b.input("D", 1);
+    let en = b.input("En", 1);
+    let delay = b.node(NodeKind::Delay { w: 1 }, &[None]);
+    let q = b.out(delay, 0);
+    let next = match how {
+        Dffe::Gates => {
+            let ne = b.not(en);
+            let load = b.and(dd, en);
+            let keep = b.and(q, ne);
+            b.or(load, keep)
+        }
+        Dffe::Nand => {
+            let ne = b.nand(en, en);
+            let load = b.nand(dd, en);
+            let keep = b.nand(q, ne);
+            b.nand(load, keep)
+        }
+        Dffe::Mux => b.instance(mux.unwrap(), &[Some(q), Some(dd), Some(en)])[0],
+    };
+    b.connect(next, (delay, 0));
+    b.output("Q", q);
+    def
+}
+
+/// A deliberate defect in a register of `dffe` chips (a near miss).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Defect {
+    None,
+    /// Bit 5 on a second enable input.
+    OtherEnable,
+    /// Bit 3 loads `D[4]` and bit 4 loads `D[3]`.
+    Crossed,
+    /// `Q` in the reverse order of the bits.
+    Reversed,
+    /// `Q[3]` inverted.
+    Inverted,
+    /// Bit 3 loads `D[3] & D[4]`.
+    ExtraGate,
+}
+
+/// `name`: a `w`-bit register of `dffe` instances sharing one enable,
+/// with an optional defect.
+fn reg_def(d: &mut Design, name: &str, dffe: DefId, w: u8, defect: Defect) -> DefId {
+    let def = d.add_definition(name);
+    let mut b = Builder::new(d, def);
+    let dd = b.input("D", w);
+    let en = b.input("Load", 1);
+    let en2 = (defect == Defect::OtherEnable).then(|| b.input("Load2", 1));
+    let bits = b.bus_expand(dd);
+    let mut q = Vec::new();
+    for k in 0..w as usize {
+        let data = match (defect, k) {
+            (Defect::Crossed, 3) => bits[4],
+            (Defect::Crossed, 4) => bits[3],
+            (Defect::ExtraGate, 3) => b.and(bits[3], bits[4]),
+            _ => bits[k],
+        };
+        let e = match (en2, k) {
+            (Some(e2), 5) => e2,
+            _ => en,
+        };
+        let o = b.instance(dffe, &[Some(data), Some(e)])[0];
+        q.push(if defect == Defect::Inverted && k == 3 {
+            b.not(o)
+        } else {
+            o
+        });
+    }
+    if defect == Defect::Reversed {
+        q.reverse();
+    }
+    let y = b.merge(&q);
+    b.output("Q", y);
+    def
+}
+
+/// The state words `p` commits.
+fn copies(p: &crate::compile::Program) -> usize {
+    p.commits
+        .iter()
+        .filter(|c| matches!(c, crate::compile::Commit::Copy { .. }))
+        .count()
+}
+
+#[test]
+fn a_register_of_dffe_chips_matches_one_register() {
+    // The report of issue #117: `reg8` of eight `dffe` chips was "not a
+    // register" (its state bits load bits of the `D` port).
+    let mut notes = Vec::new();
+    for how in [Dffe::Gates, Dffe::Nand, Dffe::Mux] {
+        let mut d = Design::new("root");
+        let f = dffe_def(&mut d, how);
+        let r = reg_def(&mut d, "reg8", f, 8, Defect::None);
+        let i = info(&d, "dffe");
+        assert!(i.matched(), "{how:?}: {}", i.note);
+        let i = info(&d, "reg8");
+        assert!(i.matched(), "{how:?}: {}", i.note);
+        assert_eq!(
+            i.note,
+            "state [8-bit Register { en: In(1), d: In(0) }], outputs [r0]"
+        );
+        notes.push(i.note.clone());
+        let d = wrap(d, r, 2);
+        let (on, off) = check_all(&format!("reg8 {how:?}"), &d);
+        assert!(on <= off, "{how:?}: {off} -> {on}");
+        // One 8-bit state word per instance, even without lifting and the
+        // word cleanup; each bit keeps its own state key.
+        for opts in [
+            Options::default(),
+            Options {
+                lift: false,
+                words: false,
+                ..Options::default()
+            },
+        ] {
+            let p = compile(&d, &opts).unwrap();
+            assert_eq!(p.state_keys.len(), 16);
+            assert_eq!(copies(&p), 2, "{how:?}");
+        }
+        on_off_with(&format!("reg8 {how:?} unlifted"), &d, true, 40, |o| {
+            Options {
+                func_match: false,
+                lift: false,
+                words: false,
+                ..o
+            }
+        });
+    }
+    assert!(notes.windows(2).all(|w| w[0] == w[1]));
+}
+
+#[test]
+fn wide_registers_beyond_the_enumeration_cap_match() {
+    // 16 and 32 bits of `dffe` chips: 33 and 65 input and state bits,
+    // proven per bit (three support bits each).
+    for w in [16u8, 32] {
+        let mut d = Design::new("root");
+        let f = dffe_def(&mut d, Dffe::Nand);
+        let r = reg_def(&mut d, "reg", f, w, Defect::None);
+        let i = info(&d, "reg");
+        assert!(i.matched(), "{w}: {}", i.note);
+        assert!(i.note.contains(&format!("{w}-bit Register")), "{}", i.note);
+        assert_eq!(i.proof, Some(Proof::Sliced { max_support: 3 }));
+        check_all(&format!("reg{w}"), &wrap(d, r, 1));
+    }
+}
+
+#[test]
+fn a_register_of_master_slave_flip_flops_matches_two_words() {
+    // 16 master-slave flip-flops (two latches each): the masters form one
+    // 16-bit register loading `D`, the slaves one loading the masters.
+    let mut d = Design::new("root");
+    let l = d_latch_def(&mut d, true);
+    let f = dff_def(&mut d, l);
+    let def = d.add_definition("reg16");
+    let mut b = Builder::new(&mut d, def);
+    let dd = b.input("D", 16);
+    let clk = b.input("Clk", 1);
+    let bits = b.bus_expand(dd);
+    let q: Vec<NetId> = bits
+        .iter()
+        .map(|&x| b.instance(f, &[Some(x), Some(clk)])[0])
+        .collect();
+    let y = b.merge(&q);
+    b.output("Q", y);
+    let i = info(&d, "reg16");
+    assert!(i.matched(), "{}", i.note);
+    assert_eq!(
+        i.note,
+        "state [16-bit Register { en: !In(1), d: In(0) }, \
+         16-bit Register { en: In(1), d: r0 }], outputs [r1]"
+    );
+    check_all("reg16 of flip-flops", &wrap(d, def, 1));
+}
+
+/// A register file of `n` `w`-bit registers of `dffe` chips: a shared `D`
+/// bus, a one-hot `En` bus (one enable per register) and one output per
+/// register.
+fn regfile_def(d: &mut Design, n: u8, w: u8) -> DefId {
+    let f = dffe_def(d, Dffe::Gates);
+    let reg = reg_def(d, "reg", f, w, Defect::None);
+    let def = d.add_definition("regfile");
+    let mut b = Builder::new(d, def);
+    let dd = b.input("D", w);
+    let en = b.input("En", n);
+    let ens = b.bus_expand(en);
+    for (r, &e) in ens.iter().enumerate() {
+        let q = b.instance(reg, &[Some(dd), Some(e)])[0];
+        b.output(format!("Q{r}"), q);
+    }
+    def
+}
+
+#[test]
+fn a_register_file_with_decoded_enables_matches() {
+    for (n, w) in [(8u8, 8u8), (8, 16)] {
+        let mut d = Design::new("root");
+        let def = regfile_def(&mut d, n, w);
+        let i = info(&d, "regfile");
+        assert!(i.matched(), "{n} x {w}: {}", i.note);
+        let regs = (0..n)
+            .map(|r| format!("{w}-bit Register {{ en: In(1)[{r}], d: In(0) }}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let outs = (0..n)
+            .map(|r| format!("r{r}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(i.note, format!("state [{regs}], outputs [{outs}]"));
+        // The enables come from a decoder of an address and a write enable
+        // in the root.
+        let r = d.root;
+        let mut b = Builder::new(&mut d, r);
+        let x = b.input("d", w);
+        let addr = b.input("addr", 3);
+        let we = b.input("we", 1);
+        let dec = b.decoder(addr);
+        let ens: Vec<NetId> = dec.iter().map(|&e| b.and(e, we)).collect();
+        let en = b.merge(&ens);
+        for (k, q) in b
+            .instance(def, &[Some(x), Some(en)])
+            .into_iter()
+            .enumerate()
+        {
+            b.output(format!("q{k}"), q);
+        }
+        check_all(&format!("regfile {n} x {w}"), &d);
+        let p = compile(&d, &Options::default()).unwrap();
+        assert_eq!(p.state_keys.len(), n as usize * w as usize);
+    }
+}
+
+#[test]
+fn near_miss_registers_are_not_one_register() {
+    // Each defect keeps the chip from being one 8-bit register; whatever
+    // the matcher makes of it (unmatched, or a few smaller registers) is
+    // exact.
+    for defect in [
+        Defect::OtherEnable,
+        Defect::Crossed,
+        Defect::Reversed,
+        Defect::Inverted,
+        Defect::ExtraGate,
+    ] {
+        let mut d = Design::new("root");
+        let f = dffe_def(&mut d, Dffe::Gates);
+        let r = reg_def(&mut d, "reg8", f, 8, defect);
+        let i = info(&d, "reg8");
+        assert!(!i.note.contains("8-bit Register"), "{defect:?}: {}", i.note);
+        let expect = match defect {
+            // Bits 0-4 and 6-7 on one enable, bit 5 on the other.
+            Defect::OtherEnable => Some(
+                "state [5-bit Register { en: In(1), d: In(0)[0..5] }, \
+                 2-bit Register { en: In(1), d: In(0)[6..8] }, \
+                 1-bit Register { en: In(2), d: In(0)[5] }], \
+                 outputs [r0 ++ r2 ++ r1]",
+            ),
+            // Bits 3 and 4 are read in the order opposite to their data.
+            Defect::Crossed => Some(
+                "state [3-bit Register { en: In(1), d: In(0)[0..3] }, \
+                 1-bit Register { en: In(1), d: In(0)[3] }, \
+                 1-bit Register { en: In(1), d: In(0)[4] }, \
+                 3-bit Register { en: In(1), d: In(0)[5..8] }], \
+                 outputs [r0 ++ r2 ++ r1 ++ r3]",
+            ),
+            Defect::Reversed => None,
+            Defect::Inverted => Some(
+                "state [3-bit Register { en: In(1), d: In(0)[0..3] }, \
+                 1-bit Register { en: In(1), d: In(0)[3] }, \
+                 4-bit Register { en: In(1), d: In(0)[4..8] }], \
+                 outputs [r0 ++ !r1 ++ r2]",
+            ),
+            Defect::ExtraGate => None,
+            Defect::None => unreachable!(),
+        };
+        match (defect, expect) {
+            (_, Some(text)) => assert_eq!(i.note, text, "{defect:?}"),
+            (Defect::Reversed, None) => {
+                // Eight 1-bit registers, read in reverse.
+                assert!(i.matched(), "{}", i.note);
+                assert_eq!(i.note.matches("1-bit Register").count(), 8, "{}", i.note);
+            }
+            (_, None) => {
+                assert!(!i.matched(), "{defect:?}: {}", i.note);
+                assert!(
+                    i.note
+                        .starts_with("state element 3 (1-bit Delay): not a register"),
+                    "{}",
+                    i.note
+                );
+            }
+        }
+        check_all(&format!("reg8 {defect:?}"), &wrap(d, r, 1));
+    }
+}
