@@ -11,3 +11,8 @@ description = "Deterministic performance metrics (program sizes, executed ops an
 perf = { path = ".." }
 logi-sim = { path = "../../logi-sim", features = ["counters"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+
+[features]
+# Lets `perf-metrics jit <case>` compare the JIT backend with the
+# interpreter (logi-sim feature `jit`). The metrics never use it.
+jit = ["logi-sim/jit"]

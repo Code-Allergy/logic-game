@@ -299,3 +299,21 @@ fn counters_are_the_same_with_the_jit() {
         assert!(want.counters().mem_writes > 0 || p.mems.is_empty());
     }
 }
+
+/// A body over `MAX_BODY` instructions stays interpreted (its native code
+/// would be slower), while the rest of the `Sim` runs native; results are
+/// the same.
+#[test]
+fn oversized_bodies_stay_interpreted() {
+    let d = generate(&GenConfig::gates(6, super::MAX_BODY + 4000, 1)).design;
+    let options = Options {
+        pack: PackMode::Off,
+        ..Options::unoptimized()
+    };
+    let p = program(&d, &options);
+    assert!(p.instrs.len() > super::MAX_BODY);
+    let s = Sim::with_options(Arc::clone(&p), SimOptions::jit());
+    let code = s.jit.as_ref().expect("the JIT ran");
+    assert!(code.bodies[0].is_none(), "the full body is interpreted");
+    check_jit(&p, 6, 6, &SimOptions::default()).unwrap();
+}
