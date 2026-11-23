@@ -684,8 +684,17 @@ impl Sim {
             .as_ref()
             .and_then(|j| j.bodies[run as usize].as_ref()?.commit.as_ref())
         {
+            // Count taken writes from the versions (only bodies with RAM
+            // writes can change them: summing every memory's version per
+            // commit costs more than the commit on designs with many ROMs).
             #[cfg(feature = "counters")]
-            let before: u64 = self.mem_writes.iter().sum();
+            let writes = commits.iter().any(|c| !matches!(c, Commit::Copy { .. }));
+            #[cfg(feature = "counters")]
+            let before: u64 = if writes {
+                self.mem_writes.iter().sum()
+            } else {
+                0
+            };
             if !self.mem_ptrs_fresh {
                 self.mem_ptrs.clear();
                 self.mem_ptrs
@@ -706,7 +715,7 @@ impl Sim {
                 };
             }
             #[cfg(feature = "counters")]
-            {
+            if writes {
                 self.counters.mem_writes += self.mem_writes.iter().sum::<u64>() - before;
             }
             return;

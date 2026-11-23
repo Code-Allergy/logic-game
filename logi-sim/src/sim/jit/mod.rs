@@ -68,10 +68,12 @@ pub const CHUNK: usize = 64;
 pub const COMMIT_CHUNK: usize = 256;
 
 /// Bodies with more instructions (or packed words) than this run
-/// interpreted: Cranelift's compile time is about linear, but a body this
-/// large is memory-bound anyway, so native code gains little for a long
-/// compile.
-pub const MAX_BODY: usize = 1 << 18;
+/// interpreted. Native code is about 20 bytes per instruction, so beyond
+/// this it no longer fits the instruction caches and runs slower than the
+/// interpreter, which streams compact operands instead: `gates1_100k`
+/// (23k instructions) ticks 1.5x faster with the JIT, `gates1_1m` (101k)
+/// 4.9x slower.
+pub const MAX_BODY: usize = 1 << 15;
 
 /// A settle chunk: `(slots, mems, tick)`. `mems` points to one pointer per
 /// memory of the program.
@@ -164,6 +166,18 @@ impl JitProgram {
         // the compiler); Cranelift's optimizer gains nothing measurable on
         // it and costs about a quarter of the compile time.
         flags.set("opt_level", "none").map_err(|e| err(&e))?;
+        // The IR verifier costs about a tenth of the compile time; the
+        // builder's IR is checked in debug builds (and so in tests).
+        flags
+            .set(
+                "enable_verifier",
+                if cfg!(debug_assertions) {
+                    "true"
+                } else {
+                    "false"
+                },
+            )
+            .map_err(|e| err(&e))?;
         flags
             .set("use_colocated_libcalls", "false")
             .map_err(|e| err(&e))?;
