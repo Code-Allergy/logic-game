@@ -103,10 +103,10 @@ enum ReadItem {
 }
 
 /// Expected rows: per recorded column, the value or nothing to check.
-struct Expected {
-    what: String,
-    rows: Vec<Vec<Option<u64>>>,
-    context: usize,
+pub(crate) struct Expected {
+    pub(crate) what: String,
+    pub(crate) rows: Vec<Vec<Option<u64>>>,
+    pub(crate) context: usize,
 }
 
 enum Step {
@@ -405,8 +405,10 @@ impl Reader<'_> {
     }
 }
 
-/// Read the rows a `compare` step expects, as values per recorded column.
-fn expected(spec: &Value, columns: &[Signal]) -> Result<Expected, String> {
+/// Read the rows a `compare` step expects, as values per recorded column
+/// (only the columns' `text` is used). The native suite runner reads
+/// CPU logs with it too.
+pub(crate) fn expected(spec: &Value, columns: &[Signal]) -> Result<Expected, String> {
     let Value::Object(spec) = spec else {
         return Err("\"compare\" takes {\"file\": path} or {\"rows\": [[...]]}".into());
     };

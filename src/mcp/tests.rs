@@ -6,6 +6,7 @@ mod compiled;
 mod expand;
 mod poke;
 mod sim;
+mod suite;
 
 use std::sync::Arc;
 
