@@ -134,6 +134,10 @@ pub struct EngineCore {
     /// Function-matching analyses of earlier compiles: an edit re-analyses
     /// only the definitions it changed.
     match_cache: MatchCache,
+    /// JIT tiering (`SimOptions::jit` in the threaded [`Engine`]): a new
+    /// program starts interpreted, and its native code is compiled on the
+    /// compile thread and swapped in by [`EngineCore::install_jit`].
+    jit_tiered: bool,
 }
 
 impl EngineCore {
@@ -158,6 +162,7 @@ impl EngineCore {
             mem_requested: false,
             dirty: true,
             match_cache: MatchCache::new(),
+            jit_tiered: false,
         }
     }
 
@@ -296,7 +301,10 @@ impl EngineCore {
     /// probes over from the running one.
     pub fn install(&mut self, program: Arc<Program>, revision: u64) -> EngineEvent {
         let snapshot = self.sim.as_ref().map(Sim::export_state);
-        let mut sim = Sim::with_options(program, self.sim_options.clone());
+        let mut options = self.sim_options.clone();
+        // Tiered: native code arrives later (`install_jit`).
+        options.jit &= !self.jit_tiered;
+        let mut sim = Sim::with_options(program, options);
         for (&node, &v) in &self.inputs {
             if let Some(port) = sim.program().ports.input_by_node(node) {
                 sim.set_input(port, v);
@@ -321,6 +329,20 @@ impl EngineCore {
         self.mem_requested = true;
         self.dirty = true;
         event
+    }
+
+    /// Swap JIT-compiled code (`Sim::compile_jit` of a `Sim` with this
+    /// revision's program and these `SimOptions`) into the running
+    /// program, if it is still revision `revision`. Results do not change,
+    /// only speed. Returns whether it was installed.
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    pub fn install_jit(&mut self, revision: u64, code: Arc<crate::sim::jit::JitProgram>) -> bool {
+        match &mut self.sim {
+            Some(sim) if self.revision == revision && self.sim_options.jit => {
+                sim.install_jit(Some(code))
+            }
+            _ => false,
+        }
     }
 
     /// Compile and install inline (the threadless path).
@@ -535,6 +557,9 @@ mod threaded {
         RequestMems,
         Load(Arc<Design>, u64),
         Compiled(u64, Result<Arc<Program>, Vec<CompileError>>),
+        /// Native code for revision `.0` (JIT tiering).
+        #[cfg(feature = "jit")]
+        Jitted(u64, Arc<crate::sim::jit::JitProgram>),
         Sync(Sender<()>),
         Shutdown,
     }
@@ -557,14 +582,24 @@ mod threaded {
 
     impl Engine {
         pub fn spawn(options: Options) -> Self {
-            let origin = Instant::now();
-            Self::spawn_with_clock(options, Arc::new(move || origin.elapsed()))
+            Self::spawn_with(options, SimOptions::default())
         }
 
-        /// [`Engine::spawn`] with the worker reading `clock` instead of
-        /// the wall clock (tests pace it by hand).
+        /// [`Engine::spawn`] with runtime options for every `Sim`. With
+        /// [`SimOptions::jit`] (and the `jit` feature), JIT compilation is
+        /// tiered: every new program starts interpreted at once, and the
+        /// compile thread compiles its native code and swaps it in when
+        /// ready (unless a newer edit is already waiting).
+        pub fn spawn_with(options: Options, sim_options: SimOptions) -> Self {
+            let origin = Instant::now();
+            Self::spawn_with_clock(options, sim_options, Arc::new(move || origin.elapsed()))
+        }
+
+        /// [`Engine::spawn_with`] with the worker reading `clock` instead
+        /// of the wall clock (tests pace it by hand).
         pub(crate) fn spawn_with_clock(
             options: Options,
+            sim_options: SimOptions,
             clock: Arc<dyn Fn() -> Duration + Send + Sync>,
         ) -> Self {
             let (tx, rx) = channel::<Msg>();
@@ -578,11 +613,15 @@ mod threaded {
 
             let back = tx.clone();
             let compile_options = options.clone();
+            #[cfg(feature = "jit")]
+            let jit_options = sim_options.clone();
             let compiler = std::thread::Builder::new()
                 .name("sim-compile".into())
                 .spawn(move || {
                     let mut cache = MatchCache::new();
-                    while let Ok(mut job) = compile_rx.recv() {
+                    #[cfg_attr(not(feature = "jit"), allow(unused_mut))]
+                    let mut next = None;
+                    while let Some(mut job) = next.take().or_else(|| compile_rx.recv().ok()) {
                         // Latest revision wins.
                         while let Ok(newer) = compile_rx.try_recv() {
                             job = newer;
@@ -590,8 +629,30 @@ mod threaded {
                         let (design, rev) = job;
                         let result = compile_cached(&design, &compile_options, &mut cache, |_| {})
                             .map(Arc::new);
+                        #[cfg(feature = "jit")]
+                        let program = result.as_ref().ok().map(Arc::clone);
                         if back.send(Msg::Compiled(rev, result)).is_err() {
                             break;
+                        }
+                        // JIT tiering: the program already runs interpreted;
+                        // compile its native code unless a newer edit waits.
+                        #[cfg(feature = "jit")]
+                        if let (Some(p), true) = (program, jit_options.jit) {
+                            next = compile_rx.try_recv().ok();
+                            if next.is_none() {
+                                let layout = Sim::with_options(
+                                    p,
+                                    SimOptions {
+                                        jit: false,
+                                        ..jit_options.clone()
+                                    },
+                                );
+                                if let Ok(code) = layout.compile_jit()
+                                    && back.send(Msg::Jitted(rev, Arc::new(code))).is_err()
+                                {
+                                    break;
+                                }
+                            }
                         }
                     }
                 })
@@ -600,7 +661,12 @@ mod threaded {
             let worker_shared = Arc::clone(&shared);
             let worker = std::thread::Builder::new()
                 .name("sim-worker".into())
-                .spawn(move || worker_loop(options, rx, compile_tx, ev_tx, worker_shared, &*clock))
+                .spawn(move || {
+                    let mut core = EngineCore::new(options);
+                    core.jit_tiered = sim_options.jit;
+                    core.set_sim_options(sim_options);
+                    worker_loop(core, rx, compile_tx, ev_tx, worker_shared, &*clock)
+                })
                 .expect("spawn worker thread");
 
             Engine {
@@ -682,14 +748,13 @@ mod threaded {
     }
 
     fn worker_loop(
-        options: Options,
+        mut core: EngineCore,
         rx: Receiver<Msg>,
         compile_tx: Sender<(Arc<Design>, u64)>,
         events: Sender<EngineEvent>,
         shared: Arc<Shared>,
         clock: Clock<'_>,
     ) {
-        let mut core = EngineCore::new(options);
         let mut spare: Option<Arc<ProbeFrame>> = None;
         let mut syncs: Vec<Sender<()>> = Vec::new();
 
@@ -721,6 +786,10 @@ mod threaded {
                 }
                 Msg::Compiled(rev, Ok(p)) => {
                     let _ = events.send(core.install(p, rev));
+                }
+                #[cfg(feature = "jit")]
+                Msg::Jitted(rev, code) => {
+                    core.install_jit(rev, code);
                 }
                 Msg::Compiled(revision, Err(errors)) => {
                     let _ = events.send(EngineEvent::CompileFailed { revision, errors });

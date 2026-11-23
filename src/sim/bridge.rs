@@ -221,7 +221,14 @@ impl SimBridge {
     pub fn new(runtime: SimRuntime) -> Self {
         let runtime = match runtime {
             #[cfg(not(target_arch = "wasm32"))]
-            SimRuntime::Threaded => Runtime::Threaded(Engine::spawn(Options::debug())),
+            // Feature `jit`: the Cranelift backend, tiered (logi-sim #117).
+            SimRuntime::Threaded => Runtime::Threaded(Engine::spawn_with(
+                Options::debug(),
+                logi_sim::sim::SimOptions {
+                    jit: cfg!(feature = "jit"),
+                    ..Default::default()
+                },
+            )),
             #[cfg(target_arch = "wasm32")]
             SimRuntime::Threaded => Runtime::Local {
                 engine: Box::new(LocalEngine::new(Options::debug())),

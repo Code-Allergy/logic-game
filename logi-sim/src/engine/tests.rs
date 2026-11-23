@@ -422,6 +422,47 @@ fn compile_errors_keep_the_old_program() {
     assert_eq!((e.frame().revision, e.frame().values[0]), (1, 3));
 }
 
+/// JIT tiering in the core: a program starts interpreted, native code
+/// for its revision swaps in (and code for another revision does not),
+/// and the probed values are the same throughout.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn jit_code_swaps_into_the_running_revision_only() {
+    let (d, en, q, mem) = counter_design(false);
+    let mut want = EngineCore::new(Options::debug());
+    let mut core = EngineCore::new(Options::debug());
+    core.set_sim_options(SimOptions::jit());
+    core.jit_tiered = true;
+    for c in [&mut want, &mut core] {
+        c.load(&d, 1);
+        c.set_input(en, 1);
+        c.set_probes(probes(q, mem));
+        c.step(5);
+        c.run(Duration::from_secs(1), &|| Duration::ZERO);
+    }
+    assert!(
+        !core.sim().unwrap().jit_active(),
+        "tiered: starts interpreted"
+    );
+    let layout = Sim::with_options(
+        Arc::clone(core.sim().unwrap().program()),
+        SimOptions::default(),
+    );
+    let code = Arc::new(layout.compile_jit().unwrap());
+    assert!(!core.install_jit(2, Arc::clone(&code)), "another revision");
+    assert!(core.install_jit(1, code));
+    assert!(core.sim().unwrap().jit_active());
+    for c in [&mut want, &mut core] {
+        c.step(9);
+        c.run(Duration::from_secs(1), &|| Duration::ZERO);
+    }
+    let (mut a, mut b) = (ProbeFrame::default(), ProbeFrame::default());
+    want.publish(&mut a);
+    core.publish(&mut b);
+    assert_eq!((a.tick, &a.values), (b.tick, &b.values));
+    assert_eq!(b.tick, 14);
+}
+
 // ── Threaded engine ──────────────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -497,7 +538,7 @@ mod threaded {
         let now = Arc::new(AtomicU64::new(0));
         let read = Arc::clone(&now);
         let clock = Arc::new(move || Duration::from_nanos(read.load(Ordering::SeqCst)));
-        let e = Engine::spawn_with_clock(Options::debug(), clock);
+        let e = Engine::spawn_with_clock(Options::debug(), SimOptions::default(), clock);
         e.load(Arc::new(d), 1);
         assert!(matches!(
             e.wait_event(Duration::from_secs(5)),
@@ -524,6 +565,45 @@ mod threaded {
         std::thread::sleep(Duration::from_millis(20));
         e.sync();
         assert_eq!(e.tick_count(), 100);
+    }
+
+    /// The threaded engine with the JIT (tiered on the compile thread)
+    /// shows the same frames as without, across an edit.
+    #[test]
+    fn jit_tiering_shows_the_same_frames() {
+        let (d1, en, q, mem) = counter_design(false);
+        let (d2, ..) = counter_design(true);
+        let engines = [
+            Engine::spawn(Options::debug()),
+            Engine::spawn_with(Options::debug(), SimOptions::jit()),
+        ];
+        for e in &engines {
+            e.load(Arc::new(d1.clone()), 1);
+            assert!(matches!(
+                e.wait_event(Duration::from_secs(5)),
+                Some(EngineEvent::Loaded { revision: 1, .. })
+            ));
+            e.set_input(en, 1);
+            e.set_probes(probes(q, mem));
+            e.step(12);
+            e.sync();
+            e.load(Arc::new(d2.clone()), 2);
+            assert!(matches!(
+                e.wait_event(Duration::from_secs(5)),
+                Some(EngineEvent::Loaded { revision: 2, .. })
+            ));
+        }
+        for n in [1, 30, 7] {
+            for e in &engines {
+                e.step(n);
+                e.sync();
+            }
+            let (a, b) = (engines[0].frame(), engines[1].frame());
+            assert_eq!(
+                (a.revision, a.tick, &a.values),
+                (b.revision, b.tick, &b.values)
+            );
+        }
     }
 
     #[test]
