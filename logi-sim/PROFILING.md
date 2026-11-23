@@ -230,3 +230,88 @@ Flamegraphs of these runs were not committed; they are reproduced by the
 `cargo xtask perf flamegraph bin:perf-metrics -- ticks ...` commands
 above (and `bench:app/bridge/edit`, `bench:app/history` for the edit
 path).
+
+## Findings, 2026-11-23: after #117 stages 1-4, and the JIT (stage 5)
+
+### Fresh profile of the interpreter
+
+Same machine and method as above (load average 1-4 during the runs),
+`perf record -F 997 --call-graph fp` of `perf-metrics ticks <case>
+3000000` (tick by tick, inputs changing), `profiling` build. The programs
+are now small: `cpu16` 302 instructions, two clock-phase variants of
+225/226 instructions plus 39 commits each (264.5 ops per tick, 154 in
+fused batches); `cpu16_rtl` 135 instructions, 15 commits.
+
+| share of samples | `cpu16` | `cpu16_rtl` |
+|---|---|---|
+| `code::exec` (all kernels, inlined) | 74% | 81% |
+| of which block dispatch (`exec` prologue, form match, range set-up) | ~19% | ~22% |
+| of which `Mux` kernel | ~15% | ~14% |
+| of which other streaming kernels (operand index loads, stores) | ~20% | ~15% |
+| of which full-`Instr` kernels (`Shr`, `MemRead`) | ~6% | ~8% |
+| `Sim::evaluate` (block loop) | 8% | 9% |
+| `Sim::commit` | 12% | 4% |
+| `Sim::tick` and the rest | 6% | 6% |
+
+So per tick about 0.30 µs (`cpu16`) and 0.23 µs (`cpu16_rtl`), i.e. 1.1
+and 1.5 ns per op: dispatch per block (median block length 1 on
+`cpu16_rtl`), operand index loads and the match per commit are most of
+the time, not the operations. That is what a JIT removes.
+
+### The JIT (`sim/jit/`, feature `jit`)
+
+Each body (program, phase variant, fused-run body) becomes straight-line
+Cranelift code in chunks of 64 instructions; within a chunk each slot is
+loaded once and results stay in registers; literal fields are
+immediates. Measured with `perf-metrics jit <case> <options> 6` (best of
+3; "tick" is `Sim::tick` with inputs changing every tick, "run" is
+`run(1000)` batches; the CPU columns run the program from reset to
+`Halted`, as `cpi`). The binary has the `counters` feature, as the
+numbers of #132.
+
+| case | instrs | interp tick | JIT tick | interp run | JIT run | speed-up tick / run | JIT compile |
+|---|---|---|---|---|---|---|---|
+| `cpu16` default | 302 | 0.296 µs | 0.071 µs | 0.176 µs | 0.039 µs | 4.2x / 4.5x | 3.3 ms |
+| `cpu16` editor | 333 | 0.337 µs | 0.083 µs | 0.175 µs | 0.040 µs | 4.1x / 4.3x | 3.6 ms |
+| `cpu16_rtl` default | 135 | 0.213 µs | 0.044 µs | 0.211 µs | 0.042 µs | 4.9x / 5.1x | 0.7 ms |
+| `cpu16_rtl` editor | 137 | 0.221 µs | 0.042 µs | 0.222 µs | 0.036 µs | 5.2x / 6.1x | 2.1 ms |
+| `testkit_cpu` | 29 | 0.075 µs | 0.018 µs | 0.076 µs | 0.017 µs | 4.1x / 4.5x | 0.2 ms |
+| `dag32_10k` | 251 | 0.608 µs | 0.086 µs | 0.013 µs | 0.015 µs | 7.1x / 1x | 1.2 ms |
+| `dag32_1m` | 819 | 1.720 µs | 0.296 µs | 0.014 µs | 0.014 µs | 5.8x / 1x | 4.3 ms |
+| `gates1_100k` | 23 009 | 18.9 µs | 11.7 µs | 0.031 µs | 0.025 µs | 1.6x / - | 68 ms |
+| `gates1_1m` | 101 113 | 77.6 µs | (interpreted) | | | 1x | - |
+
+Per CPU instruction (program run from reset to `Halted`):
+
+| | interp tick | JIT tick | interp run | JIT run |
+|---|---|---|---|---|
+| `cpu16` | 1.66 µs | 0.40 µs | 1.00 µs | 0.22 µs |
+| `cpu16_rtl` | 0.216 µs | 0.042 µs | 0.224 µs | 0.042 µs |
+
+- The clockless DAGs have nothing to do inside a batch (fusion prunes
+  every intermediate tick to 0 ops), so their "run" column is the call
+  overhead either way.
+- `gates1_1m` with the JIT was 432 µs/tick, 5.6x *slower*: about 2 MB of
+  native code for 101k one-bit gates misses the instruction caches,
+  while the interpreter streams 4-byte operands. Bodies over 32k
+  instructions (`jit::MAX_BODY`) therefore stay interpreted.
+- Chunk size: with chunks of 4096, `gates1_100k` compiled in 1.2-1.4 s and
+  ticked *slower* than with 64 (17.5 against 11.9 µs): keeping every
+  loaded slot in an SSA value across a long function makes long live
+  ranges that spill, and register allocation is superlinear. 64 is as
+  fast as larger chunks on `cpu16` in batches and faster tick by tick.
+- Cranelift's optimizer (`opt_level = speed`) gave no measurable speed on
+  these already simplified programs for about 25% more compile time; the
+  IR verifier was another ~10% (on in debug builds only).
+- Compile time is about 10 µs per instruction (all bodies: `cpu16`
+  compiles its two variants and two fused bodies). Tiering in the engine
+  keeps it off the tick loop anyway: an edit starts interpreted and
+  switches to native code when the compile thread has it.
+
+Cost of the dependencies (`cranelift-codegen`, `-frontend`, `-jit`,
+`-module`, `-native` 0.138.0), measured with `sim_report` in the
+`release` profile (fat LTO, one codegen unit), stripped: the binary grows
+from 1.6 MB to 4.7 MB; a clean build of logi-sim and its dependencies
+from 32 s to 123 s; rebuilding after touching logi-sim from 31 s to 76 s
+(LTO runs over Cranelift too). Only with `--features jit`; without it
+nothing of Cranelift is built.

@@ -210,6 +210,18 @@ cargo xtask perf flamegraph bench:frame
 cargo xtask perf stat bin:perf-metrics -- ticks cpu16 100000
 ```
 
+The JIT backend (logi-sim feature `jit`, issue #117) against the
+interpreter: µs per tick, tick by tick and in `run` batches, µs per CPU
+instruction for the gallery CPUs, and the JIT's compile time:
+
+```sh
+cargo build --profile profiling -p perf-metrics --features jit
+target/profiling/perf-metrics jit cpu16        # any `ticks` case; [OPTIONS] [seconds]
+```
+
+JIT-compiled code shows up in a profile as unnamed addresses (`perf`
+has no symbols for it).
+
 `ticks` cases: the gated ones (`cpu16`, `cpu16_rtl`, `testkit_cpu`,
 `dag32_10k`, `gates1_100k`) and the profiling-only `gates1_1m` and
 `dag32_1m`. Findings from profiling the tick loop are in

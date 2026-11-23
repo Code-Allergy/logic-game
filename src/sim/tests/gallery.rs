@@ -1921,3 +1921,33 @@ fn truth_tables_preserve_every_demo_and_gallery_item() {
         }
     }
 }
+
+/// The JIT backend (logi-sim feature `jit`, e.g. `cargo test --lib
+/// --features logi-sim/jit`; without it this compares the interpreter with
+/// itself) is bit-exact on every demo and gallery item, and on the gate
+/// CPU and its RTL twin for 3000 ticks: tick by tick with random inputs,
+/// `run` batches, state pokes, resets and imports, comparing outputs,
+/// state, every net, memories and memory versions after every step, under
+/// the editor's options and the defaults; plus fused batches with and
+/// without phase variants (`check_batches`).
+#[test]
+fn jit_preserves_every_demo_and_gallery_item() {
+    use logi_sim::compile::{Options, compile};
+    use logi_sim::sim::SimOptions;
+    use logi_sim::testkit::diff::{check_batches, check_jit};
+    let catalog = demos();
+    for item in catalog.demos.iter().chain(&catalog.gallery) {
+        let design = crate::sim::netlist::design_of(&item.workspace).unwrap();
+        let ticks = if item.id.starts_with("cpu16") {
+            5000
+        } else {
+            200
+        };
+        for o in [Options::debug(), Options::default()] {
+            let p = Arc::new(compile(&design, &o).unwrap());
+            check_jit(&p, ticks, 7, &SimOptions::default())
+                .unwrap_or_else(|e| panic!("{}: {e}", item.id));
+            check_batches(&p, 5).unwrap_or_else(|e| panic!("{}: {e}", item.id));
+        }
+    }
+}

@@ -27,6 +27,10 @@ inspector = ["dep:bevy-inspector-egui", "bevy/reflect_auto_register"]
 # The MCP server: an AI assistant builds and inspects circuits
 # (docs/mcp-server.md). Native only.
 mcp = ["dep:rmcp", "dep:tokio", "dep:axum"]
+# The simulator's Cranelift JIT backend (logi-sim feature `jit`, native
+# only), tiered: every edit runs interpreted at once and switches to native
+# code when it is compiled. Off by default for now.
+jit = ["logi-sim/jit"]
 
 [dependencies]
 logi-sim = { path = "logi-sim" }
