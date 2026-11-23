@@ -423,10 +423,7 @@ fn an_edit_of_only_the_tests_is_unsaved_and_can_be_undone() {
         app.world().resource::<WorkspaceRevision>().is_dirty(),
         "the new test is not saved yet"
     );
-    assert_eq!(
-        app.world().resource::<UndoHistory>().undo_len(),
-        steps + 1
-    );
+    assert_eq!(app.world().resource::<UndoHistory>().undo_len(), steps + 1);
 
     app.world_mut().write_message(HistoryCommand::Undo);
     app.update();

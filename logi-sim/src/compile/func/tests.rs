@@ -1017,7 +1017,6 @@ fn two_ands_def(d: &mut Design) -> DefId {
 /// so such a chip must not become one (it was a cycle of instructions,
 /// and the compiler panicked).
 #[test]
-#[ignore = "reproducer from review, not run yet: expected to panic in levelize until `table` is fixed"]
 fn a_chip_fed_from_its_own_unrelated_output_compiles() {
     let mut d = Design::new("root");
     let def = two_ands_def(&mut d);
