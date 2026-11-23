@@ -419,7 +419,7 @@ impl Run {
 
 /// `In(p)`, `In(p)[3]`, `In(p)[0..8]`, `r1`, `r1[4..8]`, `!...`: a slice
 /// of a base, for [`Replacement::desc`].
-fn slice_text(base: Base, lo: u8, len: u8, whole: u8, neg: bool) -> String {
+pub(crate) fn slice_text(base: Base, lo: u8, len: u8, whole: u8, neg: bool) -> String {
     let b = match base {
         Base::Port(p) => format!("In({p})"),
         Base::Word(g) => format!("r{g}"),

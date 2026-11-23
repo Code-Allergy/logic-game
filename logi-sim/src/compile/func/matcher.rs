@@ -973,6 +973,41 @@ impl SeqProver for SeqSliced {
     }
 }
 
+/// Fingerprint results evaluated so far (see `match_seq`).
+struct Fingerprints {
+    vals: Vec<u64>,
+    nexts: Vec<Vec<u64>>,
+    outs: Vec<Vec<u64>>,
+}
+
+impl Fingerprints {
+    /// Next values and outputs at sample `x`, evaluating samples up to it.
+    fn at(&mut self, flat: &Flat, vecs: &[Vec<u64>], nwi: usize, x: usize) -> (&[u64], &[u64]) {
+        while self.nexts.len() <= x {
+            let (ins, st) = vecs[self.nexts.len()].split_at(nwi);
+            flat.eval(ins, st, &mut self.vals);
+            self.nexts
+                .push((0..st.len()).map(|k| flat.next(&self.vals, k)).collect());
+            self.outs.push(
+                (0..flat.outputs.len())
+                    .map(|j| flat.output(&self.vals, j))
+                    .collect(),
+            );
+        }
+        (&self.nexts[x], &self.outs[x])
+    }
+}
+
+/// An enable, for reasons: `In(1)`, `!In(1)`, `In(2)[3]`.
+fn en_text(en: En, wi: &[u8]) -> String {
+    match en {
+        En::Always => "always".into(),
+        En::Bit { port, bit, neg } => {
+            super::replace::slice_text(Base::Port(port), bit, 1, wi[port as usize], neg)
+        }
+    }
+}
+
 /// A state element's kind and width, for reasons.
 fn elem_text(flat: &Flat, k: usize) -> String {
     let s = &flat.states[k];
@@ -995,28 +1030,24 @@ pub(crate) fn match_seq(flat: &Flat) -> Result<(Replacement, Proof), String> {
     let ns = ws.len();
     let wi = &shape.ports.wi;
     let ni = wi.len() as u16;
-    // Fingerprints: random input and state values (plus all 0, all 1).
+    // Fingerprints: random input and state values (plus all 0, all 1),
+    // evaluated as the checks first need them (checks stop at the first
+    // sample that refutes a candidate, so a definition that is no register
+    // usually needs only a few).
     let mut widths: Vec<u8> = wi.clone();
     widths.extend_from_slice(ws);
     let vecs = samples(&widths, SAMPLES);
-    let mut vals = vec![0u64; flat.values()];
     let nwi = wi.len();
     fn cut(v: &[u64], n: usize) -> (&[u64], &[u64]) {
         v.split_at(n)
     }
-    let mut nexts: Vec<Vec<u64>> = Vec::with_capacity(vecs.len());
-    let mut outs: Vec<Vec<u64>> = Vec::with_capacity(vecs.len());
-    for v in &vecs {
-        let (ins, st) = cut(v, nwi);
-        flat.eval(ins, st, &mut vals);
-        nexts.push((0..ns).map(|k| flat.next(&vals, k)).collect());
-        outs.push(
-            (0..shape.ports.wo.len())
-                .map(|j| flat.output(&vals, j))
-                .collect(),
-        );
-    }
-    // Candidates per state element.
+    let lazy = std::cell::RefCell::new(Fingerprints {
+        vals: vec![0u64; flat.values()],
+        nexts: Vec::with_capacity(vecs.len()),
+        outs: Vec::with_capacity(vecs.len()),
+    });
+    // The next value of every element at sample `x`.
+    let next_at = |x: usize, k: usize| lazy.borrow_mut().at(flat, &vecs, nwi, x).0[k];
     let mut ens = vec![En::Always];
     for p in 0..ni {
         for bit in 0..wi[p as usize] {
@@ -1025,56 +1056,90 @@ pub(crate) fn match_seq(flat: &Flat) -> Result<(Replacement, Proof), String> {
             }
         }
     }
+    // Random samples first: all-0 and all-1 tell few candidates apart.
+    let order: Vec<usize> = (2..vecs.len()).chain(0..2).collect();
+    const QUICK_HOLDS: usize = 8;
     let mut elem_cands: Vec<Vec<ElemSeq>> = Vec::with_capacity(ns);
     for k in 0..ns {
         let w = ws[k];
+        let bases: Vec<(ElBase, u8)> = (0..ni)
+            .filter(|&p| wi[p as usize] >= w)
+            .map(|p| (ElBase::Port(p), wi[p as usize]))
+            .chain(
+                (0..ns as u16)
+                    .filter(|&m| m as usize != k && ws[m as usize] >= w)
+                    .map(|m| (ElBase::State(m), ws[m as usize])),
+            )
+            .collect();
         let mut v = Vec::new();
-        let mut holds = None;
+        // An enable it held under until no data source was left.
+        let mut held = None;
         for &en in &ens {
-            // Where the enable is off, the element must hold.
-            let ok = vecs.iter().zip(&nexts).all(|(x, n)| {
-                let (ins, st) = cut(x, nwi);
-                shape.en(en, ins) || n[k] == st[k]
+            // A quick look first: does it hold where the enable is off
+            // (until it has been off a few times)?
+            let mut off = 0;
+            let plausible = order.iter().all(|&x| {
+                if off >= QUICK_HOLDS {
+                    return true;
+                }
+                let (ins, st) = cut(&vecs[x], nwi);
+                if shape.en(en, ins) {
+                    return true;
+                }
+                off += 1;
+                next_at(x, k) == st[k]
             });
-            if !ok {
+            if !plausible {
                 continue;
             }
-            holds.get_or_insert(en);
-            let bases = (0..ni)
-                .filter(|&p| wi[p as usize] >= w)
-                .map(|p| (ElBase::Port(p), wi[p as usize]))
-                .chain(
-                    (0..ns as u16)
-                        .filter(|&m| m as usize != k && ws[m as usize] >= w)
-                        .map(|m| (ElBase::State(m), ws[m as usize])),
-                );
-            for (base, bw) in bases {
-                for lo in 0..=bw - w {
-                    let c = ElemSeq { en, base, lo };
-                    let fits = vecs.iter().zip(&nexts).all(|(x, n)| {
-                        let (ins, st) = cut(x, nwi);
-                        shape.want(k, c, ins, st) == n[k]
-                    });
-                    if fits {
-                        v.push(c);
-                    }
+            let mut ds: Vec<ElemSeq> = bases
+                .iter()
+                .flat_map(|&(base, bw)| (0..=bw - w).map(move |lo| ElemSeq { en, base, lo }))
+                .collect();
+            // Sample by sample: where the enable is off the element holds,
+            // where it is on it loads `d`.
+            let mut holds = true;
+            for &x in &order {
+                if ds.is_empty() {
+                    break;
                 }
+                let (ins, st) = cut(&vecs[x], nwi);
+                let n = next_at(x, k);
+                if !shape.en(en, ins) {
+                    if n != st[k] {
+                        holds = false;
+                        break;
+                    }
+                    continue;
+                }
+                ds.retain(|&c| shape.want(k, c, ins, st) == n);
+            }
+            if holds && en != En::Always {
+                held.get_or_insert(en);
+            }
+            if holds {
+                v.extend(ds);
             }
         }
         if v.is_empty() {
             let what = elem_text(flat, k);
-            return Err(match holds {
+            return Err(match held {
                 None => format!(
-                    "{what}: not a register: no input bit (or its complement) is its enable"
+                    "{what}: not a register: no input bit (or its complement) enables it, \
+                     and it is not a Delay of input or state bits"
                 ),
                 Some(en) => format!(
-                    "{what}: not a register: enabled by {en:?}, it loads no slice of an \
-                     input or another state element"
+                    "{what}: not a register: enabled by {}, it loads no slice of an input \
+                     or another state element",
+                    en_text(en, wi)
                 ),
             });
         }
         elem_cands.push(v);
     }
+    let outs: Vec<Vec<u64>> = (0..vecs.len())
+        .map(|x| lazy.borrow_mut().at(flat, &vecs, nwi, x).1.to_vec())
+        .collect();
     // Candidates per output bit.
     let mut obit_cands: Vec<Vec<OBit>> = Vec::with_capacity(shape.obits.len());
     for &(j, i) in &shape.obits {
