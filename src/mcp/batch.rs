@@ -1468,7 +1468,9 @@ impl Group<'_> {
             Some(Value::Null) => Some(None),
             Some(Value::String(k)) if crate::sim::keybind::key_code(&k).is_some() => Some(Some(k)),
             Some(Value::String(k)) => {
-                return err(format!("\"key\": \"{k}\" is not a key (ArrowUp, KeyZ, Enter, Space, ...)"));
+                return err(format!(
+                    "\"key\": \"{k}\" is not a key (ArrowUp, KeyZ, Enter, Space, ...)"
+                ));
             }
             Some(_) => return err("\"key\" must be a key name, or null to remove it"),
         };
@@ -1500,7 +1502,9 @@ impl Group<'_> {
             }
             if let Some(key) = &key {
                 if !matches!(node.kind, GateKind::Input { .. }) {
-                    return err(format!("\"{part}\" is not an Input; \"key\" does not apply"));
+                    return err(format!(
+                        "\"{part}\" is not an Input; \"key\" does not apply"
+                    ));
                 }
                 let prop = crate::sim::keybind::KEY_PROPERTY.to_string();
                 match key {

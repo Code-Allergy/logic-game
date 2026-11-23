@@ -333,7 +333,9 @@ pub(crate) fn parse_node_entry(
                 return err("\"key\" binds a keyboard key to an Input; this is not one");
             }
             if crate::sim::keybind::key_code(k).is_none() {
-                return err(format!("\"key\": \"{k}\" is not a key (ArrowUp, KeyZ, Enter, Space, ...)"));
+                return err(format!(
+                    "\"key\": \"{k}\" is not a key (ArrowUp, KeyZ, Enter, Space, ...)"
+                ));
             }
         }
         let (at, placed) = match map.shift_remove("at") {
