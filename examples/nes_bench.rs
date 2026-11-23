@@ -11,6 +11,10 @@
 //! `--compare` runs the same ticks on the interpreter and on the JIT (each
 //! with variants and fusion) and requires every state element and every
 //! memory (the screen, RAMs, OAM, palette) to be the same at the end.
+//! `--blocks` reports where the ops of a tick are: each chip under the
+//! root (and inside large ones) compiled on its own, with its op mix. The
+//! settle is straight-line code that runs every op of its variant each
+//! tick whatever the data, so a block's share of ops is its share of time.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -24,7 +28,8 @@ use logi_sim::sim::{Sim, SimOptions};
 fn main() -> Result<(), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let compare = args.iter().any(|a| a == "--compare");
-    args.retain(|a| a != "--compare");
+    let blocks = args.iter().any(|a| a == "--blocks");
+    args.retain(|a| a != "--compare" && a != "--blocks");
     let folder = args
         .first()
         .ok_or("usage: nes_bench <workspace folder> [--compare] [ticks]")?;
@@ -36,6 +41,9 @@ fn main() -> Result<(), String> {
     let design = design_of(&ws)?;
     if compare {
         return compare_jit(&design, ticks);
+    }
+    if blocks {
+        return block_costs(&ws);
     }
     for (name, options) in [
         ("default", Options::default()),
@@ -175,4 +183,87 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
             words + mems
         ))
     }
+}
+
+/// Ops per block: the root's chips, and the chips inside any of them that
+/// costs at least 150 ops, each compiled as a root.
+fn block_costs(ws: &gate_quest::sim::WorkspaceDocument) -> Result<(), String> {
+    use gate_quest::mcp::batch::Place;
+    use gate_quest::mcp::compiled::insight;
+    use gate_quest::sim::{CircuitDocument, GateKind};
+
+    fn children(c: &CircuitDocument) -> Vec<(String, uuid::Uuid)> {
+        let mut out: Vec<(String, uuid::Uuid)> = c
+            .nodes
+            .iter()
+            .filter_map(|n| match n.kind {
+                GateKind::SubCircuit { definition } => {
+                    Some((n.label.clone().unwrap_or_default(), definition))
+                }
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+    fn mix(by_op: &std::collections::BTreeMap<String, usize>) -> String {
+        let mut v: Vec<(&String, &usize)> = by_op.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1));
+        v.iter()
+            .take(6)
+            .map(|(k, n)| format!("{k} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    let total = insight(ws, Place::Root)?;
+    println!(
+        "console: {} ops per tick ({})",
+        total.size.instructions,
+        mix(&total.size.by_op)
+    );
+    let t = total.size.instructions as f64;
+    let mut listed = 0usize;
+    for (label, id) in children(&ws.root) {
+        let Some(def) = ws.definitions.get(&id) else {
+            continue;
+        };
+        let i = insight(ws, Place::Definition(id))?;
+        let n = i.size.instructions;
+        listed += n;
+        println!(
+            "\n{label} ({}): {n} ops, {:.1}% ({})",
+            def.name,
+            n as f64 / t * 100.0,
+            mix(&i.size.by_op)
+        );
+        if n >= 150 {
+            let mut inner = 0;
+            for (sub, sid) in children(def) {
+                let Some(sdef) = ws.definitions.get(&sid) else {
+                    continue;
+                };
+                let si = insight(ws, Place::Definition(sid))?;
+                let m = si.size.instructions;
+                inner += m;
+                if m >= 10 {
+                    println!(
+                        "    {sub:14} {:18} {m:5} ops {:5.1}%  ({})",
+                        sdef.name,
+                        m as f64 / t * 100.0,
+                        mix(&si.size.by_op)
+                    );
+                }
+            }
+            println!(
+                "    {:33} {:5} ops (the block's own wiring and logic)",
+                "glue",
+                n.saturating_sub(inner)
+            );
+        }
+    }
+    println!(
+        "\nroot glue: {} ops (the console's own decode and wiring, and what compiling blocks together saves or adds)",
+        total.size.instructions as i64 - listed as i64
+    );
+    Ok(())
 }
