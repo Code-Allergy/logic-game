@@ -42,10 +42,15 @@ from cells import chip, gate, inp, out, unopt, use  # noqa: E402
 
 cells.EDITS.clear()
 
-# One CPU cycle per three dots: states 0, 1, 2; ce in state 2.
+# One CPU cycle per three dots: ce at ticks 2, 5, 8, ... from power-on.
+# A Clock primitive (a function of the tick count: ((t + 1) % 3) < 1)
+# rather than a counter of flip-flops, so the compiler knows on which
+# ticks the CPU's registers hold, and need not evaluate their next values
+# then. Same waveform as the free-running divide-by-3 it replaces (the
+# stored test is that counter's).
 chip("div3",
-     [gate("s0", "Delay"), gate("s1", "Delay"), gate("n", "Nor"), out("ce")],
-     [["s0", "s1", "n.a"], ["s1", "n.b", "ce"], ["n", "s0"]],
+     [{"name": "clk", "type": "Clock", "period": 3, "duty": 1, "phase": 1}, out("ce")],
+     [["clk", "ce"]],
      [{"name": "function", "sequence": {"steps": [
          {"ticks": 1, "expect": {"ce": 0}}, {"ticks": 1, "expect": {"ce": 1}},
          {"ticks": 1, "expect": {"ce": 0}}, {"ticks": 1, "expect": {"ce": 0}},
