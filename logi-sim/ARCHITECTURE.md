@@ -68,9 +68,9 @@ primitives. Names live in a side table.
 4. **Function matching** (`func/`, `Options::func_match`): each
    subcircuit definition is fingerprinted by random simulation, matched
    against a catalogue of word functions (mux, add/sub with carries,
-   compare, bitwise, constants, registers built from gate latches) and
-   proven (exhaustively, per bit slice, or as a carry chain of proven
-   adders). Instances of a proven definition lower to the word
+   compare, bitwise, constants, registers built from gate latches or
+   flip-flop chips, grouped into word registers) and proven (exhaustively,
+   per bit slice, or as a carry chain of proven adders). Instances of a proven definition lower to the word
    implementation; their internal nets stay readable through shadow slots
    (`Program::shadows`), evaluated from the instance's inputs and state on
    read. Results are cached by a BLAKE3 content key (`func::MatchCache`,

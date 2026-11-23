@@ -46,7 +46,7 @@ const MAX_CACHED: usize = 2048;
 pub type ContentKey = [u8; 32];
 
 /// Version of the serialization behind [`ContentKey`].
-pub const KEY_FORMAT: &[u8] = b"logi-sim func-match key v2";
+pub const KEY_FORMAT: &[u8] = b"logi-sim func-match key v3";
 
 /// What the analysis found for one definition.
 #[derive(Debug)]

@@ -391,11 +391,6 @@ impl Flat {
         self.widths.len()
     }
 
-    /// Total state bits.
-    pub(crate) fn state_bits(&self) -> u32 {
-        self.states.iter().map(|s| s.width as u32).sum()
-    }
-
     /// Evaluate one settle: every value from the input port values and the
     /// state values (both masked to their widths). `vals` has
     /// [`Flat::values`] entries.

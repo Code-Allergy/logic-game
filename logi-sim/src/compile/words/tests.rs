@@ -203,10 +203,26 @@ fn registers_on_the_halves_of_a_word_merge() {
     let y = b.not(lo);
     b.output("y", y);
     let (on, off) = check("split register", &d);
-    assert_eq!(copies(&off), 2);
-    assert_eq!(copies(&on), 1, "one 16-bit state word");
-    // Both halves keep their own state keys (as bit fields of the word).
-    assert_eq!(on.state_keys.len(), 2);
+    // Function matching already sees one 16-bit register (two 8-bit
+    // fields); without it, this pass merges the halves.
+    assert_eq!(copies(&off), 1);
+    let unmatched = |words| {
+        compile(
+            &d,
+            &Options {
+                func_match: false,
+                words,
+                ..Options::default()
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(copies(&unmatched(false)), 2);
+    for p in [&on, &unmatched(true)] {
+        assert_eq!(copies(p), 1, "one 16-bit state word");
+        // Both halves keep their own state keys (as bit fields of the word).
+        assert_eq!(p.state_keys.len(), 2);
+    }
 }
 
 #[test]

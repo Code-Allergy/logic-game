@@ -249,6 +249,11 @@ pub(super) fn emit(
         let pdef = &design.defs[e.def_of(p)];
         pdef.nodes[node].inputs[pin].map_or(ZERO_SLOT, |net| net_slot[e.global(p, net) as usize])
     };
+    // State keys of original state elements held as bit fields of a wider
+    // state word of a replacement: `(key index, offset, width)`. Until
+    // after word lifting each such key names the whole word; then it
+    // becomes a view of its bits (see `field_views`).
+    let mut fields: Vec<(usize, u8, u8)> = Vec::new();
     for sub in &subs {
         let repl = sub.info.repl.as_ref().expect("matched");
         let i = sub.inst;
@@ -260,19 +265,28 @@ pub(super) fn emit(
             Ref::Temp(t) => temps[t as usize],
         };
         let base_path = e.path(i);
+        let key_of = |state: u16, loc, width| {
+            let (rel, node) = repl.states[state as usize].clone();
+            let mut instances = base_path.clone();
+            instances.extend(rel);
+            StateKey {
+                path: NodePath { instances, node },
+                loc,
+                width,
+            }
+        };
         for rn in &repl.nodes {
-            let key = |loc, width| {
-                let (rel, node) = match rn.state {
-                    Some(k) => repl.states[k as usize].clone(),
-                    None => (Vec::new(), e.insts[i as usize].parent.expect("non-root").1),
-                };
-                let mut instances = base_path.clone();
-                instances.extend(rel);
-                StateKey {
-                    path: NodePath { instances, node },
+            let held = rn.state.map(|g| &repl.words[g as usize]);
+            let key = |loc, width| match held {
+                Some(f) => key_of(f[0].state, loc, width),
+                None => StateKey {
+                    path: NodePath {
+                        instances: base_path.clone(),
+                        node: e.insts[i as usize].parent.expect("non-root").1,
+                    },
                     loc,
                     width,
-                }
+                },
             };
             lower(
                 &mut em,
@@ -281,6 +295,16 @@ pub(super) fn emit(
                 &|k| r(rn.outs[k]),
                 key,
             );
+            if let Some(f) = held
+                && f.len() > 1
+            {
+                let word = em.state_keys.pop().expect("a state node keys its state");
+                for field in f {
+                    fields.push((em.state_keys.len(), field.off, field.width));
+                    em.state_keys
+                        .push(key_of(field.state, word.loc, word.width));
+                }
+            }
         }
     }
     for inst in 0..e.insts.len() as u32 {
@@ -348,6 +372,7 @@ pub(super) fn emit(
     } else {
         Vec::new()
     };
+    let views = field_views(&mut em, &fields, views);
     pass_done(super::Pass::Lift);
 
     // ── Word-level cleanup ─────────────────────────────────────────────────
@@ -573,6 +598,41 @@ pub(super) fn emit(
     }
     pass_done(super::Pass::Renumber);
     p
+}
+
+/// Make the state key of each original state element held in a wider
+/// state word of a replacement (`fields`, see `emit`) a view of its bits
+/// of that word, as word lifting does for the lanes of a state bank: state
+/// keys, snapshots, probes and shadows then name the element itself.
+fn field_views(
+    em: &mut Emitter,
+    fields: &[(usize, u8, u8)],
+    mut views: Vec<(u32, lift::Seg)>,
+) -> Vec<(u32, lift::Seg)> {
+    if fields.is_empty() {
+        return views;
+    }
+    let mut view_of: FastMap<lift::Seg, u32> = views.iter().map(|&(f, s)| (s, f)).collect();
+    for &(k, off, width) in fields {
+        let key = &mut em.state_keys[k];
+        let StateLoc::Slot(base) = key.loc else {
+            unreachable!("a state word is a slot")
+        };
+        let seg = lift::Seg {
+            base,
+            off,
+            len: width,
+        };
+        let f = *view_of.entry(seg).or_insert_with(|| {
+            em.widths.push(width);
+            let f = (em.widths.len() - 1) as u32;
+            views.push((f, seg));
+            f
+        });
+        key.loc = StateLoc::Slot(f);
+        key.width = width;
+    }
+    views
 }
 
 /// Give the internal nets of substituted instances (`pending`) shadow

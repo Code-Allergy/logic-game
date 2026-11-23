@@ -47,6 +47,7 @@ pub mod chip;
 pub mod demos;
 pub mod document;
 pub mod history;
+pub mod keybind;
 pub mod kind;
 pub mod layout;
 pub mod multi_select;
