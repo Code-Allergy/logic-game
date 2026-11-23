@@ -276,10 +276,15 @@ pub struct Sim {
     /// `full`/`fused` (0 the program's own, `k` `runs[k - 1]`).
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     jit: Option<Arc<jit::JitProgram>>,
-    /// One pointer per memory, for the JIT'd code (refreshed before each
-    /// call; `usize` keeps `Sim` `Send`).
+    /// One pointer per memory, for the JIT'd code (`usize` keeps `Sim`
+    /// `Send`). The buffers never reallocate, but a write through a new
+    /// `&mut` (the interpreter's commit, a reset, an import, a poke) would
+    /// invalidate pointers taken before it, so those clear
+    /// `mem_ptrs_fresh` and the next JIT call takes them again.
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     mem_ptrs: Vec<usize>,
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    mem_ptrs_fresh: bool,
     #[cfg(feature = "counters")]
     counters: Counters,
     /// What one settle of the program's own body executes (`blocks`,
@@ -387,6 +392,8 @@ impl Sim {
             jit: None,
             #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
             mem_ptrs: Vec::new(),
+            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            mem_ptrs_fresh: false,
             #[cfg(feature = "counters")]
             counters: Counters::default(),
             #[cfg(feature = "counters")]
@@ -679,9 +686,12 @@ impl Sim {
         {
             #[cfg(feature = "counters")]
             let before: u64 = self.mem_writes.iter().sum();
-            self.mem_ptrs.clear();
-            self.mem_ptrs
-                .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+            if !self.mem_ptrs_fresh {
+                self.mem_ptrs.clear();
+                self.mem_ptrs
+                    .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+                self.mem_ptrs_fresh = true;
+            }
             // SAFETY: the code was compiled from this body, which passed
             // `check`; `slots` has `slot_count` entries, `mem_ptrs` one
             // pointer per memory (each `2^addr_bits` words) and
@@ -700,6 +710,11 @@ impl Sim {
                 self.counters.mem_writes += self.mem_writes.iter().sum::<u64>() - before;
             }
             return;
+        }
+        // `mems_touched`, with `commits` borrowed.
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        {
+            self.mem_ptrs_fresh = false;
         }
         for c in commits {
             match *c {
@@ -760,6 +775,16 @@ impl Sim {
         }
     }
 
+    /// Memories are about to be written through new references: pointers
+    /// the JIT'd code holds must be taken again (see `mem_ptrs`).
+    #[inline]
+    fn mems_touched(&mut self) {
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        {
+            self.mem_ptrs_fresh = false;
+        }
+    }
+
     /// Apply the staged root inputs to their slots, then evaluate `run`
     /// (0: the full program or variant; otherwise a fused-run body).
     fn settle(&mut self, run: u8) {
@@ -790,9 +815,12 @@ impl Sim {
             .as_ref()
             .and_then(|j| j.bodies[run as usize].as_ref())
         {
-            self.mem_ptrs.clear();
-            self.mem_ptrs
-                .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+            if !self.mem_ptrs_fresh {
+                self.mem_ptrs.clear();
+                self.mem_ptrs
+                    .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+                self.mem_ptrs_fresh = true;
+            }
             let s = self.slots.as_mut_ptr();
             for f in &j.settle {
                 // SAFETY: as in `commit`; settle code reads memories only.
@@ -838,6 +866,7 @@ impl Sim {
     /// contents restored, tick 0, then the tick-0 settle. Root inputs keep
     /// their current values, so that settle sees them.
     pub fn reset(&mut self) {
+        self.mems_touched();
         self.slots.fill(0);
         for &(s, v) in &self.program.consts {
             self.slots[s as usize] = v;
@@ -885,6 +914,7 @@ impl Sim {
     /// Word values are masked to the current width. The tick count is
     /// restored.
     pub fn import_state(&mut self, snap: &StateSnapshot) {
+        self.mems_touched();
         let program = Arc::clone(&self.program);
         for key in &program.state_keys {
             match key.loc {
@@ -949,6 +979,7 @@ impl Sim {
     /// simulation until [`Sim::reset`]. Panics if `addr` is past the end.
     pub fn set_mem_word(&mut self, index: u32, addr: usize, value: u64) {
         let width = self.program.mems[index as usize].width;
+        self.mems_touched();
         self.mems[index as usize][addr] = value & mask(width);
         self.mem_writes[index as usize] += 1;
     }

@@ -24,8 +24,10 @@
 //! reading it.
 //!
 //! Chunks are cut at instruction boundaries (at most [`CHUNK`]
-//! instructions), which bounds Cranelift's compile time per function and
-//! makes a chunk the natural unit for running part of a body later.
+//! instructions), which bounds Cranelift's compile time and the live
+//! ranges per function, and makes a chunk the natural unit for running
+//! part of a body later (activity skipping could call the chunks of a
+//! region only).
 //!
 //! # Soundness
 //!
@@ -53,9 +55,17 @@ use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::compile::{Block, Commit, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
 use crate::netlist::mask;
 
-/// Instructions (or packed words) per settle chunk, and commits per
-/// commit chunk, at most.
-pub const CHUNK: usize = 4096;
+/// Instructions (or packed words) per settle chunk at most. Small chunks
+/// compile faster (register allocation is superlinear in function size)
+/// and also run faster: within a chunk every slot is loaded once and kept
+/// in an SSA value, and in long functions those long live ranges spill.
+/// Measured on `gates1_100k` (23k instructions): chunks of 64 compile in
+/// 150 ms and tick in 11.9 µs; 4096, 840 ms and 17.5 µs. On `cpu16`, 64
+/// is as fast as 4096 in batches and faster tick by tick.
+pub const CHUNK: usize = 64;
+
+/// Commits per commit chunk at most.
+pub const COMMIT_CHUNK: usize = 256;
 
 /// Bodies with more instructions (or packed words) than this run
 /// interpreted: Cranelift's compile time is about linear, but a body this
@@ -150,7 +160,10 @@ impl JitProgram {
     pub fn compile(p: &Program, bodies: &[BodyRef<'_>]) -> Result<Self, JitError> {
         let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
         let mut flags = settings::builder();
-        flags.set("opt_level", "speed").map_err(|e| err(&e))?;
+        // The IR is already simplified (constant folding, CSE and DCE ran in
+        // the compiler); Cranelift's optimizer gains nothing measurable on
+        // it and costs about a quarter of the compile time.
+        flags.set("opt_level", "none").map_err(|e| err(&e))?;
         flags
             .set("use_colocated_libcalls", "false")
             .map_err(|e| err(&e))?;
@@ -238,7 +251,7 @@ impl JitProgram {
                 .all(|c| !matches!(c, Commit::MemClear { .. }))
             {
                 let mut out = Vec::new();
-                for part in body.commits.chunks(CHUNK) {
+                for part in body.commits.chunks(COMMIT_CHUNK) {
                     ctx.func.signature.params.clear();
                     ctx.func.signature.params.extend([
                         AbiParam::new(ptr),

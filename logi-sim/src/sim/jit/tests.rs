@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::{BodyRef, CHUNK, JitProgram};
+use super::{BodyRef, CHUNK, COMMIT_CHUNK, JitProgram};
 use crate::compile::{Options, PackMode, compile};
 use crate::netlist::Design;
 use crate::sim::{Sim, SimOptions};
@@ -128,18 +128,19 @@ fn packed_programs_match_the_interpreter() {
 /// stored because a later chunk reads them).
 #[test]
 fn bodies_longer_than_a_chunk_match_the_interpreter() {
-    let d = generate(&GenConfig::dag(3, 3 * CHUNK, 16)).design;
+    let d = generate(&GenConfig::dag(3, 40 * CHUNK, 16)).design;
     let p = program(&d, &Options::unoptimized());
     assert!(p.instrs.len() > 2 * CHUNK);
     check_jit(&p, 40, 3, &SimOptions::default()).unwrap();
     let d = generate(&GenConfig {
         seed: 5,
-        nodes: 3 * CHUNK,
+        nodes: 40 * CHUNK,
         state_percent: 20,
         ..GenConfig::default()
     })
     .design;
     let p = program(&d, &Options::unoptimized());
+    assert!(p.commits.len() > COMMIT_CHUNK);
     check_jit(&p, 60, 5, &SimOptions::default()).unwrap();
     check_batches(&p, 5).unwrap();
 }
@@ -239,7 +240,7 @@ fn compiled_code_can_be_installed_and_removed() {
     assert_eq!(b.settle.len(), p.instrs.len().div_ceil(CHUNK).max(1));
     assert_eq!(
         b.commit.as_ref().unwrap().len(),
-        p.commits.len().div_ceil(CHUNK)
+        p.commits.len().div_ceil(COMMIT_CHUNK)
     );
 }
 
