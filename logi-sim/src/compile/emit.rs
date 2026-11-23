@@ -90,7 +90,7 @@ pub(super) fn emit(
             let Some(info) = analysis.get(e.insts[i].def) else {
                 continue;
             };
-            if !info.matched() {
+            if !info.matched() || (info.is_table() && !opts.tables) {
                 continue;
             }
             let pdef = &design.defs[e.insts[p as usize].def];
@@ -565,6 +565,7 @@ pub(super) fn emit(
         views: Vec::new(),
         shadows: Vec::new(),
         shadow_nets: Vec::new(),
+        phases: None,
     };
     renumber(&mut p, &out_ops, &dsts, &plan.lane_of, &views);
     if !pending.is_empty() {

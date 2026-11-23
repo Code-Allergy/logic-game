@@ -87,8 +87,15 @@ fn the_gate_cpu_has_chips_that_match_and_chips_that_do_not() {
     assert!(
         matches!(&i.chips["16-bit ALU"], Match::Unmatched(why) if why.contains("no catalogue function fits"))
     );
+    // A small chip with no catalogue function runs as a truth table.
+    assert!(matches!(
+        &i.chips["4-to-16 decoder with enable"],
+        Match::Matched(n) if n.starts_with("table of 5 input bits")
+    ));
+    // The program ROM and the RAM, and the decoder's table (a ROM the
+    // compiler adds).
     assert!(
-        i.size.state_words > 0 && i.size.memories == 2,
+        i.size.state_words > 0 && i.size.memories == 3,
         "{:?}",
         i.size
     );
@@ -155,14 +162,15 @@ fn a_compiled_test_pins_what_the_compiler_does() {
         &ws,
         "16-bit ALU",
         json!([{"name": "word level", "compiled": {
-            "matched": {"16-bit carry-lookahead adder": "Add", "16-bit 2-to-1 multiplexer": true},
-            "unmatched": ["Carry lookahead unit"],
+            "matched": {"16-bit carry-lookahead adder": "Add", "16-bit 2-to-1 multiplexer": true,
+                        "Carry lookahead unit": "table"},
+            "unmatched": ["16-bit 8-to-1 multiplexer"],
             "instructions": {"max": 60}
         }}]),
     );
     assert_eq!(
         suite(&ws, "16-bit ALU"),
-        "1 of 1 tests passed in 1 circuit(s) (4 cases)\n"
+        "1 of 1 tests passed in 1 circuit(s) (5 cases)\n"
     );
     // The test the view prints passes as it is.
     let i = compiled::insight(&ws, place(&ws, "16-bit ALU")).unwrap();
@@ -177,7 +185,7 @@ fn a_compiled_test_pins_what_the_compiler_does() {
         &ws,
         "16-bit ALU",
         json!([{"name": "too tight", "compiled": {
-            "matched": {"16-bit carry-lookahead adder": {"exactly": "an adder"}, "Carry lookahead unit": true},
+            "matched": {"16-bit carry-lookahead adder": {"exactly": "an adder"}, "16-bit 8-to-1 multiplexer": true},
             "unmatched": ["16-bit 2-to-1 multiplexer"],
             "instructions": {"max": 10}
         }}]),
@@ -192,7 +200,7 @@ fn a_compiled_test_pins_what_the_compiler_does() {
     for said in [
         "\"16-bit carry-lookahead adder\" matched as [Add {",
         "not exactly as an adder",
-        "\"Carry lookahead unit\" did not match: output 0: no catalogue function fits",
+        "\"16-bit 8-to-1 multiplexer\" did not match: output 0: no catalogue function fits",
         "\"16-bit 2-to-1 multiplexer\" must not match, but matched as [Mux",
         "33 instructions, more than the 10 allowed",
     ] {

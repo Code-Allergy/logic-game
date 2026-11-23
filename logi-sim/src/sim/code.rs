@@ -17,7 +17,7 @@
 //! Every kernel takes an instruction sub-range `lo..hi` of its block, so a
 //! block can be split between threads (`super::pool`).
 
-use crate::compile::{Gather, Instr, Op, Pack, PackOperand, Program};
+use crate::compile::{Block, Gather, Instr, Op, Pack, PackOperand, Program};
 use crate::netlist::mask;
 
 /// One block of [`Code`]: `len` instructions sharing `op` and `rank`.
@@ -83,10 +83,11 @@ pub(super) fn arity(op: Op) -> u32 {
 }
 
 impl Code {
-    /// Lower a program that passed `check`.
-    pub fn new(p: &Program) -> Self {
+    /// Lower a program body (the program's own, or a clock-phase variant)
+    /// that passed `check`.
+    pub fn new(blocks: &[Block], instrs: &[Instr], imms: &[u64]) -> Self {
         let mut code = Code::default();
-        for b in &p.blocks {
+        for b in blocks {
             if b.packed {
                 code.blocks.push(XBlock {
                     op: b.op,
@@ -98,8 +99,8 @@ impl Code {
                 continue;
             }
             let range = b.start as usize..(b.start + b.len) as usize;
-            let ins = &p.instrs[range.clone()];
-            let imms = &p.imms[range];
+            let ins = &instrs[range.clone()];
+            let imms = &imms[range];
             let dst0 = ins.first().map_or(0, |i| i.dst);
             let seq = streamable(b.op)
                 && ins
@@ -142,10 +143,9 @@ impl Code {
 
     /// Every block runs from the program's own instructions (the M3
     /// runtime).
-    pub fn plain(p: &Program) -> Self {
+    pub fn plain(blocks: &[Block]) -> Self {
         Code {
-            blocks: p
-                .blocks
+            blocks: blocks
                 .iter()
                 .map(|b| XBlock {
                     op: b.op,
@@ -167,6 +167,10 @@ impl Code {
 /// What a kernel needs besides the slots.
 pub(super) struct Env<'a> {
     pub program: &'a Program,
+    /// The body `code` was built from (the program's own instructions, or
+    /// a clock-phase variant's).
+    pub instrs: &'a [Instr],
+    pub imms: &'a [u64],
     pub code: &'a Code,
     pub mems: &'a [Vec<u64>],
     pub tick: u64,
@@ -204,8 +208,8 @@ pub(super) unsafe fn exec(env: &Env<'_>, b: &XBlock, lo: u32, hi: u32, s: *mut u
             let range = start as usize + lo..start as usize + hi;
             // SAFETY: `check` validated the block range and every index.
             unsafe {
-                let ins = env.program.instrs.get_unchecked(range.clone());
-                let imms = env.program.imms.get_unchecked(range);
+                let ins = env.instrs.get_unchecked(range.clone());
+                let imms = env.imms.get_unchecked(range);
                 plain(env, b.op, s, ins, imms)
             }
         }

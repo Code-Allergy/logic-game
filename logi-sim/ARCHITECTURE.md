@@ -96,6 +96,16 @@ primitives. Names live in a side table.
    instructions into the 64 lanes of a word.
 10. **Partition** (`Options::partitions`): optionally lay blocks out per
    thread.
+11. **Clock phases** (`phases.rs`, `Options::clock_phases`): a `Clock` is
+   a function of the tick count alone, so when the clocks' common period
+   `L` is at most 8, the program gets one variant per tick residue
+   (`Program::phases`) with every clock folded to its constant there.
+   Muxes on a constant select become their taken arm, a commit that would
+   copy an unchanged value (a latch whose enable is 0 in that phase) is
+   dropped, RAM writes whose enable is 0 are dropped, and what no exposed
+   slot and no commit of the variant needs is not computed. Variants share
+   every slot, the debug map, views, shadows and state keys with the
+   unspecialized program: only the instruction and commit lists differ.
 
 `Program` (`program.rs`, which documents the execution model in full) holds
 the slot count, constants, blocks and instructions, packed words, commits,
@@ -118,6 +128,16 @@ over one opcode. A tick allocates nothing.
 - `SimOptions::threads` (default 1) starts a persistent worker pool
   (`pool.rs`) for large ranks on native targets. With one thread, or on
   wasm, no pool exists and no atomics run.
+- **Clock-phase variants.** Single-threaded, the settle of tick `t` (and
+  the commit after it) runs variant `t % L` of `Program::phases`. With a
+  pool, the unspecialized program runs.
+- **Tick fusion** (`SimOptions::fuse`). Nothing can observe the slots
+  between two ticks of one `Sim::run(n)` (inputs are constant within it,
+  and probes, reads and memory copies happen between calls), so every
+  tick but the last settles only the cone of the commits that follow it
+  (next-state values and RAM write ports). State, memories, memory
+  versions and the tick count evolve exactly as tick by tick; the last
+  tick settles everything. `Sim::tick` always settles everything.
 
 ### `engine`: pacing, probes and edits
 

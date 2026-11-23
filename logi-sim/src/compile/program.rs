@@ -484,6 +484,56 @@ pub struct Program {
     /// (parallel to `blocks`). Empty otherwise. A runtime with that many
     /// threads gives thread `t` the blocks of partition `t`.
     pub block_parts: Vec<u8>,
+    /// Clock-phase variants (issue #117, `Options::clock_phases`): one body
+    /// per tick residue modulo [`Phases::period`], each with every
+    /// [`Op::Clock`] folded to its value at that residue. `None` runs
+    /// [`Self::blocks`] and [`Self::commits`] every tick.
+    pub phases: Option<Arc<Phases>>,
+}
+
+/// The executable part of a program: blocks over `instrs`/`imms`, and the
+/// commits. [`Program`]'s own fields are the unspecialized body; each
+/// [`Phases`] variant is another, over the same slots.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Body {
+    pub blocks: Vec<Block>,
+    pub instrs: Vec<Instr>,
+    pub imms: Vec<u64>,
+    pub commits: Vec<Commit>,
+}
+
+impl Body {
+    /// Operations one tick runs with this body: instructions and commits.
+    pub fn ops(&self) -> usize {
+        self.instrs.len() + self.commits.len()
+    }
+}
+
+/// Clock-phase specialization (issue #117, stage 4; see `phases.rs`).
+///
+/// Every [`Op::Clock`] is a function of the tick count alone, with a
+/// period dividing `period`. Variant `k` is the program the settle of a
+/// tick `t` with `t % period == k` runs, and the commit that follows it
+/// (the commit at the start of tick `t + 1` applies the next values that
+/// settle computed). Variants share the program's slots, constants, ports,
+/// debug map, views, shadows and state keys: they differ only in which
+/// instructions and commits run. Every slot the program exposes (a debug
+/// map entry, a view, a shadow's inputs and state, a port, a state
+/// element) holds the same value after each settle as with the
+/// unspecialized body; slots nothing exposes (next-state temporaries) may
+/// hold stale values in a variant that does not need them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Phases {
+    pub period: u32,
+    pub variants: Vec<Body>,
+}
+
+impl Phases {
+    /// Average operations (instructions plus commits) per tick over one
+    /// period.
+    pub fn ops_per_tick(&self) -> f64 {
+        self.variants.iter().map(Body::ops).sum::<usize>() as f64 / self.period as f64
+    }
 }
 
 impl Program {

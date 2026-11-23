@@ -57,6 +57,8 @@ pub enum Proof {
     Sliced { max_support: u32 },
     /// A carry chain of this many adders.
     Chained { adders: u32 },
+    /// A truth table of every combination of this many input bits.
+    Table { bits: u32 },
 }
 
 /// The result of checking one assignment of candidates.
@@ -666,4 +668,114 @@ pub(crate) fn match_seq(flat: &Flat) -> Result<(Replacement, Proof), String> {
         lower_seq(&seqs, &ws, paths, &outs, &ports.wo),
         Proof::Exhaustive { bits },
     ))
+}
+
+/// Most input bits a truth table is built for (`2^12` words, 32 KiB).
+pub(crate) const TABLE_BITS: u32 = 12;
+
+/// Fewest input bits a truth table is built for. Smaller definitions
+/// (2- to 4-bit decoders) are cheap as gates, and as gates they let word
+/// lifting and state merging see through them: on the gate `cpu16`,
+/// tabling its 2- to 4-bit decoders, which drive the register banks'
+/// enables, blocks merging their registers (77 commits become 445, 335
+/// instructions 1,102), while tabling its 5-bit decoder saves 33
+/// instructions.
+pub(crate) const MIN_TABLE_BITS: u32 = 5;
+
+/// A stateless flat with [`MIN_TABLE_BITS`] to [`TABLE_BITS`] input bits
+/// and at most 64
+/// output bits as a truth table (issue #117, stage 4): the input ports
+/// concatenated into an index (port 0 lowest), one ROM read, and one slice
+/// per output port when there are several. Built by evaluating the flat
+/// on every input combination, so it is exact by construction. `None` when
+/// the flat is too wide, or the table would not cost fewer instructions
+/// than `gate_cost` (counting the index concatenation and the output
+/// slices).
+pub(crate) fn table(flat: &Flat, gate_cost: usize) -> Option<(Replacement, Proof)> {
+    use crate::compile::func::replace::Ref;
+    use smallvec::smallvec;
+    let ports = Ports::new(flat);
+    let (nin, nout) = (ports.wi.len(), ports.wo.len());
+    if !flat.states.is_empty()
+        || nin == 0
+        || nout == 0
+        || !(MIN_TABLE_BITS..=TABLE_BITS).contains(&ports.bits)
+    {
+        return None;
+    }
+    let wsum: u32 = ports.wo.iter().map(|&w| w as u32).sum();
+    if wsum > 64 {
+        return None;
+    }
+    let cost = (nin - 1) + 1 + if nout > 1 { nout } else { 0 };
+    if cost >= gate_cost {
+        return None;
+    }
+    let mut contents = Vec::with_capacity(1 << ports.bits);
+    let mut vals = vec![0u64; flat.values()];
+    let mut ins = vec![0u64; nin];
+    for x in 0..1u128 << ports.bits {
+        ports.split(x, &mut ins);
+        flat.eval(&ins, &[], &mut vals);
+        let mut word = 0u64;
+        let mut at = 0u32;
+        for (j, &w) in ports.wo.iter().enumerate() {
+            word |= (flat.output(&vals, j) & mask(w)) << at;
+            at += w as u32;
+        }
+        contents.push(word);
+    }
+    let mut r = Replacement {
+        table: true,
+        desc: format!("table of {} input bits", ports.bits),
+        ..Replacement::default()
+    };
+    let index = if nin == 1 {
+        Ref::In(0)
+    } else {
+        r.temps.push(ports.bits as u8);
+        let t = Ref::Temp((r.temps.len() - 1) as u16);
+        r.nodes.push(super::replace::RNode {
+            kind: NodeKind::Merge {
+                widths: ports.wi.iter().copied().collect(),
+            },
+            ins: (0..nin as u16).map(Ref::In).collect(),
+            outs: smallvec![t],
+            state: None,
+        });
+        t
+    };
+    let word = if nout == 1 {
+        Ref::Out(0)
+    } else {
+        r.temps.push(wsum as u8);
+        Ref::Temp((r.temps.len() - 1) as u16)
+    };
+    r.nodes.push(super::replace::RNode {
+        kind: NodeKind::Rom {
+            addr_bits: ports.bits as u8,
+            w: wsum as u8,
+            contents: contents.into(),
+        },
+        ins: smallvec![index],
+        outs: smallvec![word],
+        state: None,
+    });
+    if nout > 1 {
+        let mut lo = 0u8;
+        for (j, &len) in ports.wo.iter().enumerate() {
+            r.nodes.push(super::replace::RNode {
+                kind: NodeKind::Split {
+                    w: wsum as u8,
+                    lo,
+                    len,
+                },
+                ins: smallvec![word],
+                outs: smallvec![Ref::Out(j as u16)],
+                state: None,
+            });
+            lo += len;
+        }
+    }
+    Some((r, Proof::Table { bits: ports.bits }))
 }

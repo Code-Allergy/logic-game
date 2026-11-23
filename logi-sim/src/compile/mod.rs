@@ -5,7 +5,8 @@
 //! definitions (see [`func`]), lower, simplify (constant
 //! folding, alias elimination, CSE, dead-code elimination; see
 //! `simplify.rs`), word lifting (bit-sliced logic back to word ops; see
-//! `lift.rs`), word-level cleanup (see `words.rs`), levelize, emit.
+//! `lift.rs`), word-level cleanup (see `words.rs`), levelize, emit, and
+//! clock-phase specialization (see [`phases`]).
 //!
 //! All passes are iterative; nothing recurses on circuit depth or instance
 //! nesting.
@@ -16,6 +17,7 @@ pub mod func;
 mod lift;
 mod loops;
 mod pack;
+pub mod phases;
 pub mod program;
 mod simplify;
 mod words;
@@ -71,6 +73,19 @@ pub struct Options {
     /// round trips, ops merged across bit ranges, and state words merged
     /// where they are only read together. See `words.rs`.
     pub words: bool,
+    /// Clock-phase specialization (issue #117, stage 4): when every
+    /// `Clock`'s period divides a small common period (at most
+    /// [`phases::MAX_PHASES`]), compile one variant of the program per
+    /// tick residue with the clocks folded to constants
+    /// ([`Program::phases`]). Every exposed slot reads the same at every
+    /// tick. See `phases.rs`.
+    pub clock_phases: bool,
+    /// Truth tables (issue #117, stage 4; needs `func_match`): a
+    /// combinational subcircuit definition with 5 to 12 input bits that
+    /// matches no catalogue function, and costs more than its table, runs
+    /// as one ROM read (plus the index concatenation and output slices).
+    /// Its internal nets stay readable through shadow slots.
+    pub tables: bool,
     /// Nets to keep observable under dead-code elimination:
     /// `(instance path, NetId)`.
     pub probes: Vec<(Vec<NodeId>, NetId)>,
@@ -149,6 +164,8 @@ impl Default for Options {
             lift: true,
             func_match: true,
             words: true,
+            clock_phases: true,
+            tables: true,
             probes: Vec::new(),
             slot_order: SlotOrder::default(),
             pack: PackMode::Auto,
@@ -171,6 +188,8 @@ impl Options {
             lift: false,
             func_match: false,
             words: false,
+            clock_phases: false,
+            tables: false,
             probes: Vec::new(),
             slot_order: SlotOrder::Production,
             pack: PackMode::Off,
@@ -251,10 +270,12 @@ pub enum Pass {
     Pack,
     /// Final slot renumbering.
     Renumber,
+    /// Clock-phase specialization.
+    Phases,
 }
 
 impl Pass {
-    pub const ALL: [Pass; 11] = [
+    pub const ALL: [Pass; 12] = [
         Pass::Validate,
         Pass::Elaborate,
         Pass::LoopCheck,
@@ -266,6 +287,7 @@ impl Pass {
         Pass::Levelize,
         Pass::Pack,
         Pass::Renumber,
+        Pass::Phases,
     ];
 
     /// Short lowercase name (benchmark ids).
@@ -282,6 +304,7 @@ impl Pass {
             Pass::Levelize => "levelize",
             Pass::Pack => "pack",
             Pass::Renumber => "renumber",
+            Pass::Phases => "phases",
         }
     }
 }
@@ -334,5 +357,10 @@ pub fn compile_cached(
         Default::default()
     };
     pass_done(Pass::Match);
-    Ok(emit::emit(elab, options, &analysis, pass_done))
+    let mut p = emit::emit(elab, options, &analysis, &mut pass_done);
+    if options.clock_phases {
+        p.phases = phases::specialize(&p).map(std::sync::Arc::new);
+    }
+    pass_done(Pass::Phases);
+    Ok(p)
 }

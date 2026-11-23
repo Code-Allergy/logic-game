@@ -52,7 +52,7 @@ mod tests;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::compile::{Commit, NodePath, Op, Program, StateLoc, ZERO_SLOT};
+use crate::compile::{Block, Body, Commit, Instr, NodePath, Op, Program, StateLoc, ZERO_SLOT};
 use crate::netlist::{NetId, NodeId, mask};
 
 /// Index of a root port, in port order.
@@ -88,6 +88,15 @@ pub struct SimOptions {
     /// Work (about one unit per instruction) a rank needs to be split
     /// between threads; smaller ranks run on the calling thread.
     pub par_min: u64,
+    /// Tick fusion (issue #117): within [`Sim::run`], a tick that is not
+    /// the last settles only what the commit after it reads, since nothing
+    /// observes the slots in between (see [`Sim::run`]). Single-threaded
+    /// only.
+    pub fuse: bool,
+    /// Run the program's clock-phase variants ([`Program::phases`]) when
+    /// it has them. Single-threaded only: a pool runs the unspecialized
+    /// program.
+    pub phases: bool,
 }
 
 /// Default [`SimOptions::par_min`] (see the design doc, section 13).
@@ -99,6 +108,8 @@ impl Default for SimOptions {
             stream: true,
             threads: 1,
             par_min: DEFAULT_PAR_MIN,
+            fuse: true,
+            phases: true,
         }
     }
 }
@@ -108,6 +119,8 @@ impl SimOptions {
     pub fn baseline() -> Self {
         Self {
             stream: false,
+            fuse: false,
+            phases: false,
             ..Self::default()
         }
     }
@@ -165,9 +178,69 @@ impl Counters {
     }
 }
 
+/// One body the runtime can settle and commit with: the program's own, a
+/// clock-phase variant, or either pruned to its commits' cone (tick
+/// fusion).
+struct Run {
+    /// `None` for the program's own body.
+    body: Option<Body>,
+    code: code::Code,
+    /// What one settle with this body executes (`blocks`, `instrs`,
+    /// `packed_words`).
+    #[cfg(feature = "counters")]
+    per_settle: Counters,
+}
+
+impl Run {
+    fn new(p: &Program, body: Option<Body>, stream: bool) -> Self {
+        let (blocks, instrs, imms) = parts(p, body.as_ref());
+        let code = if stream {
+            code::Code::new(blocks, instrs, imms)
+        } else {
+            code::Code::plain(blocks)
+        };
+        #[cfg(feature = "counters")]
+        let mut per_settle = Counters::default();
+        #[cfg(feature = "counters")]
+        for b in &code.blocks {
+            per_settle.blocks += 1;
+            match b.form {
+                code::Form::Packed { .. } => per_settle.packed_words += u64::from(b.len),
+                _ => per_settle.instrs += u64::from(b.len),
+            }
+        }
+        Run {
+            body,
+            code,
+            #[cfg(feature = "counters")]
+            per_settle,
+        }
+    }
+}
+
+/// Blocks, instructions and immediates of `body`, or of the program.
+fn parts<'a>(p: &'a Program, body: Option<&'a Body>) -> (&'a [Block], &'a [Instr], &'a [u64]) {
+    match body {
+        Some(b) => (&b.blocks, &b.instrs, &b.imms),
+        None => (&p.blocks, &p.instrs, &p.imms),
+    }
+}
+
 pub struct Sim {
     program: Arc<Program>,
+    /// The program's own body, lowered (shared with the pool).
     code: Arc<code::Code>,
+    /// Bodies other than the program's own (index 0 in `full`/`fused` means
+    /// the program's own; `k > 0` means `runs[k - 1]`).
+    runs: Vec<Run>,
+    /// Ticks per clock-phase cycle (1 without phases).
+    period: u64,
+    /// Per tick residue: the body that settles an observed tick and
+    /// commits after it.
+    full: Vec<u8>,
+    /// Per tick residue: the body that settles a tick only its own commit
+    /// observes (tick fusion), with the same commits as `full`.
+    fused: Vec<u8>,
     options: SimOptions,
     /// Worker threads, when `options.threads > 1` and some rank is large
     /// enough. Declared before `slots` and `mems`, so it is dropped (and
@@ -184,7 +257,8 @@ pub struct Sim {
     inputs: Vec<u64>,
     #[cfg(feature = "counters")]
     counters: Counters,
-    /// What one settle executes (`blocks`, `instrs`, `packed_words`).
+    /// What one settle of the program's own body executes (`blocks`,
+    /// `instrs`, `packed_words`).
     #[cfg(feature = "counters")]
     per_settle: Counters,
 }
@@ -214,9 +288,9 @@ impl Sim {
     ) -> Result<Self, BadProgram> {
         check(&program)?;
         let code = if options.stream {
-            code::Code::new(&program)
+            code::Code::new(&program.blocks, &program.instrs, &program.imms)
         } else {
-            code::Code::plain(&program)
+            code::Code::plain(&program.blocks)
         };
         let mems = program
             .mems
@@ -229,8 +303,53 @@ impl Sim {
             .collect();
         let code = Arc::new(code);
         let pool = start_pool(&program, &code, &options);
+        // Variants and fusion run single-threaded only.
+        let mut runs = Vec::new();
+        let (mut period, mut full, mut fused) = (1u64, vec![0u8], vec![0u8]);
+        if pool.is_none() {
+            let add = |runs: &mut Vec<Run>, body: Option<Body>| {
+                runs.push(Run::new(&program, body, options.stream));
+                runs.len() as u8
+            };
+            match program.phases.as_deref() {
+                Some(ph) if options.phases => {
+                    period = u64::from(ph.period);
+                    full.clear();
+                    fused.clear();
+                    for v in &ph.variants {
+                        let f = add(&mut runs, Some(v.clone()));
+                        full.push(f);
+                        let pruned = options
+                            .fuse
+                            .then(|| crate::compile::phases::prune(&program, v))
+                            .flatten();
+                        fused.push(match pruned {
+                            Some(b) => add(&mut runs, Some(b)),
+                            None => f,
+                        });
+                    }
+                }
+                _ => {
+                    if options.fuse {
+                        let own = Body {
+                            blocks: program.blocks.clone(),
+                            instrs: program.instrs.clone(),
+                            imms: program.imms.clone(),
+                            commits: program.commits.clone(),
+                        };
+                        if let Some(b) = crate::compile::phases::prune(&program, &own) {
+                            fused[0] = add(&mut runs, Some(b));
+                        }
+                    }
+                }
+            }
+        }
         let mut sim = Sim {
             code,
+            runs,
+            period,
+            full,
+            fused,
             options,
             pool,
             slots: vec![0; program.slot_count as usize],
@@ -255,7 +374,7 @@ impl Sim {
         for &(s, v) in &sim.program.consts {
             sim.slots[s as usize] = v;
         }
-        sim.settle();
+        sim.settle(sim.full_run());
         Ok(sim)
     }
 
@@ -390,29 +509,64 @@ impl Sim {
         self.counters = Counters::default();
     }
 
+    /// The body that settles the current tick when it is observed.
+    #[inline]
+    fn full_run(&self) -> u8 {
+        self.full[(self.tick % self.period) as usize]
+    }
+
     pub fn tick(&mut self) {
         #[cfg(feature = "counters")]
         {
             self.counters.ticks += 1;
         }
-        self.commit();
+        // The commit belongs to the body that settled the previous tick.
+        self.commit(self.full_run());
         self.tick += 1;
-        self.settle();
+        self.settle(self.full_run());
     }
 
+    /// Run `ticks` ticks. Exactly as many [`Self::tick`] calls at every
+    /// tick boundary anything can observe; nothing can observe the slots
+    /// between two ticks of one call, so with [`SimOptions::fuse`] every
+    /// tick but the last settles only what the following commit reads
+    /// (its next-state values, RAM write ports): state, memories, memory
+    /// versions and the tick count evolve exactly as tick by tick, and the
+    /// last tick settles everything. Root inputs cannot change within one
+    /// call.
     pub fn run(&mut self, ticks: u64) {
-        for _ in 0..ticks {
-            self.tick();
+        if ticks == 0 {
+            return;
         }
+        for _ in 1..ticks {
+            #[cfg(feature = "counters")]
+            {
+                self.counters.ticks += 1;
+            }
+            let k = (self.tick % self.period) as usize;
+            self.commit(self.full[k]);
+            self.tick += 1;
+            let k = (self.tick % self.period) as usize;
+            // The pruned body has the same commits as the full one.
+            self.settle(self.fused[k]);
+        }
+        self.tick();
     }
 
-    fn commit(&mut self) {
+    fn commit(&mut self, run: u8) {
         let p = &*self.program;
+        let commits = match run {
+            0 => &p.commits,
+            k => match &self.runs[k as usize - 1].body {
+                Some(b) => &b.commits,
+                None => &p.commits,
+            },
+        };
         #[cfg(feature = "counters")]
         {
-            self.counters.commits += p.commits.len() as u64;
+            self.counters.commits += commits.len() as u64;
         }
-        for c in &p.commits {
+        for c in commits {
             match *c {
                 Commit::Copy { state, next } => {
                     // SAFETY: indices checked in `check`.
@@ -471,21 +625,25 @@ impl Sim {
         }
     }
 
-    /// Apply the staged root inputs to their slots, then evaluate.
-    fn settle(&mut self) {
+    /// Apply the staged root inputs to their slots, then evaluate `run`
+    /// (0: the full program or variant; otherwise a fused-run body).
+    fn settle(&mut self, run: u8) {
         let p = &*self.program;
         for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
             self.slots[port.slot as usize] = v;
         }
-        self.evaluate();
+        self.evaluate(run);
     }
 
-    /// Run the blocks once, from the input slots as they are.
-    fn evaluate(&mut self) {
+    /// Run the blocks of `run` once, from the input slots as they are.
+    fn evaluate(&mut self, run: u8) {
         #[cfg(feature = "counters")]
         {
             let c = &mut self.counters;
-            let per = &self.per_settle;
+            let per = match run {
+                0 => &self.per_settle,
+                k => &self.runs[k as usize - 1].per_settle,
+            };
             c.settles += 1;
             c.blocks += per.blocks;
             c.instrs += per.instrs;
@@ -498,13 +656,23 @@ impl Sim {
             return;
         }
         let s = self.slots.as_mut_ptr();
+        let (code, body) = match run {
+            0 => (&*self.code, None),
+            k => {
+                let r = &self.runs[k as usize - 1];
+                (&r.code, r.body.as_ref())
+            }
+        };
+        let (_, instrs, imms) = parts(p, body);
         let env = code::Env {
             program: p,
-            code: &self.code,
+            instrs,
+            imms,
+            code,
             mems: &self.mems,
             tick: self.tick,
         };
-        for b in &self.code.blocks {
+        for b in &code.blocks {
             // SAFETY: the program passed `check`, `code` was built from it,
             // and `slots` has `slot_count` entries. Nothing else touches the
             // slots meanwhile.
@@ -531,7 +699,7 @@ impl Sim {
             *v += 1;
         }
         self.tick = 0;
-        self.settle();
+        self.settle(self.full_run());
     }
 
     // ── State carry-over ──────────────────────────────────────────────────
@@ -592,7 +760,7 @@ impl Sim {
             }
         }
         self.tick = snap.tick;
-        self.settle();
+        self.settle(self.full_run());
     }
 
     // ── Writing single state elements ─────────────────────────────────────
@@ -640,7 +808,7 @@ impl Sim {
     /// tick are not applied: they still reach the logic at the next tick,
     /// as they would have without this call.
     pub fn resettle(&mut self) {
-        self.evaluate();
+        self.evaluate(self.full_run());
     }
 }
 
@@ -720,53 +888,16 @@ fn check(p: &Program) -> Result<(), BadProgram> {
     if p.slot_count as u64 + 64 * p.lane_words.len() as u64 > u32::MAX as u64 + 1 {
         return bad("too many lane slots".into());
     }
-    for b in &p.blocks {
-        let end = b.start as u64 + b.len as u64;
-        if b.packed {
-            if end > p.packs.len() as u64 || !code::packable_op(b.op) {
-                return bad(format!("packed block {b:?} out of range"));
-            }
-            continue;
+    check_body(p, &p.blocks, &p.instrs, &p.imms, &p.commits)?;
+    if let Some(ph) = &p.phases {
+        if ph.period == 0 || ph.variants.len() != ph.period as usize || ph.period > 255 {
+            return bad(format!("bad phases: period {}", ph.period));
         }
-        if end > p.instrs.len() as u64 {
-            return bad(format!("block {b:?} out of range"));
-        }
-        let (sa, sb, sc) = b.op.slot_operands();
-        for (k, i) in p.instrs[b.start as usize..end as usize].iter().enumerate() {
-            let imm = p.imms[b.start as usize + k];
-            if !slot_ok(i.dst) || i.dst == ZERO_SLOT {
-                return bad(format!("bad dst in {i:?}"));
+        for v in &ph.variants {
+            if v.imms.len() != v.instrs.len() || v.blocks.iter().any(|b| b.packed) {
+                return bad("bad phase variant".into());
             }
-            if (sa && !slot_ok(i.a)) || (sb && !slot_ok(i.b)) || (sc && !slot_ok(i.c)) {
-                return bad(format!("bad operand in {i:?}"));
-            }
-            match b.op {
-                Op::MemRead if i.b as usize >= p.mems.len() => {
-                    return bad(format!("bad memory in {i:?}"));
-                }
-                Op::Clock if i.a == 0 => return bad(format!("zero clock period in {i:?}")),
-                Op::Sext if !(1..=64).contains(&i.b) => return bad(format!("bad sext in {i:?}")),
-                Op::Shr if i.b >= 64 => return bad(format!("bad shift in {i:?}")),
-                Op::Concat if i.c >= 64 => return bad(format!("bad shift in {i:?}")),
-                Op::AddCarry if imm > 64 => return bad(format!("bad width in {i:?}")),
-                _ => {}
-            }
-        }
-    }
-    for c in &p.commits {
-        let ok = match *c {
-            Commit::Copy { state, next } => slot_ok(state) && slot_ok(next) && state != ZERO_SLOT,
-            Commit::RamWrite { mem, .. } | Commit::RamWriteMasked { mem, .. } => {
-                (mem as usize) < p.mems.len()
-                    && p.mems[mem as usize].writable
-                    && c.reads().into_iter().all(slot_ok)
-            }
-            Commit::MemClear { mem, en } => {
-                (mem as usize) < p.mems.len() && p.mems[mem as usize].writable && slot_ok(en)
-            }
-        };
-        if !ok {
-            return bad(format!("bad commit {c:?}"));
+            check_body(p, &v.blocks, &v.instrs, &v.imms, &v.commits)?;
         }
     }
     for m in &p.mems {
@@ -818,6 +949,70 @@ fn check(p: &Program) -> Result<(), BadProgram> {
         };
         if !ok {
             return bad(format!("bad state key {key:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Check one body's blocks and commits (the program's own, or a
+/// clock-phase variant's) against `p`'s slots and memories.
+fn check_body(
+    p: &Program,
+    blocks: &[Block],
+    instrs: &[Instr],
+    imms: &[u64],
+    commits: &[Commit],
+) -> Result<(), BadProgram> {
+    let n = p.slot_count;
+    let bad = |m: String| Err(BadProgram(m));
+    let slot_ok = |s: u32| s < n;
+    for b in blocks {
+        let end = b.start as u64 + b.len as u64;
+        if b.packed {
+            if end > p.packs.len() as u64 || !code::packable_op(b.op) {
+                return bad(format!("packed block {b:?} out of range"));
+            }
+            continue;
+        }
+        if end > instrs.len() as u64 {
+            return bad(format!("block {b:?} out of range"));
+        }
+        let (sa, sb, sc) = b.op.slot_operands();
+        for (k, i) in instrs[b.start as usize..end as usize].iter().enumerate() {
+            let imm = imms[b.start as usize + k];
+            if !slot_ok(i.dst) || i.dst == ZERO_SLOT {
+                return bad(format!("bad dst in {i:?}"));
+            }
+            if (sa && !slot_ok(i.a)) || (sb && !slot_ok(i.b)) || (sc && !slot_ok(i.c)) {
+                return bad(format!("bad operand in {i:?}"));
+            }
+            match b.op {
+                Op::MemRead if i.b as usize >= p.mems.len() => {
+                    return bad(format!("bad memory in {i:?}"));
+                }
+                Op::Clock if i.a == 0 => return bad(format!("zero clock period in {i:?}")),
+                Op::Sext if !(1..=64).contains(&i.b) => return bad(format!("bad sext in {i:?}")),
+                Op::Shr if i.b >= 64 => return bad(format!("bad shift in {i:?}")),
+                Op::Concat if i.c >= 64 => return bad(format!("bad shift in {i:?}")),
+                Op::AddCarry if imm > 64 => return bad(format!("bad width in {i:?}")),
+                _ => {}
+            }
+        }
+    }
+    for c in commits {
+        let ok = match *c {
+            Commit::Copy { state, next } => slot_ok(state) && slot_ok(next) && state != ZERO_SLOT,
+            Commit::RamWrite { mem, .. } | Commit::RamWriteMasked { mem, .. } => {
+                (mem as usize) < p.mems.len()
+                    && p.mems[mem as usize].writable
+                    && c.reads().into_iter().all(slot_ok)
+            }
+            Commit::MemClear { mem, en } => {
+                (mem as usize) < p.mems.len() && p.mems[mem as usize].writable && slot_ok(en)
+            }
+        };
+        if !ok {
+            return bad(format!("bad commit {c:?}"));
         }
     }
     Ok(())
