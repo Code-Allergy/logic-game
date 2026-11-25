@@ -235,35 +235,6 @@ fn op_of(blocks: &[Block], len: usize) -> Vec<Op> {
     ops
 }
 
-/// `x >> c` on known bits: the `c` high bits become known zeros.
-fn shr_known(x: Known, c: u32) -> Known {
-    match (x.zeros.checked_shr(c), x.ones.checked_shr(c)) {
-        (Some(z), Some(o)) => Known {
-            zeros: z | !(ALL >> c),
-            ones: o,
-        },
-        _ => Known {
-            zeros: ALL,
-            ones: 0,
-        },
-    }
-}
-
-/// `(x << b) & imm` on known bits: the `b` low bits and the bits outside
-/// `imm` become known zeros.
-fn shl_known(x: Known, b: u32, imm: u64) -> Known {
-    match (x.zeros.checked_shl(b), x.ones.checked_shl(b)) {
-        (Some(z), Some(o)) => Known {
-            zeros: z | !(ALL << b) | !imm,
-            ones: o & imm,
-        },
-        _ => Known {
-            zeros: ALL,
-            ones: 0,
-        },
-    }
-}
-
 /// The bits an instruction's result can have, from its operands'.
 fn possible_of(op: Op, i: &Instr, imm: u64, pos: &[u64], mems: &[MemDesc]) -> u64 {
     // Lazily: a `Clock`'s fields are literals, not slots.
@@ -286,18 +257,6 @@ fn possible_of(op: Op, i: &Instr, imm: u64, pos: &[u64], mems: &[MemDesc]) -> u6
         | Op::Clock
         | Op::SrNext => 1,
         Op::Shr => a().checked_shr(i.b).unwrap_or(0) & imm,
-        Op::Shl => {
-            a().checked_shr(i.c)
-                .unwrap_or(0)
-                .checked_shl(i.b)
-                .unwrap_or(0)
-                & imm
-        }
-        // Any shift of `a`: no bit below its lowest possible one.
-        Op::ShlV => match a() {
-            0 => 0,
-            x => (ALL << x.trailing_zeros()) & imm,
-        },
         Op::Concat => a() | b().checked_shl(i.c).unwrap_or(0),
         Op::Sext => {
             if i.b >= 1 && (a() >> (i.b - 1)) & 1 == 1 {
@@ -307,7 +266,21 @@ fn possible_of(op: Op, i: &Instr, imm: u64, pos: &[u64], mems: &[MemDesc]) -> u6
             }
         }
         Op::MemRead => mems.get(i.b as usize).map_or(ALL, |m| mask(m.width)),
+        Op::Shl => shl_field(a(), i) & imm,
+        // Any amount: every bit from the operand's lowest possible one up.
+        Op::ShlV => match a() {
+            0 => 0,
+            x => (ALL << x.trailing_zeros()) & imm,
+        },
     }
+}
+
+/// `Op::Shl` of `v`, without its mask: `(v >> c) << b` (literal shifts).
+fn shl_field(v: u64, i: &Instr) -> u64 {
+    v.checked_shr(i.c)
+        .unwrap_or(0)
+        .checked_shl(i.b)
+        .unwrap_or(0)
 }
 
 /// The known bits of an instruction's result from its operands'
@@ -444,20 +417,6 @@ pub fn transfer(
                 ones: sh(x.ones) & imm,
             }
         }
-        Op::Shl => shl_known(shr_known(a(), i.c), i.b, imm),
-        // A known amount shifts like `Shl`; otherwise only the mask is
-        // known.
-        Op::ShlV => {
-            let v = b();
-            if full(v) {
-                shl_known(a(), (v.ones & 63) as u32, imm)
-            } else {
-                Known {
-                    zeros: !imm,
-                    ones: 0,
-                }
-            }
-        }
         Op::Concat => {
             let (x, y) = (a(), b());
             let sh = |v: u64| v.checked_shl(i.c).unwrap_or(0);
@@ -532,6 +491,37 @@ pub fn transfer(
                 q
             } else {
                 Known::ONE_BIT
+            }
+        }
+        // A bit that cannot be 1 after the shift is 0: the bits shifted in
+        // and the bits the mask clears among them.
+        Op::Shl => {
+            let x = a();
+            Known {
+                zeros: !(shl_field(!x.zeros, i) & imm),
+                ones: shl_field(x.ones, i) & imm,
+            }
+        }
+        Op::ShlV => {
+            let (x, n) = (a(), b());
+            if full(n) {
+                let s = (n.ones & 63) as u32;
+                Known {
+                    zeros: !((!x.zeros << s) & imm),
+                    ones: (x.ones << s) & imm,
+                }
+            } else {
+                // The amount is not known: only what no amount can set
+                // (below the operand's lowest possible bit, outside the
+                // mask).
+                let may = match !x.zeros {
+                    0 => 0,
+                    v => (ALL << v.trailing_zeros()) & imm,
+                };
+                Known {
+                    zeros: !may,
+                    ones: 0,
+                }
             }
         }
     }
@@ -1250,6 +1240,8 @@ fn demanded(p: &Program, body: &Body, op_rank: &[(Op, u32)]) -> (Vec<u64>, Vec<u
                 [true, false, false]
             }
             Op::Eq | Op::LtU | Op::SrNext => [true, true, false],
+            // The amount decides where every bit goes.
+            Op::ShlV => [false, true, false],
             Op::AddCarry | Op::And | Op::Or | Op::Nand | Op::Nor => [true, true, true],
             _ => [false; 3],
         };
@@ -1295,16 +1287,6 @@ fn pull(op: Op, i: &Instr, imm: u64, d: u64, cst: &FastMap<u32, u64>) -> [u64; 3
         Op::AddCarry | Op::Eq | Op::LtU => [ALL, ALL, ALL],
         Op::ReduceOr | Op::ReduceAnd | Op::ReduceXor | Op::MemRead => [ALL, 0, 0],
         Op::Shr => [(d & imm).checked_shl(i.b).unwrap_or(0), 0, 0],
-        Op::Shl => [
-            (d & imm)
-                .checked_shr(i.b)
-                .unwrap_or(0)
-                .checked_shl(i.c)
-                .unwrap_or(0),
-            0,
-            0,
-        ],
-        Op::ShlV => [ALL, ALL, 0],
         Op::Concat => [d, d.checked_shr(i.c).unwrap_or(0), 0],
         Op::Sext => {
             let low = if i.b >= 64 { ALL } else { mask(i.b as u8) };
@@ -1317,6 +1299,19 @@ fn pull(op: Op, i: &Instr, imm: u64, d: u64, cst: &FastMap<u32, u64>) -> [u64; 3
         }
         Op::SrNext => [ALL, ALL, d],
         Op::Clock => [0, 0, 0],
+        // Result bit `j` is operand bit `j - b + c`.
+        Op::Shl => [
+            (d & imm)
+                .checked_shr(i.b)
+                .unwrap_or(0)
+                .checked_shl(i.c)
+                .unwrap_or(0),
+            0,
+            0,
+        ],
+        // A result bit comes from an operand bit at or below it; the
+        // amount is its low six bits.
+        Op::ShlV => [low_mask(d & imm), 63, 0],
     }
 }
 
