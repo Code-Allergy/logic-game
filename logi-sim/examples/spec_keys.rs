@@ -2,7 +2,7 @@
 //! the key candidates the compile-side analysis finds in each fused-run
 //! body of a workspace's design, their widths (whole slot, exact support,
 //! fold support), and the operations each would save per tick, from the
-//! states a run gives them. Then a greedy combined key per phase, and the
+//! states a run gives them. Then the key `choose_plan` picks per phase (greedy, pruned), and the
 //! prototype's hand-picked keys (`cpu6502/ref_decode/cw` on the CPU
 //! phase; `ppu_render_ctl/*`, `ppu_sprites/{fetching,clr_oam_addr,set_ovf}`
 //! and `ppu_regs/{mask,ctrl}` on the others), whole and masked, including
@@ -32,7 +32,7 @@ use std::time::Instant;
 
 use logi_sim::compile::guard::{MIN_REGION, guard_with};
 use logi_sim::compile::spec::{
-    Candidate, KeyClass, KeyField, KeyLayout, SpecContext, possible_bits,
+    Candidate, KeyClass, KeyField, KeyLayout, PlanOptions, SpecContext, choose_plan, possible_bits,
 };
 use logi_sim::compile::{Body, Commit, Instr, Op, Options, Program, compile, phases};
 use logi_sim::sim::Sim;
@@ -415,8 +415,21 @@ fn main() -> Result<(), String> {
     }
 
     let t3 = Instant::now();
+    let ctxs: Vec<Option<&SpecContext>> = phases_.iter().map(|x| Some(&x.cx)).collect();
+    let samples: Vec<&[Vec<u64>]> = phases_.iter().map(|x| x.rows.as_slice()).collect();
+    let plan = choose_plan(
+        p,
+        &ctxs,
+        &samples,
+        &PlanOptions {
+            max_bodies: a.bodies,
+            min_loss: a.min_loss,
+            ..PlanOptions::default()
+        },
+    );
+    println!("plan chosen in {:.1} s", t3.elapsed().as_secs_f64());
     let mut saved = 0.0;
-    let mut greedy: Vec<KeyLayout> = Vec::new();
+    let mut layouts: Vec<KeyLayout> = Vec::new();
     for phase in &phases_ {
         println!(
             "\n== phase {}: {} candidates ({} ROM words, {} flags, {} registers)",
@@ -484,52 +497,15 @@ fn main() -> Result<(), String> {
                 o.stat
             );
         }
-        // Greedy combination of the best candidates.
-        let pool: Vec<usize> = scored
-            .iter()
-            .take(20)
-            .filter(|s| s.1.executed > 0.0)
-            .map(|s| s.0)
-            .collect();
-        let mut fields: Vec<KeyField> = Vec::new();
-        let mut best: Option<Outcome> = None;
-        loop {
-            let mut pick: Option<(usize, Outcome)> = None;
-            for &i in &pool {
-                let c = &phase.cands[i];
-                if fields.iter().any(|f| f.slot == c.slot) {
-                    continue;
-                }
-                let mut f = fields.clone();
-                f.push(KeyField {
-                    slot: c.slot,
-                    mask: c.support,
-                });
-                let layout = KeyLayout::new(f);
-                if layout.width() > 32 {
-                    continue;
-                }
-                let r = evaluate(p, phase, &layout, &phase.rows, a.bodies, None);
-                if pick.as_ref().is_none_or(|x| r.executed > x.1.executed) {
-                    pick = Some((i, r));
-                }
-            }
-            match pick {
-                Some((i, r)) if r.executed > best.as_ref().map_or(0.0, |b| b.executed) + 2.0 => {
-                    let c = &phase.cands[i];
-                    fields.push(KeyField {
-                        slot: c.slot,
-                        mask: c.support,
-                    });
-                    best = Some(r);
-                }
-                _ => break,
-            }
-        }
-        let layout = KeyLayout::new(fields);
-        if let Some(b) = &best {
+        // The plan `choose_plan` made (candidates scored alone, a greedy
+        // combination, pruned bits), costed here with the same samples.
+        let layout = plan.phases[phase.k]
+            .as_ref()
+            .map_or_else(KeyLayout::default, |pp| pp.layout.clone());
+        if !layout.fields.is_empty() {
+            let b = evaluate(p, phase, &layout, &phase.rows, a.bodies, None);
             println!(
-                "  greedy key ({} fields, {} bits): {:.1} executed ops/tick saved ({:.1} static), {} distinct keys, {:.1}% of ticks hit the {} bodies",
+                "  plan key ({} fields, {} bits): {:.1} executed ops/tick saved ({:.1} static), {} distinct keys, {:.1}% of ticks hit the {} bodies",
                 layout.fields.len(),
                 layout.width(),
                 b.executed,
@@ -539,11 +515,19 @@ fn main() -> Result<(), String> {
                 b.keys.len()
             );
             saved += b.executed;
+        } else {
+            println!("  no plan: no key pays");
         }
         for f in &layout.fields {
-            println!("    {} mask {:#x}", name(&names, f.slot), f.mask);
+            println!(
+                "    {} mask {:#x} ({} of {} support bits)",
+                name(&names, f.slot),
+                f.mask,
+                f.mask.count_ones(),
+                phase.cx.support(f.slot).count_ones()
+            );
         }
-        greedy.push(layout);
+        layouts.push(layout);
     }
     let period = phases_.len() as f64;
     let ex: f64 = phases_
@@ -558,7 +542,7 @@ fn main() -> Result<(), String> {
         .sum::<f64>()
         / period;
     println!(
-        "\ngreedy keys: {:.1} of {ex:.1} executed ops per tick saved ({:.0}%); selection {:.1} s",
+        "\nplan keys: {:.1} of {ex:.1} executed ops per tick saved ({:.0}%); selection {:.1} s",
         saved / period,
         100.0 * saved / period / ex,
         t3.elapsed().as_secs_f64()
@@ -566,14 +550,14 @@ fn main() -> Result<(), String> {
 
     if a.check > 0 {
         let t4 = Instant::now();
-        let n = check_exact(&program, &phases_, &greedy, a.warm, a.check, false)?;
+        let n = check_exact(&program, &phases_, &layouts, a.warm, a.check, false)?;
         // The check catches a wrong body.
-        match check_exact(&program, &phases_, &greedy, a.warm, a.check, true) {
+        match check_exact(&program, &phases_, &layouts, a.warm, a.check, true) {
             Err(e) => println!("mutation (bodies for the wrong key) caught: {e}"),
             Ok(_) => return Err("a wrong key's bodies passed the exactness check".into()),
         }
         println!(
-            "exactness: {n} fused ticks of the run, the body with no key, the greedy keys' bodies and their fallbacks against the general body: the same state and memories ({:.1} s)",
+            "exactness: {n} fused ticks of the run, the body with no key, the plan's bodies and their fallbacks against the general body: the same state and memories ({:.1} s)",
             t4.elapsed().as_secs_f64()
         );
     }
