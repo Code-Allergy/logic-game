@@ -543,22 +543,35 @@ pub fn exit_save_plan(
     store.plan_save(name, name, root, OnConflict::Rename).ok()
 }
 
-/// The player's saved workspace names (none in the web build).
+/// Workspaces built into the web build, which has no file system: listed
+/// and opened like saved ones (saving them is still unavailable). The NES
+/// is the committed `nes` workspace, with nestest in its NROM cartridge.
+#[cfg(target_arch = "wasm32")]
+pub const WEB_WORKSPACES: &[(&str, &str)] =
+    &[("nes", include_str!("../../nes/workspace/manifest.json"))];
+#[cfg(not(target_arch = "wasm32"))]
+pub const WEB_WORKSPACES: &[(&str, &str)] = &[];
+
+/// The player's saved workspace names (in the web build, the built-in
+/// [`WEB_WORKSPACES`]).
 pub fn load_saved_workspace_names() -> io::Result<Vec<String>> {
     match WorkspaceStore::player() {
         Some(store) => store.list(),
-        None => Ok(Vec::new()),
+        None => Ok(WEB_WORKSPACES.iter().map(|(n, _)| n.to_string()).collect()),
     }
 }
 
-/// Read one of the player's saved workspaces.
+/// Read one of the player's saved workspaces (or a built-in one).
 pub fn read_workspace(name: &str) -> Result<WorkspaceDocument, WorkspaceError> {
     match WorkspaceStore::player() {
         Some(store) => store.read(name),
-        None => Err(WorkspaceError::Io(io::Error::new(
-            io::ErrorKind::Unsupported,
-            WEB_SAVE_UNAVAILABLE,
-        ))),
+        None => match WEB_WORKSPACES.iter().find(|(n, _)| *n == name) {
+            Some((name, text)) => parse_workspace_text(name, text),
+            None => Err(WorkspaceError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                WEB_SAVE_UNAVAILABLE,
+            ))),
+        },
     }
 }
 
@@ -640,12 +653,16 @@ pub fn read_workspace_at(folder: &Path, name: &str) -> Result<WorkspaceDocument,
         )));
     }
 
-    let text = fs::read_to_string(manifest)?;
-    let value: serde_json::Value = serde_json::from_str(&text)?;
+    parse_workspace_text(name, &fs::read_to_string(manifest)?)
+}
+
+/// Parse the text of a workspace manifest (version 5 or 6).
+pub fn parse_workspace_text(name: &str, text: &str) -> Result<WorkspaceDocument, WorkspaceError> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
     let found = version_of(&value);
     let format_ok = value.get("format").and_then(|v| v.as_str()) == Some(WORKSPACE_FORMAT);
     if format_ok && found == Some(u64::from(SOURCE_VERSION)) {
-        return read_source_workspace(name, &text);
+        return read_source_workspace(name, text);
     }
     if !format_ok || found != Some(u64::from(WORKSPACE_VERSION)) {
         let newest = u64::from(WORKSPACE_VERSION.max(SOURCE_VERSION));
@@ -986,6 +1003,14 @@ pub fn name_key(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The web build embeds the committed NES workspace; it must open.
+    #[test]
+    fn committed_nes_workspace_parses_for_the_web_build() {
+        let text = include_str!("../../nes/workspace/manifest.json");
+        let workspace = super::parse_workspace_text("nes", text).expect("nes workspace");
+        assert!(!workspace.definitions.is_empty());
+    }
+
     use super::*;
     use crate::sim::{DocNode, GateKind};
     use bevy::math::Vec2;
