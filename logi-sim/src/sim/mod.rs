@@ -825,10 +825,11 @@ impl Sim {
         let mut left = ticks - 1;
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
         if self.options.superstep
-            && let Some(n) = self
+            && let Some((entry, n)) = self
                 .jit
                 .as_ref()
-                .and_then(|j| Some(j.superstep()?.info.ticks))
+                .and_then(|j| j.superstep())
+                .map(|s| (s.entry, s.info.ticks))
             && left > n
         {
             // The first tick applies the inputs (supersteps do not), and
@@ -845,7 +846,8 @@ impl Sim {
                 left -= 1;
             }
             while left >= n {
-                self.superstep();
+                // `entry` stays valid: the code cannot change within `run`.
+                self.superstep(entry, n);
                 left -= n;
             }
         }
@@ -875,12 +877,13 @@ impl Sim {
     /// `fused_tick`s as it holds, after the first tick of a `run` (so the
     /// inputs are already in their slots).
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
-    fn superstep(&mut self) {
+    fn superstep(&mut self, entry: jit::SuperFn, ticks: u64) {
         #[cfg(not(test))]
         debug_assert_eq!(self.tick % self.period, 0);
-        let Some(j) = self.jit.clone() else { return };
-        let Some(sup) = j.superstep() else { return };
-        let info = &sup.info;
+        #[cfg(feature = "counters")]
+        let j = Arc::clone(self.jit.as_ref().expect("a superstep"));
+        #[cfg(feature = "counters")]
+        let info = &j.superstep().expect("a superstep").info;
         if !self.mem_ptrs_fresh {
             self.mem_ptrs.clear();
             self.mem_ptrs
@@ -900,15 +903,16 @@ impl Sim {
             self.mem_ptrs.as_ptr() as *const *mut u64,
             self.mem_writes.as_mut_ptr(),
         );
-        // SAFETY: as in `commit` and `evaluate_body`: every body of the
-        // superstep passed `check_body`; `skips` has `skip_len` entries
-        // (and is not touched without the counters).
-        unsafe { (sup.entry)(s, m, self.tick, w, skips) };
+        // SAFETY: as in `commit` and `evaluate_body`: `entry` is the
+        // superstep of the installed code, every body of which passed
+        // `check_body`; `skips` has `skip_len` entries (and is not
+        // touched without the counters).
+        unsafe { entry(s, m, self.tick, w, skips) };
         #[cfg(feature = "counters")]
         {
             let c = &mut self.counters;
             c.mem_writes += self.mem_writes.iter().sum::<u64>() - before;
-            for i in 0..info.ticks {
+            for i in 0..ticks {
                 let (full, fused) = (
                     self.full[((self.tick + i) % self.period) as usize],
                     self.fused[((self.tick + i + 1) % self.period) as usize],
@@ -941,7 +945,7 @@ impl Sim {
             }
         }
         debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
-        self.tick += info.ticks;
+        self.tick += ticks;
     }
 
     fn commit(&mut self, run: u8) {
