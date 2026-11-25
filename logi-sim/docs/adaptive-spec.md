@@ -333,15 +333,21 @@ Differences from the sketch below, which P7 and P8 build on:
   phase clock (`hits + misses`) in the entry; a miss bumps a 1024-entry
   direct-mapped counter (majority vote: a colliding key wears the count
   down before taking the slot); at `hot` misses within a window the key
-  is *wanted* (at most 64 wait per phase). Counters and the pending set
-  restart every `window` keyed ticks of the phase.
+  is *wanted* (at most 64 wait per phase). A key wanted, requested or
+  installed is not wanted again; a refused build (no room, failed check,
+  stale) releases it, and a request the caller never answers expires
+  after 4 windows. Counters restart every `window` keyed ticks of the
+  phase.
 - **Requests.** `spec_requests` turns wanted keys into requests while
   the phase has room (`bodies + asked < max_per_phase`, all phases under
   `max_bodies`) or a cold body (not hit for a window) can make room;
   otherwise the key is dropped and must turn hot again. A request holds
   the program (`Weak`), the generation, the context and the `pre` flags
   (`Arc`s), the layout and whether to guard and compile; `build_spec(p,
-  r) -> SpecBuilt` needs nothing else (pure, any thread). The automatic
+  r) -> SpecBuilt` needs nothing else (pure, any thread), and builds
+  nothing for a `p` other than the request's program (the result is
+  refused everywhere). `jit::compile_unit` runs `Sim`'s program and body
+  checks itself, so its safe entry points never index out of bounds. The automatic
   plan is a request too (`choose_plan` on the samples, then each keyed
   phase's prefix and fallback built and compiled).
 - **Install.** `install_spec` refuses a build of another program or
@@ -350,7 +356,8 @@ Differences from the sketch below, which P7 and P8 build on:
   window: of the phase over `max_per_phase`, of any phase over
   `max_bodies` or `code_budget`) until it fits, or refuses (dropped);
   then takes a run, builds its `Run` (interpreter code) and inserts the
-  entry. Only between calls (a single-threaded `Sim`: the body that
+  entry. Every eviction is chosen before any is made: a body that cannot
+  fit (larger than `code_budget`, no run index left) evicts nothing. Only between calls (a single-threaded `Sim`: the body that
   settled the slots is the full body there, never an installed one).
 - **Generations.** Unique over all `Sim`s (a global counter): a new
   `Sim`, a ROM write (`rom_changed`) and the `reset` that restores the
@@ -363,7 +370,11 @@ Differences from the sketch below, which P7 and P8 build on:
   fused body's context; `samples` fused ticks per phase, spread over the
   first `plan_window`, settle with the phase's *full* body (so every slot
   the estimate reads is computed; the commit after is the full body's)
-  and keep a copy of the slots; then one plan request. No key and no
+  and keep a copy of the slots; then one plan request, asked again every
+  `plan_window` fused ticks per phase until a plan is installed (a
+  dropped request, a refused plan; the samples are kept until then). A
+  plan is installed whole: one that does not fit under the run-index cap
+  leaves nothing behind. No key and no
   superstep meanwhile (`compile_jit` and `run` skip supersteps while a
   plan is awaited); the layout counts as folded from the start, so a ROM
   write stops the sampling. A plan with no keyed phase leaves the `Sim`

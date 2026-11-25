@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::tests::{
     NoMutation, counting, jit_options, microcoded, microcoded_plan, program, same_batches,
 };
-use super::{MUTATION, PhasePlan, SpecOptions, SpecPlan, build_spec};
+use super::{MUTATION, PhasePlan, SpecOptions, SpecPlan, SpecRequest, build_spec};
 use crate::compile::{Options, Program};
 use crate::sim::{Sim, SimOptions};
 use crate::testkit::diff::{
@@ -604,4 +604,204 @@ fn installs_at_the_run_index_cap_are_refused() {
     }
     assert!(ok == 1 && refused > 0, "{ok} installed, {refused} refused");
     same_batches(&mut want, &mut s);
+}
+
+/// The microcoded machine's program with its ROM contents changed (every
+/// word `^ 3`): the same slots and memories, other folds.
+fn other_rom(p: &Program) -> Arc<Program> {
+    let mut q = p.clone();
+    let m = q.mems.iter_mut().find(|m| !m.writable).expect("a ROM");
+    m.init = m.init.iter().map(|w| w ^ 3).collect::<Vec<_>>().into();
+    Arc::new(q)
+}
+
+/// Bodies built (and checked, and compiled) against another program than
+/// the request's are refused: here the same design with other ROM
+/// contents, whose folds would give wrong results.
+#[test]
+fn builds_against_another_program_are_refused() {
+    let p = program(&microcoded(false), &Options::default());
+    let q = other_rom(&p);
+    let plan = layouts(&microcoded_plan(&p, None));
+    let spec = SpecOptions {
+        inline_build: false,
+        ..fast(Some(plan), 16, 1 << 10, 2)
+    };
+    for o in jit_options() {
+        let mut s = Sim::with_options(Arc::clone(&p), with(o, &spec));
+        let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+        for round in 0..20 {
+            s.run(20);
+            for _ in 0..20 {
+                want.tick();
+            }
+            for r in s.spec_requests() {
+                assert!(!s.install_spec(build_spec(&q, &r)), "round {round}");
+            }
+            assert!(observe(&want) == observe(&s), "round {round}");
+        }
+        let st = s.spec_stats();
+        assert!(st.bodies == 0 && st.requested > 0, "{st:?}");
+    }
+}
+
+/// A hot key is requested once (not again every window while it waits),
+/// so every request installs.
+#[test]
+fn hot_keys_are_requested_once() {
+    let p = program(&microcoded(false), &Options::default());
+    let plan = layouts(&microcoded_plan(&p, None));
+    let spec = SpecOptions {
+        inline_build: false,
+        ..fast(Some(plan), 16, 64, 2)
+    };
+    let mut s = Sim::with_options(Arc::clone(&p), with(SimOptions::default(), &spec));
+    s.run(2000);
+    let r = s.spec_requests();
+    let mut keys: Vec<(usize, u64)> = r.iter().filter_map(SpecRequest::body).collect();
+    let n = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(n, keys.len(), "duplicate requests: {r:?}");
+    for r in &r {
+        assert!(s.install_spec(build_spec(&p, r)));
+    }
+    // Requested and installed: never again.
+    s.run(2000);
+    assert!(s.spec_requests().is_empty());
+    let st = s.spec_stats();
+    assert!(st.dropped == 0 && st.installed == n as u64, "{st:?}");
+}
+
+/// An automatic plan's request the caller drops (never builds) is asked
+/// again a `plan_window` later; built and installed, it keys the machine.
+#[test]
+fn a_dropped_plan_request_is_asked_again() {
+    let p = program(&microcoded(true), &Options::default());
+    let spec = SpecOptions {
+        inline_build: false,
+        ..fast(None, 8, 64, 2)
+    };
+    let mut s = Sim::with_options(Arc::clone(&p), with(SimOptions::default(), &spec));
+    let plans = |s: &mut Sim| {
+        s.spec_requests()
+            .into_iter()
+            .filter(|r| r.body().is_none())
+            .collect::<Vec<_>>()
+    };
+    let mut asked = 0;
+    while plans(&mut s).is_empty() {
+        s.run(50);
+        asked += 1;
+        assert!(asked < 100, "no plan request");
+    }
+    // Dropped. Not asked again at once, but a plan window later.
+    s.run(10);
+    assert!(plans(&mut s).is_empty(), "asked again at once");
+    let mut again = Vec::new();
+    for _ in 0..20 {
+        s.run(50);
+        again = plans(&mut s);
+        if !again.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(again.len(), 1);
+    assert!(plans(&mut s).is_empty(), "asked again at once");
+    assert!(s.install_spec(build_spec(&p, &again[0])));
+    let st = s.spec_stats();
+    assert!(!st.awaiting_plan && st.keyed_phases > 0, "{st:?}");
+}
+
+/// A plan that does not fit under the run-index cap is refused whole:
+/// no pinned run of it is left behind.
+#[test]
+fn a_plan_past_the_run_cap_leaves_no_runs_behind() {
+    use crate::compile::Body;
+    use crate::sim::Run;
+    let p = program(&microcoded(true), &Options::default());
+    let spec = SpecOptions {
+        inline_build: false,
+        ..fast(None, 8, 64, 2)
+    };
+    let mut s = Sim::with_options(Arc::clone(&p), with(SimOptions::default(), &spec));
+    let mut plan = None;
+    while plan.is_none() {
+        s.run(50);
+        plan = s.spec_requests().into_iter().find(|r| r.body().is_none());
+    }
+    let built = build_spec(&p, &plan.unwrap());
+    let runs_needed: usize = match &built.out {
+        super::Out::Plan(ph) => ph.iter().flatten().filter(|x| x.prefix.is_some()).count() * 2,
+        super::Out::Body { .. } => unreachable!(),
+    };
+    assert!(runs_needed >= 2, "the plan has a prefix");
+    // One free index: the plan needs at least two.
+    while s.runs.len() < usize::from(u16::MAX) - 2 {
+        s.runs.push(Run::new(&p, Some(Body::default()), false));
+        s.spec.dynamic.push(None);
+    }
+    let runs = s.runs.len();
+    assert!(!s.install_spec(built));
+    assert_eq!(s.runs.len(), runs);
+    assert!(s.spec.dynamic.iter().all(Option::is_none));
+    assert_eq!(s.spec.pinned_bytes, 0);
+    assert!(s.spec_stats().awaiting_plan);
+    let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+    for _ in 0..s.tick_count() {
+        want.tick();
+    }
+    same_batches(&mut want, &mut s);
+}
+
+/// With the JIT, a body larger than the code budget is refused before
+/// anything is evicted for it (the key cycles through 32 values, so cold
+/// bodies are there to evict).
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn a_body_that_cannot_fit_evicts_nothing() {
+    let (p, plan) = counting(0xf0, &[]);
+    let spec = fast(Some(plan), 64, 8, 1);
+    let mut s = Sim::with_options(Arc::clone(&p), with(SimOptions::jit(), &spec));
+    for _ in 0..40 {
+        s.run(5);
+    }
+    let st = s.spec_stats();
+    assert!(st.bodies > 2, "{st:?}");
+    // Now every body is over budget.
+    s.options.spec.as_mut().unwrap().code_budget = 1;
+    for _ in 0..40 {
+        s.run(5);
+    }
+    let after = s.spec_stats();
+    assert!(
+        after.evicted == st.evicted && after.bodies == st.bodies && after.dropped > st.dropped,
+        "{st:?} then {after:?}"
+    );
+}
+
+/// A body that fails its check (mutation 5: `finish` refuses every body)
+/// is refused, and its key is wanted again (not left pending).
+#[test]
+fn a_body_that_fails_its_check_is_wanted_again() {
+    let _reset = NoMutation;
+    let p = program(&microcoded(false), &Options::default());
+    let plan = layouts(&microcoded_plan(&p, None));
+    let spec = SpecOptions {
+        inline_build: false,
+        ..fast(Some(plan), 16, 1 << 10, 2)
+    };
+    let mut s = Sim::with_options(Arc::clone(&p), with(SimOptions::default(), &spec));
+    s.run(40);
+    let r = s.spec_requests();
+    assert!(!r.is_empty());
+    MUTATION.set(5);
+    let built: Vec<_> = r.iter().map(|r| build_spec(&p, r)).collect();
+    MUTATION.set(0);
+    for b in built {
+        assert!(!s.install_spec(b));
+    }
+    s.run(40);
+    let again = s.spec_requests();
+    assert_eq!(again.len(), r.len(), "{again:?}");
 }

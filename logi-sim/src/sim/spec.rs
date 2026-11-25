@@ -40,7 +40,7 @@ use std::sync::{Arc, Weak};
 
 use crate::compile::guard::guard_with;
 use crate::compile::spec::{KeyLayout, PlanOptions, SpecContext, choose_plan, pext};
-use crate::compile::{Body, FastMap, FastSet, Program, phases};
+use crate::compile::{Body, FastMap, Program, phases};
 use crate::netlist::mask;
 
 use super::{Run, Sim, SimOptions};
@@ -233,12 +233,18 @@ struct Adapt {
     next_window: u64,
     tag: Box<[u64]>,
     count: Box<[u32]>,
-    /// Hot keys not yet requested.
+    /// Hot keys not yet requested (no repeats: each is also pending).
     wanted: Vec<u64>,
-    /// Keys wanted or requested and not installed (cleared every window,
-    /// so a request the caller dropped is not waited on for ever).
-    pending: FastSet<u64>,
+    /// Keys wanted or requested and not installed, with the clock at which
+    /// they were wanted: a key is wanted again only once it is neither.
+    /// A request the caller dropped expires after `PENDING_WINDOWS`
+    /// windows (one still waiting in `wanted` never does).
+    pending: FastMap<u64, u64>,
 }
+
+/// Windows after which a requested key that was never installed or
+/// refused may be wanted again (the caller dropped the request).
+const PENDING_WINDOWS: u64 = 4;
 
 impl Adapt {
     fn new(cx: Arc<SpecContext>, pre: Arc<[bool]>, layout: KeyLayout, o: &SpecOptions) -> Self {
@@ -253,7 +259,7 @@ impl Adapt {
             tag: vec![0; HOT_SLOTS].into_boxed_slice(),
             count: vec![0; HOT_SLOTS].into_boxed_slice(),
             wanted: Vec::new(),
-            pending: FastSet::default(),
+            pending: FastMap::default(),
         }
     }
 
@@ -262,7 +268,9 @@ impl Adapt {
     fn miss(&mut self, key: u64, clock: u64) {
         if clock >= self.next_window {
             self.count.fill(0);
-            self.pending.clear();
+            let (wanted, expiry) = (&self.wanted, PENDING_WINDOWS * self.window);
+            self.pending
+                .retain(|k, t| clock - *t < expiry || wanted.contains(k));
             self.next_window = clock + self.window;
         }
         let h = (key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 54) as usize & (HOT_SLOTS - 1);
@@ -278,12 +286,14 @@ impl Adapt {
         }
         if *c >= self.hot {
             *c = 0;
-            self.want(key);
+            self.want(key, clock);
         }
     }
 
-    fn want(&mut self, key: u64) {
-        if self.wanted.len() < MAX_WANTED && self.pending.insert(key) {
+    /// Want `key` unless it is wanted, requested or full.
+    fn want(&mut self, key: u64, clock: u64) {
+        if self.wanted.len() < MAX_WANTED && !self.pending.contains_key(&key) {
+            self.pending.insert(key, clock);
             self.wanted.push(key);
         }
     }
@@ -314,7 +324,8 @@ thread_local! {
     /// from the slots as they are, a miss settles with the fused body);
     /// 3 installs each built body under a wrong key (bit 0 flipped);
     /// 4 evicts a body but leaves its table entry (pointing at the freed
-    /// run, which the next install reuses).
+    /// run, which the next install reuses); 5 fails every body's check in
+    /// `build_spec`.
     pub(crate) static MUTATION: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
@@ -384,16 +395,29 @@ impl PhaseSpec {
         self.adapt.as_ref().is_some_and(|a| !a.wanted.is_empty())
     }
 
-    /// The coldest body that may be evicted (not hit for a window): its
-    /// age and key.
-    fn coldest(&self) -> Option<(u64, u64)> {
-        let a = self.adapt.as_ref()?;
+    /// The bodies that may be evicted (not hit for a window): age, key
+    /// and run of each.
+    fn cold(&self) -> Vec<(u64, u64, u16)> {
+        let Some(a) = self.adapt.as_ref() else {
+            return Vec::new();
+        };
         let clock = self.hits + self.misses;
         self.table
             .iter()
-            .map(|(&k, e)| (clock - e.last.min(clock), k))
-            .filter(|&(age, _)| age >= a.window)
-            .max()
+            .map(|(&k, e)| (clock - e.last.min(clock), k, e.run))
+            .filter(|&(age, _, _)| age >= a.window)
+            .collect()
+    }
+
+    /// Whether some body may be evicted.
+    fn has_cold(&self) -> bool {
+        let Some(a) = self.adapt.as_ref() else {
+            return false;
+        };
+        let clock = self.hits + self.misses;
+        self.table
+            .values()
+            .any(|e| clock - e.last.min(clock) >= a.window)
     }
 
     /// Build the phase's runs for `plan` with the context `cx` of its
@@ -445,7 +469,7 @@ impl PhaseSpec {
         if let Some(o) = adaptive {
             let mut a = Adapt::new(Arc::clone(cx), pre.into(), layout.clone(), o);
             for key in keys {
-                a.want(key);
+                a.want(key, 0);
             }
             ps.adapt = Some(Box::new(a));
             return Some(ps);
@@ -548,8 +572,12 @@ pub(super) struct Spec {
     contexts: Vec<Option<Arc<SpecContext>>>,
     /// Automatic plan: sampling.
     sampler: Option<Box<Sampler>>,
-    /// Automatic plan: the samples, ready for a plan request.
-    rows: Option<Vec<Vec<Vec<u64>>>>,
+    /// Automatic plan: the samples, kept until the plan is installed.
+    rows: Option<Arc<Vec<Vec<Vec<u64>>>>>,
+    /// Automatic plan: requested, and fused ticks since (asked again
+    /// after `plan_window` fused ticks per phase without a plan: the
+    /// caller dropped the request, or the plan was refused).
+    plan_asked: Option<u64>,
     /// Automatic plan: no plan installed yet (no superstep meanwhile).
     pub awaiting_plan: bool,
     /// What the layout's native code depends on (`jit::RunKey::spec`):
@@ -593,7 +621,7 @@ impl Spec {
     }
 
     fn refresh(&mut self) {
-        self.hooked = !self.phases.is_empty() || self.sampler.is_some();
+        self.hooked = !self.phases.is_empty() || self.sampler.is_some() || self.rows.is_some();
     }
 
     /// Whether the layout folds ROM contents (a keyed phase, or a plan
@@ -634,7 +662,8 @@ impl Spec {
 
     /// Whether requests wait (`Sim::spec_requests` would return some).
     pub fn has_work(&self) -> bool {
-        self.rows.is_some() || self.phases.iter().flatten().any(PhaseSpec::wants)
+        (self.rows.is_some() && self.plan_asked.is_none())
+            || self.phases.iter().flatten().any(PhaseSpec::wants)
     }
 
     fn live(&self) -> usize {
@@ -743,7 +772,7 @@ enum Work {
     },
     Plan {
         contexts: Vec<Option<Arc<SpecContext>>>,
-        rows: Vec<Vec<Vec<u64>>>,
+        rows: Arc<Vec<Vec<Vec<u64>>>>,
         options: PlanOptions,
     },
 }
@@ -850,10 +879,27 @@ impl std::fmt::Debug for SpecBuilt {
 }
 
 /// Build what `r` asks for, for the program `p` it was requested with
-/// (pure; any thread): specialize, guard, check and (with the JIT) compile
+/// (any other `p` builds nothing, and the result is refused by every
+/// `Sim`; pure; any thread): specialize, guard, check and (with the JIT) compile
 /// a body; or choose the plan from the samples and build each keyed
 /// phase's prefix and fallback.
 pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
+    if !std::ptr::eq(p, r.program.as_ptr()) {
+        // Built against another program: refused (another program's
+        // slots, memories or ROM folds), so not built at all.
+        return SpecBuilt {
+            program: Weak::new(),
+            generation: r.generation,
+            out: match &r.work {
+                Work::Body { phase, key, .. } => Out::Body {
+                    phase: *phase,
+                    key: *key,
+                    body: None,
+                },
+                Work::Plan { .. } => Out::Plan(Vec::new()),
+            },
+        };
+    }
     let n = p.slot_count as usize;
     let guard = |b: Body| match r.guard {
         Some(min) => guard_with(n, &b, None, min).unwrap_or(b),
@@ -929,6 +975,10 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
     expect(unused_variables)
 )]
 fn finish(p: &Program, body: Body, fused_only: bool, jit: bool) -> Option<Built> {
+    #[cfg(test)]
+    if MUTATION.get() == 5 {
+        return None;
+    }
     super::check_body(
         p,
         &body.blocks,
@@ -979,9 +1029,21 @@ impl Sim {
             s.rows[k].push(self.slots.clone());
             if s.done(&self.spec.contexts) {
                 let s = self.spec.sampler.take().expect("sampling");
-                self.spec.rows = Some(s.rows);
+                self.spec.rows = Some(Arc::new(s.rows));
                 self.spec.refresh();
             }
+            return;
+        }
+        if self.spec.rows.is_some() {
+            // The plan is awaited: ask again after a plan window.
+            if let Some(n) = &mut self.spec.plan_asked {
+                *n += 1;
+                let o = self.options.spec.as_ref().expect("spec options");
+                if *n >= o.plan_window.saturating_mul(self.period) {
+                    self.spec.plan_asked = None;
+                }
+            }
+            self.settle(self.fused[k]);
             return;
         }
         if self.spec.phases.get(k).is_some_and(Option::is_some) {
@@ -1009,7 +1071,14 @@ impl Sim {
         let guard = guards.then_some(self.options.guard_min);
         let program = Arc::downgrade(&self.program);
         let generation = self.spec_life.generation;
-        if let Some(rows) = self.spec.rows.take() {
+        if let Some(rows) = self
+            .spec
+            .rows
+            .as_ref()
+            .filter(|_| self.spec.plan_asked.is_none())
+        {
+            let rows = Arc::clone(rows);
+            self.spec.plan_asked = Some(0);
             out.push(SpecRequest {
                 program: program.clone(),
                 generation,
@@ -1023,16 +1092,11 @@ impl Sim {
             });
         }
         let live = self.spec.live();
-        let any_cold = self
-            .spec
-            .phases
-            .iter()
-            .flatten()
-            .any(|ps| ps.coldest().is_some());
+        let any_cold = self.spec.phases.iter().flatten().any(PhaseSpec::has_cold);
         let mut asked = 0;
         for (k, ps) in self.spec.phases.iter_mut().enumerate() {
             let Some(ps) = ps else { continue };
-            let cold = ps.coldest().is_some();
+            let cold = ps.has_cold();
             let bodies = ps.bodies();
             let Some(a) = ps.adapt.as_mut() else { continue };
             let mut asked_here = 0;
@@ -1076,12 +1140,23 @@ impl Sim {
             && b.generation == self.spec_life.generation;
         if !fresh {
             self.spec_life.stale += 1;
+            if b.generation == self.spec_life.generation
+                && let Out::Body { phase, key, .. } = b.out
+            {
+                self.unpend(phase, key);
+            }
             return false;
         }
         let ok = match b.out {
             Out::Plan(phases) => self.install_plan(phases),
             Out::Body { phase, key, body } => {
-                body.is_some_and(|body| self.install_body(phase, key, *body))
+                let ok = body.is_some_and(|body| self.install_body(phase, key, *body));
+                if !ok {
+                    // Refused (or failed its check): the key may be wanted
+                    // again.
+                    self.unpend(phase, key);
+                }
+                ok
             }
         };
         if ok {
@@ -1092,11 +1167,37 @@ impl Sim {
         ok
     }
 
+    /// `key` of phase `k` is no longer requested.
+    fn unpend(&mut self, k: usize, key: u64) {
+        if let Some(a) = self
+            .spec
+            .phases
+            .get_mut(k)
+            .and_then(Option::as_mut)
+            .and_then(|ps| ps.adapt.as_mut())
+        {
+            a.pending.remove(&key);
+        }
+    }
+
     fn install_plan(&mut self, phases: Vec<Option<BuiltPhase>>) -> bool {
         let Some(o) = self.options.spec.clone() else {
             return false;
         };
-        if !self.spec.awaiting_plan || self.spec.rows.is_some() || self.spec.sampler.is_some() {
+        if !self.spec.awaiting_plan || self.spec.rows.is_none() || self.spec.sampler.is_some() {
+            return false;
+        }
+        // Room for every run first: a plan is installed whole or not at
+        // all (asked again later).
+        let needed = phases
+            .iter()
+            .enumerate()
+            .filter(|(k, ph)| {
+                *k < self.fused.len() && ph.as_ref().is_some_and(|x| x.prefix.is_some())
+            })
+            .count()
+            * 2;
+        if needed > self.spec.free.len() + self.runs_left() {
             return false;
         }
         let mut table: Vec<Option<PhaseSpec>> = Vec::new();
@@ -1107,12 +1208,8 @@ impl Sim {
             }
             let (prefix, fallback) = match (ph.prefix, ph.fallback) {
                 (Some(pre), Some(fb)) => {
-                    let Some(pre) = self.add_run(pre, true) else {
-                        break;
-                    };
-                    let Some(fb) = self.add_run(fb, true) else {
-                        break;
-                    };
+                    let pre = self.add_run(pre, true).expect("room checked");
+                    let fb = self.add_run(fb, true).expect("room checked");
                     (Some(pre), fb)
                 }
                 _ => (None, self.fused[k]),
@@ -1135,6 +1232,8 @@ impl Sim {
         }
         self.spec.phases = table;
         self.spec.contexts.clear();
+        self.spec.rows = None;
+        self.spec.plan_asked = None;
         self.spec.awaiting_plan = false;
         // A plan change: nothing requested before it fits the new tables.
         self.spec_life.generation = next_gen();
@@ -1148,7 +1247,7 @@ impl Sim {
         let run = match self.spec.free.pop() {
             Some(r) => r,
             None => {
-                if self.runs.len() >= usize::from(u16::MAX) - 1 {
+                if self.runs_left() == 0 {
                     return None;
                 }
                 self.runs
@@ -1170,6 +1269,12 @@ impl Sim {
             bytes,
         });
         Some(run)
+    }
+
+    /// Run indices never used yet (`u16` indices, `runs.len() + 1` the
+    /// next).
+    fn runs_left(&self) -> usize {
+        (usize::from(u16::MAX) - 1).saturating_sub(self.runs.len())
     }
 
     /// Free installed run `run`, its native code with it.
@@ -1206,18 +1311,6 @@ impl Sim {
         self.spec_life.evicted += 1;
     }
 
-    /// The coldest body of phase `only` (of any phase when `None`).
-    fn victim(&self, only: Option<usize>) -> Option<(usize, u64)> {
-        self.spec
-            .phases
-            .iter()
-            .enumerate()
-            .filter(|(k, _)| only.is_none_or(|o| o == *k))
-            .filter_map(|(k, ps)| Some((ps.as_ref()?.coldest()?, k)))
-            .max()
-            .map(|((_, key), k)| (k, key))
-    }
-
     fn install_body(&mut self, k: usize, key: u64, b: Built) -> bool {
         let Some(o) = self.options.spec.clone() else {
             return false;
@@ -1233,26 +1326,51 @@ impl Sim {
             return false;
         }
         let bytes = b.unit.as_ref().map_or(0, Unit::code_bytes);
-        loop {
-            let ps = self.spec.phases[k].as_ref().expect("keyed");
-            let victim = if ps.bodies() >= o.max_per_phase {
-                Some(self.victim(Some(k)))
-            } else if self.spec.live() >= o.max_bodies
-                || self.spec.body_bytes + bytes > o.code_budget
-            {
-                Some(self.victim(None))
-            } else {
-                None
-            };
-            match victim {
-                None => break,
-                Some(None) => return false,
-                Some(Some((vk, vkey))) => self.evict(vk, vkey),
+        if bytes > o.code_budget {
+            return false;
+        }
+        // Choose the bodies to evict (the coldest first: of this phase
+        // while it is full, of any phase while all are) before evicting
+        // any, so that a body that cannot fit evicts nothing.
+        let mut cold: Vec<(u64, u64, usize, usize)> = Vec::new();
+        for (pk, ps) in self.spec.phases.iter().enumerate() {
+            let Some(ps) = ps else { continue };
+            for (age, vkey, run) in ps.cold() {
+                let i = run as usize - self.spec.base - 1;
+                let b = self.spec.dynamic[i].as_ref().map_or(0, |d| d.bytes);
+                cold.push((age, vkey, pk, b));
             }
         }
-        let Some(run) = self.add_run(b, false) else {
+        cold.sort_unstable_by_key(|c| std::cmp::Reverse((c.0, c.1, c.2)));
+        let (mut here, mut live, mut used) = (
+            self.spec.phases[k].as_ref().expect("keyed").bodies(),
+            self.spec.live(),
+            self.spec.body_bytes,
+        );
+        let mut evict = Vec::new();
+        loop {
+            let full_here = here >= o.max_per_phase;
+            if !full_here && live < o.max_bodies && used + bytes <= o.code_budget {
+                break;
+            }
+            let Some(i) = cold.iter().position(|c| !full_here || c.2 == k) else {
+                return false;
+            };
+            let (_, vkey, vk, vb) = cold.remove(i);
+            // Saturating: the counts and the table can disagree under a
+            // mutation (a test's eviction that keeps its entry).
+            here = here.saturating_sub(usize::from(vk == k));
+            live = live.saturating_sub(1);
+            used = used.saturating_sub(vb);
+            evict.push((vk, vkey));
+        }
+        if evict.is_empty() && self.spec.free.is_empty() && self.runs_left() == 0 {
             return false;
-        };
+        }
+        for (vk, vkey) in evict {
+            self.evict(vk, vkey);
+        }
+        let run = self.add_run(b, false).expect("a run is free");
         #[cfg(test)]
         let key = if MUTATION.get() == 3 { key ^ 1 } else { key };
         let ps = self.spec.phases[k].as_mut().expect("keyed");
@@ -1287,6 +1405,8 @@ impl Sim {
             a.pending.clear();
             a.wanted.clear();
         }
+        // A plan in flight is refused now: ask again.
+        self.spec.plan_asked = None;
         if self.spec.awaiting_plan && self.spec.sampler.is_none() && self.spec.rows.is_none() {
             let o = self.options.spec.clone().unwrap_or_default();
             self.spec.sampler = Some(Sampler::new(self.spec.contexts.len(), &o));

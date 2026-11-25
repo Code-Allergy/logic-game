@@ -52,12 +52,25 @@ const _: fn() = || {
     shareable::<JitUnit>();
 };
 
-/// Compile one body of `p` (which passed `Sim`'s `check`, as the body did)
-/// into a module of its own. Fails for a body that is not `used` or is
-/// larger than [`super::MAX_BODY`] (the interpreter runs those), and when
-/// Cranelift fails.
+/// Compile one body of `p` into a module of its own. Fails for a program
+/// or body that does not pass `Sim`'s checks (indices out of range), for a
+/// body that is not `used` or is larger than [`super::MAX_BODY`] (the
+/// interpreter runs those), and when Cranelift fails.
 pub fn compile_unit(p: &Program, body: BodyRef<'_>) -> Result<JitUnit, JitError> {
     let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
+    // The checks `Sim` makes before it runs a body: every slot, memory and
+    // guard index in range. The safe entry points rely on them (they only
+    // check the buffers' sizes against the program's).
+    crate::sim::check(p).map_err(|e| JitError(format!("bad program: {}", e.0)))?;
+    crate::sim::check_body(
+        p,
+        body.blocks,
+        body.instrs,
+        body.imms,
+        body.commits,
+        body.guards,
+    )
+    .map_err(|e| JitError(format!("bad body: {}", e.0)))?;
     let mut owned = new_module()?;
     let module = owned.0.as_mut().expect("just created");
     let mut ctx = module.make_context();

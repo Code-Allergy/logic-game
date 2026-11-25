@@ -414,3 +414,32 @@ fn compile_unit_of_covers_the_used_bodies() {
     }
     assert!(sim.compile_unit_of(sim.body_count()).is_none());
 }
+
+/// `compile_unit` is public and takes any body: one whose indices are out
+/// of range for the program (a write to slot 10^9, a commit past the
+/// slots, a memory that does not exist) is refused, as `Sim` refuses it,
+/// so that the safe `settle`/`commit` never touch memory out of bounds.
+#[test]
+fn compile_unit_refuses_invalid_bodies() {
+    let d = fixtures::cpu(&fixtures::MULTIPLY_PROGRAM);
+    let p = program(&d, &Options::default());
+    let sim = Sim::new(Arc::clone(&p));
+    let b = sim.body_refs().remove(0);
+    assert!(compile_unit(&p, sim.body_refs().remove(0)).is_ok());
+    let mut instrs = b.instrs.to_vec();
+    instrs[0].dst = 1_000_000_000;
+    let bad = super::BodyRef {
+        instrs: &instrs,
+        ..sim.body_refs().remove(0)
+    };
+    assert!(compile_unit(&p, bad).is_err(), "a write past the slots");
+    let mut commits = b.commits.to_vec();
+    if let Some(crate::compile::Commit::Copy { state, .. }) = commits.first_mut() {
+        *state = 1_000_000_000;
+        let bad = super::BodyRef {
+            commits: &commits,
+            ..sim.body_refs().remove(0)
+        };
+        assert!(compile_unit(&p, bad).is_err(), "a commit past the slots");
+    }
+}
