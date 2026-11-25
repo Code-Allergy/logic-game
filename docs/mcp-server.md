@@ -507,6 +507,10 @@ at the design. It applies when the simulation is made, not to a session
 that continues. The stored test kind `unoptimized` does the comparison
 on random inputs.
 
+In a `.vcd` trace the time is the tick; after a `reset` or a `restore`
+that takes the tick back, the trace goes on from one time unit later (a
+VCD's times never go back).
+
 **Limits.** A call runs at most `max_ticks` ticks (1,000,000 unless the
 script asks for more, up to 1,000,000,000), records at most 5,000,000
 rows, and reads memory files up to 64 MB. File paths are used as given,

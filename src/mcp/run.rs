@@ -598,6 +598,11 @@ enum Trace {
         out: std::io::BufWriter<std::fs::File>,
         last: Vec<Option<u64>>,
         declared: bool,
+        /// The simulation's tick at the last row, and its time in the
+        /// trace. A VCD's times never go back, and a `reset` or `restore`
+        /// takes the tick back: the trace then goes on one time unit
+        /// later. Without one, the time is the tick.
+        at: Option<(u64, u64)>,
     },
 }
 
@@ -627,6 +632,7 @@ impl Trace {
                     out,
                     last: Vec::new(),
                     declared: false,
+                    at: None,
                 }
             } else {
                 Trace::Csv(out)
@@ -645,6 +651,7 @@ impl Trace {
                 out,
                 last,
                 declared,
+                ..
             } => {
                 if *declared {
                     return Err(
@@ -685,7 +692,13 @@ impl Trace {
                 }
                 writeln!(out).map_err(io)
             }
-            Trace::Vcd { out, last, .. } => {
+            Trace::Vcd { out, last, at, .. } => {
+                let time = match *at {
+                    None => tick,
+                    Some((before, time)) if tick > before => time + (tick - before),
+                    Some((_, time)) => time + 1,
+                };
+                *at = Some((tick, time));
                 let mut stamped = false;
                 for (i, (v, c)) in row.iter().zip(columns).enumerate() {
                     if last[i] == Some(*v) {
@@ -693,7 +706,7 @@ impl Trace {
                     }
                     last[i] = Some(*v);
                     if !stamped {
-                        writeln!(out, "#{tick}").map_err(io)?;
+                        writeln!(out, "#{time}").map_err(io)?;
                         stamped = true;
                     }
                     if c.width == 1 {
