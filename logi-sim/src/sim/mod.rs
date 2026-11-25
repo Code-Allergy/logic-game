@@ -1079,10 +1079,6 @@ impl Sim {
         if ticks == 0 {
             return;
         }
-        #[cfg_attr(
-            not(all(feature = "jit", not(target_arch = "wasm32"))),
-            expect(unused_mut)
-        )]
         let mut left = ticks - 1;
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
         if self.options.superstep
@@ -1108,6 +1104,20 @@ impl Sim {
                 self.superstep(entry, n);
                 left -= n;
             }
+        }
+        if self.spec.hooked && !self.spec.awaiting_plan && left > 1 {
+            // Keyed phases: the first tick applies the inputs, the others
+            // go through `keyed_ticks`.
+            #[cfg(test)]
+            let first = spec::MUTATION.get() != 6;
+            #[cfg(not(test))]
+            let first = true;
+            if first {
+                self.fused_tick();
+                left -= 1;
+            }
+            self.keyed_ticks(left);
+            left = 0;
         }
         for _ in 0..left {
             self.fused_tick();
@@ -1136,14 +1146,48 @@ impl Sim {
         self.settle(self.fused[k]);
     }
 
-    /// The settle of a fused tick of keyed phase `k`: the inputs, the
-    /// key's prefix, then the body built for the key or the fallback (see
-    /// `sim/spec.rs`). The commit after it is the settled body's.
+    /// Fused ticks of a `run` while some phase is keyed (and no plan is
+    /// awaited), after a fused tick of the same `run`: as `fused_tick`,
+    /// without what a superstep does not do either (applying the inputs
+    /// again: nothing writes their slots within a `run`, and the tick
+    /// before applied them) and with the clock phase counted instead of
+    /// divided out. Keyed supersteps were measured and not built (see
+    /// `sim/spec.rs`); this is the part of their gain that needs none.
+    fn keyed_ticks(&mut self, n: u64) {
+        let period = self.period as usize;
+        let mut k = (self.tick % self.period) as usize;
+        for _ in 0..n {
+            #[cfg(feature = "counters")]
+            {
+                self.counters.ticks += 1;
+            }
+            self.commit(self.last);
+            self.tick += 1;
+            k += 1;
+            if k == period {
+                k = 0;
+            }
+            if self.spec.phases.get(k).is_some_and(Option::is_some) {
+                self.spec_keyed(k);
+            } else {
+                self.evaluate(self.fused[k]);
+            }
+        }
+    }
+
+    /// The settle of a fused tick of keyed phase `k`: the inputs, then
+    /// [`Sim::spec_keyed`]. The commit after it is the settled body's.
     fn spec_settle(&mut self, k: usize) {
         let p = &*self.program;
         for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
             self.slots[port.slot as usize] = v;
         }
+        self.spec_keyed(k);
+    }
+
+    /// The key's prefix, then the body built for the key or the fallback
+    /// (see `sim/spec.rs`), on inputs already in their slots.
+    fn spec_keyed(&mut self, k: usize) {
         let ps = self.spec.phases[k].as_ref().expect("a keyed phase");
         let prefix = ps.prefix;
         #[cfg(test)]

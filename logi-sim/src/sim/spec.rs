@@ -335,7 +335,8 @@ thread_local! {
     /// 3 installs each built body under a wrong key (bit 0 flipped);
     /// 4 evicts a body but leaves its table entry (pointing at the freed
     /// run, which the next install reuses); 5 fails every body's check in
-    /// `build_spec`.
+    /// `build_spec`; 6 runs every fused tick of a keyed `run` through
+    /// `Sim::keyed_ticks` (the inputs never applied).
     pub(crate) static MUTATION: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
