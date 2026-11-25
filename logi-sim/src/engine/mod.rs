@@ -25,14 +25,14 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::compile::func::MatchCache;
 use crate::compile::{CompileError, NodePath, Options, Program, compile_cached};
 use crate::netlist::{Design, NetId, NodeId};
-use crate::sim::{Sim, SimOptions};
+use crate::sim::{Sim, SimOptions, SpecBuilt, SpecRequest};
 
 /// Tick pacing.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,7 +138,48 @@ pub struct EngineCore {
     /// program starts interpreted, and its native code is compiled on the
     /// compile thread and swapped in by [`EngineCore::install_jit`].
     jit_tiered: bool,
+    /// The tiered program's native code has not arrived yet (or has been
+    /// given up on): specialized bodies wait for it, so that each is built
+    /// with its native unit ([`SpecRequest::set_native`]).
+    jit_wait: bool,
+    /// Somebody else builds the `Sim`'s specialized bodies
+    /// ([`EngineCore::drive_spec`]): the `Sim`s run with
+    /// `SpecOptions::inline_build` off and requests are handed out by
+    /// [`EngineCore::spec_jobs`].
+    spec_driven: bool,
+    /// Requests taken from the `Sim` and not handed out yet (the `Sim`
+    /// bounds them by its own caps), plan first.
+    spec_queue: VecDeque<SpecRequest>,
+    /// Jobs handed out for the running program and not yet installed back.
+    spec_inflight: usize,
 }
+
+/// A specialization build to run off the tick loop: `request` was made by
+/// the `Sim` running `program`, revision `revision`. Run it with
+/// [`crate::sim::build_spec`]`(&job.program, &job.request)` on any thread
+/// and give the result to [`EngineCore::install_spec`] with `revision`.
+pub struct SpecJob {
+    pub revision: u64,
+    pub program: Arc<Program>,
+    pub request: SpecRequest,
+}
+
+impl SpecJob {
+    /// Whether it is the automatic plan (the expensive build: seconds on
+    /// a console).
+    pub fn is_plan(&self) -> bool {
+        self.request.body().is_none()
+    }
+
+    /// Build it.
+    pub fn build(&self) -> SpecBuilt {
+        crate::sim::build_spec(&self.program, &self.request)
+    }
+}
+
+/// Builds in flight at once, at most: bounds what a slow compile thread
+/// holds (the rest wait in the core, and in the `Sim`'s own queues).
+pub const SPEC_INFLIGHT: usize = 8;
 
 impl EngineCore {
     /// An empty core. `options` are used for every compile; the default
@@ -163,6 +204,10 @@ impl EngineCore {
             dirty: true,
             match_cache: MatchCache::new(),
             jit_tiered: false,
+            jit_wait: false,
+            spec_driven: false,
+            spec_queue: VecDeque::new(),
+            spec_inflight: 0,
         }
     }
 
@@ -303,11 +348,7 @@ impl EngineCore {
         let snapshot = self.sim.as_ref().map(Sim::export_state);
         // Tiered: native code arrives later (`install_jit`); until then the
         // interpreter runs the layout the native code is compiled from.
-        let options = if self.jit_tiered {
-            self.sim_options.tier_layout()
-        } else {
-            self.sim_options.clone()
-        };
+        let options = self.sim_run_options();
         let mut sim = Sim::with_options(program, options);
         for (&node, &v) in &self.inputs {
             if let Some(port) = sim.program().ports.input_by_node(node) {
@@ -329,10 +370,115 @@ impl EngineCore {
         };
         self.sim = Some(sim);
         self.revision = revision;
+        // Builds in flight were for the old program (their results are
+        // dropped by revision, and refused by the `Sim` anyway).
+        self.spec_queue.clear();
+        self.spec_inflight = 0;
+        // (Native code only ever arrives with the feature.)
+        self.jit_wait = self.jit_tiered && cfg!(all(feature = "jit", not(target_arch = "wasm32")));
         self.resolve_probes();
         self.mem_requested = true;
         self.dirty = true;
         event
+    }
+
+    /// The options of the `Sim`s this core creates: tiered when native
+    /// code comes later, without inline spec builds when they are driven.
+    fn sim_run_options(&self) -> SimOptions {
+        let mut options = if self.jit_tiered {
+            self.sim_options.tier_layout()
+        } else {
+            self.sim_options.clone()
+        };
+        if self.spec_driven
+            && let Some(spec) = &mut options.spec
+        {
+            spec.inline_build = false;
+        }
+        options
+    }
+
+    /// The caller builds the specialized bodies of
+    /// [`SimOptions::spec`] (see [`EngineCore::spec_jobs`]) instead of the
+    /// `Sim` building them inline. Call it before the first program is
+    /// installed. The threaded [`Engine`] does; [`LocalEngine`] (wasm)
+    /// does not, so there a `Sim` with `spec` stalls one `run` for the
+    /// automatic plan's build: leave `spec` off there.
+    pub fn drive_spec(&mut self, on: bool) {
+        self.spec_driven = on;
+    }
+
+    /// The program's native code is not coming (the compile failed or was
+    /// skipped for a newer edit): bodies built from now on need not wait
+    /// for it. A no-op for another revision.
+    pub fn jit_given_up(&mut self, revision: u64) {
+        if self.revision == revision {
+            self.jit_wait = false;
+        }
+    }
+
+    /// Specialization builds to run now, at most [`SPEC_INFLIGHT`] in
+    /// flight, the automatic plan before bodies. Call it after each batch;
+    /// nothing is handed out while a tiered program awaits its native
+    /// code, so that bodies get native units, and the JIT compile is never
+    /// queued behind a plan build.
+    pub fn spec_jobs(&mut self) -> Vec<SpecJob> {
+        let mut out = Vec::new();
+        if !self.spec_driven || self.jit_wait {
+            return out;
+        }
+        let Some(sim) = &mut self.sim else {
+            return out;
+        };
+        if self.spec_queue.is_empty() && self.spec_inflight < SPEC_INFLIGHT {
+            let mut fresh = sim.spec_requests();
+            for r in &mut fresh {
+                // Tiered: the `Sim` is interpreted at first, native code
+                // has arrived by now.
+                if self.jit_tiered {
+                    r.set_native(true);
+                }
+            }
+            // The plan first (stable: bodies keep their order).
+            fresh.sort_by_key(|r| r.body().is_some());
+            self.spec_queue.extend(fresh);
+        }
+        while self.spec_inflight < SPEC_INFLIGHT
+            && let Some(request) = self.spec_queue.pop_front()
+        {
+            self.spec_inflight += 1;
+            out.push(SpecJob {
+                revision: self.revision,
+                program: Arc::clone(sim.program()),
+                request,
+            });
+        }
+        out
+    }
+
+    /// Install a build of [`EngineCore::spec_jobs`] into the running
+    /// program, if it is still revision `revision` (the `Sim` also checks
+    /// its program, ROM generation and caps). Results do not change, only
+    /// speed. Returns whether it was installed.
+    pub fn install_spec(&mut self, revision: u64, built: SpecBuilt) -> bool {
+        if self.revision != revision {
+            return false;
+        }
+        self.spec_inflight = self.spec_inflight.saturating_sub(1);
+        match &mut self.sim {
+            Some(sim) => sim.install_spec(built),
+            None => false,
+        }
+    }
+
+    /// Builds installed into the running program so far.
+    pub fn spec_installed(&self) -> u64 {
+        self.sim.as_ref().map_or(0, |s| s.spec_stats().installed)
+    }
+
+    /// Builds handed out and not yet installed.
+    pub fn spec_inflight(&self) -> usize {
+        self.spec_inflight
     }
 
     /// Swap JIT-compiled code (`Sim::compile_jit` of a `Sim` with this
@@ -343,6 +489,7 @@ impl EngineCore {
     pub fn install_jit(&mut self, revision: u64, code: Arc<crate::sim::jit::JitProgram>) -> bool {
         match &mut self.sim {
             Some(sim) if self.revision == revision && self.sim_options.jit => {
+                self.jit_wait = false;
                 sim.install_jit(Some(code))
             }
             _ => false,
@@ -548,6 +695,15 @@ mod threaded {
 
     use super::*;
 
+    #[cfg(feature = "jit")]
+    /// Options for `Sim`s whose spec builds are driven by the engine.
+    fn driven(mut o: SimOptions) -> SimOptions {
+        if let Some(spec) = &mut o.spec {
+            spec.inline_build = false;
+        }
+        o
+    }
+
     /// Time budget per batch: commands are drained between batches.
     const BATCH: Duration = Duration::from_millis(1);
 
@@ -561,17 +717,29 @@ mod threaded {
         RequestMems,
         Load(Arc<Design>, u64),
         Compiled(u64, Result<Arc<Program>, Vec<CompileError>>),
-        /// Native code for revision `.0` (JIT tiering).
+        /// Native code for revision `.0` (JIT tiering), or `None` when it
+        /// is not coming (compile failure, or skipped for a newer edit).
         #[cfg(feature = "jit")]
-        Jitted(u64, Arc<crate::sim::jit::JitProgram>),
+        Jitted(u64, Option<Arc<crate::sim::jit::JitProgram>>),
+        /// A specialization build for revision `.0` (`EngineCore::spec_jobs`).
+        SpecBuilt(u64, SpecBuilt),
         Sync(Sender<()>),
         Shutdown,
+    }
+
+    /// Work for the compile thread.
+    enum Job {
+        Compile(Arc<Design>, u64),
+        Spec(SpecJob),
     }
 
     struct Shared {
         frame: Mutex<Arc<ProbeFrame>>,
         tick: AtomicU64,
         revision: AtomicU64,
+        /// Specialized bodies (and plans) installed so far in the running
+        /// program, as of the last publish.
+        spec_installed: AtomicU64,
     }
 
     /// Runs an [`EngineCore`] on a worker thread. Designs compile on a
@@ -594,6 +762,14 @@ mod threaded {
         /// tiered: every new program starts interpreted at once, and the
         /// compile thread compiles its native code and swaps it in when
         /// ready (unless a newer edit is already waiting).
+        ///
+        /// With [`SimOptions::spec`], state-keyed specialization is
+        /// adaptive and built off the tick loop too: the worker hands the
+        /// `Sim`'s requests (at most [`SPEC_INFLIGHT`] in flight) to the
+        /// compile thread, which builds them after the JIT compile (the
+        /// automatic plan first, then bodies) and sends them back, to be
+        /// installed between batches if the revision still runs. An edit
+        /// drops the builds of the old revision. Frames never change.
         pub fn spawn_with(options: Options, sim_options: SimOptions) -> Self {
             let origin = Instant::now();
             Self::spawn_with_clock(options, sim_options, Arc::new(move || origin.elapsed()))
@@ -608,31 +784,75 @@ mod threaded {
         ) -> Self {
             let (tx, rx) = channel::<Msg>();
             let (ev_tx, events) = channel();
-            let (compile_tx, compile_rx) = channel::<(Arc<Design>, u64)>();
+            let (compile_tx, compile_rx) = channel::<Job>();
             let shared = Arc::new(Shared {
                 frame: Mutex::new(Arc::new(ProbeFrame::default())),
                 tick: AtomicU64::new(0),
                 revision: AtomicU64::new(0),
+                spec_installed: AtomicU64::new(0),
             });
 
             let back = tx.clone();
             let compile_options = options.clone();
             #[cfg(feature = "jit")]
-            let jit_options = sim_options.clone();
+            let jit_options = driven(sim_options.clone());
             let compiler = std::thread::Builder::new()
                 .name("sim-compile".into())
                 .spawn(move || {
                     let mut cache = MatchCache::new();
+                    // Specialization builds waiting, and the revision of the
+                    // program compiled last (builds for another are stale:
+                    // the worker installs that program and drops them).
+                    let mut backlog: VecDeque<SpecJob> = VecDeque::new();
+                    let mut current = None;
                     #[cfg_attr(not(feature = "jit"), allow(unused_mut))]
-                    let mut next = None;
-                    while let Some(mut job) = next.take().or_else(|| compile_rx.recv().ok()) {
+                    let mut next: Option<Job> = None;
+                    loop {
+                        // An edit first, then (when it is compiled) the
+                        // JIT, then the plan, then bodies, one at a time.
+                        let job = match next.take() {
+                            Some(job) => Some(job),
+                            None if backlog.is_empty() => match compile_rx.recv() {
+                                Ok(job) => Some(job),
+                                Err(_) => break,
+                            },
+                            None => compile_rx.try_recv().ok(),
+                        };
+                        let Some(job) = job else {
+                            let i = backlog
+                                .iter()
+                                .position(SpecJob::is_plan)
+                                .unwrap_or_default();
+                            let job = backlog.remove(i).expect("a job waits");
+                            if current == Some(job.revision)
+                                && back
+                                    .send(Msg::SpecBuilt(job.revision, job.build()))
+                                    .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        };
+                        let (design, rev) = match job {
+                            Job::Spec(job) => {
+                                backlog.push_back(job);
+                                continue;
+                            }
+                            Job::Compile(design, rev) => (design, rev),
+                        };
                         // Latest revision wins.
+                        let (mut design, mut rev) = (design, rev);
                         while let Ok(newer) = compile_rx.try_recv() {
-                            job = newer;
+                            match newer {
+                                Job::Compile(d, r) => (design, rev) = (d, r),
+                                Job::Spec(job) => backlog.push_back(job),
+                            }
                         }
-                        let (design, rev) = job;
                         let result = compile_cached(&design, &compile_options, &mut cache, |_| {})
                             .map(Arc::new);
+                        if result.is_ok() {
+                            current = Some(rev);
+                        }
                         #[cfg(feature = "jit")]
                         let program = result.as_ref().ok().map(Arc::clone);
                         if back.send(Msg::Compiled(rev, result)).is_err() {
@@ -642,14 +862,20 @@ mod threaded {
                         // compile its native code unless a newer edit waits.
                         #[cfg(feature = "jit")]
                         if let (Some(p), true) = (program, jit_options.jit) {
-                            next = compile_rx.try_recv().ok();
-                            if next.is_none() {
-                                let layout = Sim::with_options(p, jit_options.tier_layout());
-                                if let Ok(code) = layout.compile_jit()
-                                    && back.send(Msg::Jitted(rev, Arc::new(code))).is_err()
-                                {
-                                    break;
+                            while let Ok(newer) = compile_rx.try_recv() {
+                                match newer {
+                                    Job::Spec(job) => backlog.push_back(job),
+                                    edit => next = Some(edit),
                                 }
+                            }
+                            let code = if next.is_none() {
+                                let layout = Sim::with_options(p, jit_options.tier_layout());
+                                layout.compile_jit().ok().map(Arc::new)
+                            } else {
+                                None
+                            };
+                            if back.send(Msg::Jitted(rev, code)).is_err() {
+                                break;
                             }
                         }
                     }
@@ -662,6 +888,7 @@ mod threaded {
                 .spawn(move || {
                     let mut core = EngineCore::new(options);
                     core.jit_tiered = sim_options.jit;
+                    core.drive_spec(sim_options.spec.is_some());
                     core.set_sim_options(sim_options);
                     worker_loop(core, rx, compile_tx, ev_tx, worker_shared, &*clock)
                 })
@@ -715,6 +942,11 @@ mod threaded {
         pub fn revision(&self) -> u64 {
             self.shared.revision.load(Ordering::Relaxed)
         }
+        /// Specialized builds installed into the running program
+        /// ([`SimOptions::spec`]), as of the last frame.
+        pub fn spec_installed(&self) -> u64 {
+            self.shared.spec_installed.load(Ordering::Relaxed)
+        }
         pub fn try_event(&self) -> Option<EngineEvent> {
             self.events.try_recv().ok()
         }
@@ -748,7 +980,7 @@ mod threaded {
     fn worker_loop(
         mut core: EngineCore,
         rx: Receiver<Msg>,
-        compile_tx: Sender<(Arc<Design>, u64)>,
+        compile_tx: Sender<Job>,
         events: Sender<EngineEvent>,
         shared: Arc<Shared>,
         clock: Clock<'_>,
@@ -767,6 +999,9 @@ mod threaded {
             *spare = Some(old);
             shared.tick.store(core.tick_count(), Ordering::Relaxed);
             shared.revision.store(core.revision(), Ordering::Relaxed);
+            shared
+                .spec_installed
+                .store(core.spec_installed(), Ordering::Relaxed);
         };
 
         // Returns false on shutdown.
@@ -780,14 +1015,19 @@ mod threaded {
                 Msg::SetMemProbes(p) => core.set_mem_probes(p),
                 Msg::RequestMems => core.request_mems(),
                 Msg::Load(d, rev) => {
-                    let _ = compile_tx.send((d, rev));
+                    let _ = compile_tx.send(Job::Compile(d, rev));
                 }
                 Msg::Compiled(rev, Ok(p)) => {
                     let _ = events.send(core.install(p, rev));
                 }
                 #[cfg(feature = "jit")]
-                Msg::Jitted(rev, code) => {
+                Msg::Jitted(rev, Some(code)) => {
                     core.install_jit(rev, code);
+                }
+                #[cfg(feature = "jit")]
+                Msg::Jitted(rev, None) => core.jit_given_up(rev),
+                Msg::SpecBuilt(rev, built) => {
+                    core.install_spec(rev, built);
                 }
                 Msg::Compiled(revision, Err(errors)) => {
                     let _ = events.send(EngineEvent::CompileFailed { revision, errors });
@@ -809,6 +1049,9 @@ mod threaded {
                 }
             }
             core.run(BATCH, clock);
+            for job in core.spec_jobs() {
+                let _ = compile_tx.send(Job::Spec(job));
+            }
             if core.dirty() || core.mems_stale() || !syncs.is_empty() {
                 publish(&mut core, &mut spare);
             }

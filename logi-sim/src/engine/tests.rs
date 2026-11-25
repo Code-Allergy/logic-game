@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::netlist::{Design, NodeKind};
+use crate::sim::SpecOptions;
 
 /// A clock that advances by `tick` on every read, plus manual jumps. Reads
 /// must advance enough that a chunk of ticks looks costly; otherwise the
@@ -487,6 +488,315 @@ fn jit_tiering_runs_the_guarded_layout() {
     assert!(core.sim().unwrap().jit_active());
 }
 
+// ── Specialization (core, driven by hand) ───────────────────────────────
+
+/// A microcoded machine: a 4-bit program counter addresses a ROM whose
+/// word selects the ALU operation (a key computed from state), a mode
+/// register loaded from input `ld` decides whether the result is
+/// inverted. Probes: the accumulator and the mode. `extra` is an edit.
+fn micro_design(extra: bool) -> (Design, NodeId, NodeId, NetId, NetId) {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let ld = b.input("ld", 1);
+    let one = b.one();
+    let zero = b.zero(1);
+    let pc = b.counter(4, one, zero);
+    let words: Vec<u64> = (0..16u64).map(|k| (k * 0x5b + 3) & 0xff).collect();
+    let uw = b.rom(pc, 8, &words);
+    let op = b.split(uw, 0, 2);
+    let xm = b.split(x, 0, 2);
+    let mode = b.register(ld, xm);
+    let (acc_reg, acc) = b.state_placeholder(NodeKind::Register { w: 8 });
+    let (sum, _) = b.add(acc, x, None);
+    let xo = b.xor(acc, x);
+    let an = b.and(acc, x);
+    let alu = b.mux_n(op, &[sum, xo, an, acc]);
+    let inv = b.eq_const(mode, 3);
+    let nalu = b.not(alu);
+    let next = b.mux(inv, alu, nalu);
+    b.connect(one, (acc_reg, 0));
+    b.connect(next, (acc_reg, 1));
+    b.output("acc", acc);
+    b.output("mode", mode);
+    if extra {
+        let y = b.input("y", 1);
+        let ny = b.not(y);
+        b.output("ny", ny);
+    }
+    let x_node = d.root_def().nets[x].driver.0;
+    let ld_node = d.root_def().nets[ld].driver.0;
+    (d, x_node, ld_node, acc, mode)
+}
+
+/// Options that make everything happen within a few thousand ticks.
+fn quick_spec() -> SpecOptions {
+    SpecOptions {
+        window: 256,
+        hot: 4,
+        plan_window: 128,
+        samples: 32,
+        ..SpecOptions::default()
+    }
+}
+
+/// A core running `micro_design` with these runtime options.
+fn micro_core(sim_options: SimOptions, spec_driven: bool) -> (EngineCore, NodeId, NodeId) {
+    let (d, x, ld, acc, mode) = micro_design(false);
+    let mut core = EngineCore::new(Options::debug());
+    core.drive_spec(spec_driven);
+    core.set_sim_options(sim_options);
+    core.load(&d, 1);
+    core.set_input(x, 0x5a);
+    core.set_input(ld, 1);
+    core.set_probes(probes(acc, mode));
+    (core, x, ld)
+}
+
+fn run_ticks(core: &mut EngineCore, n: u64) {
+    core.step(n);
+    core.run(Duration::from_secs(10), &|| Duration::ZERO);
+}
+
+/// Hand out and build everything the core asks for (what the compile
+/// thread does), install it, and return how many builds ran.
+fn build_all(core: &mut EngineCore) -> usize {
+    let mut n = 0;
+    loop {
+        let jobs = core.spec_jobs();
+        if jobs.is_empty() {
+            return n;
+        }
+        assert!(jobs.len() <= SPEC_INFLIGHT);
+        for job in jobs {
+            core.install_spec(job.revision, job.build());
+            n += 1;
+        }
+    }
+}
+
+fn same_frame(a: &mut EngineCore, b: &mut EngineCore) {
+    let (mut fa, mut fb) = (ProbeFrame::default(), ProbeFrame::default());
+    a.publish(&mut fa);
+    b.publish(&mut fb);
+    assert_eq!((fa.tick, &fa.values), (fb.tick, &fb.values));
+}
+
+/// Requests flow out of the core, bodies come back and install, and
+/// every frame equals the one of a core without specialization; with the
+/// engine driving the builds, the `Sim` never builds inline.
+#[test]
+fn spec_requests_flow_and_frames_match() {
+    let spec = SimOptions {
+        spec: Some(quick_spec()),
+        ..SimOptions::default()
+    };
+    let (mut want, ..) = micro_core(SimOptions::default(), false);
+    let (mut core, x, ld) = micro_core(spec.clone(), true);
+    assert!(core.sim().unwrap().spec_stats().awaiting_plan);
+    let mut builds = 0;
+    for round in 0..40 {
+        // Inputs change now and then: keys change with them.
+        if round % 10 == 9 {
+            for c in [&mut want, &mut core] {
+                c.set_input(x, 0x11 + round);
+                c.set_input(ld, 0);
+            }
+        }
+        for c in [&mut want, &mut core] {
+            run_ticks(c, 300);
+        }
+        assert_eq!(core.spec_inflight(), 0);
+        builds += build_all(&mut core);
+        same_frame(&mut want, &mut core);
+    }
+    let st = core.sim().unwrap().spec_stats();
+    assert!(!st.awaiting_plan && st.keyed_phases > 0, "{st:?}");
+    assert!(st.installed as usize >= 2 && builds > 1, "{st:?}");
+    assert!(st.bodies > 0 && st.hits > 0, "{st:?}");
+    assert_eq!(st.installed + st.stale + st.dropped, st.requested, "{st:?}");
+}
+
+/// Without `drive_spec` the core hands out nothing; the `Sim` builds
+/// inline as before.
+#[test]
+fn spec_inline_without_a_driver() {
+    let spec = SimOptions {
+        spec: Some(quick_spec()),
+        ..SimOptions::default()
+    };
+    let (mut core, ..) = micro_core(spec, false);
+    run_ticks(&mut core, 6000);
+    assert!(core.spec_jobs().is_empty());
+    assert!(core.sim().unwrap().spec_stats().installed > 0);
+}
+
+/// The plan goes first, in-flight builds are capped, and the rest wait in
+/// the core.
+#[test]
+fn spec_jobs_are_capped_and_the_plan_goes_first() {
+    let spec = SimOptions {
+        spec: Some(quick_spec()),
+        ..SimOptions::default()
+    };
+    let (mut core, ..) = micro_core(spec, true);
+    run_ticks(&mut core, 400);
+    let first = core.spec_jobs();
+    assert_eq!(first.len(), 1);
+    assert!(first[0].is_plan());
+    assert!(core.spec_jobs().is_empty(), "no more asked of the Sim yet");
+    assert_eq!(core.spec_inflight(), 1);
+    let job = first.into_iter().next().unwrap();
+    assert!(core.install_spec(job.revision, job.build()));
+    // Bodies: never more than SPEC_INFLIGHT out at a time.
+    let mut out = Vec::new();
+    for _ in 0..30 {
+        run_ticks(&mut core, 300);
+        out.extend(core.spec_jobs());
+        assert!(core.spec_inflight() <= SPEC_INFLIGHT);
+        assert!(out.len() <= SPEC_INFLIGHT);
+    }
+    assert!(!out.is_empty() && out.iter().all(|j| !j.is_plan()));
+}
+
+/// A new program revision drops the builds of the old one, however far
+/// along they were, and the new program gets its own.
+#[test]
+fn spec_builds_of_an_old_revision_are_dropped() {
+    let spec = SimOptions {
+        spec: Some(quick_spec()),
+        ..SimOptions::default()
+    };
+    let (mut core, ..) = micro_core(spec, true);
+    run_ticks(&mut core, 600);
+    build_all(&mut core);
+    run_ticks(&mut core, 2000);
+    // Hold a handful of builds back, as a slow compile thread does.
+    let held = core.spec_jobs();
+    assert!(!held.is_empty());
+    let built: Vec<_> = held.iter().map(|j| (j.revision, j.build())).collect();
+    // An edit: revision 2 replaces the program.
+    let (d2, ..) = micro_design(true);
+    core.load(&d2, 2);
+    assert_eq!(core.spec_inflight(), 0);
+    for (rev, b) in built {
+        assert_eq!(rev, 1);
+        assert!(!core.install_spec(rev, b), "revision 1 is gone");
+    }
+    assert_eq!(core.sim().unwrap().spec_stats().installed, 0);
+    // Even labelled with the new revision the `Sim` refuses another
+    // program's build.
+    let (mut other, ..) = micro_core(
+        SimOptions {
+            spec: Some(quick_spec()),
+            ..SimOptions::default()
+        },
+        true,
+    );
+    run_ticks(&mut other, 600);
+    let jobs = other.spec_jobs();
+    assert!(!jobs.is_empty());
+    for j in jobs {
+        assert!(!core.install_spec(2, j.build()));
+    }
+    assert_eq!(core.sim().unwrap().spec_stats().installed, 0);
+    // The new program runs and specializes on its own.
+    run_ticks(&mut core, 6000);
+    build_all(&mut core);
+    run_ticks(&mut core, 6000);
+    assert!(core.sim().unwrap().spec_stats().installed > 0);
+}
+
+/// `reset` with builds in flight: the program is the same, so they may
+/// still install, and frames equal a core without specialization from
+/// tick 0 again.
+#[test]
+fn spec_survives_a_reset_with_builds_in_flight() {
+    let spec = SimOptions {
+        spec: Some(quick_spec()),
+        ..SimOptions::default()
+    };
+    let (mut core, ..) = micro_core(spec, true);
+    run_ticks(&mut core, 600);
+    let jobs = core.spec_jobs();
+    assert!(!jobs.is_empty());
+    let built: Vec<_> = jobs.iter().map(|j| (j.revision, j.build())).collect();
+    core.reset();
+    for (rev, b) in built {
+        core.install_spec(rev, b);
+    }
+    let mut want = micro_core(SimOptions::default(), false).0;
+    for c in [&mut want, &mut core] {
+        run_ticks(c, 600);
+    }
+    for _ in 0..20 {
+        build_all(&mut core);
+        for c in [&mut want, &mut core] {
+            run_ticks(c, 300);
+        }
+        same_frame(&mut want, &mut core);
+    }
+}
+
+/// With the JIT, a tiered program's specialization waits for its native
+/// code (so that bodies get units), then `install_jit` and spec installs
+/// coexist and frames stay equal to the plain interpreter.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn spec_waits_for_native_code_then_coexists_with_it() {
+    let spec = SimOptions {
+        spec: Some(quick_spec()),
+        ..SimOptions::jit()
+    };
+    let (mut want, ..) = micro_core(SimOptions::default(), false);
+    let (mut core, ..) = {
+        let (d, x, ld, acc, mode) = micro_design(false);
+        let mut core = EngineCore::new(Options::debug());
+        core.drive_spec(true);
+        core.jit_tiered = true;
+        core.set_sim_options(spec.clone());
+        core.load(&d, 1);
+        core.set_input(x, 0x5a);
+        core.set_input(ld, 1);
+        core.set_probes(probes(acc, mode));
+        (core, x, ld)
+    };
+    for c in [&mut want, &mut core] {
+        run_ticks(c, 3000);
+    }
+    assert!(core.spec_jobs().is_empty(), "native code first");
+    assert_eq!(core.sim().unwrap().spec_stats().requested, 0);
+    // The compile thread's layout, as in the threaded engine.
+    let mut layout_options = spec.tier_layout();
+    layout_options.spec.as_mut().unwrap().inline_build = false;
+    let layout = Sim::with_options(Arc::clone(core.sim().unwrap().program()), layout_options);
+    assert!(core.install_jit(1, Arc::new(layout.compile_jit().unwrap())));
+    assert!(core.sim().unwrap().jit_active());
+    for _ in 0..30 {
+        build_all(&mut core);
+        for c in [&mut want, &mut core] {
+            run_ticks(c, 300);
+        }
+        same_frame(&mut want, &mut core);
+    }
+    let st = core.sim().unwrap().spec_stats();
+    assert!(st.installed > 1 && st.hits > 0, "{st:?}");
+    assert!(st.code_bytes > 0, "bodies came with native units: {st:?}");
+    // Native code that never comes (a failed compile) lets bodies through.
+    let (mut late, ..) = micro_core(SimOptions::default(), true);
+    late.jit_tiered = true;
+    let (d, ..) = micro_design(false);
+    late.set_sim_options(spec);
+    late.load(&d, 3);
+    run_ticks(&mut late, 600);
+    assert!(late.spec_jobs().is_empty());
+    late.jit_given_up(2);
+    assert!(late.spec_jobs().is_empty(), "another revision");
+    late.jit_given_up(3);
+    assert!(!late.spec_jobs().is_empty());
+}
+
 // ── Threaded engine ──────────────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -627,6 +937,78 @@ mod threaded {
                 (a.revision, a.tick, &a.values),
                 (b.revision, b.tick, &b.values)
             );
+        }
+    }
+
+    /// The threaded engine with adaptive specialization (the compile thread
+    /// builds, the worker installs between batches) shows the same frames
+    /// as without, across an edit, with and without the JIT; bodies do
+    /// arrive.
+    #[test]
+    fn spec_builds_off_thread_show_the_same_frames() {
+        let (d1, x, ld, acc, mode) = micro_design(false);
+        let (d2, ..) = micro_design(true);
+        let mut variants = vec![SimOptions::default()];
+        #[cfg(feature = "jit")]
+        variants.push(SimOptions::jit());
+        for base in variants {
+            let spec = SimOptions {
+                spec: Some(quick_spec()),
+                ..base.clone()
+            };
+            let engines = [
+                Engine::spawn_with(Options::debug(), base),
+                Engine::spawn_with(Options::debug(), spec),
+            ];
+            for e in &engines {
+                e.load(Arc::new(d1.clone()), 1);
+                assert!(matches!(
+                    e.wait_event(Duration::from_secs(5)),
+                    Some(EngineEvent::Loaded { revision: 1, .. })
+                ));
+                e.set_input(x, 0x5a);
+                e.set_input(ld, 1);
+                e.set_probes(probes(acc, mode));
+            }
+            let mut seen = 0;
+            let t0 = Instant::now();
+            // Until the bodies have come (and a while after), in steps.
+            let mut rounds = 0;
+            while (seen < 3 || rounds < 40) && t0.elapsed() < Duration::from_secs(60) {
+                rounds += 1;
+                for e in &engines {
+                    e.step(1000);
+                    e.sync();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                let (a, b) = (engines[0].frame(), engines[1].frame());
+                assert_eq!(
+                    (a.revision, a.tick, &a.values),
+                    (b.revision, b.tick, &b.values)
+                );
+                seen = engines[1].spec_installed();
+            }
+            assert!(seen >= 3, "bodies installed on the worker: {seen}");
+            assert_eq!(engines[0].spec_installed(), 0);
+            // An edit drops the old program's builds; the new one starts over.
+            for e in &engines {
+                e.load(Arc::new(d2.clone()), 2);
+                assert!(matches!(
+                    e.wait_event(Duration::from_secs(5)),
+                    Some(EngineEvent::Loaded { revision: 2, .. })
+                ));
+            }
+            for n in [1, 300, 4000, 5000] {
+                for e in &engines {
+                    e.step(n);
+                    e.sync();
+                }
+                let (a, b) = (engines[0].frame(), engines[1].frame());
+                assert_eq!(
+                    (a.revision, a.tick, &a.values),
+                    (b.revision, b.tick, &b.values)
+                );
+            }
         }
     }
 
