@@ -1657,6 +1657,7 @@ pub fn workspace_io_system(
     mut members: Query<&mut CircuitMember, Allow<bevy::ecs::entity_disabling::Disabled>>,
     mut revision: ResMut<WorkspaceRevision>,
     mut feedback: ResMut<AuthoringFeedback>,
+    save_outcome: Option<ResMut<super::SaveOutcome>>,
     editor_state: Option<ResMut<crate::editor::EditorState>>,
 ) {
     let Some(name) = save_events.read().last().map(|ev| ev.name.clone()) else {
@@ -1707,6 +1708,9 @@ pub fn workspace_io_system(
             Err(err)
         }
     };
+    if let Some(mut save_outcome) = save_outcome {
+        save_outcome.0 = Some(outcome.clone());
+    }
     if let Some(mut editor_state) = editor_state {
         if outcome.is_ok() {
             editor_state.saved_workspaces = None;

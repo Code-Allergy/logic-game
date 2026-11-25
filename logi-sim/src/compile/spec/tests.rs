@@ -48,9 +48,12 @@ fn settle(p: &Program, body: &Body, slots: &mut [u64], mems: &[Vec<u64>], tick: 
         for k in b.start..b.start + b.len {
             let i = body.instrs[k as usize];
             for (is, x) in [(sa, i.a), (sb, i.b), (sc, i.c)] {
+                if !is {
+                    continue; // a literal field
+                }
                 let r = written_rank[x as usize];
                 assert!(
-                    !is || r == u32::MAX || r < b.rank,
+                    r == u32::MAX || r < b.rank,
                     "operand {x} of {i:?} (rank {}) not written before",
                     b.rank
                 );
@@ -675,4 +678,73 @@ fn ram_reads_and_unknown_state_stay_general() {
     let cx = SpecContext::new(&p, &body, &possible, phase).unwrap();
     let spec = cx.specialize(&p, &[], &[]);
     assert!(spec.ops() <= body.ops());
+}
+
+/// A layout of more than 64 bits cannot pack every field: it is refused,
+/// and an oversized one assumes nothing about the bits its key drops (a
+/// 64-bit field then a 1-bit field pack the same key for either value of
+/// the second).
+#[test]
+fn oversized_key_layouts_assume_only_what_they_pack() {
+    let fields = vec![
+        KeyField { slot: 1, mask: ALL },
+        KeyField { slot: 2, mask: 1 },
+    ];
+    assert!(KeyLayout::try_new(fields.clone()).is_none());
+    assert!(KeyLayout::try_new(vec![fields[0]]).is_some());
+    let layout = KeyLayout::new(fields);
+    assert!(!layout.fits());
+    let (a, b) = ([0, 7, 0], [0, 7, 1]);
+    assert_eq!(layout.pack(&a), layout.pack(&b));
+    let assumed = layout.assume(layout.pack(&a));
+    assert_eq!(assumed[0], (1, Known::constant(7)));
+    assert_eq!(
+        assumed[1],
+        (2, Known::UNKNOWN),
+        "the dropped bit is not known"
+    );
+    // A field straddling bit 64 keeps the bits that fit.
+    let layout = KeyLayout::new(vec![
+        KeyField {
+            slot: 1,
+            mask: ALL >> 2,
+        },
+        KeyField {
+            slot: 2,
+            mask: 0b1111,
+        },
+    ]);
+    let assumed = layout.assume(ALL);
+    assert_eq!(assumed[1], (2, Known::bits(0b11, 0b11)));
+}
+
+/// A `Clock`'s fields are literals: a period past the slot count is not
+/// read as a slot (possible bits, specialization without a known phase).
+#[test]
+fn a_long_clock_period_is_not_a_slot() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 4);
+    let clk = b.clock(1000, 500, 3);
+    let held = b.register(clk, x);
+    let c4 = b.zext(clk, 4);
+    let y = b.xor(held, c4);
+    let q = b.register(clk, y);
+    b.output("q", q);
+    let p = compile(&d, &Options::default()).unwrap();
+    assert!(p.phases.is_none());
+    let clocks: Vec<u32> = p
+        .blocks
+        .iter()
+        .filter(|bl| bl.op == Op::Clock)
+        .flat_map(|bl| &p.instrs[bl.start as usize..(bl.start + bl.len) as usize])
+        .map(|i| i.a)
+        .collect();
+    assert!(
+        clocks.iter().any(|&a| a >= p.slot_count),
+        "{clocks:?} vs {}",
+        p.slot_count
+    );
+    check_design("clock 1000", &d, 6, 4);
 }

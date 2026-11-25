@@ -620,8 +620,9 @@ Routing is the editor's job and happens only in the game host.
 - The game binds 127.0.0.1 on a free port. Every request must carry
   `Authorization: Bearer <token>`, a random token made for that run;
   without it the answer is 401. The address and the token are written to
-  `mcp.json` in the game's data folder (beside `workspaces/`) and the
-  address is printed at start:
+  `mcp.json` in the game's data folder (beside `workspaces/`), readable
+  by its owner only on Unix (mode 0600), and the address is printed at
+  start:
 
   ```json
   {"url": "http://127.0.0.1:41873/mcp", "token": "…", "pid": 12345}
