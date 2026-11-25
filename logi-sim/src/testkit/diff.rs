@@ -14,7 +14,7 @@ use super::rng::Rng;
 use crate::compile::{Options, Program, StateLoc, compile};
 use crate::netlist::{Design, mask};
 use crate::reference::Reference;
-use crate::sim::{Sim, SimOptions};
+use crate::sim::{PhasePlan, Sim, SimOptions, SpecOptions, SpecPlan, spec_contexts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mismatch {
@@ -300,6 +300,17 @@ pub(crate) fn observe(sim: &Sim) -> Observed {
 /// Runs the program as is, with phase variants off, with fusion off and
 /// with guards off; the reference runs none of them.
 pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
+    check_batches_with(p, seed, None)
+}
+
+/// [`check_batches`] with state-keyed specialization
+/// ([`SimOptions::spec`]) on every runtime variant (the reference runs
+/// none).
+pub fn check_batches_with(
+    p: &Arc<Program>,
+    seed: u64,
+    spec: Option<&SpecOptions>,
+) -> Result<(), String> {
     let plain = SimOptions {
         fuse: false,
         phases: false,
@@ -358,6 +369,10 @@ pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
         .iter()
         .cloned()
         .chain(jit)
+        .map(|o| SimOptions {
+            spec: spec.cloned(),
+            ..o
+        })
         .map(|o| Sim::with_options(Arc::clone(p), o))
         .collect();
     for s in &sims {
@@ -548,4 +563,95 @@ pub fn check_jit_design(d: &Design, ticks: u64, seed: u64) -> Result<(), String>
         check_batches(&p, seed)?;
     }
     Ok(())
+}
+
+// ── Specialization plans (`SimOptions::spec`) ─────────────────────────────
+
+/// A plan for testing specialization on `p`: per phase of the default
+/// runtime layout, up to three key candidates
+/// ([`crate::compile::spec::SpecContext::candidates`]) drawn by `seed`,
+/// each on its support or a random sub-mask of it (any sub-mask is exact),
+/// at most 12 key bits; bodies for every value of a key of up to 4 bits,
+/// and for the 8 most frequent keys of a sample run of `ticks` ticks with
+/// random inputs. A phase without candidates is not keyed.
+pub fn spec_plan(p: &Arc<Program>, seed: u64, ticks: u64) -> SpecPlan {
+    use crate::compile::spec::{KeyField, KeyLayout};
+    let contexts = spec_contexts(p, &SimOptions::default());
+    let mut rng = Rng::new(seed ^ 0x5eed_5bec);
+    let mut layouts: Vec<Option<KeyLayout>> = Vec::new();
+    for cx in &contexts {
+        let Some(cx) = cx else {
+            layouts.push(None);
+            continue;
+        };
+        let cands = cx.candidates(p);
+        let mut fields: Vec<KeyField> = Vec::new();
+        let mut width = 0;
+        for _ in 0..3 {
+            if cands.is_empty() {
+                break;
+            }
+            let c = rng.pick(&cands);
+            if fields.iter().any(|f| f.slot == c.slot) {
+                continue;
+            }
+            let mut m = c.support;
+            if rng.coin() {
+                m &= rng.next_u64() | m.isolate_lowest_one();
+            }
+            while m.count_ones() + width > 12 {
+                m &= m - 1;
+            }
+            if m != 0 {
+                width += m.count_ones();
+                fields.push(KeyField {
+                    slot: c.slot,
+                    mask: m,
+                });
+            }
+        }
+        layouts.push((!fields.is_empty()).then(|| KeyLayout::new(fields)));
+    }
+    // Key frequencies of a sample run (full settles compute every slot).
+    let period = layouts.len().max(1) as u64;
+    let mut freq: Vec<std::collections::HashMap<u64, u64>> =
+        vec![Default::default(); layouts.len()];
+    let mut sim = Sim::with_options(Arc::clone(p), SimOptions::baseline());
+    let slots: Vec<u32> = (0..p.slot_count).collect();
+    for _ in 0..ticks {
+        for (port, q) in p.ports.inputs.iter().enumerate() {
+            sim.set_input(port, rng.next_u64() & mask(q.width));
+        }
+        sim.tick();
+        let k = (sim.tick_count() % period) as usize;
+        if let Some(Some(l)) = layouts.get(k) {
+            let row: Vec<u64> = slots.iter().map(|&s| sim.read(s)).collect();
+            *freq[k].entry(l.pack(&row)).or_default() += 1;
+        }
+    }
+    let phases = layouts
+        .into_iter()
+        .zip(freq)
+        .map(|(l, f)| {
+            let layout = l?;
+            let w = layout.width();
+            let mut keys: Vec<u64> = if w <= 4 {
+                (0..1u64 << w).collect()
+            } else {
+                Vec::new()
+            };
+            let mut hot: Vec<(u64, u64)> = f.into_iter().collect();
+            hot.sort_by_key(|&(k, n)| (std::cmp::Reverse(n), k));
+            keys.extend(hot.into_iter().take(8).map(|x| x.0));
+            Some(PhasePlan { layout, keys })
+        })
+        .collect();
+    SpecPlan { phases }
+}
+
+/// [`SpecOptions`] with `plan`.
+pub fn spec_options(plan: SpecPlan) -> SpecOptions {
+    SpecOptions {
+        plan: Some(Arc::new(plan)),
+    }
 }

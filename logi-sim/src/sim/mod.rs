@@ -49,8 +49,11 @@ mod pool {
         }
     }
 }
+mod spec;
 #[cfg(test)]
 mod tests;
+
+pub use spec::{PhasePlan, SpecOptions, SpecPlan, SpecStats, spec_contexts};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -151,6 +154,14 @@ pub struct SimOptions {
     /// the compiler and the phase variants are part of the [`Program`]
     /// and stay: they are not covered (see `set_mem_word`).
     pub known_bits: bool,
+    /// State-keyed specialization (issue #117, `docs/adaptive-spec.md`):
+    /// in a fused tick of a phase the plan keys, run the key's prefix,
+    /// then the body built for the key's value, or the fallback (the
+    /// general body without the prefix's work) on a miss. Needs `fuse`;
+    /// single-threaded only. While a phase is keyed, [`Sim::run`] runs no
+    /// supersteps. Like the known-bits bodies, a ROM write switches it off
+    /// until [`Sim::reset`]. Off (`None`) by default.
+    pub spec: Option<SpecOptions>,
 }
 
 /// Default [`SimOptions::par_min`] (see the design doc, section 13).
@@ -172,6 +183,7 @@ impl Default for SimOptions {
             superstep_ticks: DEFAULT_SUPERSTEP_TICKS,
             superstep_chunk: DEFAULT_SUPERSTEP_CHUNK,
             known_bits: true,
+            spec: None,
         }
     }
 }
@@ -345,8 +357,11 @@ struct Layout {
     period: u64,
     full: Vec<u16>,
     fused: Vec<u16>,
-    /// Some fused body is a known-bits body.
+    /// Some fused body is a known-bits body, or some phase is keyed: the
+    /// bodies fold ROM contents.
     folded: bool,
+    /// Per phase, its key and specialized bodies (empty: none keyed).
+    spec: Vec<Option<spec::PhaseSpec>>,
 }
 
 /// What a ROM write sets aside (see [`Sim::rom_changed`]).
@@ -354,6 +369,7 @@ struct Stash {
     runs: Vec<Run>,
     full: Vec<u16>,
     fused: Vec<u16>,
+    spec: Vec<Option<spec::PhaseSpec>>,
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     jit: Option<Arc<jit::JitProgram>>,
 }
@@ -367,96 +383,132 @@ impl Layout {
             full: vec![0],
             fused: vec![0],
             folded: false,
+            spec: Vec::new(),
         }
     }
 }
 
 /// The bodies of `program` under `options`: clock-phase variants, fused-run
-/// bodies (with known-bits folds when `known_bits`), guards.
-fn build_layout(program: &Arc<Program>, options: &SimOptions, known_bits: bool) -> Layout {
+/// bodies, guards, and, when `folds` (the ROMs hold the program's
+/// contents), known-bits fused bodies (`options.known_bits`) and the
+/// specialized bodies of `options.spec`.
+/// Run indices specialized bodies leave free for the plain runs added
+/// after them: a full and a fused body per clock phase (at most 8 phases)
+/// and the program's own, with room to spare.
+const SPEC_RUN_RESERVE: usize = 64;
+
+fn build_layout(program: &Arc<Program>, options: &SimOptions, folds: bool) -> Layout {
+    use crate::compile::{guard, phases, spec as cspec};
     let Layout {
         mut runs,
         mut period,
         mut full,
         mut fused,
         mut folded,
+        spec: _,
     } = Layout::own();
-    {
-        {
-            use crate::compile::{guard, phases, spec};
-            let guards = options.guard && (options.jit || options.guard_interpreter);
-            let add = |runs: &mut Vec<Run>, body: Option<Body>| {
-                runs.push(Run::new(program, body, options.stream));
-                u16::try_from(runs.len()).expect("run index fits u16")
+    let guards = options.guard && (options.jit || options.guard_interpreter);
+    let add = |runs: &mut Vec<Run>, body: Option<Body>| {
+        runs.push(Run::new(program, body, options.stream));
+        u16::try_from(runs.len()).expect("run index fits u16")
+    };
+    let n_slots = program.slot_count as usize;
+    // Full settles are observed: guard only what nothing exposes, and
+    // nothing under `Options::debug`.
+    let exposed = (guards && !program.debug_options).then(|| phases::exposed(program));
+    let guard_full = |b: &Body| {
+        let e = exposed.as_deref()?;
+        guard::guard_with(n_slots, b, Some(e), options.guard_min)
+    };
+    // Fused-run bodies are guarded alike, specialized or not.
+    let guard_fused = |b: &Body| {
+        guards
+            .then(|| guard::guard_with(n_slots, b, None, options.guard_min))
+            .flatten()
+    };
+    let plan = options
+        .spec
+        .as_ref()
+        .and_then(|s| s.plan.as_deref())
+        .filter(|_| folds && options.fuse);
+    let known_bits = folds && options.known_bits;
+    let possible =
+        ((known_bits || plan.is_some()) && options.fuse).then(|| cspec::possible_bits(program));
+    let mut specs: Vec<Option<spec::PhaseSpec>> = Vec::new();
+    // A fused-run body: pruned to its commits' cone, folded by the known
+    // bits (no key), then guarded; and the phase's specialized bodies
+    // when the plan keys it.
+    // `same` is the run to use when nothing changes the body.
+    let mut fused_body = |runs: &mut Vec<Run>, b: &Body, phase: Option<u64>, same: u16| -> u16 {
+        let k = phase.unwrap_or(0) as usize;
+        let (pruned, cx) = spec::fused_context(program, b, possible.as_deref(), phase);
+        let base = pruned.as_ref().unwrap_or(b);
+        let known = cx
+            .as_ref()
+            .filter(|_| known_bits)
+            .map(|c| c.fallback(program, &[]))
+            .filter(|k| k.instrs.len() < base.instrs.len());
+        folded |= known.is_some();
+        let body = known.or(pruned);
+        let body = guard_fused(body.as_ref().unwrap_or(b)).or(body);
+        let f = match body {
+            Some(body) => add(runs, Some(body)),
+            None => same,
+        };
+        let phase_plan = plan.and_then(|p| p.phases.get(k)?.as_ref());
+        if let (Some(pp), Some(cx)) = (phase_plan, cx.as_ref()) {
+            // Leave room for the runs every later phase still adds (its
+            // full and fused bodies) under the u16 run index.
+            let mut add_spec = |body: Body| {
+                (runs.len() < usize::from(u16::MAX) - SPEC_RUN_RESERVE)
+                    .then(|| add(runs, Some(body)))
             };
-            let n_slots = program.slot_count as usize;
-            // Full settles are observed: guard only what nothing exposes,
-            // and nothing under `Options::debug`.
-            let exposed = (guards && !program.debug_options).then(|| phases::exposed(program));
-            let guard_full = |b: &Body| {
-                let e = exposed.as_deref()?;
-                guard::guard_with(n_slots, b, Some(e), options.guard_min)
-            };
-            let possible = (known_bits && options.fuse).then(|| spec::possible_bits(program));
-            // A fused-run body: pruned to its commits' cone, folded by
-            // the known bits (no key), then guarded.
-            let mut fused_body = |b: &Body, phase: Option<u64>| {
-                let pruned = phases::prune(program, b);
-                let base = pruned.as_ref().unwrap_or(b);
-                let known = possible
-                    .as_deref()
-                    .and_then(|poss| spec::SpecContext::new(program, base, poss, phase))
-                    .map(|c| c.fallback(program, &[]))
-                    .filter(|k| k.instrs.len() < base.instrs.len());
-                folded |= known.is_some();
-                let pruned = known.or(pruned);
-                let guarded = guards
-                    .then(|| {
-                        let b = pruned.as_ref().unwrap_or(b);
-                        guard::guard_with(n_slots, b, None, options.guard_min)
-                    })
-                    .flatten();
-                guarded.or(pruned)
-            };
-            let own = || Body {
-                blocks: program.blocks.clone(),
-                instrs: program.instrs.clone(),
-                imms: program.imms.clone(),
-                commits: program.commits.clone(),
-                guards: Vec::new(),
-            };
-            match program.phases.as_deref() {
-                Some(ph) if options.phases => {
-                    period = u64::from(ph.period);
-                    full.clear();
-                    fused.clear();
-                    for (k, v) in ph.variants.iter().enumerate() {
-                        let f = add(&mut runs, Some(guard_full(v).unwrap_or_else(|| v.clone())));
-                        full.push(f);
-                        let body = options
-                            .fuse
-                            .then(|| fused_body(v, Some(k as u64)))
-                            .flatten();
-                        fused.push(match body {
-                            Some(b) => add(&mut runs, Some(b)),
-                            None => f,
-                        });
-                    }
+            let guard_spec = |body: Body| guard_fused(&body).unwrap_or(body);
+            let ps = spec::PhaseSpec::build(program, cx, pp, f, &mut add_spec, &guard_spec);
+            folded |= ps.is_some();
+            specs.resize(k + 1, None);
+            specs[k] = ps;
+        }
+        f
+    };
+    let own = || Body {
+        blocks: program.blocks.clone(),
+        instrs: program.instrs.clone(),
+        imms: program.imms.clone(),
+        commits: program.commits.clone(),
+        guards: Vec::new(),
+    };
+    match program.phases.as_deref() {
+        Some(ph) if options.phases => {
+            period = u64::from(ph.period);
+            full.clear();
+            fused.clear();
+            for (k, v) in ph.variants.iter().enumerate() {
+                let f = add(&mut runs, Some(guard_full(v).unwrap_or_else(|| v.clone())));
+                full.push(f);
+                fused.push(match options.fuse {
+                    true => fused_body(&mut runs, v, Some(k as u64), f),
+                    false => f,
+                });
+            }
+        }
+        _ => {
+            if program.packs.is_empty() && (options.fuse || exposed.is_some()) {
+                let own = own();
+                if let Some(b) = guard_full(&own) {
+                    full[0] = add(&mut runs, Some(b));
+                    fused[0] = full[0];
                 }
-                _ => {
-                    if program.packs.is_empty() && (options.fuse || exposed.is_some()) {
-                        let own = own();
-                        if let Some(b) = guard_full(&own) {
-                            full[0] = add(&mut runs, Some(b));
-                            fused[0] = full[0];
-                        }
-                        if let Some(b) = options.fuse.then(|| fused_body(&own, None)).flatten() {
-                            fused[0] = add(&mut runs, Some(b));
-                        }
-                    }
+                if options.fuse {
+                    fused[0] = fused_body(&mut runs, &own, None, full[0]);
                 }
             }
         }
+    }
+    if specs.iter().all(Option::is_none) {
+        specs.clear();
+    } else {
+        specs.resize(period as usize, None);
     }
     Layout {
         runs,
@@ -464,6 +516,7 @@ fn build_layout(program: &Arc<Program>, options: &SimOptions, known_bits: bool) 
         full,
         fused,
         folded,
+        spec: specs,
     }
 }
 
@@ -482,9 +535,12 @@ pub struct Sim {
     /// Per tick residue: the body that settles a tick only its own commit
     /// observes (tick fusion), with the same commits as `full`.
     fused: Vec<u16>,
-    /// Whether some fused body is a known-bits body (reads ROM contents
-    /// to fold; see [`SimOptions::known_bits`]).
+    /// Whether some fused body is a known-bits or specialized body (reads
+    /// ROM contents to fold; see [`SimOptions::known_bits`]).
     folded: bool,
+    /// Per clock phase, its key and specialized bodies
+    /// ([`SimOptions::spec`]); empty when no phase is keyed.
+    spec: Vec<Option<spec::PhaseSpec>>,
     /// The body that settled the slots now: the next commit is its own
     /// (a known-bits body may not compute what the full body's commits
     /// read). Between calls it is the full body of the tick.
@@ -578,8 +634,9 @@ impl Sim {
             full,
             fused,
             folded,
+            spec,
         } = if pool.is_none() {
-            build_layout(&program, &options, options.known_bits)
+            build_layout(&program, &options, true)
         } else {
             Layout::own()
         };
@@ -597,6 +654,7 @@ impl Sim {
             full,
             fused,
             folded,
+            spec,
             last: 0,
             stash: None,
             options,
@@ -672,7 +730,23 @@ impl Sim {
         let p = &*self.program;
         let mut bodies = Vec::with_capacity(self.runs.len() + 1);
         let in_full = |k: usize| self.full.iter().any(|&f| f as usize == k);
-        let used = |k: usize| in_full(k) || self.fused.iter().any(|&f| f as usize == k);
+        // Specialized bodies, fallbacks and prefixes run too; a prefix's
+        // results are read by the key and the body after it, so all of
+        // them are stored (not `fused_only`).
+        let mut in_spec = vec![false; self.runs.len() + 1];
+        let mut is_prefix = vec![false; self.runs.len() + 1];
+        for ps in self.spec.iter().flatten() {
+            in_spec[ps.fallback as usize] = true;
+            if let Some(r) = ps.prefix {
+                is_prefix[r as usize] = true;
+            }
+            for (_, r) in ps.entries() {
+                in_spec[r as usize] = true;
+            }
+        }
+        let used = |k: usize| {
+            in_full(k) || in_spec[k] || is_prefix[k] || self.fused.iter().any(|&f| f as usize == k)
+        };
         bodies.push(jit::BodyRef {
             blocks: &p.blocks,
             instrs: &p.instrs,
@@ -693,14 +767,16 @@ impl Sim {
                 commits,
                 guards,
                 used: used(k + 1),
-                fused_only: !in_full(k + 1),
+                fused_only: !in_full(k + 1) && !is_prefix[k + 1],
             });
         }
         // The superstep: whole clock periods of fused ticks, starting at
-        // phase 0 (see `Sim::run`).
+        // phase 0 (see `Sim::run`). None while a phase is keyed: the
+        // superstep would run the general fused bodies (the two are
+        // alternatives until supersteps check keys).
         let o = &self.options;
         let (mut parts, mut live_end) = (Vec::new(), Vec::new());
-        if o.superstep && o.fuse && self.pool.is_none() {
+        if o.superstep && o.fuse && self.pool.is_none() && self.spec.is_empty() {
             let l = self.period;
             let n = o.superstep_ticks.max(1).div_ceil(l) * l;
             for i in 0..n {
@@ -743,6 +819,7 @@ impl Sim {
             full: self.full.clone(),
             fused: self.fused.clone(),
             folded: self.folded,
+            spec: self.spec_layout(),
         });
         Ok(code)
     }
@@ -762,6 +839,7 @@ impl Sim {
                     && k.full == self.full
                     && k.fused == self.fused
                     && k.folded == self.folded
+                    && k.spec == self.spec_layout()
             }) && c.bodies.len() == self.runs.len() + 1
                 && self.pool.is_none();
             if !fits {
@@ -1001,7 +1079,96 @@ impl Sim {
         self.commit(self.last);
         self.tick += 1;
         let k = (self.tick % self.period) as usize;
+        if !self.spec.is_empty() && self.spec[k].is_some() {
+            self.spec_settle(k);
+            return;
+        }
         self.settle(self.fused[k]);
+    }
+
+    /// The settle of a fused tick of keyed phase `k`: the inputs, the
+    /// key's prefix, then the body built for the key or the fallback (see
+    /// `sim/spec.rs`). The commit after it is the settled body's.
+    fn spec_settle(&mut self, k: usize) {
+        let p = &*self.program;
+        for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
+            self.slots[port.slot as usize] = v;
+        }
+        let ps = self.spec[k].as_ref().expect("a keyed phase");
+        let prefix = ps.prefix;
+        #[cfg(test)]
+        if spec::MUTATION.get() == 2 {
+            // Mutation: no prefix (a stale key, and a body missing the
+            // prefix's values).
+            let ps = self.spec[k].as_ref().expect("a keyed phase");
+            let key = ps.key(&self.slots);
+            let run = ps.lookup(key);
+            let run = if run == ps.fallback {
+                self.fused[k]
+            } else {
+                run
+            };
+            self.evaluate(run);
+            return;
+        }
+        if let Some(pre) = prefix {
+            // The prefix is part of this settle, not one of its own.
+            self.evaluate_body(pre);
+            #[cfg(feature = "counters")]
+            {
+                self.counters.settles -= 1;
+            }
+        }
+        let ps = self.spec[k].as_mut().expect("a keyed phase");
+        let run = ps.lookup(ps.key(&self.slots));
+        if run == ps.fallback {
+            ps.misses += 1;
+        } else {
+            ps.hits += 1;
+        }
+        self.evaluate(run);
+    }
+
+    /// Keyed phases, bodies, hits and misses ([`SimOptions::spec`]).
+    pub fn spec_stats(&self) -> SpecStats {
+        let mut s = SpecStats::default();
+        for ps in self.spec.iter().flatten() {
+            s.keyed_phases += 1;
+            s.bodies += ps.bodies();
+        }
+        // Set aside by a ROM write, the tables keep their counts.
+        let stashed = self.stash.as_ref().map(|st| &st.spec);
+        for ps in self
+            .spec
+            .iter()
+            .chain(stashed.into_iter().flatten())
+            .flatten()
+        {
+            s.hits += ps.hits;
+            s.misses += ps.misses;
+        }
+        s
+    }
+
+    /// The specialized runs, for telling layouts apart: per keyed phase,
+    /// its index, prefix, fallback, key fields and every key with its run.
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    fn spec_layout(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        for (k, ps) in self.spec.iter().enumerate() {
+            let Some(ps) = ps else { continue };
+            out.extend([k as u64, ps.prefix.map_or(u64::MAX, u64::from)]);
+            out.push(u64::from(ps.fallback));
+            let f = ps.field_words();
+            out.push(f.len() as u64);
+            out.extend(f);
+            let e = ps.entries();
+            out.push(e.len() as u64);
+            for (key, run) in e {
+                out.extend([key, u64::from(run)]);
+            }
+        }
+        out
     }
 
     /// The JIT's superstep, from a settled tick at phase 0: as many
@@ -1457,9 +1624,10 @@ impl Sim {
         }
     }
 
-    /// A ROM word changed: the known-bits fused bodies fold ROM reads
-    /// from the program's contents ([`SimOptions::known_bits`]), so set
-    /// them aside and run the unfolded fused bodies until [`Sim::reset`]
+    /// A ROM word changed: the known-bits fused bodies and the specialized
+    /// bodies fold ROM reads from the program's contents
+    /// ([`SimOptions::known_bits`], [`SimOptions::spec`]), so set them
+    /// aside and run the unfolded fused bodies until [`Sim::reset`]
     /// puts the contents back. (Native code is compiled again for the
     /// unfolded bodies when the `Sim` ran native code.) Folds the
     /// compiler and the phase variants did are part of the [`Program`] and
@@ -1475,11 +1643,12 @@ impl Sim {
             return;
         }
         let off = build_layout(&self.program, &self.options, false);
-        debug_assert!(off.period == self.period && !off.folded);
+        debug_assert!(off.period == self.period && !off.folded && off.spec.is_empty());
         self.stash = Some(Box::new(Stash {
             runs: std::mem::replace(&mut self.runs, off.runs),
             full: std::mem::replace(&mut self.full, off.full),
             fused: std::mem::replace(&mut self.fused, off.fused),
+            spec: std::mem::replace(&mut self.spec, off.spec),
             #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
             jit: self.jit.take(),
         }));
@@ -1501,12 +1670,14 @@ impl Sim {
             runs,
             full,
             fused,
+            spec,
             #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
             jit,
         } = *stash;
         self.runs = runs;
         self.full = full;
         self.fused = fused;
+        self.spec = spec;
         self.folded = true;
         self.last = self.full_run();
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]

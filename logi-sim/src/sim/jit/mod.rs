@@ -195,6 +195,8 @@ pub(crate) struct RunKey {
     pub fused: Vec<u16>,
     /// Whether the fused bodies fold ROM contents (`SimOptions::known_bits`).
     pub folded: bool,
+    /// The specialized runs (`Sim::spec_layout`).
+    pub spec: Vec<u64>,
 }
 
 /// Owns a `JITModule` and frees its code when dropped (a `JITModule` alone
