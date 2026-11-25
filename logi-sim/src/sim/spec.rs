@@ -140,6 +140,7 @@ impl PhaseSpec {
     }
 
     /// Key values with a body, and their runs (sorted by key).
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     pub fn entries(&self) -> Vec<(u64, u16)> {
         let mut v: Vec<(u64, u16)> = self.table.iter().map(|(&k, &r)| (k, r)).collect();
         v.sort_unstable();

@@ -1,7 +1,8 @@
 # Adaptive state-keyed specialization (issue #117)
 
 Status: compile side implemented (`compile/spec.rs`, package P1 below);
-runtime packages P2 to P9 designed here, not started.
+P2, P3 and the fixed-plan runtime P4 implemented (`sim/spec.rs`, section
+4 "P4 as built"); P5 to P9 designed here, not started.
 
 ## 1. Goal
 
@@ -195,6 +196,58 @@ struct PhaseSpec {                       // in Sim, per phase with a plan
 Run indices become `u16` (`full`, `fused`, `RunKey`, `commit`,
 `evaluate`): up to 65535 bodies, of which the cap keeps a few dozen.
 
+### P4 as built (fixed plan)
+
+Differences from the sketch above, which P5b builds on:
+
+- `SpecOptions` holds only `plan: Option<Arc<SpecPlan>>` for now (the
+  caps, window and thresholds come with P5b). The runtime's plan is
+  `sim::SpecPlan { phases: Vec<Option<sim::PhasePlan>> }` with
+  `PhasePlan { layout: KeyLayout, keys: Vec<u64> }`: the key values to
+  build bodies for are part of a fixed plan (P6's `compile::spec::plan`
+  types carry estimates instead; P5b maps one onto the other). A layout
+  wider than 64 bits or naming a slot past the program's leaves its
+  phase unkeyed; keys wider than the layout are ignored.
+- `PhaseSpec { fields, prefix: Option<u16>, fallback: u16, table:
+  FastMap<u64, u16>, hits, misses }` (run 0 is the program's own body,
+  so "no prefix" is `None`). The key is packed with a shift per
+  contiguous field mask and `pext` otherwise. When every key slot is
+  state, an input or a constant there is no prefix and the fallback *is*
+  the phase's fused run (the general body), so a miss costs nothing.
+- Bodies are built in `build_layout` (so `rom_changed`'s rebuild with
+  folds off drops them and the stash keeps them for `reset`). `folded`
+  is also set by a keyed phase, so a ROM poke switches specialization
+  off with `known_bits` off too.
+- `Sim::spec_stats() -> SpecStats { keyed_phases, bodies, hits, misses }`
+  (P5b extends it). `sim::spec_contexts(p, options)` gives the context of
+  each phase's fused body as the runtime builds it (for plans: P6's
+  sampling, tests, benches).
+- JIT: `compile_jit` compiles the spec runs with the others; a prefix is
+  not `fused_only` (the key and the body after it read every result).
+  `RunKey` gains `spec` (the tables' runs), so code for another plan is
+  refused. No superstep is compiled while any phase is keyed (step 1).
+- Counters: the prefix's instructions count, but not as a settle (one
+  settle per tick, as before).
+- Tests (`sim/spec/tests.rs`): `testkit::diff::check_batches_with` with
+  `testkit::diff::spec_plan` (up to three candidates per phase drawn by
+  seed, support or a random sub-mask, at most 12 bits; every value of
+  keys of up to 4 bits plus the 8 hottest of a sample run) on 5 designs
+  per `standard_configs` entry, default and debug options, plus
+  `check_pair` spec on against off and `check_jit` with spec; a
+  microcoded design (ROM word plus register key, with and without clock
+  phases, all, some and no keys); an always-missing key equal to off;
+  `last` across fused ticks, `tick`, `run`, `resettle`, `reset`,
+  `import_state`; counters against the bodies' sizes along the known key
+  sequence; ROM pokes; supersteps; native code of another plan refused;
+  300 bodies; mutations (bodies for the wrong key, skipped prefix) caught.
+- Measured (`spec_keys --bench`, greedy keys with bodies for the 64 most
+  frequent keys per phase, JIT, spec on against the default JIT with
+  supersteps; executed ops from a `counters` build): NES demo 739 -> 375
+  ops per tick; Blade Buster (MMC3, after 6M ticks) 805 -> 437. Speed:
+  see the P4 report numbers in the PR (the shared machine's spread is
+  large); 192 bodies take 1.5 to 1.9 MiB of native code (0.2 MiB
+  without), which is what P5b's caps are for.
+
 ### Per fused tick (`Sim::run`, the path without a superstep)
 
 ```text
@@ -347,7 +400,7 @@ parallel (separate files), then P5b, P7, P8, P9.
 | P1 | compile side: support analysis, candidates, specializer, `prune_bits`, report (**done**) | `compile/spec.rs`, `compile/spec/tests.rs`, `examples/spec_keys.rs` | - | opus |
 | P2 | known-bits fused bodies: every fused body becomes `SpecContext::fallback(p, &[])` (no key); ROM-poke switch-off | `sim/mod.rs` (fused-body construction), `sim/tests.rs` | P1, superstep merged | sonnet |
 | P3 | run index `u16` | `sim/mod.rs`, `sim/jit/mod.rs`, `sim/jit/superstep.rs` | superstep merged | sonnet |
-| P4 | fixed-plan runtime: `SpecOptions` with `plan`, `PhaseSpec`, prefix/fallback runs, dispatch in `run`, `last`, inline builds, JIT of spec bodies in `compile_jit`, counters, superstep exclusion | `sim/mod.rs`, new `sim/spec.rs`, `testkit/diff.rs` | P3 | opus |
+| P4 | fixed-plan runtime: `SpecOptions` with `plan`, `PhaseSpec`, prefix/fallback runs, dispatch in `run`, `last`, inline builds, JIT of spec bodies in `compile_jit`, counters, superstep exclusion (**done**) | `sim/mod.rs`, new `sim/spec.rs`, `testkit/diff.rs` | P3 | opus |
 | P5a | per-body JIT units: `jit::compile_unit`, `JitUnit`, freeing | new `sim/jit/unit.rs`, `sim/jit/mod.rs` (share emission) | P3 | sonnet |
 | P5b | adaptive tables: miss counters, hot detection, `spec_requests`/`build_spec`/`install_spec`, LRU eviction, caps, `spec_stats` | `sim/spec.rs`, `sim/mod.rs` | P4, P5a | opus |
 | P6 | automatic plan: `spec::choose_plan(contexts, samples, opts) -> SpecPlan` (pure, the report's greedy + `prune_bits`), runtime sampling window | `compile/spec.rs` (pure part), `sim/spec.rs` | P1 (pure part: none) | sonnet |
