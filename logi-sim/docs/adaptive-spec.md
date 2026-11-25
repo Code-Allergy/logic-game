@@ -4,7 +4,9 @@ Status: compile side implemented (`compile/spec.rs`, package P1 below);
 P2, P3, the fixed-plan runtime P4 and the adaptive tables P5 (with P6's
 sampling window) implemented (`sim/spec.rs`, section 4 "P4 as built" and
 "P5b as built"); the pure part of the plan choice (`compile/spec/plan.rs`,
-P6, section 3b); P7 to P9 designed here.
+P6, section 3b); P8 measured, partly built ("P8 as built": keyed
+supersteps do not pay, the superstep comes back where nothing is keyed);
+P7 and P9 designed here.
 
 ## 1. Goal
 
@@ -378,7 +380,7 @@ Differences from the sketch below, which P7 and P8 build on:
   superstep meanwhile (`compile_jit` and `run` skip supersteps while a
   plan is awaited); the layout counts as folded from the start, so a ROM
   write stops the sampling. A plan with no keyed phase leaves the `Sim`
-  without keys (and without the superstep it could have: a follow-up).
+  without keys (and, since P8, brings the layout's superstep).
 - **Stats.** `SpecStats` adds `requested`, `installed` (a plan counts
   one), `evicted`, `stale`, `dropped`, `code_bytes` (installed units,
   pinned included) and `awaiting_plan`; hits and misses as in P4.
@@ -470,7 +472,102 @@ Differences from the sketch below, which P7 and P8 build on:
   take a `SuperRef`). `Spec::hooked` makes `run` skip the program's
   superstep; a plan that keys nothing leaves no superstep either (the
   layout was compiled without one while the plan was awaited), which P8
-  can fix by compiling the superstep with the plan.
+  can fix by compiling the superstep with the plan. (Done, see "P8 as
+  built": the superstep with the plan, not keyed supersteps.)
+
+### P8 as built (supersteps while keyed)
+
+Measured first, then built what pays:
+
+- **Keyed supersteps per period key (not built).** A superstep per hot
+  *period key* (the keys of one period's ticks), with a side exit at the
+  first tick whose key differs, only runs when that tuple repeats and can
+  be predicted before the call (the keys of a period depend on state the
+  superstep computes). `spec_keys --period-keys 3000000` measures this on
+  the plan's keys (cap 16 per phase, `--min-loss 4`, as the automatic
+  plan; 3M ticks after the profile):
+
+  | | NES demo | Blade Buster |
+  |---|---|---|
+  | distinct period keys (of 1M periods) | 978 | 4068 |
+  | periods covered by the 16 / 64 / 256 most frequent | 47% / 79% / 98% | 39% / 81% / 89% |
+  | period key right: the previous one / the one that followed it last time | 0% / 28% | 0% / 28% |
+  | ticks run before the first wrong phase (second predictor) | 38% | 45% |
+  | phase 1, 2, 0: distinct keys | 49, 97, 49 | 49, 630, 51 |
+  | phase 1, 2, 0: key changes per period | 76%, 44%, 76% | 76%, 68%, 76% |
+
+  The PPU phases' keys follow the dot and change in three periods of
+  four; the CPU phase's with the microcode step. Under the body cap (16
+  superstep units of three bodies each, as much code again as the 48
+  bodies) even a perfect predictor would run 39 to 47% of periods as
+  supersteps, the best cheap one 28% (38 to 45% of ticks). Supersteps
+  gain 8 to 12% where every period is one (spec off), so this design is
+  bounded at about 3 to 5% before side exits and the instruction-cache
+  cost of the extra code: under the 5% the work needed to pay. The doc's
+  assumption ("period keys repeat") does not hold.
+- **A superstep of dispatch (not built).** One unit per period that
+  computes each tick's key and branches to inlined bodies merges every
+  value back at each tick's dispatch, so it forwards within a tick only;
+  its gain over the per-tick path is mostly the per-tick dispatch
+  overhead. It needs a second copy of every hot body (0.4 to 0.5 MiB
+  here) compiled again whenever a body comes or goes (hundreds of times
+  over 26M ticks, about 4 ms per body). The overhead it would remove was
+  measured instead (next item) and is small.
+- **Keyed ticks without the per-tick overhead (built).** Within a `run`,
+  `Sim::keyed_ticks` runs the fused ticks of a keyed `Sim` (no plan
+  awaited) without what supersteps also leave out: the inputs are
+  applied by the first fused tick only (nothing writes their slots within
+  a `run`), and the clock phase is counted instead of divided out.
+  Automatic plan, cap 16, JIT, k ticks/s, median (range) of interleaved
+  rounds of 1M ticks after 6M (NES demo) and 8M (Blade Buster) ticks:
+
+  | | NES demo | Blade Buster |
+  |---|---|---|
+  | 11 rounds: per-tick path | 3424 (2044..3865) | 2692 (2285..3067) |
+  | 11 rounds: `keyed_ticks` | 3552 (2069..4098) +4% | 2736 (2112..3203) +2% |
+  | 7 rounds: per-tick path | 3743 (2826..3886) | 2403 (1823..2906) |
+  | 7 rounds: `keyed_ticks` | 3964 (3396..4032) +6% | 2707 (1903..3026) +13% |
+
+  (A shared 4-core machine: the ranges overlap; the medians always
+  favour `keyed_ticks`.) Spec off with supersteps ran 2586 and 2693 (NES),
+  2329 and 2118 (Blade Buster) in the same rounds. A mutation that never
+  applies the inputs is caught by `check_batches`.
+- **The superstep with a plan that keys nothing (built).** The layout's
+  native code is compiled without a superstep while an automatic plan is
+  awaited (keys are to come). The plan request now carries the layout's
+  superstep (its fused bodies, owned: `SuperBuild`), and `build_spec`
+  compiles it into a `jit::SuperUnit` of its own (`compile_superstep`,
+  sharing `define_superstep` with `JitProgram`) when the plan keys no
+  phase. `install_plan` keeps it in `Spec::superstep`: pinned like the
+  plan's prefixes and fallbacks (counted in `SpecStats::code_bytes`, not
+  under `code_budget`; 47 KiB on the NES), freed with the `Spec` (a
+  `SuperUnit` frees its module on drop; `run` holds only its entry, and
+  nothing installs or evicts within a `run`), set aside and restored
+  with the layout by a ROM write and `reset`, and run only while native
+  code is installed. `compile_jit` after such a plan includes the
+  superstep in the program's code (the layout key is unchanged, so that
+  code installs). Automatic plan with no key bit (`max_key_bits` 0), JIT,
+  median of 7 rounds, four processes each:
+
+  | | NES demo | Blade Buster |
+  |---|---|---|
+  | spec off (supersteps) | 2609..2776 | 2244..2485 |
+  | keying nothing, with the plan's superstep | 2553..2715 (-7%..+2%) | 2226..2488 (-3%..0%) |
+  | keying nothing, no superstep (as before P8) | 2191..2430 (-7%..-18%) | 1829..2048 (-16%..-23%) |
+
+- **Tests** (`sim/spec/adaptive_tests.rs`, `sim/spec/tests.rs`): a plan
+  that keys nothing brings the superstep (interpreted, native code
+  removed and installed again, a ROM write and the `reset` after it,
+  `check_batches_with` on the microcoded machine and on every
+  `standard_configs` design with default and debug options, `check_pair`
+  with pokes and imports); each of the superstep mutations (stores after
+  the superstep dropped, a superstep at any phase, values read by a later
+  chunk not stored) is caught on a `Sim` whose only superstep is the
+  plan's; with the `counters` feature, the plan's superstep counts what
+  the program's own counts, batch for batch; `keyed_ticks` under every
+  existing P4/P5b test, plus a mutation (inputs never applied) caught by
+  `check_batches`. The doc's P8 test plan (side exits at every tick
+  offset, a skipped key check) belongs to the keyed supersteps not built.
 
 ### Per fused tick (`Sim::run`, the path without a superstep)
 
@@ -569,7 +666,9 @@ so JIT tiering (interpreted first, native later) applies per body too.
   the tick reached, from which `run` continues tick by tick. A superstep
   is built per hot *period key* (the tuple of the `L` ticks' keys), under
   the same cap. On the NES the CPU phase's key changes once per period
-  and the PPU keys rarely within one, so period keys repeat.
+  and the PPU keys rarely within one, so period keys repeat. (Measured
+  in P8: they do not. The PPU keys change in three periods of four, and
+  period keys hardly repeat; not built, see "P8 as built".)
 
 ## 5. Cost model and the cap
 
@@ -630,7 +729,7 @@ parallel (separate files), then P5b, P7, P8, P9.
 | P5b | adaptive tables: miss counters, hot detection, `spec_requests`/`build_spec`/`install_spec`, LRU eviction, caps, `spec_stats` (**done**) | `sim/spec.rs`, `sim/mod.rs` | P4, P5a | opus |
 | P6 | automatic plan: `spec::choose_plan(contexts, samples, opts) -> SpecPlan` (pure, the report's greedy + `prune_bits`), runtime sampling window (**done**; the window with P5b) | `compile/spec.rs` (pure part), `sim/spec.rs` | P1 (pure part: none) | sonnet |
 | P7 | engine integration: compile-thread builds, revision checks, `LocalEngine` inline | `engine/mod.rs`, `engine/tests.rs` | P5b | sonnet |
-| P8 | keyed supersteps with side exits; measure against P4's per-tick path | `sim/jit/superstep.rs`, `sim/mod.rs` | P4, superstep merged | opus |
+| P8 | keyed supersteps with side exits; measure against P4's per-tick path (**measured**: not built; the superstep with a plan that keys nothing, and the keyed tick loop, **done**) | `sim/jit/superstep.rs`, `sim/mod.rs` | P4, superstep merged | opus |
 | P9 | benches and docs: `nes_bench` rows (spec on/off, hits, live bodies), `perf-metrics` row, `ARCHITECTURE.md`, `PROFILING.md`, tune defaults | `examples/nes_bench.rs`, `xtask/`, docs | P5b (P7 for the game) | haiku |
 
 P2 and P3 are implemented (`SimOptions::known_bits`, on by default; run
