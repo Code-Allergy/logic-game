@@ -235,6 +235,35 @@ fn op_of(blocks: &[Block], len: usize) -> Vec<Op> {
     ops
 }
 
+/// `x >> c` on known bits: the `c` high bits become known zeros.
+fn shr_known(x: Known, c: u32) -> Known {
+    match (x.zeros.checked_shr(c), x.ones.checked_shr(c)) {
+        (Some(z), Some(o)) => Known {
+            zeros: z | !(ALL >> c),
+            ones: o,
+        },
+        _ => Known {
+            zeros: ALL,
+            ones: 0,
+        },
+    }
+}
+
+/// `(x << b) & imm` on known bits: the `b` low bits and the bits outside
+/// `imm` become known zeros.
+fn shl_known(x: Known, b: u32, imm: u64) -> Known {
+    match (x.zeros.checked_shl(b), x.ones.checked_shl(b)) {
+        (Some(z), Some(o)) => Known {
+            zeros: z | !(ALL << b) | !imm,
+            ones: o & imm,
+        },
+        _ => Known {
+            zeros: ALL,
+            ones: 0,
+        },
+    }
+}
+
 /// The bits an instruction's result can have, from its operands'.
 fn possible_of(op: Op, i: &Instr, imm: u64, pos: &[u64], mems: &[MemDesc]) -> u64 {
     // Lazily: a `Clock`'s fields are literals, not slots.
@@ -257,6 +286,18 @@ fn possible_of(op: Op, i: &Instr, imm: u64, pos: &[u64], mems: &[MemDesc]) -> u6
         | Op::Clock
         | Op::SrNext => 1,
         Op::Shr => a().checked_shr(i.b).unwrap_or(0) & imm,
+        Op::Shl => {
+            a().checked_shr(i.c)
+                .unwrap_or(0)
+                .checked_shl(i.b)
+                .unwrap_or(0)
+                & imm
+        }
+        // Any shift of `a`: no bit below its lowest possible one.
+        Op::ShlV => match a() {
+            0 => 0,
+            x => (ALL << x.trailing_zeros()) & imm,
+        },
         Op::Concat => a() | b().checked_shl(i.c).unwrap_or(0),
         Op::Sext => {
             if i.b >= 1 && (a() >> (i.b - 1)) & 1 == 1 {
@@ -415,6 +456,20 @@ pub fn transfer(
             Known {
                 zeros: sh(x.zeros) | !sh(ALL) | !imm,
                 ones: sh(x.ones) & imm,
+            }
+        }
+        Op::Shl => shl_known(shr_known(a(), i.c), i.b, imm),
+        // A known amount shifts like `Shl`; otherwise only the mask is
+        // known.
+        Op::ShlV => {
+            let v = b();
+            if full(v) {
+                shl_known(a(), (v.ones & 63) as u32, imm)
+            } else {
+                Known {
+                    zeros: !imm,
+                    ones: 0,
+                }
             }
         }
         Op::Concat => {
@@ -1287,6 +1342,16 @@ fn pull(op: Op, i: &Instr, imm: u64, d: u64, cst: &FastMap<u32, u64>) -> [u64; 3
         Op::AddCarry | Op::Eq | Op::LtU => [ALL, ALL, ALL],
         Op::ReduceOr | Op::ReduceAnd | Op::ReduceXor | Op::MemRead => [ALL, 0, 0],
         Op::Shr => [(d & imm).checked_shl(i.b).unwrap_or(0), 0, 0],
+        Op::Shl => [
+            (d & imm)
+                .checked_shr(i.b)
+                .unwrap_or(0)
+                .checked_shl(i.c)
+                .unwrap_or(0),
+            0,
+            0,
+        ],
+        Op::ShlV => [ALL, ALL, 0],
         Op::Concat => [d, d.checked_shr(i.c).unwrap_or(0), 0],
         Op::Sext => {
             let low = if i.b >= 64 { ALL } else { mask(i.b as u8) };
