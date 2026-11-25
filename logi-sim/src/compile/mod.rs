@@ -21,6 +21,7 @@ mod pack;
 pub mod phases;
 pub mod program;
 mod simplify;
+pub mod spec;
 mod words;
 
 #[cfg(test)]
