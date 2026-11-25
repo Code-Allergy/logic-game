@@ -122,7 +122,7 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 }
 
 /// Slots every variant must keep correct (see the module docs).
-fn exposed(p: &Program) -> Vec<bool> {
+pub(crate) fn exposed(p: &Program) -> Vec<bool> {
     let n = p.slot_count as usize;
     let mut out = vec![false; n];
     let mut mark = |s: u32| {

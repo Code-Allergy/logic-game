@@ -282,7 +282,8 @@ fn cpi(name: &str, options: &str, secs: f64) {
 
 /// Interpreter against JIT (`SimOptions::jit`, logi-sim feature `jit`):
 /// µs per tick tick by tick (inputs changing every tick, as `ticks`) and
-/// in `run(1000)` batches, best of 3 over about `secs` seconds; for the
+/// in `run(1000)` batches, best of 3 over about `secs` seconds, with
+/// guards on and off (`-ng`), and the executed ops per tick; for the
 /// gallery CPUs also µs per retired CPU instruction over a program run;
 /// and the JIT's compile time for this program.
 fn jit_compare(name: &str, options: &str, secs: f64) {
@@ -312,15 +313,46 @@ fn jit_compare(name: &str, options: &str, secs: f64) {
             .fold(f64::MAX, f64::min)
     };
     let best_jit = build(&jit) - build(&interp);
+    let guard_ms = build(&interp)
+        - build(&SimOptions {
+            guard: false,
+            ..interp.clone()
+        });
     println!(
-        "{name} {options}: {} instrs, {} commits; program compile {compile_ms:.2} ms, JIT compile {best_jit:.2} ms (every body)",
+        "{name} {options}: {} instrs, {} commits; program compile {compile_ms:.2} ms, JIT compile {best_jit:.2} ms (every body), guards {guard_ms:.3} ms",
         p.instrs.len(),
         p.commits.len()
     );
     let cpu = perf::CPUS.contains(&name);
     let (ticks, retired) = if cpu { cpu_run(&p, 10_000_000) } else { (0, 0) };
-    for (label, o) in [("interp", &interp), ("jit", &jit)] {
-        let mut row = format!("  {label:6}");
+    // Guards (issue #117, stage 6) off, for comparison.
+    let ng = |o: &SimOptions| SimOptions {
+        guard: false,
+        ..o.clone()
+    };
+    let (interp_ng, jit_ng) = (ng(&interp), ng(&jit));
+    for (label, o) in [
+        ("interp", &interp),
+        ("interp-ng", &interp_ng),
+        ("jit", &jit),
+        ("jit-ng", &jit_ng),
+    ] {
+        let mut row = format!("  {label:9}");
+        // Executed ops per tick, tick by tick and in batches.
+        for mode in ["tick", "run"] {
+            let mut sim = Sim::with_options(Arc::clone(&p), o.clone());
+            let mut lfsr = 0x9E37_79B9_7F4A_7C15u64;
+            sim.reset_counters();
+            if mode == "tick" {
+                for _ in 0..10_000 {
+                    tick(&mut sim, &mut lfsr);
+                }
+            } else {
+                sim.run(10_000);
+            }
+            let c = sim.counters();
+            row += &format!(" {mode} {:.1} ops/tick", c.ops() as f64 / c.ticks as f64);
+        }
         for mode in ["tick", "run"] {
             let mut best = f64::MAX;
             for _ in 0..3 {

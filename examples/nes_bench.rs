@@ -29,10 +29,16 @@ fn main() -> Result<(), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let compare = args.iter().any(|a| a == "--compare");
     let blocks = args.iter().any(|a| a == "--blocks");
+    // `--only <text>`: run only the configurations whose name contains it.
+    let only = args.iter().position(|a| a == "--only").map(|k| {
+        let v = args.get(k + 1).cloned().unwrap_or_default();
+        args.drain(k..(k + 2).min(args.len()));
+        v
+    });
     args.retain(|a| a != "--compare" && a != "--blocks");
-    let folder = args
-        .first()
-        .ok_or("usage: nes_bench <workspace folder> [--compare] [ticks]")?;
+    let folder = args.first().ok_or(
+        "usage: nes_bench <workspace folder> [--compare | --blocks] [--only <name>] [ticks]",
+    )?;
     let ticks: u64 = args
         .get(1)
         .map_or(Ok(3_000_000), |t| t.parse())
@@ -57,8 +63,14 @@ fn main() -> Result<(), String> {
             describe(&program)
         );
         let jit = SimOptions::jit();
-        let runs: [(&str, SimOptions, bool); 8] = [
+        let no_guard = |o: &SimOptions| SimOptions {
+            guard: false,
+            ..o.clone()
+        };
+        let runs: [(&str, SimOptions, bool); 12] = [
             ("JIT: run(n), variants + fusion", jit.clone(), true),
+            ("JIT: run(n), no guards", no_guard(&jit), true),
+            ("JIT: tick() loop, no guards", no_guard(&jit), false),
             (
                 "JIT: run(n), neither",
                 SimOptions {
@@ -70,6 +82,7 @@ fn main() -> Result<(), String> {
             ),
             ("JIT: tick() loop", jit, false),
             ("run(n), variants + fusion", SimOptions::default(), true),
+            ("run(n), no guards", no_guard(&SimOptions::default()), true),
             (
                 "run(n), variants only",
                 SimOptions {
@@ -96,8 +109,16 @@ fn main() -> Result<(), String> {
                 true,
             ),
             ("tick() loop, defaults", SimOptions::default(), false),
+            (
+                "tick() loop, no guards",
+                no_guard(&SimOptions::default()),
+                false,
+            ),
         ];
         for (what, sim_options, batch) in runs {
+            if only.as_ref().is_some_and(|o| !what.contains(o.as_str())) {
+                continue;
+            }
             let start = Instant::now();
             let jit_on = sim_options.jit;
             let mut sim = Sim::with_options(Arc::clone(&program), sim_options);
@@ -106,6 +127,8 @@ fn main() -> Result<(), String> {
                 println!("  {what:32} JIT not active (build with --features jit)");
                 continue;
             }
+            #[cfg(feature = "counters")]
+            sim.reset_counters();
             let start = Instant::now();
             if batch {
                 sim.run(ticks);
@@ -120,8 +143,20 @@ fn main() -> Result<(), String> {
             } else {
                 String::new()
             };
+            #[cfg(feature = "counters")]
+            let ops = {
+                let c = sim.counters();
+                let t = c.ticks.max(1) as f64;
+                format!(
+                    ", {:.0} ops/tick, {:.0} blocks/tick",
+                    c.ops() as f64 / t,
+                    c.blocks as f64 / t
+                )
+            };
+            #[cfg(not(feature = "counters"))]
+            let ops = String::new();
             println!(
-                "  {what:32} {:6.0} k ticks/s ({:5.1}% of NES speed{jit_note})",
+                "  {what:32} {:6.0} k ticks/s ({:5.1}% of NES speed{jit_note}{ops})",
                 rate / 1e3,
                 rate / 5_369_318.0 * 100.0
             );
@@ -146,43 +181,87 @@ fn describe(p: &Program) -> String {
     }
 }
 
-/// The interpreter and the JIT, `ticks` ticks from power-on: the same state
-/// and memories, or an error naming the first difference.
+/// The interpreter and the JIT, with guards on and off, `ticks` ticks
+/// from power-on: the same state and memories, or an error naming the
+/// first difference. Then a shorter run compared at every batch boundary:
+/// fused batches of 1 to 7 ticks (guards on, interpreter and JIT) against
+/// single ticks with guards off.
 fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), String> {
     let program = Arc::new(compile(design, &Options::default()).map_err(|e| format!("{e:?}"))?);
-    let mut interp = Sim::with_options(Arc::clone(&program), SimOptions::default());
-    let mut jit = Sim::with_options(Arc::clone(&program), SimOptions::jit());
-    if !jit.jit_active() {
+    let no_guard = |o: SimOptions| SimOptions { guard: false, ..o };
+    let configs = [
+        ("interpreter, no guards", no_guard(SimOptions::default())),
+        ("interpreter", SimOptions::default()),
+        ("JIT", SimOptions::jit()),
+        ("JIT, no guards", no_guard(SimOptions::jit())),
+    ];
+    let mut sims: Vec<Sim> = configs
+        .iter()
+        .map(|(_, o)| Sim::with_options(Arc::clone(&program), o.clone()))
+        .collect();
+    if !sims[2].jit_active() {
         return Err("the JIT is not active (build with --features jit)".into());
     }
-    interp.run(ticks);
-    jit.run(ticks);
-    let (a, b) = (interp.export_state(), jit.export_state());
-    let mut differ = 0;
-    for (path, v) in &a.words {
-        if b.words.get(path) != Some(v) {
-            differ += 1;
+    for s in &mut sims {
+        s.run(ticks);
+    }
+    let a = sims[0].export_state();
+    for (k, s) in sims.iter().enumerate().skip(1) {
+        let b = s.export_state();
+        let mut differ = 0;
+        for (path, v) in &a.words {
+            if b.words.get(path) != Some(v) {
+                differ += 1;
+            }
+        }
+        for (path, m) in &a.mems {
+            if b.mems.get(path) != Some(m) {
+                differ += 1;
+                println!("memory {path:?} differs");
+            }
+        }
+        if differ > 0 || a.tick != b.tick {
+            return Err(format!(
+                "{}: {differ} of {} state elements differ from {}",
+                configs[k].0,
+                a.words.len() + a.mems.len(),
+                configs[0].0
+            ));
         }
     }
-    for (path, m) in &a.mems {
-        if b.mems.get(path) != Some(m) {
-            differ += 1;
-            println!("memory {path:?} differs");
+    println!(
+        "{ticks} ticks: {} agree on {} state words and {} memories",
+        configs.map(|c| c.0).join(", "),
+        a.words.len(),
+        a.mems.len()
+    );
+    // Batch boundaries.
+    let short = (ticks / 20).max(1000);
+    let mut want = Sim::with_options(Arc::clone(&program), no_guard(SimOptions::default()));
+    let mut got = [
+        Sim::with_options(Arc::clone(&program), SimOptions::default()),
+        Sim::with_options(Arc::clone(&program), SimOptions::jit()),
+    ];
+    let mut t = 0;
+    let mut n = 0u64;
+    while t < short {
+        n = n * 5 % 7 + 1;
+        for _ in 0..n {
+            want.tick();
+        }
+        for g in &mut got {
+            g.run(n);
+        }
+        t += n;
+        let w = want.export_state();
+        for g in &got {
+            if g.export_state() != w {
+                return Err(format!("a fused batch differs at tick {t}"));
+            }
         }
     }
-    let words = a.words.len();
-    let mems = a.mems.len();
-    if differ == 0 && a.tick == b.tick {
-        println!(
-            "{ticks} ticks: interpreter and JIT agree on {words} state words and {mems} memories"
-        );
-        Ok(())
-    } else {
-        Err(format!(
-            "{differ} of {} state elements differ",
-            words + mems
-        ))
-    }
+    println!("{short} ticks in batches of 1 to 7: the same state at every boundary");
+    Ok(())
 }
 
 /// Ops per block: the root's chips, and the chips inside any of them that

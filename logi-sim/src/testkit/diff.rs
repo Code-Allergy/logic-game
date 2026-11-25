@@ -297,11 +297,13 @@ fn observe(sim: &Sim) -> Observed {
 /// `run(n)` (with and without phase variants) equals `n` single ticks of
 /// the unspecialized program at every batch boundary.
 ///
-/// Runs the program as is, with phase variants off, and with fusion off.
+/// Runs the program as is, with phase variants off, with fusion off and
+/// with guards off; the reference runs none of them.
 pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
     let plain = SimOptions {
         fuse: false,
         phases: false,
+        guard: false,
         ..SimOptions::default()
     };
     let mut want = Sim::with_options(Arc::clone(p), plain);
@@ -313,6 +315,15 @@ pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
         },
         SimOptions {
             fuse: false,
+            ..SimOptions::default()
+        },
+        SimOptions {
+            guard: false,
+            ..SimOptions::default()
+        },
+        // Guards down to single-instruction regions.
+        SimOptions {
+            guard_min: 1,
             ..SimOptions::default()
         },
     ];
@@ -399,30 +410,44 @@ pub fn check_jit(
     seed: u64,
     options: &SimOptions,
 ) -> Result<(), String> {
-    let mut want = Sim::with_options(
-        Arc::clone(p),
-        SimOptions {
-            jit: false,
-            ..options.clone()
-        },
-    );
-    let mut got = Sim::with_options(
-        Arc::clone(p),
-        SimOptions {
-            jit: true,
-            ..options.clone()
-        },
-    );
-    if JIT && options.threads <= 1 && !got.jit_active() {
+    let want = SimOptions {
+        jit: false,
+        ..options.clone()
+    };
+    let got = SimOptions {
+        jit: true,
+        ..options.clone()
+    };
+    if JIT && options.threads <= 1 && !Sim::with_options(Arc::clone(p), got.clone()).jit_active() {
         return Err("the JIT did not compile the program".into());
     }
+    check_pair(p, ticks, seed, &want, &got).map_err(|e| {
+        e.replace(
+            "the runtime options differ",
+            "JIT differs from the interpreter",
+        )
+    })
+}
+
+/// Two runtimes of one program, `want` and `got`, side by side as
+/// [`check_jit`] runs them: everything observable compared after every
+/// tick, `run` batch, poke plus `resettle`, reset and import.
+pub fn check_pair(
+    p: &Arc<Program>,
+    ticks: u64,
+    seed: u64,
+    want: &SimOptions,
+    got: &SimOptions,
+) -> Result<(), String> {
+    let mut want = Sim::with_options(Arc::clone(p), want.clone());
+    let mut got = Sim::with_options(Arc::clone(p), got.clone());
     let mut rng = Rng::new(seed);
     let same = |want: &Sim, got: &Sim, at: &str| {
         if observe(want) == observe(got) {
             Ok(())
         } else {
             Err(format!(
-                "JIT differs from the interpreter {at} (tick {})",
+                "the runtime options differ {at} (tick {})",
                 want.tick_count()
             ))
         }
