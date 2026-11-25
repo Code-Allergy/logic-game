@@ -11,6 +11,12 @@
 //! `--compare` runs the same ticks on the interpreter and on the JIT (each
 //! with variants and fusion) and requires every state element and every
 //! memory (the screen, RAMs, OAM, palette) to be the same at the end.
+//! `--against <other workspace>` runs both workspaces from power-on and
+//! compares every memory they share (screen, RAMs, OAM, palette, CHR) at
+//! each frame boundary: a redesigned block must leave them all unchanged.
+//! `--press frame:input:frames,...` holds a root input (a `p1_*` button)
+//! at 1 from that frame for that many frames, in both; `--screen file`
+//! stores the last frame's screen memory.
 //! `--blocks` reports where the ops of a tick are: each chip under the
 //! root (and inside large ones) compiled on its own, with its op mix. The
 //! settle is straight-line code that runs every op of its variant each
@@ -35,9 +41,23 @@ fn main() -> Result<(), String> {
         args.drain(k..(k + 2).min(args.len()));
         v
     });
+    let against = args.iter().position(|a| a == "--against").map(|i| {
+        let other = args.get(i + 1).cloned().unwrap_or_default();
+        args.drain(i..(i + 2).min(args.len()));
+        other
+    });
+    let mut value_of = |flag: &str| {
+        args.iter().position(|a| a == flag).map(|i| {
+            let v = args.get(i + 1).cloned().unwrap_or_default();
+            args.drain(i..(i + 2).min(args.len()));
+            v
+        })
+    };
+    let presses = parse_presses(&value_of("--press").unwrap_or_default())?;
+    let screen = value_of("--screen");
     args.retain(|a| a != "--compare" && a != "--blocks");
     let folder = args.first().ok_or(
-        "usage: nes_bench <workspace folder> [--compare | --blocks] [--only <name>] [ticks]",
+        "usage: nes_bench <workspace folder> [--compare | --blocks | --against <workspace> [--press ...] [--screen file]] [--only <name>] [ticks]",
     )?;
     let ticks: u64 = args
         .get(1)
@@ -50,6 +70,10 @@ fn main() -> Result<(), String> {
     }
     if blocks {
         return block_costs(&ws);
+    }
+    if let Some(other) = against {
+        let other = design_of(&suite::read_workspace(Path::new(&other))?)?;
+        return compare_designs(&design, &other, ticks, &presses, screen.as_deref());
     }
     for (name, options) in [
         ("default", Options::default()),
@@ -345,4 +369,118 @@ fn block_costs(ws: &gate_quest::sim::WorkspaceDocument) -> Result<(), String> {
         total.size.instructions as i64 - listed as i64
     );
     Ok(())
+}
+
+/// Two designs from power-on, frame by frame (89,342 ticks, rendering off;
+/// the odd-frame skip makes frames one tick shorter, so this is a fixed
+/// tick grid): every memory both have must be the same at every boundary.
+fn compare_designs(
+    a: &logi_sim::netlist::Design,
+    b: &logi_sim::netlist::Design,
+    ticks: u64,
+    presses: &[(u64, String, u64)],
+    screen: Option<&str>,
+) -> Result<(), String> {
+    const FRAME: u64 = 89_342;
+    let pa = Arc::new(compile(a, &Options::default()).map_err(|e| format!("{e:?}"))?);
+    let pb = Arc::new(compile(b, &Options::default()).map_err(|e| format!("{e:?}"))?);
+    // The Screen is not a state element; it is the one writable memory of
+    // 2^16 8-bit words (256 x 256, Rgb332) in the console.
+    let screen_of = |p: &Program| -> Option<u32> {
+        let mut found = p
+            .mems
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.writable && m.addr_bits == 16 && m.width == 8);
+        match (found.next(), found.next()) {
+            (Some((i, _)), None) => Some(i as u32),
+            _ => None,
+        }
+    };
+    let (screen_a, screen_b) = (screen_of(&pa), screen_of(&pb));
+    let mut sa = Sim::with_options(pa, SimOptions::default());
+    let mut sb = Sim::with_options(pb, SimOptions::default());
+    let frames = ticks.div_ceil(FRAME);
+    let mut shared = 0;
+    for f in 1..=frames {
+        // An input is held while any of its presses is on.
+        let mut held: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
+        for (from, input, count) in presses {
+            *held.entry(input.as_str()).or_default() |= (*from..from + count).contains(&f);
+        }
+        for (input, on) in held {
+            sa.set(input, u64::from(on));
+            sb.set(input, u64::from(on));
+        }
+        sa.run(FRAME);
+        sb.run(FRAME);
+        let (ma, mb) = (sa.export_state().mems, sb.export_state().mems);
+        shared = 0;
+        if let (Some(x), Some(y)) = (screen_a, screen_b) {
+            shared += 1;
+            if sa.mem(x) != sb.mem(y) {
+                let (ma, mb) = (sa.mem(x), sb.mem(y));
+                let diff: Vec<usize> = (0..ma.len()).filter(|&i| ma[i] != mb[i]).collect();
+                let (xs, ys): (Vec<usize>, Vec<usize>) =
+                    diff.iter().map(|i| (i % 256, i / 256)).unzip();
+                if let Some(file) = screen {
+                    let bytes = |m: &[u64]| m.iter().map(|w| *w as u8).collect::<Vec<u8>>();
+                    std::fs::write(file, bytes(ma)).map_err(|e| format!("{file}: {e}"))?;
+                    std::fs::write(format!("{file}.other"), bytes(mb))
+                        .map_err(|e| format!("{file}: {e}"))?;
+                }
+                return Err(format!(
+                    "frame {f}: the screens differ in {} pixels, x {}..={}, y {}..={}",
+                    diff.len(),
+                    xs.iter().min().unwrap_or(&0),
+                    xs.iter().max().unwrap_or(&0),
+                    ys.iter().min().unwrap_or(&0),
+                    ys.iter().max().unwrap_or(&0)
+                ));
+            }
+        }
+        for (path, m) in &ma {
+            let Some(n) = mb.get(path) else { continue };
+            shared += 1;
+            if m != n {
+                let first = m.2.iter().zip(&n.2).position(|(x, y)| x != y);
+                return Err(format!(
+                    "frame {f}: memory {path:?} differs (first at word {first:?})"
+                ));
+            }
+        }
+    }
+    println!(
+        "{frames} frames: the {shared} memories both designs have are identical at every frame"
+    );
+    if screen_a.is_none() || screen_b.is_none() {
+        println!("(no screen found in one design: screens not compared)");
+    }
+    if let (Some(file), Some(x)) = (screen, screen_a) {
+        let bytes: Vec<u8> = sa.mem(x).iter().map(|w| *w as u8).collect();
+        std::fs::write(file, bytes).map_err(|e| format!("{file}: {e}"))?;
+        println!("screen stored in {file}");
+    }
+    Ok(())
+}
+
+/// `frame:input:frames,...`.
+fn parse_presses(text: &str) -> Result<Vec<(u64, String, u64)>, String> {
+    text.split(',')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let f: Vec<&str> = p.split(':').collect();
+            match f.as_slice() {
+                [from, input, count] => Ok((
+                    from.parse()
+                        .map_err(|_| format!("--press {p}: bad frame"))?,
+                    input.to_string(),
+                    count
+                        .parse()
+                        .map_err(|_| format!("--press {p}: bad count"))?,
+                )),
+                _ => Err(format!("--press {p}: expected frame:input:frames")),
+            }
+        })
+        .collect()
 }
