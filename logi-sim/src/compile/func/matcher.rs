@@ -1436,7 +1436,7 @@ pub(crate) const MIN_TABLE_BITS: u32 = 5;
 /// on every input combination, so it is exact by construction. `None` when
 /// the flat is too wide, or the table would not cost fewer instructions
 /// than `gate_cost` (counting the index concatenation and the output
-/// slices), or some output does not read some input port.
+/// slices).
 pub(crate) fn table(flat: &Flat, gate_cost: usize) -> Option<(Replacement, Proof)> {
     use crate::compile::func::replace::Ref;
     use smallvec::smallvec;
@@ -1458,11 +1458,9 @@ pub(crate) fn table(flat: &Flat, gate_cost: usize) -> Option<(Replacement, Proof
         return None;
     }
     // Every output of a table reads every input port (through the index).
-    // In gates an output reads only the ports of its own cone, and the
-    // loop check passed on those: an output may feed, outside the chip, a
-    // port it does not read. A table of such a chip would close a cycle
-    // of instructions, so only a chip whose every output reads every port
-    // is tabled.
+    // In gates an output reads only the ports of its own cone: where some
+    // output does not read some port, the table is `partial` (see
+    // `Replacement::partial`).
     let support = bit_support(flat, &ports)?;
     let reads_every_port = flat.outputs.iter().all(|&v| {
         let read = support[v as usize].iter().fold(0u128, |a, &b| a | b);
@@ -1472,9 +1470,6 @@ pub(crate) fn table(flat: &Flat, gate_cost: usize) -> Option<(Replacement, Proof
             .zip(&ports.wi)
             .all(|(&off, &w)| read >> off & mask(w) as u128 != 0)
     });
-    if !reads_every_port {
-        return None;
-    }
     let mut contents = Vec::with_capacity(1 << ports.bits);
     let mut vals = vec![0u64; flat.values()];
     let mut ins = vec![0u64; nin];
@@ -1491,6 +1486,7 @@ pub(crate) fn table(flat: &Flat, gate_cost: usize) -> Option<(Replacement, Proof
     }
     let mut r = Replacement {
         table: true,
+        partial: !reads_every_port,
         desc: format!("table of {} input bits", ports.bits),
         ..Replacement::default()
     };
