@@ -649,9 +649,8 @@ pub fn spec_plan(p: &Arc<Program>, seed: u64, ticks: u64) -> SpecPlan {
     SpecPlan { phases }
 }
 
-/// [`SpecOptions`] with `plan`.
+/// [`SpecOptions`] with `plan`, fixed (P4: every body built with the
+/// `Sim`).
 pub fn spec_options(plan: SpecPlan) -> SpecOptions {
-    SpecOptions {
-        plan: Some(Arc::new(plan)),
-    }
+    SpecOptions::fixed(plan)
 }

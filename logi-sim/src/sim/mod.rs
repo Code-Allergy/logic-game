@@ -53,7 +53,9 @@ mod spec;
 #[cfg(test)]
 mod tests;
 
-pub use spec::{PhasePlan, SpecOptions, SpecPlan, SpecStats, spec_contexts};
+pub use spec::{
+    PhasePlan, SpecBuilt, SpecOptions, SpecPlan, SpecRequest, SpecStats, build_spec, spec_contexts,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -360,8 +362,8 @@ struct Layout {
     /// Some fused body is a known-bits body, or some phase is keyed: the
     /// bodies fold ROM contents.
     folded: bool,
-    /// Per phase, its key and specialized bodies (empty: none keyed).
-    spec: Vec<Option<spec::PhaseSpec>>,
+    /// Keys, tables and specialized bodies.
+    spec: spec::Spec,
 }
 
 /// What a ROM write sets aside (see [`Sim::rom_changed`]).
@@ -369,7 +371,7 @@ struct Stash {
     runs: Vec<Run>,
     full: Vec<u16>,
     fused: Vec<u16>,
-    spec: Vec<Option<spec::PhaseSpec>>,
+    spec: spec::Spec,
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     jit: Option<Arc<jit::JitProgram>>,
 }
@@ -383,7 +385,7 @@ impl Layout {
             full: vec![0],
             fused: vec![0],
             folded: false,
-            spec: Vec::new(),
+            spec: spec::Spec::default(),
         }
     }
 }
@@ -421,15 +423,16 @@ fn build_layout(program: &Arc<Program>, options: &SimOptions, folds: bool) -> La
             .then(|| guard::guard_with(n_slots, b, None, options.guard_min))
             .flatten()
     };
-    let plan = options
-        .spec
-        .as_ref()
-        .and_then(|s| s.plan.as_deref())
-        .filter(|_| folds && options.fuse);
+    let spec_options = options.spec.as_ref().filter(|_| folds && options.fuse);
+    let plan = spec_options.and_then(|s| s.plan.as_deref());
+    // Adaptive tables (the caps and thresholds), and an automatic plan.
+    let adaptive = spec_options.filter(|s| s.adaptive);
+    let automatic = spec_options.filter(|s| s.automatic());
     let known_bits = folds && options.known_bits;
-    let possible =
-        ((known_bits || plan.is_some()) && options.fuse).then(|| cspec::possible_bits(program));
+    let possible = ((known_bits || plan.is_some() || automatic.is_some()) && options.fuse)
+        .then(|| cspec::possible_bits(program));
     let mut specs: Vec<Option<spec::PhaseSpec>> = Vec::new();
+    let mut contexts: Vec<Option<Arc<cspec::SpecContext>>> = Vec::new();
     // A fused-run body: pruned to its commits' cone, folded by the known
     // bits (no key), then guarded; and the phase's specialized bodies
     // when the plan keys it.
@@ -450,15 +453,20 @@ fn build_layout(program: &Arc<Program>, options: &SimOptions, folds: bool) -> La
             Some(body) => add(runs, Some(body)),
             None => same,
         };
+        let cx = cx.map(Arc::new);
         let phase_plan = plan.and_then(|p| p.phases.get(k)?.as_ref());
         if let (Some(pp), Some(cx)) = (phase_plan, cx.as_ref()) {
             let mut add_spec =
                 |body: Body| (runs.len() < usize::from(u16::MAX)).then(|| add(runs, Some(body)));
             let guard_spec = |body: Body| guard_fused(&body).unwrap_or(body);
-            let ps = spec::PhaseSpec::build(program, cx, pp, f, &mut add_spec, &guard_spec);
-            folded |= ps.is_some();
+            let ps =
+                spec::PhaseSpec::build(program, cx, pp, f, adaptive, &mut add_spec, &guard_spec);
             specs.resize(k + 1, None);
             specs[k] = ps;
+        }
+        if automatic.is_some() {
+            contexts.resize(k + 1, None);
+            contexts[k] = cx;
         }
         f
     };
@@ -501,13 +509,18 @@ fn build_layout(program: &Arc<Program>, options: &SimOptions, folds: bool) -> La
     } else {
         specs.resize(period as usize, None);
     }
+    contexts.resize(period as usize, None);
+    let spec = spec::Spec::new(specs, contexts, automatic, runs.len());
+    // The specialized bodies fold ROM contents (those of an automatic
+    // plan will).
+    folded |= spec.folds();
     Layout {
         runs,
         period,
         full,
         fused,
         folded,
-        spec: specs,
+        spec,
     }
 }
 
@@ -529,9 +542,12 @@ pub struct Sim {
     /// Whether some fused body is a known-bits or specialized body (reads
     /// ROM contents to fold; see [`SimOptions::known_bits`]).
     folded: bool,
-    /// Per clock phase, its key and specialized bodies
-    /// ([`SimOptions::spec`]); empty when no phase is keyed.
-    spec: Vec<Option<spec::PhaseSpec>>,
+    /// Per clock phase, its key and specialized bodies, the bodies
+    /// installed since the layout was built ([`SimOptions::spec`]).
+    spec: spec::Spec,
+    /// The generation of builds this `Sim` accepts, and what its tables
+    /// did.
+    spec_life: spec::Life,
     /// The body that settled the slots now: the next commit is its own
     /// (a known-bits body may not compute what the full body's commits
     /// read). Between calls it is the full body of the tick.
@@ -646,6 +662,7 @@ impl Sim {
             fused,
             folded,
             spec,
+            spec_life: spec::Life::new(),
             last: 0,
             stash: None,
             options,
@@ -686,6 +703,10 @@ impl Sim {
             sim.slots[s as usize] = v;
         }
         sim.settle(sim.full_run());
+        if sim.options.spec.as_ref().is_some_and(|s| s.inline_build) {
+            // The plan's key values (adaptive tables start with them).
+            sim.spec_build_inline();
+        }
         Ok(sim)
     }
 
@@ -719,55 +740,19 @@ impl Sim {
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     pub fn compile_jit(&self) -> Result<jit::JitProgram, jit::JitError> {
         let p = &*self.program;
-        let mut bodies = Vec::with_capacity(self.runs.len() + 1);
-        let in_full = |k: usize| self.full.iter().any(|&f| f as usize == k);
-        // Specialized bodies, fallbacks and prefixes run too; a prefix's
-        // results are read by the key and the body after it, so all of
-        // them are stored (not `fused_only`).
-        let mut in_spec = vec![false; self.runs.len() + 1];
-        let mut is_prefix = vec![false; self.runs.len() + 1];
-        for ps in self.spec.iter().flatten() {
-            in_spec[ps.fallback as usize] = true;
-            if let Some(r) = ps.prefix {
-                is_prefix[r as usize] = true;
-            }
-            for (_, r) in ps.entries() {
-                in_spec[r as usize] = true;
-            }
-        }
-        let used = |k: usize| {
-            in_full(k) || in_spec[k] || is_prefix[k] || self.fused.iter().any(|&f| f as usize == k)
-        };
-        bodies.push(jit::BodyRef {
-            blocks: &p.blocks,
-            instrs: &p.instrs,
-            imms: &p.imms,
-            commits: &p.commits,
-            guards: &[],
-            used: used(0),
-            fused_only: false,
-        });
-        for (k, r) in self.runs.iter().enumerate() {
-            let (blocks, instrs, imms) = parts(p, r.body.as_ref());
-            let commits = r.body.as_ref().map_or(&p.commits[..], |b| &b.commits[..]);
-            let guards = r.body.as_ref().map_or(&[][..], |b| &b.guards[..]);
-            bodies.push(jit::BodyRef {
-                blocks,
-                instrs,
-                imms,
-                commits,
-                guards,
-                used: used(k + 1),
-                fused_only: !in_full(k + 1) && !is_prefix[k + 1],
-            });
-        }
+        let bodies = self.body_refs();
         // The superstep: whole clock periods of fused ticks, starting at
         // phase 0 (see `Sim::run`). None while a phase is keyed: the
         // superstep would run the general fused bodies (the two are
         // alternatives until supersteps check keys).
         let o = &self.options;
         let (mut parts, mut live_end) = (Vec::new(), Vec::new());
-        if o.superstep && o.fuse && self.pool.is_none() && self.spec.is_empty() {
+        if o.superstep
+            && o.fuse
+            && self.pool.is_none()
+            && self.spec.phases.is_empty()
+            && !self.spec.awaiting_plan
+        {
             let l = self.period;
             let n = o.superstep_ticks.max(1).div_ceil(l) * l;
             for i in 0..n {
@@ -810,7 +795,7 @@ impl Sim {
             full: self.full.clone(),
             fused: self.fused.clone(),
             folded: self.folded,
-            spec: self.spec_layout(),
+            spec: self.spec.key.clone(),
         });
         Ok(code)
     }
@@ -821,7 +806,9 @@ impl Sim {
     /// `code` must come from [`Sim::compile_jit`] of a `Sim` of the same
     /// `Arc<Program>` with the same run layout (the same fusion and phase
     /// options, no thread pool); otherwise nothing changes and this
-    /// returns `false`.
+    /// returns `false`. Specialized bodies installed at run time
+    /// ([`Sim::install_spec`]) are not part of the layout: they bring
+    /// their own native code, which runs while native code is installed.
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     pub fn install_jit(&mut self, code: Option<Arc<jit::JitProgram>>) -> bool {
         if let Some(c) = &code {
@@ -830,8 +817,8 @@ impl Sim {
                     && k.full == self.full
                     && k.fused == self.fused
                     && k.folded == self.folded
-                    && k.spec == self.spec_layout()
-            }) && c.bodies.len() == self.runs.len() + 1
+                    && k.spec == self.spec.key
+            }) && c.bodies.len() == self.spec.base + 1
                 && self.pool.is_none();
             if !fits {
                 return false;
@@ -1027,6 +1014,7 @@ impl Sim {
         let mut left = ticks - 1;
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
         if self.options.superstep
+            && !self.spec.hooked
             && let Some((entry, n)) = self
                 .jit
                 .as_ref()
@@ -1057,6 +1045,9 @@ impl Sim {
             self.fused_tick();
         }
         self.tick();
+        if self.options.spec.as_ref().is_some_and(|s| s.inline_build) && self.spec.has_work() {
+            self.spec_build_inline();
+        }
     }
 
     /// One tick of a `run` that is not the last: commit, then settle only
@@ -1070,8 +1061,8 @@ impl Sim {
         self.commit(self.last);
         self.tick += 1;
         let k = (self.tick % self.period) as usize;
-        if !self.spec.is_empty() && self.spec[k].is_some() {
-            self.spec_settle(k);
+        if self.spec.hooked {
+            self.spec_fused(k);
             return;
         }
         self.settle(self.fused[k]);
@@ -1085,13 +1076,13 @@ impl Sim {
         for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
             self.slots[port.slot as usize] = v;
         }
-        let ps = self.spec[k].as_ref().expect("a keyed phase");
+        let ps = self.spec.phases[k].as_ref().expect("a keyed phase");
         let prefix = ps.prefix;
         #[cfg(test)]
         if spec::MUTATION.get() == 2 {
             // Mutation: no prefix (a stale key, and a body missing the
             // prefix's values).
-            let ps = self.spec[k].as_ref().expect("a keyed phase");
+            let ps = self.spec.phases[k].as_ref().expect("a keyed phase");
             let key = ps.key(&self.slots);
             let run = ps.lookup(key);
             let run = if run == ps.fallback {
@@ -1110,53 +1101,9 @@ impl Sim {
                 self.counters.settles -= 1;
             }
         }
-        let ps = self.spec[k].as_mut().expect("a keyed phase");
-        let run = ps.lookup(ps.key(&self.slots));
-        if run == ps.fallback {
-            ps.misses += 1;
-        } else {
-            ps.hits += 1;
-        }
+        let ps = self.spec.phases[k].as_mut().expect("a keyed phase");
+        let run = ps.dispatch(ps.key(&self.slots));
         self.evaluate(run);
-    }
-
-    /// Keyed phases, bodies, hits and misses ([`SimOptions::spec`]).
-    pub fn spec_stats(&self) -> SpecStats {
-        let mut s = SpecStats::default();
-        for ps in self.spec.iter().flatten() {
-            s.keyed_phases += 1;
-            s.bodies += ps.bodies();
-        }
-        // Set aside by a ROM write, the tables keep their counts.
-        let stashed = self.stash.as_ref().map(|st| &st.spec);
-        for ps in self
-            .spec
-            .iter()
-            .chain(stashed.into_iter().flatten())
-            .flatten()
-        {
-            s.hits += ps.hits;
-            s.misses += ps.misses;
-        }
-        s
-    }
-
-    /// The specialized runs, for telling layouts apart: per keyed phase,
-    /// its index, prefix, fallback and every key with its run.
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
-    fn spec_layout(&self) -> Vec<u64> {
-        let mut out = Vec::new();
-        for (k, ps) in self.spec.iter().enumerate() {
-            let Some(ps) = ps else { continue };
-            out.extend([k as u64, ps.prefix.map_or(u64::MAX, u64::from)]);
-            out.push(u64::from(ps.fallback));
-            let e = ps.entries();
-            out.push(e.len() as u64);
-            for (key, run) in e {
-                out.extend([key, u64::from(run)]);
-            }
-        }
-        out
     }
 
     /// The JIT's superstep, from a settled tick at phase 0: as many
@@ -1221,7 +1168,7 @@ impl Sim {
                 c.instrs += per.instrs;
                 c.packed_words += per.packed_words;
             }
-            for (k, r) in self.runs.iter().enumerate() {
+            for (k, r) in self.runs.iter().enumerate().take(self.spec.base) {
                 let base = info.skip_base[k + 1];
                 for (g, &(blocks, instrs)) in r.guard_cost.iter().enumerate() {
                     let n = std::mem::take(&mut self.skips[base + g]);
@@ -1249,11 +1196,7 @@ impl Sim {
             self.counters.commits += commits.len() as u64;
         }
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
-        if let Some(fs) = self
-            .jit
-            .as_ref()
-            .and_then(|j| j.bodies[run as usize].as_ref()?.commit.as_ref())
-        {
+        if let Some(fs) = native(&self.jit, &self.spec, run).and_then(|b| b.commit.as_ref()) {
             // Count taken writes from the versions (only bodies with RAM
             // writes can change them: summing every memory's version per
             // commit costs more than the commit on designs with many ROMs).
@@ -1408,11 +1351,7 @@ impl Sim {
             c.packed_words += per.packed_words;
         }
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
-        if let Some(j) = self
-            .jit
-            .as_ref()
-            .and_then(|j| j.bodies[run as usize].as_ref())
-        {
+        if let Some(j) = native(&self.jit, &self.spec, run) {
             if !self.mem_ptrs_fresh {
                 self.mem_ptrs.clear();
                 self.mem_ptrs
@@ -1631,7 +1570,7 @@ impl Sim {
             return;
         }
         let off = build_layout(&self.program, &self.options, false);
-        debug_assert!(off.period == self.period && !off.folded && off.spec.is_empty());
+        debug_assert!(off.period == self.period && !off.folded && !off.spec.hooked);
         self.stash = Some(Box::new(Stash {
             runs: std::mem::replace(&mut self.runs, off.runs),
             full: std::mem::replace(&mut self.full, off.full),
@@ -1643,6 +1582,7 @@ impl Sim {
         self.folded = false;
         // Between calls the slots are those of a full settle.
         self.last = self.full_run();
+        self.spec_new_generation();
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
         if self.stash.as_ref().is_some_and(|s| s.jit.is_some()) {
             self.jit = self.compile_jit().ok().map(Arc::new);
@@ -1668,6 +1608,7 @@ impl Sim {
         self.spec = spec;
         self.folded = true;
         self.last = self.full_run();
+        self.spec_new_generation();
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
         {
             // Keep the backend the caller has now: native code (the stashed
@@ -1687,6 +1628,22 @@ impl Sim {
     /// as they would have without this call.
     pub fn resettle(&mut self) {
         self.evaluate(self.full_run());
+    }
+}
+
+/// The native code of `run`: the installed program's, or (a body
+/// installed at run time) its own unit, while native code is installed.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[inline]
+fn native<'a>(
+    jit: &'a Option<Arc<jit::JitProgram>>,
+    spec: &'a spec::Spec,
+    run: u16,
+) -> Option<&'a jit::JitBody> {
+    let j = jit.as_ref()?;
+    match j.bodies.get(run as usize) {
+        Some(b) => b.as_ref(),
+        None => spec.unit(run).map(jit::JitUnit::body),
     }
 }
 

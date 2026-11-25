@@ -21,6 +21,17 @@
 //! executed operations per tick with the feature `counters`), and the
 //! state and memories must be equal at the end.
 //!
+//! `--adaptive N` instead compares the runtime's tables (all JIT-compiled
+//! with the feature `jit`): spec off (supersteps), the fixed plan with
+//! bodies for the 16 and 64 most frequent keys of the profile (P4), the
+//! adaptive tables on the plan's keys with caps of 8, 16 and 32 bodies per
+//! phase, and an automatic plan (keys chosen from the `Sim`'s own first
+//! window, `--auto-window` fused ticks per phase, `--auto-samples` states
+//! per phase) with 16. Adaptive builds run on a thread of their own. Each
+//! runs to the end of the profile (`--warm` + `--sample`), then `N` ticks
+//! are timed in `--rounds` interleaved rounds, then again from `--later`;
+//! state and memories must agree at the end.
+//!
 //! `--demo` patches a small program into the PRG ROM that renders like a
 //! game (sprites and background on, OAM DMA every frame), writing `$1E`
 //! to `PPUMASK` (a title screen's value); the transfer check then runs it
@@ -56,6 +67,10 @@ struct Args {
     check: usize,
     bench: u64,
     rounds: u64,
+    adaptive: u64,
+    later: u64,
+    auto_window: u64,
+    auto_samples: usize,
 }
 
 fn args() -> Result<Args, String> {
@@ -71,6 +86,10 @@ fn args() -> Result<Args, String> {
         check: 300,
         bench: 0,
         rounds: 3,
+        adaptive: 0,
+        later: 20_000_000,
+        auto_window: SpecOptions::default().plan_window,
+        auto_samples: SpecOptions::default().samples,
     };
     while let Some(x) = it.next() {
         let mut num = |what: &str| -> Result<u64, String> {
@@ -88,6 +107,10 @@ fn args() -> Result<Args, String> {
             "--check" => a.check = num("--check")? as usize,
             "--bench" => a.bench = num("--bench")?,
             "--rounds" => a.rounds = num("--rounds")?,
+            "--adaptive" => a.adaptive = num("--adaptive")?,
+            "--later" => a.later = num("--later")?,
+            "--auto-window" => a.auto_window = num("--auto-window")?,
+            "--auto-samples" => a.auto_samples = num("--auto-samples")? as usize,
             f if a.folder.is_empty() => a.folder = f.to_string(),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -566,6 +589,10 @@ fn main() -> Result<(), String> {
         t3.elapsed().as_secs_f64()
     );
 
+    if a.adaptive > 0 {
+        return adaptive_bench(&program, &phases_, &layouts, &a);
+    }
+
     if a.check > 0 {
         let t4 = Instant::now();
         let n = check_exact(&program, &phases_, &layouts, a.warm, a.check, false)?;
@@ -630,9 +657,7 @@ fn bench(program: &Arc<Program>, plan: SpecPlan, a: &Args) -> Result<(), String>
     };
     let t = Instant::now();
     let on_options = SimOptions {
-        spec: Some(SpecOptions {
-            plan: Some(Arc::new(plan)),
-        }),
+        spec: Some(SpecOptions::fixed(plan)),
         ..base.clone()
     };
     let mut on = Sim::with_options(Arc::clone(program), on_options);
@@ -1095,4 +1120,299 @@ fn check_exact(
         checked += 1;
     }
     Ok(checked)
+}
+
+/// One runtime of `--adaptive`.
+struct Runner {
+    name: String,
+    sim: Sim,
+    /// Builds come back here (adaptive tables).
+    builds: Vec<logi_sim::sim::SpecBuilt>,
+    adaptive: bool,
+    /// Seconds spent in this runner's `run` calls and installs.
+    busy: f64,
+    /// Ticks and busy seconds from construction to the first hit.
+    first_hit: Option<(u64, f64)>,
+    rates: [Vec<f64>; 2],
+    hit: [(u64, u64); 2],
+    /// Executed operations per tick (feature `counters`).
+    ops: [f64; 2],
+}
+
+/// `--adaptive`: see the module documentation.
+fn adaptive_bench(
+    program: &Arc<Program>,
+    phases_: &[Phase],
+    layouts: &[KeyLayout],
+    a: &Args,
+) -> Result<(), String> {
+    use logi_sim::sim::{SpecBuilt, SpecRequest, build_spec};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let jit = cfg!(feature = "jit");
+    let base = SimOptions {
+        jit,
+        ..SimOptions::default()
+    };
+    // The profile's most frequent keys per phase (`evaluate`'s order).
+    let top = |n: usize| -> SpecPlan {
+        SpecPlan {
+            phases: phases_
+                .iter()
+                .zip(layouts)
+                .map(|(ph, layout)| {
+                    (!layout.fields.is_empty()).then(|| {
+                        let mut count: HashMap<u64, u64> = HashMap::new();
+                        for r in &ph.rows {
+                            *count.entry(layout.pack(r)).or_default() += 1;
+                        }
+                        let mut v: Vec<(u64, u64)> = count.into_iter().collect();
+                        v.sort_by_key(|&(k, c)| (std::cmp::Reverse(c), k));
+                        PhasePlan {
+                            layout: layout.clone(),
+                            keys: v.into_iter().take(n).map(|x| x.0).collect(),
+                        }
+                    })
+                })
+                .collect(),
+        }
+    };
+    let adaptive = |plan: Option<SpecPlan>, cap: usize| SpecOptions {
+        plan: plan.map(Arc::new),
+        max_per_phase: cap,
+        max_bodies: 3 * cap,
+        code_budget: usize::MAX,
+        inline_build: false,
+        min_loss: a.min_loss as u32,
+        ..SpecOptions::default()
+    };
+    let mut configs: Vec<(String, Option<SpecOptions>)> = vec![
+        ("off".into(), None),
+        ("fixed 16".into(), Some(SpecOptions::fixed(top(16)))),
+        ("fixed 64".into(), Some(SpecOptions::fixed(top(64)))),
+    ];
+    for cap in [8, 16, 32] {
+        configs.push((format!("adaptive {cap}"), Some(adaptive(Some(top(0)), cap))));
+    }
+    configs.push((
+        "automatic 16".into(),
+        Some(SpecOptions {
+            plan_window: a.auto_window,
+            samples: a.auto_samples,
+            ..adaptive(None, 16)
+        }),
+    ));
+
+    // One build thread for every runner, as an engine's compile thread.
+    let (to_builder, requests) = mpsc::channel::<(usize, SpecRequest)>();
+    let (to_main, built) = mpsc::channel::<(usize, SpecBuilt, Duration)>();
+    let prog = Arc::clone(program);
+    let builder = std::thread::spawn(move || {
+        for (i, r) in requests {
+            let t = Instant::now();
+            let b = build_spec(&prog, &r);
+            if to_main.send((i, b, t.elapsed())).is_err() {
+                break;
+            }
+        }
+    });
+    let mut body_ms: Vec<f64> = Vec::new();
+    let mut plan_ms: Vec<f64> = Vec::new();
+    let mut runners: Vec<Runner> = configs
+        .into_iter()
+        .map(|(name, spec)| {
+            let t = Instant::now();
+            let adaptive = spec.as_ref().is_some_and(|s| s.adaptive);
+            let sim = Sim::with_options(
+                Arc::clone(program),
+                SimOptions {
+                    spec,
+                    ..base.clone()
+                },
+            );
+            println!(
+                "  {name}: built in {:.2} s, jit {}",
+                t.elapsed().as_secs_f64(),
+                sim.jit_active()
+            );
+            Runner {
+                name,
+                sim,
+                builds: Vec::new(),
+                adaptive,
+                busy: 0.0,
+                first_hit: None,
+                rates: [Vec::new(), Vec::new()],
+                hit: [(0, 0); 2],
+                ops: [0.0; 2],
+            }
+        })
+        .collect();
+
+    // Run `n` ticks of runner `i` in batches, handing requests to the
+    // builder and installing what came back between batches. Seconds.
+    let mut step = |rs: &mut Vec<Runner>, i: usize, n: u64, batch: u64| -> f64 {
+        let t = Instant::now();
+        let mut left = n;
+        while left > 0 {
+            let k = left.min(batch);
+            let r = &mut rs[i];
+            r.sim.run(k);
+            left -= k;
+            if r.adaptive {
+                for q in r.sim.spec_requests() {
+                    to_builder.send((i, q)).expect("builder alive");
+                }
+            }
+            while let Ok((j, b, d)) = built.try_recv() {
+                match b.plan_phases() {
+                    Some(_) => plan_ms.push(d.as_secs_f64() * 1e3),
+                    None => body_ms.push(d.as_secs_f64() * 1e3),
+                }
+                rs[j].builds.push(b);
+            }
+            let r = &mut rs[i];
+            for b in std::mem::take(&mut r.builds) {
+                r.sim.install_spec(b);
+            }
+            let secs = t.elapsed().as_secs_f64();
+            if r.first_hit.is_none() && r.sim.spec_stats().hits > 0 {
+                r.first_hit = Some((r.sim.tick_count(), r.busy + secs));
+            }
+        }
+        let secs = t.elapsed().as_secs_f64();
+        rs[i].busy += secs;
+        secs
+    };
+    let start = a.warm + a.sample;
+    let t = Instant::now();
+    for i in 0..runners.len() {
+        // Small batches while warming: first hits are timed finely.
+        step(&mut runners, i, start, 10_000);
+    }
+    println!(
+        "  warmed {} runtimes to tick {start} in {:.1} s",
+        runners.len(),
+        t.elapsed().as_secs_f64()
+    );
+    let rounds = a.rounds.max(1);
+    let per = a.adaptive / rounds;
+    for (seg, from) in [start, a.later.max(start + a.adaptive)]
+        .into_iter()
+        .enumerate()
+    {
+        for i in 0..runners.len() {
+            let now = runners[i].sim.tick_count();
+            if from > now {
+                step(&mut runners, i, from - now, 30_000);
+            }
+            let st = runners[i].sim.spec_stats();
+            runners[i].hit[seg] = (st.hits, st.misses);
+            #[cfg(feature = "counters")]
+            runners[i].sim.reset_counters();
+        }
+        for round in 0..rounds {
+            let n = runners.len();
+            for j in 0..n {
+                // Rotate the order every round.
+                let i = (j + round as usize) % n;
+                let secs = step(&mut runners, i, per, 30_000);
+                runners[i].rates[seg].push(per as f64 / secs / 1e3);
+            }
+        }
+        for r in &mut runners {
+            let st = r.sim.spec_stats();
+            r.hit[seg] = (st.hits - r.hit[seg].0, st.misses - r.hit[seg].1);
+            #[cfg(feature = "counters")]
+            {
+                let c = r.sim.counters();
+                r.ops[seg] = c.ops() as f64 / c.ticks.max(1) as f64;
+            }
+        }
+    }
+    drop(to_builder);
+    builder.join().map_err(|_| "builder panicked")?;
+
+    let stat = |v: &[f64]| {
+        let mut v = v.to_vec();
+        v.sort_by(f64::total_cmp);
+        (v[v.len() / 2], v[0], *v.last().expect("a round"))
+    };
+    let off = [stat(&runners[0].rates[0]).0, stat(&runners[0].rates[1]).0];
+    println!(
+        "\n  k ticks/s (JIT {}), median (range) of {rounds} rounds of {per} ticks; hits of keyed ticks",
+        jit
+    );
+    println!(
+        "  {:<14} {:>28} {:>28} {:>8} {:>10} {:>9} {:>8}",
+        "runtime", "from start", "from later", "bodies", "code KiB", "evicted", "1st hit"
+    );
+    for r in &runners {
+        let st = r.sim.spec_stats();
+        let cell = |seg: usize| {
+            let (m, lo, hi) = stat(&r.rates[seg]);
+            let (h, x) = r.hit[seg];
+            let hit = if h + x > 0 {
+                format!(" {:>3.0}%", 100.0 * h as f64 / (h + x) as f64)
+            } else {
+                "     ".into()
+            };
+            let ops = if cfg!(feature = "counters") {
+                format!(" {:>5.0} ops", r.ops[seg])
+            } else {
+                String::new()
+            };
+            format!(
+                "{m:>5.0} ({lo:>4.0}..{hi:>4.0}) {:+4.0}%{hit}{ops}",
+                (m / off[seg] - 1.0) * 100.0
+            )
+        };
+        #[cfg(feature = "jit")]
+        let kib = (r.sim.jit_code().map_or(0, |j| j.code_bytes) + st.code_bytes) / 1024;
+        #[cfg(not(feature = "jit"))]
+        let kib = st.code_bytes / 1024;
+        let first = r.first_hit.map_or("-".into(), |(t, s)| {
+            format!("{:.2}M {:.1}s", t as f64 / 1e6, s)
+        });
+        println!(
+            "  {:<14} {:>28} {:>28} {:>8} {:>10} {:>9} {:>8}",
+            r.name,
+            cell(0),
+            cell(1),
+            st.bodies,
+            kib,
+            st.evicted,
+            first
+        );
+    }
+    let ms = |v: &mut Vec<f64>| {
+        if v.is_empty() {
+            return "none".to_string();
+        }
+        v.sort_by(f64::total_cmp);
+        format!(
+            "{} builds, median {:.1} ms, 90% {:.1} ms, max {:.1} ms",
+            v.len(),
+            v[v.len() / 2],
+            v[v.len() * 9 / 10],
+            v[v.len() - 1]
+        )
+    };
+    println!("  build latency per body: {}", ms(&mut body_ms));
+    println!("  automatic plan build: {}", ms(&mut plan_ms));
+
+    let want = &runners[0].sim;
+    for r in &runners[1..] {
+        if r.sim.export_state() != want.export_state()
+            || (0..program.mems.len() as u32).any(|m| r.sim.mem(m) != want.mem(m))
+        {
+            return Err(format!("{}: state differs from spec off", r.name));
+        }
+    }
+    println!(
+        "  state and memories equal after {} ticks",
+        want.tick_count()
+    );
+    Ok(())
 }

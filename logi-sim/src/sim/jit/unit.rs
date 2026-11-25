@@ -100,6 +100,12 @@ pub fn compile_unit(p: &Program, body: BodyRef<'_>) -> Result<JitUnit, JitError>
 }
 
 impl JitUnit {
+    /// The compiled functions (for `Sim`, which calls them with its
+    /// buffers; the borrow keeps them from outliving the unit).
+    pub(crate) fn body(&self) -> &JitBody {
+        &self.body
+    }
+
     /// Settle chunks.
     pub fn settle_chunks(&self) -> usize {
         self.body.settle_chunks()
@@ -207,12 +213,25 @@ impl JitUnit {
 }
 
 impl Sim {
-    /// The bodies this `Sim` runs, numbered as its runs (0 the program's
-    /// own, `k` `runs[k - 1]`), as [`Sim::compile_jit`] builds them.
+    /// The bodies of this `Sim`'s layout, numbered as its runs (0 the
+    /// program's own, `k` `runs[k - 1]`): what [`Sim::compile_jit`]
+    /// compiles. Bodies installed at run time ([`Sim::install_spec`])
+    /// have units of their own and are not included.
     pub(crate) fn body_refs(&self) -> Vec<BodyRef<'_>> {
         let p = &*self.program;
+        let base = self.spec.base;
         let in_full = |k: usize| self.full.iter().any(|&f| f as usize == k);
-        let used = |k: usize| in_full(k) || self.fused.iter().any(|&f| f as usize == k);
+        // Specialized bodies, fallbacks and prefixes of the layout's
+        // tables run too; a prefix's results are read by the key and the
+        // body after it, so all of them are stored (not `fused_only`).
+        let mut in_spec = vec![false; base + 1];
+        let mut is_prefix = vec![false; base + 1];
+        for (r, prefix) in self.spec.base_runs() {
+            in_spec[r as usize] = true;
+            is_prefix[r as usize] |= prefix;
+        }
+        let used =
+            |k: usize| in_full(k) || in_spec[k] || self.fused.iter().any(|&f| f as usize == k);
         let mut out = vec![BodyRef {
             blocks: &p.blocks,
             instrs: &p.instrs,
@@ -222,7 +241,7 @@ impl Sim {
             used: used(0),
             fused_only: false,
         }];
-        for (k, r) in self.runs.iter().enumerate() {
+        for (k, r) in self.runs[..base].iter().enumerate() {
             let (blocks, instrs, imms) = parts(p, r.body.as_ref());
             out.push(BodyRef {
                 blocks,
@@ -231,15 +250,16 @@ impl Sim {
                 commits: r.body.as_ref().map_or(&p.commits[..], |b| &b.commits[..]),
                 guards: r.body.as_ref().map_or(&[][..], |b| &b.guards[..]),
                 used: used(k + 1),
-                fused_only: !in_full(k + 1),
+                fused_only: !in_full(k + 1) && !is_prefix[k + 1],
             });
         }
         out
     }
 
-    /// Bodies this `Sim` runs: 0 the program's own, `k` `runs[k - 1]`.
+    /// Bodies of this `Sim`'s layout: 0 the program's own, `k`
+    /// `runs[k - 1]` (not those installed at run time).
     pub fn body_count(&self) -> usize {
-        self.runs.len() + 1
+        self.spec.base + 1
     }
 
     /// Body `run` as a [`JitUnit`] of its own (`None`: not used, or too
