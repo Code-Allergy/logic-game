@@ -1507,6 +1507,37 @@ fn reset_restores_the_known_bits_folds() {
     }
 }
 
+/// A ROM write, then `install_jit(None)`, then a reset: the folded bodies
+/// come back and the `Sim` stays interpreted, as the caller chose.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn reset_after_a_rom_write_keeps_the_chosen_backend() {
+    let p = Arc::new(compile(&rom_flag(), &Options::default()).unwrap());
+    let rom = (0..p.mems.len() as u32)
+        .find(|&m| !p.mems[m as usize].writable)
+        .unwrap();
+    let mut sim = Sim::with_options(Arc::clone(&p), SimOptions::jit());
+    assert!(sim.jit_active());
+    let w = sim.mem(rom)[0];
+    sim.set_mem_word(rom, 0, w ^ 1);
+    assert!(
+        sim.jit_active(),
+        "native code again for the unfolded bodies"
+    );
+    assert!(sim.install_jit(None));
+    sim.reset();
+    assert!(sim.folded && !sim.jit_active(), "interpreted, as chosen");
+    let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+    want.set_mem_word(rom, 0, w ^ 1);
+    want.reset();
+    same_over_batches(&mut want, &mut sim, 14).unwrap();
+    // Native code stays native through the same sequence.
+    let mut native = Sim::with_options(Arc::clone(&p), SimOptions::jit());
+    native.set_mem_word(rom, 0, w ^ 1);
+    native.reset();
+    assert!(native.folded && native.jit_active());
+}
+
 /// Features `counters`: known-bits bodies execute no more operations than
 /// the general fused bodies, and fewer on some design.
 #[cfg(feature = "counters")]

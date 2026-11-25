@@ -1511,10 +1511,11 @@ impl Sim {
         self.last = self.full_run();
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
         {
-            let had = self.jit.is_some();
-            self.jit = jit;
-            if had && self.jit.is_none() {
-                self.jit = self.compile_jit().ok().map(Arc::new);
+            // Keep the backend the caller has now: native code (the stashed
+            // code, or compiled again) only when it runs native code, so a
+            // `install_jit(None)` since the ROM write stays in effect.
+            if self.jit.is_some() {
+                self.jit = jit.or_else(|| self.compile_jit().ok().map(Arc::new));
             }
         }
     }
