@@ -48,10 +48,14 @@ use std::sync::Mutex;
 mod superstep;
 #[cfg(test)]
 mod tests;
+mod unit;
+#[cfg(test)]
+mod unit_tests;
 
 #[cfg(test)]
 pub(crate) use superstep::MUTATION;
 pub use superstep::{JitSuper, Part, SuperFn, SuperInfo, SuperRef};
+pub use unit::{JitUnit, compile_unit};
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::I64;
@@ -253,165 +257,19 @@ impl JitProgram {
         superstep: Option<&SuperRef<'_>>,
     ) -> Result<Self, JitError> {
         let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
-        let mut flags = settings::builder();
-        // The IR is already simplified (constant folding, CSE and DCE ran in
-        // the compiler); Cranelift's optimizer gains nothing measurable on
-        // it and costs about a quarter of the compile time.
-        flags.set("opt_level", "none").map_err(|e| err(&e))?;
-        // The IR verifier costs about a tenth of the compile time; the
-        // builder's IR is checked in debug builds (and so in tests).
-        flags
-            .set(
-                "enable_verifier",
-                if cfg!(debug_assertions) {
-                    "true"
-                } else {
-                    "false"
-                },
-            )
-            .map_err(|e| err(&e))?;
-        flags
-            .set("use_colocated_libcalls", "false")
-            .map_err(|e| err(&e))?;
-        flags
-            .set(
-                "is_pic",
-                if cfg!(target_arch = "x86_64") {
-                    "true"
-                } else {
-                    "false"
-                },
-            )
-            .map_err(|e| err(&e))?;
-        // Windows commits a thread's stack a page at a time, through one
-        // guard page: a function whose frame is larger than a page must
-        // touch every page on its way down, or its first access below the
-        // guard page is an access violation. Chunks of many items
-        // (`SimOptions::superstep_chunk`) have such frames. The probes are
-        // inline (no call to a `__probestack` symbol), and only functions
-        // with a frame over a page get any.
-        if PROBE_STACK {
-            flags
-                .set("enable_probestack", "true")
-                .map_err(|e| err(&e))?;
-            flags
-                .set("probestack_strategy", "inline")
-                .map_err(|e| err(&e))?;
-        }
-        let isa = cranelift_native::builder()
-            .map_err(|e| err(&e))?
-            .finish(settings::Flags::new(flags))
-            .map_err(|e| err(&e))?;
-        let mut owned = Owned(Some(JITModule::new(JITBuilder::with_isa(
-            isa,
-            cranelift_module::default_libcall_names(),
-        ))));
+        let mut owned = new_module()?;
         let module = owned.0.as_mut().expect("just created");
         let ptr = module.target_config().pointer_type();
         let mut ctx = module.make_context();
         let mut fctx = FunctionBuilderContext::new();
-        type Ids = (Vec<FuncId>, Option<Vec<FuncId>>);
         let mut ids: Vec<Option<Ids>> = Vec::with_capacity(bodies.len());
         let mut count = 0usize;
         let mut n = 0u32;
         let (mut bytes, mut super_bytes) = (0usize, 0usize);
         for body in bodies {
-            let items: usize = body.blocks.iter().map(|b| b.len as usize).sum();
-            if !body.used || items > MAX_BODY {
-                ids.push(None);
-                continue;
-            }
-            let chunks = chunks(body);
-            // Slots read by commits and by later chunks: live out of a chunk.
-            let mut live: HashSet<u32> = HashSet::new();
-            if body.fused_only {
-                for c in body.commits {
-                    live.extend(c.reads());
-                }
-                // The counters test each guard's conditions after the
-                // settle (`Sim::evaluate`), so they must be in the slots.
-                #[cfg(feature = "counters")]
-                for g in body.guards {
-                    live.extend(g.conds.iter().map(|c| c.slot));
-                }
-            }
-            let mut lives = vec![HashSet::new(); chunks.len()];
-            for (k, ch) in chunks.iter().enumerate().rev() {
-                if body.fused_only {
-                    lives[k] = live.clone();
-                    for &(item, seg) in ch {
-                        item.reads(p, body, |s| {
-                            live.insert(s);
-                        });
-                        if seg > 0 {
-                            for c in &body.guards[seg as usize - 1].conds {
-                                live.insert(c.slot);
-                            }
-                        }
-                    }
-                }
-            }
-            let mut settle = Vec::with_capacity(chunks.len());
-            for (ch, live) in chunks.iter().zip(&lives) {
-                count += ch.len();
-                ctx.func.signature.params.clear();
-                ctx.func.signature.params.extend([
-                    AbiParam::new(ptr),
-                    AbiParam::new(ptr),
-                    AbiParam::new(I64),
-                ]);
-                ctx.func.name = UserFuncName::user(0, n);
-                build_settle(
-                    module.target_config(),
-                    &mut ctx.func,
-                    &mut fctx,
-                    p,
-                    body,
-                    ch,
-                    body.fused_only.then_some(live),
-                );
-                let id = module
-                    .declare_function(&format!("settle{n}"), Linkage::Local, &ctx.func.signature)
-                    .map_err(|e| err(&e))?;
-                n += 1;
-                module.define_function(id, &mut ctx).map_err(|e| err(&e))?;
-                bytes += code_size(&ctx);
-                module.clear_context(&mut ctx);
-                settle.push(id);
-            }
-            let commit = if body
-                .commits
-                .iter()
-                .all(|c| !matches!(c, Commit::MemClear { .. }))
-            {
-                let mut out = Vec::new();
-                for part in body.commits.chunks(COMMIT_CHUNK) {
-                    ctx.func.signature.params.clear();
-                    ctx.func.signature.params.extend([
-                        AbiParam::new(ptr),
-                        AbiParam::new(ptr),
-                        AbiParam::new(ptr),
-                    ]);
-                    ctx.func.name = UserFuncName::user(0, n);
-                    build_commit(module.target_config(), &mut ctx.func, &mut fctx, p, part);
-                    let id = module
-                        .declare_function(
-                            &format!("commit{n}"),
-                            Linkage::Local,
-                            &ctx.func.signature,
-                        )
-                        .map_err(|e| err(&e))?;
-                    n += 1;
-                    module.define_function(id, &mut ctx).map_err(|e| err(&e))?;
-                    bytes += code_size(&ctx);
-                    module.clear_context(&mut ctx);
-                    out.push(id);
-                }
-                Some(out)
-            } else {
-                None
-            };
-            ids.push(Some((settle, commit)));
+            ids.push(compile_body(
+                module, &mut ctx, &mut fctx, p, body, &mut n, &mut count, &mut bytes,
+            )?);
         }
         // The superstep: only over bodies compiled with a native commit.
         let mut sup = None;
@@ -561,6 +419,186 @@ impl JitProgram {
             _module: Mutex::new(owned),
         })
     }
+}
+
+/// A Cranelift module configured for this crate's code (see
+/// `JitProgram::compile_with`), owned so that its code is freed on drop.
+fn new_module() -> Result<Owned, JitError> {
+    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
+    let mut flags = settings::builder();
+    // The IR is already simplified (constant folding, CSE and DCE ran in
+    // the compiler); Cranelift's optimizer gains nothing measurable on
+    // it and costs about a quarter of the compile time.
+    flags.set("opt_level", "none").map_err(|e| err(&e))?;
+    // The IR verifier costs about a tenth of the compile time; the
+    // builder's IR is checked in debug builds (and so in tests).
+    flags
+        .set(
+            "enable_verifier",
+            if cfg!(debug_assertions) {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .map_err(|e| err(&e))?;
+    flags
+        .set("use_colocated_libcalls", "false")
+        .map_err(|e| err(&e))?;
+    flags
+        .set(
+            "is_pic",
+            if cfg!(target_arch = "x86_64") {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .map_err(|e| err(&e))?;
+    // Windows commits a thread's stack a page at a time, through one
+    // guard page: a function whose frame is larger than a page must
+    // touch every page on its way down, or its first access below the
+    // guard page is an access violation. Chunks of many items
+    // (`SimOptions::superstep_chunk`) have such frames. The probes are
+    // inline (no call to a `__probestack` symbol), and only functions
+    // with a frame over a page get any.
+    if PROBE_STACK {
+        flags
+            .set("enable_probestack", "true")
+            .map_err(|e| err(&e))?;
+        flags
+            .set("probestack_strategy", "inline")
+            .map_err(|e| err(&e))?;
+    }
+    let isa = cranelift_native::builder()
+        .map_err(|e| err(&e))?
+        .finish(settings::Flags::new(flags))
+        .map_err(|e| err(&e))?;
+    Ok(Owned(Some(JITModule::new(JITBuilder::with_isa(
+        isa,
+        cranelift_module::default_libcall_names(),
+    )))))
+}
+
+/// The functions of one compiled body: settle chunks, and commit chunks
+/// (`None` when a `MemClear` is committed by the interpreter).
+type Ids = (Vec<FuncId>, Option<Vec<FuncId>>);
+
+/// Compile one body into `module` (`None`: not used, or larger than
+/// [`MAX_BODY`]). `n` numbers the functions, `count` and `bytes` sum
+/// instructions and native bytes.
+#[allow(clippy::too_many_arguments)]
+fn compile_body(
+    module: &mut JITModule,
+    ctx: &mut cranelift_codegen::Context,
+    fctx: &mut FunctionBuilderContext,
+    p: &Program,
+    body: &BodyRef<'_>,
+    n: &mut u32,
+    count: &mut usize,
+    bytes: &mut usize,
+) -> Result<Option<Ids>, JitError> {
+    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
+    let ptr = module.target_config().pointer_type();
+    let items: usize = body.blocks.iter().map(|b| b.len as usize).sum();
+    if !body.used || items > MAX_BODY {
+        return Ok(None);
+    }
+    let chunks = chunks(body);
+    // Slots read by commits and by later chunks: live out of a chunk.
+    let mut live: HashSet<u32> = HashSet::new();
+    if body.fused_only {
+        for c in body.commits {
+            live.extend(c.reads());
+        }
+        // The counters test each guard's conditions after the
+        // settle (`Sim::evaluate`), so they must be in the slots.
+        #[cfg(feature = "counters")]
+        for g in body.guards {
+            live.extend(g.conds.iter().map(|c| c.slot));
+        }
+    }
+    let mut lives = vec![HashSet::new(); chunks.len()];
+    for (k, ch) in chunks.iter().enumerate().rev() {
+        if body.fused_only {
+            lives[k] = live.clone();
+            for &(item, seg) in ch {
+                item.reads(p, body, |s| {
+                    live.insert(s);
+                });
+                if seg > 0 {
+                    for c in &body.guards[seg as usize - 1].conds {
+                        live.insert(c.slot);
+                    }
+                }
+            }
+        }
+    }
+    let mut settle = Vec::with_capacity(chunks.len());
+    for (ch, live) in chunks.iter().zip(&lives) {
+        *count += ch.len();
+        ctx.func.signature.params.clear();
+        ctx.func.signature.params.extend([
+            AbiParam::new(ptr),
+            AbiParam::new(ptr),
+            AbiParam::new(I64),
+        ]);
+        ctx.func.name = UserFuncName::user(0, *n);
+        build_settle(
+            module.target_config(),
+            &mut ctx.func,
+            fctx,
+            p,
+            body,
+            ch,
+            body.fused_only.then_some(live),
+        );
+        let id = module
+            .declare_function(
+                &format!("settle{}", *n),
+                Linkage::Local,
+                &ctx.func.signature,
+            )
+            .map_err(|e| err(&e))?;
+        *n += 1;
+        module.define_function(id, ctx).map_err(|e| err(&e))?;
+        *bytes += code_size(ctx);
+        module.clear_context(ctx);
+        settle.push(id);
+    }
+    let commit = if body
+        .commits
+        .iter()
+        .all(|c| !matches!(c, Commit::MemClear { .. }))
+    {
+        let mut out = Vec::new();
+        for part in body.commits.chunks(COMMIT_CHUNK) {
+            ctx.func.signature.params.clear();
+            ctx.func.signature.params.extend([
+                AbiParam::new(ptr),
+                AbiParam::new(ptr),
+                AbiParam::new(ptr),
+            ]);
+            ctx.func.name = UserFuncName::user(0, *n);
+            build_commit(module.target_config(), &mut ctx.func, fctx, p, part);
+            let id = module
+                .declare_function(
+                    &format!("commit{}", *n),
+                    Linkage::Local,
+                    &ctx.func.signature,
+                )
+                .map_err(|e| err(&e))?;
+            *n += 1;
+            module.define_function(id, ctx).map_err(|e| err(&e))?;
+            *bytes += code_size(ctx);
+            module.clear_context(ctx);
+            out.push(id);
+        }
+        Some(out)
+    } else {
+        None
+    };
+    Ok(Some((settle, commit)))
 }
 
 /// Bytes of machine code `ctx` holds after `define_function`.
