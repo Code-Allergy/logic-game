@@ -436,3 +436,92 @@ fn an_edit_of_only_the_tests_is_unsaved_and_can_be_undone() {
     assert_eq!(app.world().resource::<WorkspaceTests>().0.len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_request_whose_caller_gave_up_is_not_served_later() {
+    let (mut app, mut link) = app();
+    link.timeout = Duration::from_millis(20);
+    // A gesture holds requests back for longer than the caller waits.
+    app.world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+    let demo = (*catalog().unwrap().get("half_adder").unwrap().workspace).clone();
+    let e = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| link.open("late".into(), demo, false));
+        while !worker.is_finished() {
+            app.update();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker.join().unwrap().unwrap_err()
+    });
+    assert!(
+        e.contains("did not answer") && e.contains("nothing was done"),
+        "{e}"
+    );
+    // The gesture ends: the abandoned request must not open the workspace.
+    app.world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .release(MouseButton::Left);
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_ne!(app.world().resource::<ActiveCircuit>().name, "late");
+    assert!(labels(&mut app).is_empty());
+}
+
+#[test]
+fn a_save_names_the_session_chips_it_leaves_out() {
+    use crate::sim::{CircuitDocument, DocNode, GateKind};
+    let chip = |name: &str| CircuitDocument::new(name);
+    let (placed, inner, loose) = (chip("placed"), chip("inner"), chip("loose"));
+    let other = chip("of another workspace");
+    let mut placed = placed;
+    placed.add(DocNode::new(
+        GateKind::SubCircuit {
+            definition: inner.id,
+        },
+        Vec2::ZERO,
+    ));
+    let mut root = CircuitDocument::new("root");
+    root.add(DocNode::new(
+        GateKind::SubCircuit {
+            definition: placed.id,
+        },
+        Vec2::ZERO,
+    ));
+    // The session made three chips; the library also has one it did not.
+    let session: std::collections::HashSet<_> = [placed.id, inner.id, loose.id].into();
+    let mut library = CircuitLibrary::default();
+    for def in [placed, inner, loose, other] {
+        library.definitions.insert(def.id, Arc::new(def));
+    }
+    assert_eq!(
+        crate::mcp::app::unplaced(&library, &root, &session),
+        ["loose"]
+    );
+}
+
+#[test]
+fn a_refused_transport_request_changes_nothing() {
+    let (mut app, link) = app();
+    let (mut s, dir) = session(link, "app-transport-refused");
+    drive(&mut app, || s.edit_tool(object(counter()), None, false)).unwrap();
+    app.update();
+    app.update();
+    let transport = |s: &mut Session, command: Value| s.transport_tool(object(command));
+    // A good input before a bad one, and a good input with a bad action.
+    for command in [
+        json!({"action": "set", "inputs": {"En": 1, "Missing": 0}}),
+        json!({"action": "set", "inputs": {"En": 2}}),
+        json!({"action": "nonsense", "hz": 5, "inputs": {"En": 1}}),
+        // More ticks than a step may run (its end must not overflow).
+        json!({"action": "step", "ticks": u64::MAX, "inputs": {"En": 1}}),
+    ] {
+        drive(&mut app, || transport(&mut s, command.clone())).unwrap_err();
+        app.update();
+        app.update();
+        let state = drive(&mut app, || s.app_tool("state")).unwrap();
+        assert!(state.contains("in En=0"), "{command}: {state}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -848,6 +848,19 @@ fn a_bad_set_or_load_costs_no_simulation() {
         assert!(e.starts_with("steps[1]: "), "{e}");
         assert_eq!(state.rig.tick_count(), 0, "{e}");
     }
+    // A load past the end of the memory is refused before anything runs.
+    let e = run::run(
+        &mut state,
+        &object(json!({"steps": [
+            {"ticks": 5}, {"load": {"part": "ram", "data": [1], "at": 16}}
+        ]})),
+    )
+    .unwrap_err();
+    assert!(
+        e.starts_with("steps[1]: ") && e.contains("past the memory"),
+        "{e}"
+    );
+    assert_eq!(state.rig.tick_count(), 0, "{e}");
     // An address at the end of the address space is refused, not a panic.
     let e = script_error(
         &ws,

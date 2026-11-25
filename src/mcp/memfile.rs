@@ -172,12 +172,11 @@ fn hex_words(text: &str) -> Result<Vec<u64>, String> {
     Ok(words)
 }
 
-/// Put `load` into memory contents of `2^addr_bits` words (growing
-/// `contents` as far as needed).
-pub fn place(contents: &mut Vec<u64>, addr_bits: u8, load: &Load) -> Result<(), String> {
+/// Where `load` ends in a memory of `2^addr_bits` words (the address
+/// after its last word), or why it does not fit.
+pub fn end(addr_bits: u8, load: &Load) -> Result<usize, String> {
     let size = 1usize << addr_bits;
-    let end = load
-        .at
+    load.at
         .checked_add(load.words.len())
         .filter(|end| *end <= size)
         .ok_or_else(|| {
@@ -186,7 +185,13 @@ pub fn place(contents: &mut Vec<u64>, addr_bits: u8, load: &Load) -> Result<(), 
                 load.words.len(),
                 load.at
             )
-        })?;
+        })
+}
+
+/// Put `load` into memory contents of `2^addr_bits` words (growing
+/// `contents` as far as needed).
+pub fn place(contents: &mut Vec<u64>, addr_bits: u8, load: &Load) -> Result<(), String> {
+    let end = end(addr_bits, load)?;
     if contents.len() < end {
         contents.resize(end, 0);
     }

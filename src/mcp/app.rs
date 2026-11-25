@@ -18,6 +18,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,10 +33,10 @@ use crate::editor::files::{OpenRequest, open_now};
 use crate::sim::history::{HistoryWorld, Snapshot};
 use crate::sim::source::parse_int_text;
 use crate::sim::{
-    ActiveCircuit, AuthoringFeedback, CircuitReader, CircuitView, GateKind, GateLabel, GateType,
-    GateValues, InputDrive, LoadWorkspaceEvent, RootItems, SaveWorkspaceEvent, SelectedGate,
-    SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, UndoHistory, WorkspaceDocument,
-    WorkspaceRevision, WorkspaceTests,
+    ActiveCircuit, AuthoringFeedback, CircuitDocument, CircuitReader, CircuitView, GateKind,
+    GateLabel, GateType, GateValues, InputDrive, LoadWorkspaceEvent, RootItems, SaveWorkspaceEvent,
+    SelectedGate, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, UndoHistory,
+    WorkspaceDocument, WorkspaceRevision, WorkspaceTests,
 };
 use crate::{GameState, sim::CircuitLibrary};
 
@@ -70,25 +71,42 @@ pub enum AppRequest {
 /// gesture, or a window that is not being drawn, holds it up).
 pub const APP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A request on its way to the app, and whether its caller gave up
+/// waiting: the app drops it then, or an edit the caller was told had
+/// failed would still be made once frames resume (and made twice when
+/// the caller tries again).
+struct Queued {
+    request: AppRequest,
+    abandoned: Arc<AtomicBool>,
+}
+
 /// The session's end: each call sends a request and waits for the app.
 pub struct ChannelLink {
-    requests: Sender<AppRequest>,
+    requests: Sender<Queued>,
     pub timeout: Duration,
 }
 
 impl ChannelLink {
     fn call<T>(&self, request: impl FnOnce(Reply<T>) -> AppRequest) -> Result<T, String> {
         let (reply, answer) = channel();
+        let abandoned = Arc::new(AtomicBool::new(false));
         self.requests
-            .send(request(reply))
+            .send(Queued {
+                request: request(reply),
+                abandoned: Arc::clone(&abandoned),
+            })
             .map_err(|_| "the game is not running any more".to_string())?;
         match answer.recv_timeout(self.timeout) {
             Ok(result) => result,
-            Err(_) => Err(format!(
-                "the game did not answer in {} s (a drag or a text edit in progress holds \
-                 requests back; so does a window that is not being drawn)",
-                self.timeout.as_secs()
-            )),
+            Err(_) => {
+                abandoned.store(true, Ordering::Relaxed);
+                Err(format!(
+                    "the game did not answer in {} s (a drag or a text edit in progress holds \
+                     requests back; so does a window that is not being drawn); nothing was \
+                     done",
+                    self.timeout.as_secs()
+                ))
+            }
         }
     }
 }
@@ -152,8 +170,8 @@ struct PendingStep {
 /// The app's end: the requests that came in and are waiting.
 #[derive(Resource)]
 pub struct McpInbox {
-    requests: Mutex<Receiver<AppRequest>>,
-    waiting: VecDeque<AppRequest>,
+    requests: Mutex<Receiver<Queued>>,
+    waiting: VecDeque<Queued>,
     saving: Option<PendingSave>,
     stepping: Option<PendingStep>,
     /// Chips that came through this link (an edit, an opened workspace).
@@ -238,10 +256,14 @@ pub fn serve_requests(world: &mut World) {
         inbox.settle -= 1;
     } else if !gesture(world) {
         while inbox.saving.is_none() && inbox.stepping.is_none() && inbox.settle == 0 {
-            let Some(request) = inbox.waiting.pop_front() else {
+            let Some(queued) = inbox.waiting.pop_front() else {
                 break;
             };
-            serve(world, &mut inbox, request);
+            // Its caller stopped waiting and was told so.
+            if queued.abandoned.load(Ordering::Relaxed) {
+                continue;
+            }
+            serve(world, &mut inbox, queued.request);
         }
     }
     world.insert_resource(inbox);
@@ -372,21 +394,21 @@ fn serve(world: &mut World, inbox: &mut McpInbox, request: AppRequest) {
             }
         }
         AppRequest::Transport { command, reply } => {
-            let stepping = command.get("action").and_then(Value::as_str) == Some("step");
-            let before = world.get_resource::<SimBridge>().map(SimBridge::tick_count);
-            match (transport(world, &command), before) {
+            match transport(world, &command) {
                 // A step is done by the simulation's own thread: answer
                 // when it has got there.
-                (Ok(_), Some(before)) if stepping => {
-                    let ticks = command.get("ticks").and_then(Value::as_u64).unwrap_or(1);
+                Ok((_, Some(target))) => {
                     inbox.stepping = Some(PendingStep {
                         reply,
-                        target: before + ticks,
+                        target,
                         frames: 600,
                     });
                 }
-                (result, _) => {
-                    let _ = reply.send(result);
+                Ok((text, None)) => {
+                    let _ = reply.send(Ok(text));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
                 }
             }
         }
@@ -460,7 +482,44 @@ fn finish_save(world: &mut World, inbox: &mut McpInbox) {
         None if !dirty && renamed => Ok(format!("saved \"{name}\"")),
         None => Err("the editor did not save (is this the web build?)".to_string()),
     };
+    // The editor saves what the root reaches: say which of the session's
+    // chips that left out, so that the save does not pass for all of it.
+    let chips = inbox.chips.clone();
+    let left_out = world
+        .run_system_once(move |reader: CircuitReader, library: Res<CircuitLibrary>| {
+            unplaced(&library, &reader.root_document(), &chips)
+        })
+        .unwrap_or_default();
+    let result = result.map(|said| match left_out.as_slice() {
+        [] => said,
+        names => format!(
+            "{said}\nNOT saved: {} (not placed anywhere; the game saves the chips the \
+             circuit uses). Place them and save again to keep them.",
+            names
+                .iter()
+                .map(|n| format!("chip \"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    });
     let _ = pending.reply.send(result);
+}
+
+/// The names of the session's `chips` that `root` does not reach (and
+/// that no chip it reaches uses), sorted: a save leaves them out.
+pub(crate) fn unplaced(
+    library: &CircuitLibrary,
+    root: &CircuitDocument,
+    chips: &HashSet<Uuid>,
+) -> Vec<String> {
+    let reached = library.reachable_from(root);
+    let mut names: Vec<String> = chips
+        .iter()
+        .filter(|id| **id != root.id && !reached.contains_key(*id))
+        .filter_map(|id| library.get(*id).map(|def| def.name.clone()))
+        .collect();
+    names.sort();
+    names
 }
 
 fn read(world: &mut World, chips: &HashSet<Uuid>) -> Result<AppWorkspace, String> {
@@ -510,7 +569,16 @@ fn rate_text(config: &SimulationConfig) -> String {
 }
 
 /// The `transport` tool on the simulation the editor shows.
-fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, String> {
+/// The most ticks one `step` runs: far more than any call waits for, and
+/// small enough that the tick a step ends at cannot overflow.
+const MAX_STEP_TICKS: u64 = 1 << 48;
+
+/// Do a transport request: what to answer and, for a step, the tick it
+/// ends at (the answer waits until the simulation has got there).
+fn transport(
+    world: &mut World,
+    command: &Map<String, Value>,
+) -> Result<(String, Option<u64>), String> {
     let number = |key: &str| -> Result<Option<u64>, String> {
         match command.get(key) {
             None | Some(Value::Null) => Ok(None),
@@ -538,6 +606,11 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
         .unwrap_or("status")
         .to_string();
     let ticks = number("ticks")?.unwrap_or(1);
+    if ticks > MAX_STEP_TICKS {
+        return Err(format!(
+            "\"ticks\" is at most {MAX_STEP_TICKS} (run the simulation for longer waits)"
+        ));
+    }
     let hz = match command.get("hz") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if s == "max" => Some(None),
@@ -567,8 +640,19 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                   mut config: ResMut<SimulationConfig>,
                   gates: Query<(Entity, &GateLabel, &GateType), RootItems>,
                   mut set: MessageWriter<SetInputValue>|
-                  -> Result<String, String> {
-                // Inputs first, so a step in the same call sees them.
+                  -> Result<(String, Option<u64>), String> {
+                // Everything is checked before anything is changed: a
+                // request that is refused leaves the simulation alone.
+                if !matches!(
+                    action.as_str(),
+                    "run" | "pause" | "step" | "reset" | "status" | "rate" | "set"
+                ) {
+                    return Err(format!(
+                        "unknown action \"{action}\" (actions: run, pause, step, reset, \
+                         rate, set, status)"
+                    ));
+                }
+                let mut writes: Vec<(Entity, u64)> = Vec::new();
                 for (label, value) in &inputs {
                     let found: Vec<(Entity, u8)> = gates
                         .iter()
@@ -586,14 +670,16 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                     if *w < 64 && *value >> *w != 0 {
                         return Err(format!("{value} does not fit input \"{label}\" ({w} bits)"));
                     }
-                    set.write(SetInputValue {
-                        entity: *entity,
-                        value: *value,
-                    });
+                    writes.push((*entity, *value));
+                }
+                // Inputs first, so a step in the same call sees them.
+                for (entity, value) in writes {
+                    set.write(SetInputValue { entity, value });
                     // The simulation gets it now; the message keeps the
                     // part's own record in step.
-                    bridge.set_input(*entity, *value);
+                    bridge.set_input(entity, value);
                 }
+                let mut target = None;
                 if let Some(rate) = hz {
                     match rate {
                         Some(hz) => {
@@ -608,18 +694,19 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                     "pause" => bridge.set_running(false),
                     "step" => {
                         bridge.set_running(false);
+                        // A running simulation goes on until its own
+                        // thread has seen the pause: wait for that, so
+                        // that the step is counted from where it stopped
+                        // and not from a tick it has already passed.
+                        bridge.sync();
+                        target = Some(bridge.tick_count().saturating_add(ticks));
                         bridge.step(ticks);
                     }
                     "reset" => bridge.reset(),
-                    "status" | "rate" | "set" => {}
-                    other => {
-                        return Err(format!(
-                            "unknown action \"{other}\" (actions: run, pause, step, reset, \
-                             rate, set, status)"
-                        ));
-                    }
+                    // Checked above.
+                    _ => {}
                 }
-                Ok(format!(
+                let text = format!(
                     "{}, tick {}, rate {}\n",
                     if bridge.is_running() {
                         "running"
@@ -628,7 +715,8 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                     },
                     bridge.tick_count(),
                     rate_text(&config)
-                ))
+                );
+                Ok((text, target))
             },
         )
         .map_err(|e| format!("the game could not do it: {e}"))

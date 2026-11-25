@@ -721,7 +721,7 @@ close in later milestones:
   one that needs the same bits; a second one is made.
 - In the game, a chip that is not placed anywhere is lost when the
   workspace is saved and reopened (the editor saves what the root
-  reaches).
+  reaches). The reply to `save` names the chips it left out.
 - While the game's window is hidden or minimised its frames may stop,
   and calls wait for them.
 - `app state` reads the editor's resources; it does not read the cards'

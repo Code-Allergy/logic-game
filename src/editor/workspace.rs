@@ -820,6 +820,9 @@ fn is_unlabelled_port(node: &crate::sim::DocNode) -> bool {
 /// outputs, `display0`, ... for displays (skipping labels in use in that
 /// circuit). Returns the workspace to write and the names given, as
 /// `"in0" (Input in "Adder")`.
+///
+/// A chip's pins are numbered in label order, so naming a port can move
+/// its pin: the wires on the chip's placements follow their ports.
 pub fn label_unlabelled_ports(
     workspace: &WorkspaceDocument,
 ) -> (Cow<'_, WorkspaceDocument>, Vec<String>) {
@@ -859,11 +862,30 @@ pub fn label_unlabelled_ports(
     let mut ids: Vec<Uuid> = out.definitions.keys().copied().collect();
     ids.sort_unstable();
     for id in ids {
-        if let Some(def) = out.definitions.get_mut(&id)
-            && needs(def)
-        {
-            label(Arc::make_mut(def));
+        let Some(old) = out.definitions.get(&id).filter(|d| needs(d)).cloned() else {
+            continue;
+        };
+        let mut new = (*old).clone();
+        label(&mut new);
+        if let Some(remap) = crate::sim::view::PinRemap::between(&old, &new) {
+            // No port is gone, so no wire is dropped; this is the same
+            // circuit, so the revision stays.
+            let renumber = |doc: &CircuitDocument| {
+                remap.apply(id, doc).map(|(mut renumbered, _)| {
+                    renumbered.revision = doc.revision;
+                    renumbered
+                })
+            };
+            if let Some(root) = renumber(&out.root) {
+                out.root = root;
+            }
+            for def in out.definitions.values_mut() {
+                if let Some(doc) = renumber(def) {
+                    *def = Arc::new(doc);
+                }
+            }
         }
+        out.definitions.insert(id, Arc::new(new));
     }
     (Cow::Owned(out), named)
 }
@@ -1288,5 +1310,50 @@ mod tests {
         assert!(old.join("Old one/manifest.json").exists(), "left in place");
         fs::remove_dir_all(new).ok();
         fs::remove_dir_all(old).ok();
+    }
+    #[test]
+    fn naming_a_port_keeps_the_wires_of_a_chips_placements_on_their_ports() {
+        use crate::sim::GateKind;
+        // A chip with an unnamed input and an input `A`: unnamed sorts
+        // first, so it is pin 0. Named `in0` it sorts after `A`: pin 1.
+        let mut chip = CircuitDocument::new("chip");
+        let unnamed = chip.add(DocNode::new(GateKind::Input { w: 1 }, Vec2::ZERO));
+        let mut a = DocNode::new(GateKind::Input { w: 1 }, Vec2::ZERO);
+        a.label = Some("A".into());
+        let a = chip.add(a);
+        let pin = |doc: &CircuitDocument, id: Uuid| {
+            doc.interface().0.iter().position(|n| n.id == id).unwrap() as u8
+        };
+        assert_eq!((pin(&chip, unnamed), pin(&chip, a)), (0, 1));
+
+        let mut root = CircuitDocument::new("root");
+        let mut port = |label: &str| {
+            let mut n = DocNode::new(GateKind::Input { w: 1 }, Vec2::ZERO);
+            n.label = Some(label.into());
+            root.add(n)
+        };
+        let (to_unnamed, to_a) = (port("X"), port("Y"));
+        let placed = root.add(DocNode::new(
+            GateKind::SubCircuit {
+                definition: chip.id,
+            },
+            Vec2::ZERO,
+        ));
+        root.connect(to_unnamed, 0, placed, 0);
+        root.connect(to_a, 0, placed, 1);
+        let mut workspace = WorkspaceDocument::new(root);
+        let chip_id = workspace.define(chip);
+
+        let (saved, named) = label_unlabelled_ports(&workspace);
+        assert_eq!(named.len(), 1, "{named:?}");
+        let chip = &saved.definitions[&chip_id];
+        assert_eq!((pin(chip, unnamed), pin(chip, a)), (1, 0));
+        let sink = |from: Uuid| {
+            let wire = saved.root.wires.iter().find(|w| w.from.node == from);
+            wire.unwrap().to.pin
+        };
+        assert_eq!(sink(to_unnamed), pin(chip, unnamed));
+        assert_eq!(sink(to_a), pin(chip, a));
+        assert_eq!(saved.root.revision, workspace.root.revision);
     }
 }

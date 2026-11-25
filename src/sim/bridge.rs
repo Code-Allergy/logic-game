@@ -1059,6 +1059,17 @@ impl SimBridge {
         });
     }
 
+    /// Wait until the simulation's thread has handled every command sent
+    /// so far (a pause, a step), so that [`Self::tick_count`] is the tick
+    /// they left it at. Nothing to wait for when it runs in the frame.
+    pub fn sync(&self) {
+        self.with_runtime(|rt| match rt {
+            #[cfg(not(target_arch = "wasm32"))]
+            Runtime::Threaded(engine) => engine.sync(),
+            Runtime::Local { .. } => {}
+        });
+    }
+
     /// Queue `n` ticks, run even while paused.
     pub fn step(&self, n: u64) {
         self.with_runtime(|rt| match rt {

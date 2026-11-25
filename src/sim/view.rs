@@ -325,7 +325,11 @@ impl PinRemap {
     /// Renumber the wires of `doc` to instances of `def`. Returns the
     /// updated document if anything changed, and the ports of the wires
     /// it dropped.
-    fn apply(&self, def: Uuid, doc: &CircuitDocument) -> Option<(CircuitDocument, Vec<String>)> {
+    pub(crate) fn apply(
+        &self,
+        def: Uuid,
+        doc: &CircuitDocument,
+    ) -> Option<(CircuitDocument, Vec<String>)> {
         let instances: Vec<Uuid> = doc
             .nodes
             .iter()

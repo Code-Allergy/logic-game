@@ -315,6 +315,25 @@ fn remove_takes_the_wires_and_set_changes_parameters() {
     for label in ["inv[0]", "inv[1]", "last"] {
         assert!(labels.contains(&label), "{labels:?}");
     }
+    // An array with a gap keeps its indices too: `n[2]` is `inv[2]`.
+    let (sparse, _) = edit(
+        &ws,
+        json!({"ops": [
+            {"add": [{"name": "n", "type": "Not", "count": 3}]},
+            {"remove": ["n[1]"]},
+            {"set": [{"part": "n", "label": "inv"}]}
+        ]}),
+    );
+    let labels: Vec<&str> = sparse
+        .root
+        .nodes
+        .iter()
+        .filter_map(|n| n.label.as_deref())
+        .collect();
+    assert!(
+        labels.contains(&"inv[0]") && labels.contains(&"inv[2]") && !labels.contains(&"inv[1]"),
+        "{labels:?}"
+    );
     let e = refused(&ws, json!({"ops": [{"set": {"part": "g", "type": "Or"}}]}));
     assert!(e.contains("type cannot be set"), "{e}");
 

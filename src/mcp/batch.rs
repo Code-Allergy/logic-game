@@ -1496,6 +1496,20 @@ impl Group<'_> {
             return err(format!("a part is already labelled \"{label}\""));
         }
 
+        // The index each part of a whole array has: an array may have
+        // gaps (removed elements), which `ids` leaves out.
+        let indices: Vec<usize> = if is_array {
+            names.table[whole.node]
+                .elements
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| !e.id.is_nil())
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let mut changed: HashSet<Uuid> = HashSet::new();
         for (i, id) in ids.iter().enumerate() {
             let node = self
@@ -1506,7 +1520,7 @@ impl Group<'_> {
                 .expect("named parts are in the document");
             if let Some(label) = &label {
                 node.label = Some(if is_array {
-                    format!("{label}[{i}]")
+                    format!("{label}[{}]", indices[i])
                 } else {
                     label.clone()
                 });

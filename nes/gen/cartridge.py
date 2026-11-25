@@ -82,6 +82,7 @@ def strip(args):
         circuit(doc, cart)  # both cartridges must be there
     empty_carts(doc)
     doc["name"] = "nes"
+    root(doc)["name"] = "nes"
     save(COMMITTED, doc)
     print(f"wrote {COMMITTED}/manifest.json (cartridges empty)")
     if args.rom:
@@ -95,7 +96,8 @@ def install(args):
     if os.path.exists(os.path.join(args.into, "manifest.json")):
         shutil.copy(os.path.join(args.into, "manifest.json"), os.path.join(args.into, "manifest.json.bak"))
     save(args.into, load(COMMITTED))
-    print(f"installed the committed workspace in {args.into} (no ROM yet: use insert)")
+    print(f"installed the committed workspace in {args.into} (nestest in the NROM cartridge; "
+          "insert puts another ROM in)")
 
 
 def insert(args):

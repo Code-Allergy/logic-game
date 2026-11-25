@@ -752,8 +752,18 @@ impl Rig {
             Source::Net { path, net, lo, len } => {
                 (self.sim.read_net(path, *net).unwrap_or(0) >> lo) & mask(*len)
             }
+            // One word, without a copy of the memory: a recorded word is
+            // read every tick.
             Source::Word { memory, addr } => {
-                self.words(memory).get(*addr).copied().unwrap_or(0) & mask(memory.width)
+                let word = if memory.rom {
+                    self.rom_contents(memory)
+                        .and_then(|words| words.get(*addr).copied())
+                } else {
+                    self.sim
+                        .mem_index(&memory.path)
+                        .and_then(|i| self.sim.mem(i).get(*addr).copied())
+                };
+                word.unwrap_or(0) & mask(memory.width)
             }
             Source::State(target) => self.peek(target),
         }
