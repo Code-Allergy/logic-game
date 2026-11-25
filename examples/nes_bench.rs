@@ -25,6 +25,8 @@
 //! `--executed` (build with `--features counters`) counts the instructions
 //! the interpreter actually executes per tick in `run(n)` batches, with
 //! guards on and off: what guards skip at run time.
+//! `--unnamed` lists the ops that write no authored net, `--ops <block>`
+//! the ops writing a block's nets (op, width, operands, readers).
 //! `--blocks` reports where the ops of a tick are: each chip under the
 //! root (and inside large ones) compiled on its own, with its op mix. The
 //! settle is straight-line code that runs every op of its variant each
@@ -44,6 +46,12 @@ fn main() -> Result<(), String> {
     let compare = args.iter().any(|a| a == "--compare");
     let blocks = args.iter().any(|a| a == "--blocks");
     let executed = args.iter().any(|a| a == "--executed");
+    let unnamed = args.iter().any(|a| a == "--unnamed");
+    let ops_of = args.iter().position(|a| a == "--ops").map(|k| {
+        let block = args.get(k + 1).cloned().unwrap_or_default();
+        args.drain(k..(k + 2).min(args.len()));
+        block
+    });
     let attribute = args.iter().position(|a| a == "--attribute").map(|k| {
         let depth = args.get(k + 1).and_then(|d| d.parse::<usize>().ok());
         args.drain(k..(k + 1 + usize::from(depth.is_some())).min(args.len()));
@@ -69,7 +77,7 @@ fn main() -> Result<(), String> {
     };
     let presses = parse_presses(&value_of("--press").unwrap_or_default())?;
     let screen = value_of("--screen");
-    args.retain(|a| a != "--compare" && a != "--blocks" && a != "--executed");
+    args.retain(|a| a != "--compare" && a != "--blocks" && a != "--executed" && a != "--unnamed");
     let folder = args.first().ok_or(
         "usage: nes_bench <workspace folder> [--compare | --blocks | --against <workspace> [--press ...] [--screen file]] [--only <name>] [ticks]",
     )?;
@@ -120,7 +128,13 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     if let Some(depth) = attribute {
-        return attribute_ops(&ws, depth);
+        return attribute_ops(&ws, depth, None);
+    }
+    if unnamed {
+        return attribute_ops(&ws, 2, Some(String::new()));
+    }
+    if let Some(block) = ops_of {
+        return attribute_ops(&ws, 2, Some(block));
     }
     if let Some(other) = against {
         let other = design_of(&suite::read_workspace(Path::new(&other))?)?;
@@ -190,9 +204,13 @@ fn main() -> Result<(), String> {
                 false,
             ),
         ];
-        for (what, sim_options, batch) in runs {
+        for (what, mut sim_options, batch) in runs {
             if only.as_ref().is_some_and(|o| !what.contains(o.as_str())) {
                 continue;
+            }
+            // GUARD_MIN overrides the guard threshold of every row.
+            if let Some(min) = std::env::var("GUARD_MIN").ok().and_then(|v| v.parse().ok()) {
+                sim_options.guard_min = min;
             }
             let start = Instant::now();
             let jit_on = sim_options.jit;
@@ -537,7 +555,13 @@ fn parse_presses(text: &str) -> Result<Vec<(u64, String, u64)>, String> {
 }
 
 /// Ops of the compiled design attributed to instance paths (see `--attribute`).
-fn attribute_ops(ws: &gate_quest::sim::WorkspaceDocument, depth: usize) -> Result<(), String> {
+fn attribute_ops(
+    ws: &gate_quest::sim::WorkspaceDocument,
+    depth: usize,
+    // Some(""): list the ops that write no authored net; Some(block): the
+    // ops writing that block's nets (a path prefix).
+    list: Option<String>,
+) -> Result<(), String> {
     use std::collections::BTreeMap;
     let (design, map) = gate_quest::sim::netlist::design_map_of(ws)?;
     // (definition, node) -> the part's label in the workspace.
@@ -576,18 +600,44 @@ fn attribute_ops(ws: &gate_quest::sim::WorkspaceDocument, depth: usize) -> Resul
         names
     };
     let paths: Vec<Vec<String>> = (0..dm.instances.len() as u32).map(label).collect();
-    // The deepest instance that names each slot.
+    // The deepest instance that names each slot, and that net.
     let mut owner: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut net_of: std::collections::HashMap<u32, logi_sim::netlist::NetId> =
+        std::collections::HashMap::new();
     for (inst, nets) in dm.net_slots.iter().enumerate() {
-        for (_, &slot) in nets {
+        for (net, &slot) in nets {
             let deeper = owner
                 .get(&slot)
                 .is_none_or(|&o| paths[o as usize].len() < paths[inst].len());
             if deeper {
                 owner.insert(slot, inst as u32);
+                net_of.insert(slot, net);
             }
         }
     }
+    // "path/part.pin" of a slot's net: the part that drives it.
+    let slot_name = |slot: u32| -> Option<String> {
+        let inst = *owner.get(&slot)?;
+        let net = *net_of.get(&slot)?;
+        let def_id = dm.instances[inst as usize].def;
+        let def = design.def(def_id).ok()?;
+        let (node, pin) = def.nets.get(net)?.driver;
+        let part = labels
+            .get(&(def_id, node))
+            .cloned()
+            .unwrap_or_else(|| "?".into());
+        let path = paths[inst as usize].join("/");
+        let pin = if pin == 0 {
+            String::new()
+        } else {
+            format!(".{pin}")
+        };
+        Some(if path.is_empty() {
+            format!("{part}{pin}")
+        } else {
+            format!("{path}/{part}{pin}")
+        })
+    };
     let Some(phases) = &p.phases else {
         return Err("no clock-phase variants: this mode counts the variants' ops".into());
     };
@@ -632,21 +682,59 @@ fn attribute_ops(ws: &gate_quest::sim::WorkspaceDocument, depth: usize) -> Resul
     // (every tick of a run(n) batch but the last) runs the variant pruned
     // to its commits' cone, then guarded.
     let full: Vec<_> = phases.variants.iter().map(count).collect();
-    let fused: Vec<_> = phases
+    let fused_bodies: Vec<logi_sim::compile::Body> = phases
         .variants
         .iter()
         .map(|v| {
             let pruned = logi_sim::compile::phases::prune(&p, v).unwrap_or_else(|| v.clone());
-            let guarded = logi_sim::compile::guard::guard_with(
+            logi_sim::compile::guard::guard_with(
                 p.slot_count as usize,
                 &pruned,
                 None,
                 logi_sim::compile::guard::MIN_REGION,
             )
-            .unwrap_or(pruned);
-            count(&guarded)
+            .unwrap_or(pruned)
         })
         .collect();
+    if let Some(block) = list {
+        // A real slot no net names may hold named nets as views (bits of a
+        // lifted or merged word): name it by them, low bits first.
+        let mut parts: std::collections::HashMap<u32, Vec<(u8, String)>> =
+            std::collections::HashMap::new();
+        for &named in owner.keys() {
+            if let Some((real, shift, mask)) = p.resolve(named)
+                && real != named
+                && !owner.contains_key(&real)
+            {
+                let w = mask.count_ones();
+                let n = slot_name(named).unwrap_or_else(|| format!("#{named}"));
+                parts
+                    .entry(real)
+                    .or_default()
+                    .push((shift, format!("{n}[{shift}+{w}]")));
+            }
+        }
+        let word_name = |slot: u32| -> Option<String> {
+            let mut v = parts.get(&slot)?.clone();
+            v.sort();
+            v.dedup_by(|a, b| a.0 == b.0);
+            Some(format!(
+                "{{{}}}",
+                v.into_iter().map(|(_, n)| n).collect::<Vec<_>>().join(", ")
+            ))
+        };
+        let full_name = |slot: u32| slot_name(slot).or_else(|| word_name(slot));
+        let wanted = |dst: u32| -> bool {
+            match owner.get(&dst) {
+                None => block.is_empty(),
+                Some(&o) => {
+                    !block.is_empty() && paths[o as usize].join("/").starts_with(block.as_str())
+                }
+            }
+        };
+        return list_ops(&fused_bodies[0], &wanted, &full_name);
+    }
+    let fused: Vec<_> = fused_bodies.iter().map(count).collect();
     let mut keys: Vec<String> = full
         .iter()
         .chain(&fused)
@@ -680,6 +768,92 @@ fn attribute_ops(ws: &gate_quest::sim::WorkspaceDocument, depth: usize) -> Resul
             format!("{fu:?}"),
             format!("{gu:?}")
         );
+    }
+    Ok(())
+}
+
+/// Every op of `body` whose result `wanted` selects: op, width, operands
+/// (named where they are authored nets), and what reads the result.
+fn list_ops(
+    body: &logi_sim::compile::Body,
+    wanted: &dyn Fn(u32) -> bool,
+    slot_name: &dyn Fn(u32) -> Option<String>,
+) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    // Each instruction's index, op and the block it sits in.
+    let mut ops: Vec<(usize, logi_sim::compile::Op)> = Vec::new();
+    for block in &body.blocks {
+        if block.packed {
+            continue;
+        }
+        for k in block.start..block.start + block.len {
+            ops.push((k as usize, block.op));
+        }
+    }
+    // Readers of each slot: instructions (by index) and commits.
+    let mut readers: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
+    let name_or = |slot: u32| slot_name(slot).unwrap_or_else(|| format!("#{slot}"));
+    for &(k, op) in &ops {
+        let i = body.instrs[k];
+        let (sa, sb, sc) = op.slot_operands();
+        for (is, slot) in [(sa, i.a), (sb, i.b), (sc, i.c)] {
+            if is {
+                readers
+                    .entry(slot)
+                    .or_default()
+                    .push(format!("{op:?} -> {}", name_or(i.dst)));
+            }
+        }
+    }
+    for c in &body.commits {
+        for slot in c.reads() {
+            readers.entry(slot).or_default().push("commit".into());
+        }
+    }
+    let mut by_op: BTreeMap<String, usize> = BTreeMap::new();
+    let mut lines = Vec::new();
+    for &(k, op) in &ops {
+        let i = body.instrs[k];
+        if !wanted(i.dst) {
+            continue;
+        }
+        *by_op.entry(format!("{op:?}")).or_default() += 1;
+        let imm = body.imms.get(k).copied().unwrap_or(0);
+        let width = if imm != 0 && (imm & imm.wrapping_add(1)) == 0 {
+            format!("w{}", imm.count_ones())
+        } else {
+            "w?".into()
+        };
+        let (sa, sb, sc) = op.slot_operands();
+        let mut args = Vec::new();
+        for (is, slot, lit) in [(sa, i.a, i.a), (sb, i.b, i.b), (sc, i.c, i.c)] {
+            if is {
+                args.push(name_or(slot));
+            } else if matches!(
+                op,
+                logi_sim::compile::Op::Shr | logi_sim::compile::Op::Concat
+            ) && lit != 0
+            {
+                args.push(format!("<<{lit}"));
+            }
+        }
+        let used = readers
+            .get(&i.dst)
+            .map(|r| r.join("; "))
+            .unwrap_or_else(|| "nothing".into());
+        lines.push(format!(
+            "#{:<5} {op:?} {width}  ({})  -> read by: {used}",
+            i.dst,
+            args.join(", ")
+        ));
+    }
+    println!("{} ops (fused tick, CPU idle phase):", lines.len());
+    for (op, n) in &by_op {
+        println!("  {op}: {n}");
+    }
+    println!();
+    for l in lines {
+        println!("{l}");
     }
     Ok(())
 }
