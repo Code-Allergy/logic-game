@@ -297,6 +297,21 @@ fn recordings_go_to_a_trace_and_compare_with_expected_rows() {
         2,
         "{text}"
     );
+    // A reset takes the tick back; the times of the trace still go up.
+    let out = script(
+        &ws,
+        json!({"trace": vcd, "steps": [
+            {"set": {"Go": 1}}, {"record": ["Count"]}, {"ticks": 5}, {"reset": true}, {"ticks": 4}
+        ]}),
+    );
+    assert!(!out.failed, "{}", out.text);
+    let text = std::fs::read_to_string(&vcd).unwrap();
+    let times: Vec<u64> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix('#')?.parse().ok())
+        .collect();
+    assert!(times.len() > 5, "{text}");
+    assert!(times.windows(2).all(|w| w[0] < w[1]), "{times:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
