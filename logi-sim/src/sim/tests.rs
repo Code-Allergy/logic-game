@@ -1177,13 +1177,20 @@ fn memory_versions_change_only_on_writes() {
 
 /// Feature `counters`: without guards every tick executes every block and
 /// processes every commit; the counts are exact. With guards (the
-/// default), a skipped guarded range is not counted.
+/// interpreter with `guard_interpreter`), a skipped guarded range is not
+/// counted.
 #[cfg(feature = "counters")]
 #[test]
 fn counters_count_executed_work() {
     let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
     let p = Arc::new(compile(&d, &Options::default()).unwrap());
-    let mut guarded = Sim::new(Arc::clone(&p));
+    let mut guarded = Sim::with_options(
+        Arc::clone(&p),
+        SimOptions {
+            guard_interpreter: true,
+            ..SimOptions::default()
+        },
+    );
     let (_, skippable) = guarded.guarded();
     assert!(skippable > 0, "the CPU's register enables guard cones");
     guarded.reset_counters();
@@ -1237,6 +1244,7 @@ fn jit_counters_match_the_interpreter_with_guards() {
                 SimOptions {
                     jit,
                     guard_min: 1,
+                    guard_interpreter: true,
                     ..SimOptions::default()
                 },
             )
@@ -1249,4 +1257,33 @@ fn jit_counters_match_the_interpreter_with_guards() {
             assert_eq!(interp.counters(), jit.counters(), "after run({n})");
         }
     }
+}
+
+/// Guards follow the JIT (`SimOptions::guard_interpreter` off by default):
+/// the interpreter's default runs unguarded, a JIT `Sim` and the tiered
+/// interpreter layout (`SimOptions::tier_layout`) are guarded alike, and
+/// `guard_interpreter` guards the interpreter.
+#[test]
+fn guards_follow_the_jit_and_its_tier_layout() {
+    let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
+    let p = Arc::new(compile(&d, &Options::default()).unwrap());
+    let guarded = |o: SimOptions| Sim::with_options(Arc::clone(&p), o).guarded();
+    let jit = guarded(SimOptions::jit());
+    assert!(jit.0 > 0, "the CPU's register enables guard cones");
+    assert_eq!(guarded(SimOptions::default()), (0, 0));
+    assert_eq!(guarded(SimOptions::jit().tier_layout()), jit);
+    assert_eq!(
+        guarded(SimOptions {
+            guard_interpreter: true,
+            ..SimOptions::default()
+        }),
+        jit
+    );
+    assert_eq!(
+        guarded(SimOptions {
+            guard: false,
+            ..SimOptions::jit()
+        }),
+        (0, 0)
+    );
 }
