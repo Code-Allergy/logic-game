@@ -15,12 +15,12 @@ use crate::testkit::diff::{
 };
 use crate::testkit::{GenConfig, generate};
 
-fn program(d: &Design, options: &Options) -> Arc<Program> {
+pub(super) fn program(d: &Design, options: &Options) -> Arc<Program> {
     Arc::new(compile(d, options).unwrap_or_else(|e| panic!("{e:?}")))
 }
 
 /// Resets [`MUTATION`] when dropped (a failing assertion included).
-struct NoMutation;
+pub(super) struct NoMutation;
 impl Drop for NoMutation {
     fn drop(&mut self) {
         MUTATION.set(0);
@@ -33,7 +33,7 @@ impl Drop for NoMutation {
 /// whether the result is inverted (a register key). With `clocked`, the
 /// accumulator only loads on one phase of a 2-tick clock (two clock-phase
 /// variants).
-fn microcoded(clocked: bool) -> Design {
+pub(super) fn microcoded(clocked: bool) -> Design {
     let mut d = Design::new("top");
     let r = d.root;
     let mut b = d.builder(r);
@@ -65,7 +65,7 @@ fn microcoded(clocked: bool) -> Design {
 
 /// The slot of the ROM word and of the mode register in a program of
 /// [`microcoded`]: the candidates of the first fused body, by class.
-fn microcoded_keys(p: &Program) -> (u32, u64, u32, u64) {
+pub(super) fn microcoded_keys(p: &Program) -> (u32, u64, u32, u64) {
     use crate::compile::spec::KeyClass;
     let cxs = crate::sim::spec_contexts(p, &SimOptions::default());
     let cx = cxs
@@ -92,7 +92,7 @@ fn microcoded_keys(p: &Program) -> (u32, u64, u32, u64) {
 
 /// The plan keying every phase on the ROM word and the mode register, with
 /// bodies for `keys` (all of them when `None`).
-fn microcoded_plan(p: &Program, keys: Option<Vec<u64>>) -> SpecPlan {
+pub(super) fn microcoded_plan(p: &Program, keys: Option<Vec<u64>>) -> SpecPlan {
     let (rom, rm, reg, gm) = microcoded_keys(p);
     let layout = KeyLayout::new(vec![
         KeyField {
@@ -112,7 +112,7 @@ fn microcoded_plan(p: &Program, keys: Option<Vec<u64>>) -> SpecPlan {
     }
 }
 
-fn with_spec(o: SimOptions, plan: &SpecPlan) -> SimOptions {
+pub(super) fn with_spec(o: SimOptions, plan: &SpecPlan) -> SimOptions {
     SimOptions {
         spec: Some(spec_options(plan.clone())),
         ..o
@@ -184,7 +184,7 @@ fn microcoded_plans_match_single_ticks() {
     }
 }
 
-fn jit_options() -> Vec<SimOptions> {
+pub(super) fn jit_options() -> Vec<SimOptions> {
     let mut v = vec![SimOptions::default()];
     if JIT {
         v.push(SimOptions::jit());
@@ -196,7 +196,7 @@ fn jit_options() -> Vec<SimOptions> {
 /// results. Returns the program, the counter's slot and the plan keying on
 /// a computed candidate (a prefix) and the counter's bits `count_mask`,
 /// with bodies for `keys` (the counter's part; the computed part 0).
-fn counting(count_mask: u64, keys: &[u64]) -> (Arc<Program>, SpecPlan) {
+pub(super) fn counting(count_mask: u64, keys: &[u64]) -> (Arc<Program>, SpecPlan) {
     let mut d = Design::new("top");
     let r = d.root;
     let mut b = d.builder(r);
@@ -258,7 +258,11 @@ fn a_key_that_always_misses_equals_spec_off() {
     for o in jit_options() {
         let mut off = Sim::with_options(Arc::clone(&p), o.clone());
         let mut on = Sim::with_options(Arc::clone(&p), with_spec(o.clone(), &plan));
-        assert!(on.spec[0].as_ref().is_some_and(|ps| ps.prefix.is_some()));
+        assert!(
+            on.spec.phases[0]
+                .as_ref()
+                .is_some_and(|ps| ps.prefix.is_some())
+        );
         for round in 0..40u64 {
             off.set_input(0, round * 977);
             on.set_input(0, round * 977);
@@ -284,7 +288,7 @@ fn last_follows_the_settled_body() {
         for o in jit_options() {
             let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
             let mut got = Sim::with_options(Arc::clone(&p), with_spec(o.clone(), &plan));
-            let ps = got.spec[0].clone().expect("phase 0 is keyed");
+            let ps = got.spec.phases[0].clone().expect("phase 0 is keyed");
             let snap = want.export_state();
             let same = |want: &Sim, got: &Sim, at: &str| {
                 assert!(observe(want) == observe(got), "{at} (keys {keys:?})");
@@ -356,7 +360,7 @@ fn counters_count_the_prefix_and_the_chosen_body() {
     for o in jit_options() {
         let o = SimOptions { guard: false, ..o };
         let mut sim = Sim::with_options(Arc::clone(&p), with_spec(o.clone(), &plan));
-        let ps = sim.spec[0].clone().expect("keyed");
+        let ps = sim.spec.phases[0].clone().expect("keyed");
         let len = |sim: &Sim, run: u16| -> (u64, u64) {
             match run {
                 0 => (p.instrs.len() as u64, p.commits.len() as u64),
@@ -423,7 +427,9 @@ fn rom_pokes_switch_specialization_off_until_reset() {
             let w = got.mem(rom)[3];
             got.set_mem_word(rom, 3, w ^ 0x40);
             want.set_mem_word(rom, 3, w ^ 0x40);
-            assert!(!got.folded && got.spec.is_empty() && got.spec_stats().keyed_phases == 0);
+            assert!(
+                !got.folded && got.spec.phases.is_empty() && got.spec_stats().keyed_phases == 0
+            );
             assert_eq!(got.jit_active(), jit);
             for _ in 0..6 {
                 got.run(13);
@@ -442,7 +448,7 @@ fn rom_pokes_switch_specialization_off_until_reset() {
     }
 }
 
-fn same_batches(want: &mut Sim, got: &mut Sim) {
+pub(super) fn same_batches(want: &mut Sim, got: &mut Sim) {
     for n in [1, 2, 3, 7, 16, 5, 40] {
         for _ in 0..n {
             want.tick();
@@ -467,7 +473,7 @@ fn supersteps_only_without_keys() {
         phases: vec![None, None],
     };
     let plain = Sim::with_options(Arc::clone(&p), with_spec(SimOptions::jit(), &unkeyed));
-    assert!(plain.spec.is_empty() && sup(&plain));
+    assert!(plain.spec.phases.is_empty() && sup(&plain));
     let rom = (0..p.mems.len() as u32)
         .find(|&m| !p.mems[m as usize].writable)
         .unwrap();
@@ -475,7 +481,7 @@ fn supersteps_only_without_keys() {
     keyed.set_mem_word(rom, 0, w ^ 1);
     assert!(sup(&keyed));
     keyed.reset();
-    assert!(!sup(&keyed) && !keyed.spec.is_empty());
+    assert!(!sup(&keyed) && !keyed.spec.phases.is_empty());
 }
 
 /// Native code compiled for one plan is not installed into a `Sim` with

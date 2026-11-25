@@ -74,6 +74,7 @@ fn main() -> Result<(), String> {
     }
     let compare = args.iter().any(|a| a == "--compare");
     let blocks = args.iter().any(|a| a == "--blocks");
+    let units = args.iter().any(|a| a == "--units");
     let executed = args.iter().any(|a| a == "--executed");
     let unnamed = args.iter().any(|a| a == "--unnamed");
     let ops_of = args.iter().position(|a| a == "--ops").map(|k| {
@@ -106,7 +107,13 @@ fn main() -> Result<(), String> {
     };
     let presses = parse_presses(&value_of("--press").unwrap_or_default())?;
     let screen = value_of("--screen");
-    args.retain(|a| a != "--compare" && a != "--blocks" && a != "--executed" && a != "--unnamed");
+    args.retain(|a| {
+        a != "--compare"
+            && a != "--units"
+            && a != "--blocks"
+            && a != "--executed"
+            && a != "--unnamed"
+    });
     let folder = args.first().ok_or(
         "usage: nes_bench <workspace folder> [--compare | --blocks | --against <workspace> [--press ...] [--screen file]] [--only <name>] [ticks]",
     )?;
@@ -118,6 +125,9 @@ fn main() -> Result<(), String> {
     let design = design_of(&ws)?;
     if compare {
         return compare_jit(&design, ticks);
+    }
+    if units {
+        return unit_costs(&design);
     }
     if blocks {
         return block_costs(&ws);
@@ -373,6 +383,52 @@ fn describe(p: &Program) -> String {
 /// first difference. Then a shorter run compared at every batch boundary:
 /// fused batches of 1 to 7 ticks (guards on, interpreter and JIT) against
 /// single ticks with guards off.
+/// `--units`: compile every body of the console as a `JitUnit` of its own
+/// (what adaptive specialization does per hot key) and report each one's
+/// instructions, native code size and compile time.
+#[cfg(not(feature = "jit"))]
+fn unit_costs(_: &logi_sim::netlist::Design) -> Result<(), String> {
+    Err("--units needs the JIT: build with --features jit".into())
+}
+
+#[cfg(feature = "jit")]
+fn unit_costs(design: &logi_sim::netlist::Design) -> Result<(), String> {
+    let program = Arc::new(compile(design, &Options::default()).map_err(|e| format!("{e:?}"))?);
+    let sim = Sim::new(Arc::clone(&program));
+    // Warm-up: the first compile pays one-time costs (ISA lookup, page faults).
+    drop(sim.compile_unit_of(0));
+    let (mut bytes, mut instrs, mut n) = (0, 0, 0);
+    let mut total = std::time::Duration::ZERO;
+    for k in 0..sim.body_count() {
+        let t = Instant::now();
+        let u = sim.compile_unit_of(k);
+        let took = t.elapsed();
+        match u {
+            None => println!("body {k}: not compiled"),
+            Some(Err(e)) => println!("body {k}: error {}", e.0),
+            Some(Ok(u)) => {
+                println!(
+                    "body {k}: {} instrs, {} settle chunks, {} KiB native, {:.1} ms",
+                    u.instrs(),
+                    u.settle_chunks(),
+                    u.code_bytes() / 1024,
+                    took.as_secs_f64() * 1e3
+                );
+                bytes += u.code_bytes();
+                instrs += u.instrs();
+                total += took;
+                n += 1;
+            }
+        }
+    }
+    println!(
+        "{n} units, {instrs} instrs, {} KiB native, {:.1} ms to compile them one by one",
+        bytes / 1024,
+        total.as_secs_f64() * 1e3
+    );
+    Ok(())
+}
+
 fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), String> {
     let program = Arc::new(compile(design, &base_options()).map_err(|e| format!("{e:?}"))?);
     // The same design without the shift rewrites, interpreted.

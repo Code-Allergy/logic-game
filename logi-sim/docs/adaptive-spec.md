@@ -1,9 +1,10 @@
 # Adaptive state-keyed specialization (issue #117)
 
 Status: compile side implemented (`compile/spec.rs`, package P1 below);
-the pure part of the plan choice (`compile/spec/plan.rs`, P6); P2, P3
-and the fixed-plan runtime P4 implemented (`sim/spec.rs`, section 4 "P4
-as built"); P5 and P7 to P9, and P6's sampling window, designed here.
+P2, P3, the fixed-plan runtime P4 and the adaptive tables P5 (with P6's
+sampling window) implemented (`sim/spec.rs`, section 4 "P4 as built" and
+"P5b as built"); the pure part of the plan choice (`compile/spec/plan.rs`,
+P6, section 3b); P7 to P9 designed here.
 
 ## 1. Goal
 
@@ -292,6 +293,185 @@ Differences from the sketch above, which P5b builds on:
   I-cache, not the op count, decides past a few dozen bodies, which is
   what P5b's caps are for.
 
+### P5b as built (adaptive tables)
+
+Differences from the sketch below, which P7 and P8 build on:
+
+- **Options.** `SpecOptions { plan, adaptive, max_per_phase (16),
+  max_bodies (48), code_budget (1 MiB), window (2^16), hot (256),
+  plan_window (2^20), samples (512), max_key_bits (32), min_loss (4),
+  inline_build (true) }`, integers only (`SimOptions` stays `Eq`): `hot`
+  is a miss count per window instead of `hot_share`, `min_loss` whole ops.
+  `Default` is adaptive with an automatic plan; `SpecOptions::fixed(plan)`
+  is P4 unchanged (bodies built with the layout, no counting, no caps);
+  `SpecOptions::with_plan(plan)` is adaptive on given keys, the plan's
+  key values wanted first (built by the first requests, inline at
+  construction). `inline_build` defaults to on so that a `Sim` used on
+  its own works; an engine turns it off and drives the requests.
+- **Layout.** Everything specialization adds lives in `sim::spec::Spec`
+  (tables, sampler, installed runs), set aside and restored as a whole
+  by a ROM write and `reset` (`Stash::spec`). Runs built with the layout
+  are `runs[..base]`; installed bodies are runs past `base`, freed runs
+  are reused (a placeholder body keeps the index), so `runs` never
+  outgrows `base + caps`. `Spec::key` (the layout's specialized runs plus
+  "a plan is still to come") is `RunKey::spec`, computed once when the
+  layout is built: installs and evictions never change it, so the base
+  `JitProgram` stays valid and `install_jit` keeps accepting code compiled
+  for the layout (`bodies.len() == base + 1`). An automatic plan's
+  prefixes and fallbacks are installed runs too (pinned: never evicted).
+- **Native code.** `build_spec` compiles each body (prefix: not
+  `fused_only`) into a `JitUnit` (P5a); `Sim` keeps it beside the run
+  (`Spec::dynamic`) and calls it through `settle_raw`/`commit_raw` with
+  the cached `mem_ptrs` (`sim::native` picks the program's body or the
+  unit). Units run only while native code is installed
+  (`install_jit(None)` interprets everything, units included); a
+  `MemClear` body commits through the interpreter. A request asks for a
+  unit when the `Sim` has `jit` on or runs native code;
+  `SpecRequest::set_native` overrides it (tiered `Sim`s).
+- **Per fused tick.** `fused_tick` tests one flag (`Spec::hooked`: a
+  keyed phase or sampling) and calls `spec_fused`. A hit stores the
+  phase clock (`hits + misses`) in the entry; a miss bumps a 1024-entry
+  direct-mapped counter (majority vote: a colliding key wears the count
+  down before taking the slot); at `hot` misses within a window the key
+  is *wanted* (at most 64 wait per phase). A key wanted, requested or
+  installed is not wanted again; a refused build (no room, failed check,
+  stale) releases it, and a request the caller never answers expires
+  after 4 windows. Counters restart every `window` keyed ticks of the
+  phase.
+- **Requests.** `spec_requests` turns wanted keys into requests while
+  the phase has room (`bodies + asked < max_per_phase`, all phases under
+  `max_bodies`) or a cold body (not hit for a window) can make room;
+  otherwise the key is dropped and must turn hot again. A request holds
+  the program (`Weak`), the generation, the context and the `pre` flags
+  (`Arc`s), the layout and whether to guard and compile; `build_spec(p,
+  r) -> SpecBuilt` needs nothing else (pure, any thread), and builds
+  nothing for a `p` other than the request's program (the result is
+  refused everywhere). `jit::compile_unit` runs `Sim`'s program and body
+  checks itself, so its safe entry points never index out of bounds. The automatic
+  plan is a request too (`choose_plan` on the samples, then each keyed
+  phase's prefix and fallback built and compiled).
+- **Install.** `install_spec` refuses a build of another program or
+  `Sim` or generation (stale), a key with a body, and a key over the
+  layout's width; then evicts the coldest body (largest age past one
+  window: of the phase over `max_per_phase`, of any phase over
+  `max_bodies` or `code_budget`) until it fits, or refuses (dropped);
+  then takes a run, builds its `Run` (interpreter code) and inserts the
+  entry. Every eviction is chosen before any is made: a body that cannot
+  fit (larger than `code_budget`, no run index left) evicts nothing. Only between calls (a single-threaded `Sim`: the body that
+  settled the slots is the full body there, never an installed one).
+- **Generations.** Unique over all `Sim`s (a global counter): a new
+  `Sim`, a ROM write (`rom_changed`) and the `reset` that restores the
+  folded layout (`rom_restored`) take a new one, clear the pending keys
+  and, if the plan's samples went out, sample again. A plain `reset` or
+  `import_state` keeps the generation: tables map key values, so builds
+  stay exact (snapshots hold no ROM; an import that changes a ROM word
+  goes through `rom_changed`).
+- **Automatic plan.** At construction each phase keeps the `Arc` of its
+  fused body's context; `samples` fused ticks per phase, spread over the
+  first `plan_window`, settle with the phase's *full* body (so every slot
+  the estimate reads is computed; the commit after is the full body's)
+  and keep a copy of the slots; then one plan request, asked again every
+  `plan_window` fused ticks per phase until a plan is installed (a
+  dropped request, a refused plan; the samples are kept until then). A
+  plan is installed whole: one that does not fit under the run-index cap
+  leaves nothing behind. No key and no
+  superstep meanwhile (`compile_jit` and `run` skip supersteps while a
+  plan is awaited); the layout counts as folded from the start, so a ROM
+  write stops the sampling. A plan with no keyed phase leaves the `Sim`
+  without keys (and without the superstep it could have: a follow-up).
+- **Stats.** `SpecStats` adds `requested`, `installed` (a plan counts
+  one), `evicted`, `stale`, `dropped`, `code_bytes` (installed units,
+  pinned included) and `awaiting_plan`; hits and misses as in P4.
+- **Tests** (`sim/spec/adaptive_tests.rs`; every P4 test unchanged on
+  `SpecOptions::fixed`): hot detection (nothing below `hot`, then bodies
+  for exactly the hot values, then hits); a plan's keys built first;
+  `check_batches_with`, `check_pair` (pokes, ROM writes, reset, import)
+  and `check_jit` on 5 designs per `standard_configs` entry, default and
+  debug options, for three adaptive settings (1 body per phase and a
+  window of 2, 3 and 16, an automatic plan): bodies come and go
+  mid-run; eviction under a cap of 4 and a window of 8 (a key cycling
+  through 8 values: hundreds of installs and evictions, never more than 4
+  live, runs reused, a code budget of 0 keeps every native body out);
+  stale builds refused after a ROM write, after the `reset` that undoes
+  it, from another `Sim` and another program, accepted after a plain
+  `reset` and `import_state`; builds on a `std::thread` with installs
+  between batches (plan given and automatic); an automatic plan (no key
+  and no superstep while sampling, keys after; a ROM write while sampling,
+  then `reset`); with the JIT, installed bodies run their units, the
+  program's code is not recompiled, `install_jit` of the layout's code
+  still works, an automatic `Sim` refuses code with a superstep; 1500
+  build/evict cycles keep live units and runs within the cap (P5a's RSS
+  test covers freeing). Mutations caught by `check_batches`: a body
+  installed under the wrong key (bit 0 flipped), and an eviction that
+  frees the run but leaves its entry (the next install reuses the run for
+  another key).
+- **Measured** (`spec_keys --adaptive 6000000 --rounds 6 --later
+  20000000 --bodies 16`, JIT, all runtimes in one process, builds on one
+  thread of their own; k ticks/s, median of 6 interleaved rounds of 1M
+  ticks, range in brackets, hit rate of keyed ticks; a shared 4-core
+  machine). Fixed plans and the adaptive tables' keys come from a
+  profile of ticks 1.5M to 6M (Blade Buster) or 1.5M to 2.1M (NES demo);
+  "start" is the 6M (2.1M) ticks right after, "later" ticks 20M to 26M.
+
+  | Blade Buster (MMC3) | start | later | live bodies | native KiB |
+  |---|---|---|---|---|
+  | spec off (supersteps) | 2432 (2303..2513) | 2397 (1873..2494) | 0 | 208 |
+  | fixed, 16 keys per phase | 2952 (2449..3027) +21%, 92% | 2318 (1532..2404) -3%, 64% | 48 | 693 |
+  | fixed, 64 keys | 2914 (2424..2955) +20%, 98% | 2302 (1579..2395) -4%, 68% | 145 | 1835 |
+  | adaptive, cap 8 | 2542 (1845..2567) +5%, 68% | 2732 (2295..2834) +14%, 80% | 24 | 463 |
+  | adaptive, cap 16 | 2949 (2049..3000) +21%, 93% | 3003 (2494..3015) +25%, 94% | 48 | 694 |
+  | adaptive, cap 32 | 2744 (2260..3062) +13%, 95% | 3013 (2437..3034) +26%, 96% | 96 | 1081 |
+  | automatic plan, cap 16 | 2757 (2109..3057) +13%, 94% | 2992 (2721..3076) +25%, 97% | 48 | 685 |
+
+  | NES demo | start | later | live bodies | native KiB |
+  |---|---|---|---|---|
+  | spec off (supersteps) | 2721 (2239..2758) | 2415 (1894..2808) | 0 | 183 |
+  | fixed, 16 keys per phase | 3464 (3131..3784) +27%, 96% | 3509 (3172..3800) +45%, 96% | 48 | 578 |
+  | fixed, 64 keys | 3461 (2944..3832) +27%, 100% | 3593 (2908..3874) +49%, 100% | 134 | 1251 |
+  | adaptive, cap 8 | 3105 (2526..3171) +14%, 71% | 3187 (1955..3272) +32%, 71% | 24 | 386 |
+  | adaptive, cap 16 | 3191 (2303..3648) +17%, 96% | 3625 (2800..3733) +50%, 96% | 48 | 581 |
+  | adaptive, cap 32 | 3537 (3175..3750) +30%, 98% | 3461 (3180..3777) +43%, 98% | 96 | 798 |
+  | automatic plan, cap 16 | 3612 (2190..3717) +33%, 94% | 3691 (3068..3948) +53%, 98% | 43 | 535 |
+
+  Executed ops per tick on Blade Buster (a `counters` build, the same
+  runs): spec off 756; fixed 16 keys 482 at the start, **613 later** (the
+  profile's keys hit 64%); adaptive cap 16 480 and 475; automatic plan
+  502 and 485 (with `plan_window` 2^16, the first 200k ticks of boot code:
+  610 and 606, hence the default of 2^20). The adaptive tables keep the
+  later scene at the profiled scene's level where a fixed plan profiled
+  early falls back below spec off; cap 16 is the best default on both
+  (cap 8 misses too often, 32 holds more code for 1 to 2% more hits).
+  Time to the first hit: 30k ticks (the first batch; the profile's
+  first key values turn hot within it) with a plan's keys, 6.1M (Blade
+  Buster) and 4.6M (NES) ticks with an automatic plan (the sampling
+  window, 3.1M ticks, plus the plan's build). Build latency per body
+  (specialize, guard, check, compile a unit; on the build thread while
+  the runtimes run): median 4.1 ms, 90% 6.8 ms, max 17 ms (Blade
+  Buster), 1.9 / 6.7 / 10.4 ms (NES); the automatic plan's build
+  (`choose_plan` on 512 samples per phase plus prefixes and fallbacks):
+  3.1 s and 2.3 s. Hundreds of evictions over 26M ticks (90 at cap 16 on
+  Blade Buster), state and memories equal to spec off at the end.
+- **For P7 (engine).** Turn `inline_build` off for `Sim`s the worker
+  drives; after each batch send `spec_requests()` to the compile thread
+  (`build_spec(&program, &r)`), and `install_spec` the results between
+  batches: staleness (another program, `Sim` or generation) is checked
+  by `install_spec` itself, so the engine's revision check only saves
+  work. A tiered `Sim` (`tier_layout`: `jit` off until `install_jit`)
+  should `set_native(true)` on its requests; bodies installed before
+  that have no unit and run interpreted until evicted (rebuilding them
+  after `install_jit` is a possible refinement). The automatic plan's
+  build takes seconds on the NES console: queue it behind the JIT
+  compile, never ahead of it. `LocalEngine` keeps `inline_build`, but the
+  plan's build then stalls one `run` for that long: on wasm, fewer
+  `samples` or a fixed plan.
+- **For P8 (keyed supersteps).** Installed bodies are not in the
+  `JitProgram`, so a keyed superstep is a unit of its own (per hot period
+  key, under the same caps, evicted like a body; `compile_unit` would
+  take a `SuperRef`). `Spec::hooked` makes `run` skip the program's
+  superstep; a plan that keys nothing leaves no superstep either (the
+  layout was compiled without one while the plan was awaited), which P8
+  can fix by compiling the superstep with the plan.
+
 ### Per fused tick (`Sim::run`, the path without a superstep)
 
 ```text
@@ -446,9 +626,9 @@ parallel (separate files), then P5b, P7, P8, P9.
 | P2 | known-bits fused bodies: every fused body becomes `SpecContext::fallback(p, &[])` (no key); ROM-poke switch-off | `sim/mod.rs` (fused-body construction), `sim/tests.rs` | P1, superstep merged | sonnet |
 | P3 | run index `u16` | `sim/mod.rs`, `sim/jit/mod.rs`, `sim/jit/superstep.rs` | superstep merged | sonnet |
 | P4 | fixed-plan runtime: `SpecOptions` with `plan`, `PhaseSpec`, prefix/fallback runs, dispatch in `run`, `last`, inline builds, JIT of spec bodies in `compile_jit`, counters, superstep exclusion (**done**) | `sim/mod.rs`, new `sim/spec.rs`, `testkit/diff.rs` | P3 | opus |
-| P5a | per-body JIT units: `jit::compile_unit`, `JitUnit`, freeing | new `sim/jit/unit.rs`, `sim/jit/mod.rs` (share emission) | P3 | sonnet |
-| P5b | adaptive tables: miss counters, hot detection, `spec_requests`/`build_spec`/`install_spec`, LRU eviction, caps, `spec_stats` | `sim/spec.rs`, `sim/mod.rs` | P4, P5a | opus |
-| P6 | automatic plan: `spec::choose_plan(contexts, samples, opts) -> SpecPlan` (pure, the report's greedy + `prune_bits`), runtime sampling window | `compile/spec.rs` (pure part), `sim/spec.rs` | P1 (pure part: none) | sonnet |
+| P5a | per-body JIT units: `jit::compile_unit`, `JitUnit`, freeing (**done**) | new `sim/jit/unit.rs`, `sim/jit/mod.rs` (share emission) | P3 | sonnet |
+| P5b | adaptive tables: miss counters, hot detection, `spec_requests`/`build_spec`/`install_spec`, LRU eviction, caps, `spec_stats` (**done**) | `sim/spec.rs`, `sim/mod.rs` | P4, P5a | opus |
+| P6 | automatic plan: `spec::choose_plan(contexts, samples, opts) -> SpecPlan` (pure, the report's greedy + `prune_bits`), runtime sampling window (**done**; the window with P5b) | `compile/spec.rs` (pure part), `sim/spec.rs` | P1 (pure part: none) | sonnet |
 | P7 | engine integration: compile-thread builds, revision checks, `LocalEngine` inline | `engine/mod.rs`, `engine/tests.rs` | P5b | sonnet |
 | P8 | keyed supersteps with side exits; measure against P4's per-tick path | `sim/jit/superstep.rs`, `sim/mod.rs` | P4, superstep merged | opus |
 | P9 | benches and docs: `nes_bench` rows (spec on/off, hits, live bodies), `perf-metrics` row, `ARCHITECTURE.md`, `PROFILING.md`, tune defaults | `examples/nes_bench.rs`, `xtask/`, docs | P5b (P7 for the game) | haiku |
