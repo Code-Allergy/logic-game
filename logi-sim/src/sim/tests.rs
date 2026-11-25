@@ -1175,14 +1175,32 @@ fn memory_versions_change_only_on_writes() {
     assert_ne!(s.mem_version(m), v2);
 }
 
-/// Feature `counters`: every tick executes every block and processes every
-/// commit; the counts are exact.
+/// Feature `counters`: without guards every tick executes every block and
+/// processes every commit; the counts are exact. With guards (the
+/// default), a skipped guarded range is not counted.
 #[cfg(feature = "counters")]
 #[test]
 fn counters_count_executed_work() {
     let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
-    let mut sim = sim_of(&d);
-    let p = Arc::clone(sim.program());
+    let p = Arc::new(compile(&d, &Options::default()).unwrap());
+    let mut guarded = Sim::new(Arc::clone(&p));
+    let (_, skippable) = guarded.guarded();
+    assert!(skippable > 0, "the CPU's register enables guard cones");
+    guarded.reset_counters();
+    guarded.run(10);
+    let g = *guarded.counters();
+    let all = 10 * p.instrs.len() as u64;
+    assert!(g.instrs < all && g.instrs >= all - 10 * skippable as u64);
+    assert_eq!(g.commits, 10 * p.commits.len() as u64);
+    // Guards were added after this test was written: its exact counts
+    // are those of the unguarded bodies.
+    let mut sim = Sim::with_options(
+        Arc::clone(&p),
+        SimOptions {
+            guard: false,
+            ..SimOptions::default()
+        },
+    );
     assert_eq!(sim.counters().settles, 1);
     sim.reset_counters();
     sim.run(10);
