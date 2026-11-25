@@ -827,6 +827,38 @@ fn spec_plan_is_built_once_at_a_time() {
     assert_eq!(plans, 1);
 }
 
+/// A program swap while the first plan is still building: the old plan
+/// is dropped by revision, and the new program gets a plan of its own (the
+/// in-flight flag does not outlive its program).
+#[test]
+fn a_swap_before_the_plan_returns_frees_the_plan_slot() {
+    let spec = SimOptions {
+        spec: Some(quick_spec()),
+        ..SimOptions::default()
+    };
+    let (mut core, ..) = micro_core(spec, true);
+    let mut old = Vec::new();
+    for _ in 0..40 {
+        run_ticks(&mut core, 400);
+        old.extend(core.spec_jobs().into_iter().filter(SpecJob::is_plan));
+    }
+    assert_eq!(old.len(), 1, "the first plan is in flight");
+    let (d2, ..) = micro_design(true);
+    core.load(&d2, 2);
+    // The old plan comes back after the swap: refused, for another revision.
+    let job = old.pop().unwrap();
+    assert!(!core.install_spec(job.revision, job.build()));
+    let mut plans = Vec::new();
+    for _ in 0..40 {
+        run_ticks(&mut core, 400);
+        plans.extend(core.spec_jobs().into_iter().filter(SpecJob::is_plan));
+    }
+    assert_eq!(plans.len(), 1, "the new program asks for its plan");
+    let job = plans.pop().unwrap();
+    assert_eq!(job.revision, 2);
+    assert!(core.install_spec(job.revision, job.build()));
+}
+
 /// Bodies of a tiered program built after its native code failed to
 /// arrive carry no units (they would never run and would count against
 /// the code budget).

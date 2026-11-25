@@ -379,6 +379,9 @@ impl EngineCore {
         // dropped by revision, and refused by the `Sim` anyway).
         self.spec_queue.clear();
         self.spec_inflight = 0;
+        // A plan building for the old program never comes back here (its
+        // revision is stale): the new program may ask for its own.
+        self.plan_inflight = false;
         // (Native code only ever arrives with the feature.)
         self.jit_wait = self.jit_tiered && cfg!(all(feature = "jit", not(target_arch = "wasm32")));
         self.resolve_probes();
