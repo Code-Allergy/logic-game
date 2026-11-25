@@ -1217,3 +1217,36 @@ fn counters_count_executed_work() {
     sim.reset();
     assert_eq!(sim.counters().settles, 11);
 }
+
+/// Features `counters` and `jit`: a JIT'd fused run counts the same
+/// skipped guarded work as the interpreter, at every batch length. The
+/// counters re-test each guard's conditions after the settle, so the JIT
+/// must leave them in the slots even where no later code reads them.
+#[cfg(all(feature = "counters", feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn jit_counters_match_the_interpreter_with_guards() {
+    for d in [
+        fixtures::cpu(&fixtures::LOOP_PROGRAM),
+        fixtures::register_file(3, 8),
+        fixtures::fifo(3, 8),
+    ] {
+        let p = Arc::new(compile(&d, &Options::default()).unwrap());
+        let sim = |jit| {
+            Sim::with_options(
+                Arc::clone(&p),
+                SimOptions {
+                    jit,
+                    guard_min: 1,
+                    ..SimOptions::default()
+                },
+            )
+        };
+        let (mut interp, mut jit) = (sim(false), sim(true));
+        assert!(jit.jit_active(), "the JIT compiled the program");
+        for n in [1, 2, 3, 5, 8, 13, 64, 1000] {
+            interp.run(n);
+            jit.run(n);
+            assert_eq!(interp.counters(), jit.counters(), "after run({n})");
+        }
+    }
+}

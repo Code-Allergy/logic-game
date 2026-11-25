@@ -281,6 +281,12 @@ impl JitProgram {
                 for c in body.commits {
                     live.extend(c.reads());
                 }
+                // The counters test each guard's conditions after the
+                // settle (`Sim::evaluate`), so they must be in the slots.
+                #[cfg(feature = "counters")]
+                for g in body.guards {
+                    live.extend(g.conds.iter().map(|c| c.slot));
+                }
             }
             let mut lives = vec![HashSet::new(); chunks.len()];
             for (k, ch) in chunks.iter().enumerate().rev() {
