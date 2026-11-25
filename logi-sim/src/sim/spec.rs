@@ -357,6 +357,16 @@ impl PhaseSpec {
         self.fallback
     }
 
+    /// The key's fields as words (slot, mask per field), for telling run
+    /// layouts apart: bodies for the same keys but other fields assume
+    /// other bits.
+    fn field_words(&self) -> Vec<u64> {
+        self.fields
+            .iter()
+            .flat_map(|f| [u64::from(f.slot), f.mask])
+            .collect()
+    }
+
     /// Specialized bodies.
     pub fn bodies(&self) -> usize {
         self.table.len()
@@ -601,6 +611,9 @@ impl Spec {
             let Some(ps) = ps else { continue };
             out.extend([k as u64, ps.prefix.map_or(u64::MAX, u64::from)]);
             out.push(u64::from(ps.fallback));
+            let f = ps.field_words();
+            out.push(f.len() as u64);
+            out.extend(f);
             let e = ps.entries();
             out.push(e.len() as u64);
             for (key, run) in e {
@@ -1123,11 +1136,14 @@ impl Sim {
         self.spec.phases = table;
         self.spec.contexts.clear();
         self.spec.awaiting_plan = false;
+        // A plan change: nothing requested before it fits the new tables.
+        self.spec_life.generation = next_gen();
         self.spec.refresh();
         true
     }
 
-    /// A run index past the layout's for `b` (a free one first).
+    /// A run index past the layout's for `b` (a free one first); `None`
+    /// when every `u16` run index is taken (the install is refused).
     fn add_run(&mut self, b: Built, pinned: bool) -> Option<u16> {
         let run = match self.spec.free.pop() {
             Some(r) => r,

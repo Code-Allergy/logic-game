@@ -542,3 +542,75 @@ fn spec_mutations_are_caught() {
         assert!(caught, "mutation {m} is not caught");
     }
 }
+
+/// Native code compiled for one plan is refused by a `Sim` whose plan has
+/// the same keys over other bits (another mask): its bodies assume other
+/// bits, so the run layouts differ.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn native_code_for_other_key_bits_is_refused() {
+    let keys: Vec<u64> = (0..16).collect();
+    let (p, low) = counting(0xf, &keys);
+    let mut high = low.clone();
+    let pp = high.phases[0].as_mut().unwrap();
+    let mut fields = pp.layout.fields.clone();
+    fields[1].mask = 0xf0;
+    pp.layout = KeyLayout::new(fields);
+    let a = Sim::with_options(Arc::clone(&p), with_spec(SimOptions::jit(), &low));
+    let mut b = Sim::with_options(
+        Arc::clone(&p),
+        with_spec(SimOptions::jit().tier_layout(), &high),
+    );
+    let code = Arc::new(a.compile_jit().unwrap());
+    assert!(
+        !b.install_jit(Some(code)),
+        "code for bits 0..4 is not for bits 4..8"
+    );
+    let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+    same_batches(&mut want, &mut b);
+}
+
+/// A plan with more key values than run indices on one phase of a
+/// two-phase program: the `Sim` is built (bodies stop at the cap, leaving
+/// room for the other phase's runs) and still equals single ticks.
+#[test]
+fn a_plan_past_the_run_index_cap_leaves_room_for_other_phases() {
+    let p = program(&microcoded(true), &Options::default());
+    let period = p.phases.as_ref().map_or(1, |ph| ph.period as usize);
+    assert!(period >= 2, "two clock phases");
+    // The 8-bit input `x` and the 8-bit accumulator: 65536 key values.
+    let x = p
+        .ports
+        .inputs
+        .iter()
+        .find(|i| i.name.as_deref() == Some("x"))
+        .expect("input x")
+        .slot;
+    let acc = p
+        .state_keys
+        .iter()
+        .find_map(|k| match k.loc {
+            crate::compile::StateLoc::Slot(s) if k.width == 8 => Some(p.resolve(s)?.0),
+            _ => None,
+        })
+        .expect("the 8-bit accumulator");
+    let layout = KeyLayout::new(vec![
+        KeyField {
+            slot: x,
+            mask: 0xff,
+        },
+        KeyField {
+            slot: acc,
+            mask: 0xff,
+        },
+    ]);
+    let keys: Vec<u64> = (0..1u64 << layout.width()).collect();
+    assert!(keys.len() >= usize::from(u16::MAX));
+    let mut phases = vec![None; period];
+    phases[0] = Some(PhasePlan { layout, keys });
+    let plan = SpecPlan { phases };
+    let mut s = Sim::with_options(Arc::clone(&p), with_spec(SimOptions::default(), &plan));
+    assert!(s.runs.len() <= usize::from(u16::MAX));
+    let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+    same_batches(&mut want, &mut s);
+}

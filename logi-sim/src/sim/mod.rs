@@ -390,6 +390,11 @@ impl Layout {
     }
 }
 
+/// Run indices specialized bodies leave free for the plain runs added
+/// after them: a full and a fused body per clock phase (at most 8 phases)
+/// and the program's own, with room to spare.
+const SPEC_RUN_RESERVE: usize = 64;
+
 /// The bodies of `program` under `options`: clock-phase variants, fused-run
 /// bodies, guards, and, when `folds` (the ROMs hold the program's
 /// contents), known-bits fused bodies (`options.known_bits`) and the
@@ -456,8 +461,12 @@ fn build_layout(program: &Arc<Program>, options: &SimOptions, folds: bool) -> La
         let cx = cx.map(Arc::new);
         let phase_plan = plan.and_then(|p| p.phases.get(k)?.as_ref());
         if let (Some(pp), Some(cx)) = (phase_plan, cx.as_ref()) {
-            let mut add_spec =
-                |body: Body| (runs.len() < usize::from(u16::MAX)).then(|| add(runs, Some(body)));
+            // Leave room for the runs every later phase still adds (its
+            // full and fused bodies) under the u16 run index.
+            let mut add_spec = |body: Body| {
+                (runs.len() < usize::from(u16::MAX) - SPEC_RUN_RESERVE)
+                    .then(|| add(runs, Some(body)))
+            };
             let guard_spec = |body: Body| guard_fused(&body).unwrap_or(body);
             let ps =
                 spec::PhaseSpec::build(program, cx, pp, f, adaptive, &mut add_spec, &guard_spec);

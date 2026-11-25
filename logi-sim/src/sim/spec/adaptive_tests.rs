@@ -563,3 +563,45 @@ fn adaptive_mutations_are_caught() {
         assert!(caught, "mutation {m} is not caught");
     }
 }
+
+/// Run-time installs never push a run index past `u16::MAX`: with the
+/// runs filled up to the last index, one more body installs and the next
+/// is refused (not a panic), and the results stay exact.
+#[test]
+fn installs_at_the_run_index_cap_are_refused() {
+    use crate::compile::Body;
+    use crate::sim::Run;
+    let (p, plan) = counting(0xff, &[]);
+    let spec = SpecOptions {
+        inline_build: false,
+        max_bodies: usize::MAX,
+        ..fast(Some(plan), 1 << 20, 1 << 20, 1)
+    };
+    let mut s = Sim::with_options(Arc::clone(&p), with(SimOptions::default(), &spec));
+    // Fill every index but the last free one with placeholder runs (as
+    // if that many bodies had been installed).
+    while s.runs.len() < usize::from(u16::MAX) - 2 {
+        s.runs.push(Run::new(&p, Some(Body::default()), false));
+        s.spec.dynamic.push(None);
+    }
+    let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+    let (mut ok, mut refused) = (0, 0);
+    for round in 0..8 {
+        s.run(3);
+        for _ in 0..3 {
+            want.tick();
+        }
+        let r = s.spec_requests();
+        for r in &r {
+            if s.install_spec(build_spec(&p, r)) {
+                ok += 1;
+            } else {
+                refused += 1;
+            }
+        }
+        assert!(s.runs.len() < usize::from(u16::MAX), "round {round}");
+        assert!(observe(&want) == observe(&s), "round {round}");
+    }
+    assert!(ok == 1 && refused > 0, "{ok} installed, {refused} refused");
+    same_batches(&mut want, &mut s);
+}
