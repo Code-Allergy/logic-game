@@ -517,8 +517,10 @@ fn hundreds_of_bodies() {
 }
 
 /// Deliberate runtime bugs (`MUTATION`) are caught by `check_batches`:
-/// bodies built for the wrong key, and a skipped prefix (the key read
-/// from stale slots, the body run without the prefix's values).
+/// bodies built for the wrong key, a skipped prefix (the key read from
+/// stale slots, the body run without the prefix's values), and keyed
+/// fused ticks that never apply the inputs (`Sim::keyed_ticks` relies on
+/// the tick before it having applied them).
 #[test]
 fn spec_mutations_are_caught() {
     let _reset = NoMutation;
@@ -533,7 +535,7 @@ fn spec_mutations_are_caught() {
     for (p, spec) in &programs {
         check_batches_with(p, 1, Some(spec)).unwrap();
     }
-    for m in 1..=2 {
+    for m in [1, 2, 6] {
         MUTATION.set(m);
         let caught = programs
             .iter()

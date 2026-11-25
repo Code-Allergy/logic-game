@@ -34,6 +34,15 @@
 //! ROM contents, so a ROM write turns specialization off with the
 //! known-bits bodies (`Sim::rom_changed`) until `Sim::reset`; builds
 //! requested before carry an older generation and are refused.
+//!
+//! Supersteps (`jit::superstep`) run the general fused bodies, so `run`
+//! uses none while a phase is keyed. An automatic plan is chosen after the
+//! layout's native code was compiled (without a superstep, since keys
+//! were to come); a plan that keys no phase therefore brings the layout's
+//! superstep, compiled with the plan ([`Spec::superstep`]). Supersteps
+//! *keyed* per period were measured and not built: on the NES console the
+//! keys of whole periods hardly repeat (`docs/adaptive-spec.md`, "P8 as
+//! built").
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -71,7 +80,8 @@ pub struct SpecOptions {
     /// Specialized bodies over all phases at most.
     pub max_bodies: usize,
     /// Bytes of native code of the specialized bodies at most (the
-    /// prefixes and fallbacks of an automatic plan are not counted).
+    /// prefixes, fallbacks and superstep of an automatic plan are not
+    /// counted: they are never evicted).
     pub code_budget: usize,
     /// Fused ticks of a phase per counting window: miss counters restart
     /// every window, and a body not hit for a window is cold (may be
@@ -325,7 +335,8 @@ thread_local! {
     /// 3 installs each built body under a wrong key (bit 0 flipped);
     /// 4 evicts a body but leaves its table entry (pointing at the freed
     /// run, which the next install reuses); 5 fails every body's check in
-    /// `build_spec`.
+    /// `build_spec`; 6 runs every fused tick of a keyed `run` through
+    /// `Sim::keyed_ticks` (the inputs never applied).
     pub(crate) static MUTATION: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
@@ -508,6 +519,41 @@ impl Unit {
     }
 }
 
+/// A superstep's native code: a `SuperUnit` with the JIT.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+pub(super) type SuperCode = super::jit::SuperUnit;
+#[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+pub(super) enum SuperCode {}
+
+/// A superstep compiled after the layout was built (see
+/// [`Spec::superstep`]): its code, and the run each of its bodies is
+/// (its parts name bodies by their index in `runs`).
+pub(super) struct SpecSuper {
+    #[cfg_attr(
+        not(all(feature = "jit", not(target_arch = "wasm32"))),
+        expect(dead_code)
+    )]
+    pub code: SuperCode,
+    #[cfg_attr(
+        not(all(feature = "jit", not(target_arch = "wasm32"), feature = "counters")),
+        expect(dead_code)
+    )]
+    pub runs: Vec<u16>,
+    bytes: usize,
+}
+
+/// What a superstep request carries: the bodies (owned, so that the build
+/// needs nothing of the `Sim`), the run of each, and the superstep.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+pub(super) struct SuperBuild {
+    pub bodies: Vec<Body>,
+    pub runs: Vec<u16>,
+    pub parts: Vec<super::jit::Part>,
+    pub live_end: Vec<u32>,
+    pub ticks: u64,
+    pub chunk: usize,
+}
+
 /// A run installed after the layout was built.
 pub(super) struct Dyn {
     /// Its native code (run only while the `Sim` runs native code).
@@ -590,9 +636,13 @@ pub(super) struct Spec {
     /// Free runs past `base`.
     free: Vec<u16>,
     /// Native bytes of the specialized bodies installed, and of the
-    /// pinned runs.
+    /// pinned runs (and the superstep).
     body_bytes: usize,
     pinned_bytes: usize,
+    /// The superstep of an automatic plan that keys no phase (the layout's
+    /// native code was compiled without one while the plan was awaited):
+    /// run by `Sim::run` while native code is installed.
+    pub superstep: Option<Arc<SpecSuper>>,
 }
 
 impl Spec {
@@ -743,7 +793,8 @@ pub struct SpecStats {
     pub stale: u64,
     pub dropped: u64,
     /// Native bytes of the bodies installed at run time (specialized
-    /// bodies, and the prefixes and fallbacks of an automatic plan).
+    /// bodies, and the prefixes and fallbacks of an automatic plan), and
+    /// of the superstep a plan that keys nothing brings.
     pub code_bytes: usize,
     /// An automatic plan is still being sampled or built.
     pub awaiting_plan: bool,
@@ -774,6 +825,9 @@ enum Work {
         contexts: Vec<Option<Arc<SpecContext>>>,
         rows: Arc<Vec<Vec<Vec<u64>>>>,
         options: PlanOptions,
+        /// The layout's superstep, compiled when the plan keys nothing.
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        superstep: Option<SuperBuild>,
     },
 }
 
@@ -835,7 +889,8 @@ enum Out {
         key: u64,
         body: Option<Box<Built>>,
     },
-    Plan(Vec<Option<BuiltPhase>>),
+    /// The keyed phases, and the superstep when none is keyed.
+    Plan(Vec<Option<BuiltPhase>>, Option<Box<SpecSuper>>),
 }
 
 impl SpecBuilt {
@@ -843,7 +898,7 @@ impl SpecBuilt {
     pub fn body(&self) -> Option<(usize, u64)> {
         match &self.out {
             Out::Body { phase, key, .. } => Some((*phase, *key)),
-            Out::Plan(_) => None,
+            Out::Plan(..) => None,
         }
     }
 
@@ -852,11 +907,13 @@ impl SpecBuilt {
         let b = |x: Option<&Built>| x.and_then(|b| b.unit.as_ref()).map_or(0, Unit::code_bytes);
         match &self.out {
             Out::Body { body, .. } => b(body.as_deref()),
-            Out::Plan(ph) => ph
-                .iter()
-                .flatten()
-                .map(|x| b(x.prefix.as_ref()) + b(x.fallback.as_ref()))
-                .sum(),
+            Out::Plan(ph, sup) => {
+                ph.iter()
+                    .flatten()
+                    .map(|x| b(x.prefix.as_ref()) + b(x.fallback.as_ref()))
+                    .sum::<usize>()
+                    + sup.as_ref().map_or(0, |s| s.bytes)
+            }
         }
     }
 
@@ -864,7 +921,7 @@ impl SpecBuilt {
     pub fn plan_phases(&self) -> Option<usize> {
         match &self.out {
             Out::Body { .. } => None,
-            Out::Plan(ph) => Some(ph.iter().flatten().count()),
+            Out::Plan(ph, _) => Some(ph.iter().flatten().count()),
         }
     }
 }
@@ -896,7 +953,7 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
                     key: *key,
                     body: None,
                 },
-                Work::Plan { .. } => Out::Plan(Vec::new()),
+                Work::Plan { .. } => Out::Plan(Vec::new(), None),
             },
         };
     }
@@ -924,11 +981,13 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
             contexts,
             rows,
             options,
+            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            superstep,
         } => {
             let cxs: Vec<Option<&SpecContext>> = contexts.iter().map(Option::as_deref).collect();
             let samples: Vec<&[Vec<u64>]> = rows.iter().map(Vec::as_slice).collect();
             let plan = choose_plan(p, &cxs, &samples, options);
-            let phases = contexts
+            let phases: Vec<Option<BuiltPhase>> = contexts
                 .iter()
                 .enumerate()
                 .map(|(k, cx)| {
@@ -957,7 +1016,16 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
                     })
                 })
                 .collect();
-            Out::Plan(phases)
+            // Keying nothing: the superstep the layout would have had.
+            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            let sup = superstep
+                .as_ref()
+                .filter(|_| r.jit && phases.iter().all(Option::is_none))
+                .and_then(|sb| build_superstep(p, sb))
+                .map(Box::new);
+            #[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+            let sup = None;
+            Out::Plan(phases, sup)
         }
     };
     SpecBuilt {
@@ -965,6 +1033,37 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
         generation: r.generation,
         out,
     }
+}
+
+/// Compile the superstep of `sb` (`None` when it cannot be compiled).
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+fn build_superstep(p: &Program, sb: &SuperBuild) -> Option<SpecSuper> {
+    use super::jit::{BodyRef, SuperRef, compile_superstep};
+    let bodies: Vec<BodyRef<'_>> = sb
+        .bodies
+        .iter()
+        .map(|b| BodyRef {
+            blocks: &b.blocks,
+            instrs: &b.instrs,
+            imms: &b.imms,
+            commits: &b.commits,
+            guards: &b.guards,
+            used: true,
+            fused_only: true,
+        })
+        .collect();
+    let s = SuperRef {
+        parts: &sb.parts,
+        ticks: sb.ticks,
+        live_end: &sb.live_end,
+        chunk: sb.chunk,
+    };
+    let code = compile_superstep(p, &bodies, &s).ok()?;
+    Some(SpecSuper {
+        bytes: code.info().code_bytes,
+        code,
+        runs: sb.runs.clone(),
+    })
 }
 
 /// Check `body` as `Sim` checks its bodies and compile its unit.
@@ -1088,6 +1187,8 @@ impl Sim {
                     contexts: self.spec.contexts.clone(),
                     rows,
                     options: o.plan_options(),
+                    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+                    superstep: if jit { self.super_build() } else { None },
                 },
             });
         }
@@ -1148,7 +1249,7 @@ impl Sim {
             return false;
         }
         let ok = match b.out {
-            Out::Plan(phases) => self.install_plan(phases),
+            Out::Plan(phases, sup) => self.install_plan(phases, sup),
             Out::Body { phase, key, body } => {
                 let ok = body.is_some_and(|body| self.install_body(phase, key, *body));
                 if !ok {
@@ -1180,7 +1281,11 @@ impl Sim {
         }
     }
 
-    fn install_plan(&mut self, phases: Vec<Option<BuiltPhase>>) -> bool {
+    fn install_plan(
+        &mut self,
+        phases: Vec<Option<BuiltPhase>>,
+        sup: Option<Box<SpecSuper>>,
+    ) -> bool {
         let Some(o) = self.options.spec.clone() else {
             return false;
         };
@@ -1229,6 +1334,11 @@ impl Sim {
             table.resize(self.fused.len(), None);
         } else {
             table.clear();
+            // Nothing keyed: the layout's superstep.
+            if let Some(sup) = sup {
+                self.spec.pinned_bytes += sup.bytes;
+                self.spec.superstep = Some(Arc::from(sup));
+            }
         }
         self.spec.phases = table;
         self.spec.contexts.clear();

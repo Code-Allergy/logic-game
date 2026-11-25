@@ -769,7 +769,9 @@ mod threaded {
     /// Work for the compile thread.
     pub(super) enum Job {
         Compile(Arc<Design>, u64),
-        Spec(SpecJob),
+        // Boxed: a spec job carries its request (bodies and the plan's
+        // superstep), far larger than a compile job.
+        Spec(Box<SpecJob>),
     }
 
     struct Shared {
@@ -877,7 +879,7 @@ mod threaded {
                         };
                         let (design, rev) = match job {
                             Job::Spec(job) => {
-                                enqueue(&mut backlog, job);
+                                enqueue(&mut backlog, *job);
                                 continue;
                             }
                             Job::Compile(design, rev) => (design, rev),
@@ -887,7 +889,7 @@ mod threaded {
                         while let Ok(newer) = compile_rx.try_recv() {
                             match newer {
                                 Job::Compile(d, r) => (design, rev) = (d, r),
-                                Job::Spec(job) => enqueue(&mut backlog, job),
+                                Job::Spec(job) => enqueue(&mut backlog, *job),
                             }
                         }
                         let result = compile_cached(&design, &compile_options, &mut cache, |_| {})
@@ -906,7 +908,7 @@ mod threaded {
                         if let (Some(p), true) = (program, jit_options.jit) {
                             while let Ok(newer) = compile_rx.try_recv() {
                                 match newer {
-                                    Job::Spec(job) => enqueue(&mut backlog, job),
+                                    Job::Spec(job) => enqueue(&mut backlog, *job),
                                     edit => next = Some(edit),
                                 }
                             }
@@ -1092,7 +1094,7 @@ mod threaded {
             }
             core.run(BATCH, clock);
             for job in core.spec_jobs() {
-                let _ = compile_tx.send(Job::Spec(job));
+                let _ = compile_tx.send(Job::Spec(Box::new(job)));
             }
             if core.dirty() || core.mems_stale() || !syncs.is_empty() {
                 publish(&mut core, &mut spare);

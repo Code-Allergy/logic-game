@@ -732,7 +732,7 @@ fn a_plan_past_the_run_cap_leaves_no_runs_behind() {
     }
     let built = build_spec(&p, &plan.unwrap());
     let runs_needed: usize = match &built.out {
-        super::Out::Plan(ph) => ph.iter().flatten().filter(|x| x.prefix.is_some()).count() * 2,
+        super::Out::Plan(ph, _) => ph.iter().flatten().filter(|x| x.prefix.is_some()).count() * 2,
         super::Out::Body { .. } => unreachable!(),
     };
     assert!(runs_needed >= 2, "the plan has a prefix");
@@ -804,4 +804,161 @@ fn a_body_that_fails_its_check_is_wanted_again() {
     s.run(40);
     let again = s.spec_requests();
     assert_eq!(again.len(), r.len(), "{again:?}");
+}
+
+/// Options whose automatic plan keys no phase (no key bit allowed),
+/// sampling a short window.
+fn keying_nothing() -> SpecOptions {
+    SpecOptions {
+        max_key_bits: 0,
+        ..fast(None, 8, 16, 2)
+    }
+}
+
+/// An automatic plan that keys no phase brings the superstep the layout's
+/// native code lacks (compiled while the plan was awaited), built with
+/// the plan (P8 (c)): `run` uses it while native code is installed, not
+/// while interpreting, and a ROM write and the `reset` after it keep it
+/// with the layout. Every batch boundary equals single ticks.
+#[test]
+fn a_plan_that_keys_nothing_brings_the_superstep() {
+    let p = program(&microcoded(true), &Options::default());
+    let spec = keying_nothing();
+    for o in jit_options() {
+        let mut s = Sim::with_options(Arc::clone(&p), with(o.clone(), &spec));
+        let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+        while s.spec_stats().awaiting_plan {
+            assert!(s.spec.superstep.is_none());
+            s.run(10);
+            for _ in 0..10 {
+                want.tick();
+            }
+            assert!(observe(&want) == observe(&s));
+            assert!(s.tick_count() < 5000, "no plan");
+        }
+        let st = s.spec_stats();
+        assert!(st.keyed_phases == 0 && st.installed == 1, "{st:?}");
+        assert!(!s.spec.hooked);
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        if s.jit_active() {
+            assert!(s.jit_code().unwrap().superstep().is_none());
+            let sup = s.spec.superstep.clone().expect("a superstep");
+            assert_eq!(sup.code.info().ticks, 2);
+            assert_eq!(s.super_fn().map(|f| f.1), Some(2));
+            assert!(st.code_bytes >= sup.code.info().code_bytes && st.code_bytes > 0);
+            same_batches(&mut want, &mut s);
+            // Interpreted: the superstep stays but does not run.
+            assert!(s.install_jit(None));
+            assert!(s.super_fn().is_none());
+            same_batches(&mut want, &mut s);
+            let code = Arc::new(s.compile_jit().unwrap());
+            assert!(s.install_jit(Some(code)));
+            // A ROM write sets it aside with the layout (the unfolded
+            // layout's native code has a superstep of its own); `reset`
+            // brings it back.
+            let rom = (0..p.mems.len() as u32)
+                .find(|&m| !p.mems[m as usize].writable)
+                .unwrap();
+            let w = s.mem(rom)[1];
+            s.set_mem_word(rom, 1, w ^ 1);
+            want.set_mem_word(rom, 1, w ^ 1);
+            assert!(s.spec.superstep.is_none() && s.super_fn().is_some());
+            same_batches(&mut want, &mut s);
+            s.reset();
+            want.reset();
+            assert!(s.spec.superstep.is_some() && s.super_fn().is_some());
+            same_batches(&mut want, &mut s);
+            continue;
+        }
+        assert!(s.spec.superstep.is_none());
+        same_batches(&mut want, &mut s);
+    }
+    // Every runtime variant (supersteps of several periods, small chunks),
+    // with the plan arriving mid-run; pokes, imports and resets.
+    for seed in 1..=3 {
+        check_batches_with(&p, seed, Some(&spec)).unwrap();
+    }
+    check_pair(
+        &p,
+        400,
+        5,
+        &SimOptions::baseline(),
+        &with(SimOptions::jit(), &spec),
+    )
+    .unwrap();
+    // Random designs: whatever the plan, exact.
+    for (c, cfg) in standard_configs().iter().enumerate() {
+        let g = generate(&GenConfig {
+            seed: c as u64 * 131 + 7,
+            ..cfg.clone()
+        });
+        for options in [Options::default(), Options::debug()] {
+            let q = program(&g.design, &options);
+            check_batches_with(&q, c as u64, Some(&spec))
+                .unwrap_or_else(|e| panic!("config {c}: {e}"));
+        }
+    }
+}
+
+/// The superstep a plan brings is the one the mutations of
+/// `jit::superstep` break: with each, `check_batches` fails on a program
+/// whose only superstep is the plan's (so that superstep runs, and its
+/// bugs are caught).
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn the_plans_superstep_is_checked() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::sim::jit::MUTATION.set(0);
+        }
+    }
+    let _reset = Reset;
+    let spec = keying_nothing();
+    let cases: Vec<Arc<Program>> = [false, true]
+        .into_iter()
+        .map(|clocked| program(&microcoded(clocked), &Options::default()))
+        .collect();
+    for p in &cases {
+        let mut s = Sim::with_options(Arc::clone(p), with(SimOptions::jit(), &spec));
+        while s.spec_stats().awaiting_plan {
+            s.run(10);
+        }
+        assert!(s.jit_code().unwrap().superstep().is_none() && s.super_fn().is_some());
+        check_batches_with(p, 1, Some(&spec)).unwrap();
+    }
+    for m in 1..=3 {
+        crate::sim::jit::MUTATION.set(m);
+        let caught = cases
+            .iter()
+            .any(|p| check_batches_with(p, 1, Some(&spec)).is_err());
+        crate::sim::jit::MUTATION.set(0);
+        assert!(caught, "superstep mutation {m} is not caught");
+    }
+}
+
+/// Work counters (feature `counters`) of the plan's superstep are those of
+/// the program's own: a `Sim` whose plan keys nothing counts what a `Sim`
+/// without specialization counts, batch for batch.
+#[cfg(all(feature = "counters", feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn the_plans_superstep_counts_like_the_programs() {
+    for clocked in [false, true] {
+        let p = program(&microcoded(clocked), &Options::default());
+        let mut s = Sim::with_options(Arc::clone(&p), with(SimOptions::jit(), &keying_nothing()));
+        while s.spec_stats().awaiting_plan {
+            s.run(10);
+        }
+        let mut plain = Sim::with_options(Arc::clone(&p), SimOptions::jit());
+        plain.run(s.tick_count());
+        assert!(s.super_fn().is_some() && plain.jit_code().unwrap().superstep().is_some());
+        s.reset_counters();
+        plain.reset_counters();
+        for n in [1, 9, 2, 30, 7, 64] {
+            s.run(n);
+            plain.run(n);
+            assert_eq!(s.counters(), plain.counters(), "run({n})");
+        }
+        assert!(observe(&s) == observe(&plain));
+    }
 }
