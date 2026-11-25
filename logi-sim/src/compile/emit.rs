@@ -745,7 +745,7 @@ fn add_shadows(p: &mut Program, e: &Elab<'_>, subs: &[Sub], top: &[u32], pending
 /// (which run from the full instruction) and memory reads more.
 fn op_cost(op: Op) -> u32 {
     match op {
-        Op::Shr | Op::Concat | Op::Sext | Op::Clock => 5,
+        Op::Shr | Op::Concat | Op::Sext | Op::Clock | Op::Shl => 5,
         Op::MemRead => 6,
         _ => {
             let (a, b, c) = op.slot_operands();

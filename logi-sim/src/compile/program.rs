@@ -115,6 +115,14 @@ pub enum Op {
     /// SR latch next state: `if b != 0 { 0 } else if a != 0 { 1 } else { c }`
     /// (`a` = s, `b` = r, `c` = state).
     SrNext,
+    /// Shift by literals: `((a >> c) << b) & imm`; `b` and `c` are literal
+    /// shifts below 64. A bit field moved up, as a concatenation whose low
+    /// part is zero compiles (`Options::shifts`).
+    Shl,
+    /// Shift left by a slot: `(a << (b & 63)) & imm`. A barrel shifter of
+    /// muxes compiles to it (`Options::barrels`), with an amount narrow
+    /// enough that the mask never applies.
+    ShlV,
 }
 
 impl Op {
@@ -122,10 +130,12 @@ impl Op {
     pub fn slot_operands(self) -> (bool, bool, bool) {
         use Op::*;
         match self {
-            Copy | Not | ReduceOr | ReduceAnd | ReduceXor | Shr | Sext | MemRead => {
+            Copy | Not | ReduceOr | ReduceAnd | ReduceXor | Shr | Sext | MemRead | Shl => {
                 (true, false, false)
             }
-            And | Or | Xor | Nand | Nor | Xnor | Switch | Eq | LtU | Concat => (true, true, false),
+            And | Or | Xor | Nand | Nor | Xnor | Switch | Eq | LtU | Concat | ShlV => {
+                (true, true, false)
+            }
             Mux | AddSum | AddCarry | SrNext => (true, true, true),
             Clock => (false, false, false),
         }
