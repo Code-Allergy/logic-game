@@ -1,5 +1,5 @@
 {
-  "_comment": "nestest in automation mode ($C000) on cpu_tb: the 16 KiB PRG at $8000 and $C000 of the 64 KiB RAM. This copy: on cpu_tb_gates (cpu6502, the phase 4 CPU).",
+  "_comment": "nestest in automation mode ($C000) on cpu_tb: the 16 KiB PRG at $8000 and $C000 of the 64 KiB RAM. This copy: on cpu_tb_gates (cpu6502, the phase 4 CPU). The first tick (`start` [{\"ticks\": 1}]) lets the inputs reach the design: a fresh simulation's first tick does not see them yet (runner bug).",
   "kind": "nestest",
   "circuit": "cpu_tb_gates",
   "signals": {
@@ -23,6 +23,9 @@
     "magic": 255
   },
   "start": [
+    {
+      "ticks": 1
+    },
     {
       "load": {
         "part": "ram",

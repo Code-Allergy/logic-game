@@ -1,5 +1,5 @@
 {
-  "_comment": "Klaus Dormann's 6502_functional_test (the prebuilt binary, decimal tests included) on cpu_tb with decimal mode on. This copy: on cpu_tb_gates (cpu6502, the phase 4 CPU).",
+  "_comment": "Klaus Dormann's 6502_functional_test (the prebuilt binary, decimal tests included) on cpu_tb with decimal mode on. This copy: on cpu_tb_gates (cpu6502, the phase 4 CPU). The first tick (`start` [{\"ticks\": 1}]) lets the inputs reach the design: a fresh simulation's first tick does not see them yet (runner bug).",
   "kind": "klaus",
   "circuit": "cpu_tb_gates",
   "signals": {
@@ -20,6 +20,9 @@
     "magic": 255
   },
   "start": [
+    {
+      "ticks": 1
+    },
     {
       "load": {
         "part": "ram",
