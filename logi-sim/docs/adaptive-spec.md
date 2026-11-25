@@ -394,6 +394,72 @@ Differences from the sketch below, which P7 and P8 build on:
   installed under the wrong key (bit 0 flipped), and an eviction that
   frees the run but leaves its entry (the next install reuses the run for
   another key).
+- **Measured** (`spec_keys --adaptive 6000000 --rounds 6 --later
+  20000000 --bodies 16`, JIT, all runtimes in one process, builds on one
+  thread of their own; k ticks/s, median of 6 interleaved rounds of 1M
+  ticks, range in brackets, hit rate of keyed ticks; a shared 4-core
+  machine). Fixed plans and the adaptive tables' keys come from a
+  profile of ticks 1.5M to 6M (Blade Buster) or 1.5M to 2.1M (NES demo);
+  "start" is the 6M (2.1M) ticks right after, "later" ticks 20M to 26M.
+
+  | Blade Buster (MMC3) | start | later | live bodies | native KiB |
+  |---|---|---|---|---|
+  | spec off (supersteps) | 2432 (2303..2513) | 2397 (1873..2494) | 0 | 208 |
+  | fixed, 16 keys per phase | 2952 (2449..3027) +21%, 92% | 2318 (1532..2404) -3%, 64% | 48 | 693 |
+  | fixed, 64 keys | 2914 (2424..2955) +20%, 98% | 2302 (1579..2395) -4%, 68% | 145 | 1835 |
+  | adaptive, cap 8 | 2542 (1845..2567) +5%, 68% | 2732 (2295..2834) +14%, 80% | 24 | 463 |
+  | adaptive, cap 16 | 2949 (2049..3000) +21%, 93% | 3003 (2494..3015) +25%, 94% | 48 | 694 |
+  | adaptive, cap 32 | 2744 (2260..3062) +13%, 95% | 3013 (2437..3034) +26%, 96% | 96 | 1081 |
+  | automatic plan, cap 16 | 2757 (2109..3057) +13%, 94% | 2992 (2721..3076) +25%, 97% | 48 | 685 |
+
+  | NES demo | start | later | live bodies | native KiB |
+  |---|---|---|---|---|
+  | spec off (supersteps) | 2721 (2239..2758) | 2415 (1894..2808) | 0 | 183 |
+  | fixed, 16 keys per phase | 3464 (3131..3784) +27%, 96% | 3509 (3172..3800) +45%, 96% | 48 | 578 |
+  | fixed, 64 keys | 3461 (2944..3832) +27%, 100% | 3593 (2908..3874) +49%, 100% | 134 | 1251 |
+  | adaptive, cap 8 | 3105 (2526..3171) +14%, 71% | 3187 (1955..3272) +32%, 71% | 24 | 386 |
+  | adaptive, cap 16 | 3191 (2303..3648) +17%, 96% | 3625 (2800..3733) +50%, 96% | 48 | 581 |
+  | adaptive, cap 32 | 3537 (3175..3750) +30%, 98% | 3461 (3180..3777) +43%, 98% | 96 | 798 |
+  | automatic plan, cap 16 | 3612 (2190..3717) +33%, 94% | 3691 (3068..3948) +53%, 98% | 43 | 535 |
+
+  Executed ops per tick on Blade Buster (a `counters` build, the same
+  runs): spec off 756; fixed 16 keys 482 at the start, **613 later** (the
+  profile's keys hit 64%); adaptive cap 16 480 and 475; automatic plan
+  502 and 485 (with `plan_window` 2^16, the first 200k ticks of boot code:
+  610 and 606, hence the default of 2^20). The adaptive tables keep the
+  later scene at the profiled scene's level where a fixed plan profiled
+  early falls back below spec off; cap 16 is the best default on both
+  (cap 8 misses too often, 32 holds more code for 1 to 2% more hits).
+  Time to the first hit: 30k ticks (the first batch; the profile's
+  first key values turn hot within it) with a plan's keys, 6.1M (Blade
+  Buster) and 4.6M (NES) ticks with an automatic plan (the sampling
+  window, 3.1M ticks, plus the plan's build). Build latency per body
+  (specialize, guard, check, compile a unit; on the build thread while
+  the runtimes run): median 4.1 ms, 90% 6.8 ms, max 17 ms (Blade
+  Buster), 1.9 / 6.7 / 10.4 ms (NES); the automatic plan's build
+  (`choose_plan` on 512 samples per phase plus prefixes and fallbacks):
+  3.1 s and 2.3 s. Hundreds of evictions over 26M ticks (90 at cap 16 on
+  Blade Buster), state and memories equal to spec off at the end.
+- **For P7 (engine).** Turn `inline_build` off for `Sim`s the worker
+  drives; after each batch send `spec_requests()` to the compile thread
+  (`build_spec(&program, &r)`), and `install_spec` the results between
+  batches: staleness (another program, `Sim` or generation) is checked
+  by `install_spec` itself, so the engine's revision check only saves
+  work. A tiered `Sim` (`tier_layout`: `jit` off until `install_jit`)
+  should `set_native(true)` on its requests; bodies installed before
+  that have no unit and run interpreted until evicted (rebuilding them
+  after `install_jit` is a possible refinement). The automatic plan's
+  build takes seconds on the NES console: queue it behind the JIT
+  compile, never ahead of it. `LocalEngine` keeps `inline_build`, but the
+  plan's build then stalls one `run` for that long: on wasm, fewer
+  `samples` or a fixed plan.
+- **For P8 (keyed supersteps).** Installed bodies are not in the
+  `JitProgram`, so a keyed superstep is a unit of its own (per hot period
+  key, under the same caps, evicted like a body; `compile_unit` would
+  take a `SuperRef`). `Spec::hooked` makes `run` skip the program's
+  superstep; a plan that keys nothing leaves no superstep either (the
+  layout was compiled without one while the plan was awaited), which P8
+  can fix by compiling the superstep with the plan.
 
 ### Per fused tick (`Sim::run`, the path without a superstep)
 
