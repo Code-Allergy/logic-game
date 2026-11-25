@@ -112,8 +112,16 @@ pub struct SimOptions {
     /// pick (the data input of a register whose enable is 0). Applies to
     /// fused-run bodies, and to full settles of a program not compiled
     /// with `Options::debug`, where only slots nothing exposes are
-    /// skipped. Single-threaded only.
+    /// skipped. Single-threaded only, and with the JIT only unless
+    /// [`SimOptions::guard_interpreter`] is on.
     pub guard: bool,
+    /// Guard the interpreter's bodies too (off by default). The guarded
+    /// segments split the interpreter's blocks and break its streaming:
+    /// on the NES console the interpreter ran about 17% slower with
+    /// guards, while the JIT, which branches inside its chunks, gains.
+    /// When the JIT is requested but cannot run, the interpreter runs the
+    /// guarded bodies (correct, just not the fastest layout).
+    pub guard_interpreter: bool,
     /// Fewest instructions a guarded region holds
     /// ([`crate::compile::guard::MIN_REGION`] by default; smaller values
     /// guard more, smaller cones).
@@ -145,6 +153,7 @@ impl Default for SimOptions {
             phases: true,
             jit: false,
             guard: true,
+            guard_interpreter: false,
             guard_min: crate::compile::guard::MIN_REGION,
             superstep: true,
             superstep_ticks: DEFAULT_SUPERSTEP_TICKS,
@@ -168,6 +177,18 @@ impl SimOptions {
             guard: false,
             superstep: false,
             ..Self::default()
+        }
+    }
+
+    /// The interpreted layout of these options for JIT tiering: `jit` off,
+    /// but the bodies laid out as the JIT would run them (guarded when
+    /// `jit` asks for guards), so native code compiled from this layout
+    /// later swaps into a `Sim` built with it.
+    pub fn tier_layout(&self) -> Self {
+        Self {
+            jit: false,
+            guard_interpreter: self.guard_interpreter || self.jit,
+            ..self.clone()
         }
     }
 
@@ -396,6 +417,7 @@ impl Sim {
         let (mut period, mut full, mut fused) = (1u64, vec![0u8], vec![0u8]);
         if pool.is_none() {
             use crate::compile::{guard, phases};
+            let guards = options.guard && (options.jit || options.guard_interpreter);
             let add = |runs: &mut Vec<Run>, body: Option<Body>| {
                 runs.push(Run::new(&program, body, options.stream));
                 runs.len() as u8
@@ -403,8 +425,7 @@ impl Sim {
             let n_slots = program.slot_count as usize;
             // Full settles are observed: guard only what nothing exposes,
             // and nothing under `Options::debug`.
-            let exposed =
-                (options.guard && !program.debug_options).then(|| phases::exposed(&program));
+            let exposed = (guards && !program.debug_options).then(|| phases::exposed(&program));
             let guard_full = |b: &Body| {
                 let e = exposed.as_deref()?;
                 guard::guard_with(n_slots, b, Some(e), options.guard_min)
@@ -412,8 +433,7 @@ impl Sim {
             // A fused-run body: pruned to its commits' cone, then guarded.
             let fused_body = |b: &Body| {
                 let pruned = phases::prune(&program, b);
-                let guarded = options
-                    .guard
+                let guarded = guards
                     .then(|| {
                         let b = pruned.as_ref().unwrap_or(b);
                         guard::guard_with(n_slots, b, None, options.guard_min)

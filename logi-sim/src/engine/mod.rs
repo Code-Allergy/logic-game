@@ -301,9 +301,13 @@ impl EngineCore {
     /// probes over from the running one.
     pub fn install(&mut self, program: Arc<Program>, revision: u64) -> EngineEvent {
         let snapshot = self.sim.as_ref().map(Sim::export_state);
-        let mut options = self.sim_options.clone();
-        // Tiered: native code arrives later (`install_jit`).
-        options.jit &= !self.jit_tiered;
+        // Tiered: native code arrives later (`install_jit`); until then the
+        // interpreter runs the layout the native code is compiled from.
+        let options = if self.jit_tiered {
+            self.sim_options.tier_layout()
+        } else {
+            self.sim_options.clone()
+        };
         let mut sim = Sim::with_options(program, options);
         for (&node, &v) in &self.inputs {
             if let Some(port) = sim.program().ports.input_by_node(node) {
@@ -640,13 +644,7 @@ mod threaded {
                         if let (Some(p), true) = (program, jit_options.jit) {
                             next = compile_rx.try_recv().ok();
                             if next.is_none() {
-                                let layout = Sim::with_options(
-                                    p,
-                                    SimOptions {
-                                        jit: false,
-                                        ..jit_options.clone()
-                                    },
-                                );
+                                let layout = Sim::with_options(p, jit_options.tier_layout());
                                 if let Ok(code) = layout.compile_jit()
                                     && back.send(Msg::Jitted(rev, Arc::new(code))).is_err()
                                 {

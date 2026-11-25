@@ -446,8 +446,11 @@ fn jit_code_swaps_into_the_running_revision_only() {
     );
     let layout = Sim::with_options(
         Arc::clone(core.sim().unwrap().program()),
-        SimOptions::default(),
+        SimOptions::jit().tier_layout(),
     );
+    // The interpreter runs the JIT's layout, guards included.
+    let native = Sim::with_options(Arc::clone(core.sim().unwrap().program()), SimOptions::jit());
+    assert_eq!(core.sim().unwrap().guarded(), native.guarded());
     let code = Arc::new(layout.compile_jit().unwrap());
     assert!(!core.install_jit(2, Arc::clone(&code)), "another revision");
     assert!(core.install_jit(1, code));
@@ -461,6 +464,27 @@ fn jit_code_swaps_into_the_running_revision_only() {
     core.publish(&mut b);
     assert_eq!((a.tick, &a.values), (b.tick, &b.values));
     assert_eq!(b.tick, 14);
+}
+
+/// JIT tiering keeps the JIT's layout: while a tiered program runs
+/// interpreted it is guarded like the native code that will swap in
+/// (guards otherwise follow `SimOptions::jit`), and that code installs.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn jit_tiering_runs_the_guarded_layout() {
+    let d = crate::testkit::fixtures::cpu(&crate::testkit::fixtures::LOOP_PROGRAM);
+    let mut core = EngineCore::new(Options::debug());
+    core.set_sim_options(SimOptions::jit());
+    core.jit_tiered = true;
+    core.load(&d, 1);
+    let sim = core.sim().unwrap();
+    assert!(!sim.jit_active(), "tiered: starts interpreted");
+    let native = Sim::with_options(Arc::clone(sim.program()), SimOptions::jit());
+    assert!(native.guarded().0 > 0, "the CPU's enables guard cones");
+    assert_eq!(sim.guarded(), native.guarded());
+    let layout = Sim::with_options(Arc::clone(sim.program()), SimOptions::jit().tier_layout());
+    assert!(core.install_jit(1, Arc::new(layout.compile_jit().unwrap())));
+    assert!(core.sim().unwrap().jit_active());
 }
 
 // ── Threaded engine ──────────────────────────────────────────────────────

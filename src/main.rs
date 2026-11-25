@@ -29,16 +29,30 @@ fn main() {
     // The game has no gamepad input, so Bevy is built without gilrs (see
     // Cargo.toml): an unplugged pad with rumble can't flood the log with
     // force-feedback errors every 50 ms.
-    let mut app = app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: GAME_TITLE.to_string(),
-            canvas: Some(GAME_WEB_TAG.to_owned()),
-            fit_canvas_to_parent: true,
-            prevent_default_event_handling: true,
-            ..default()
-        }),
-        ..default()
-    }));
+    // Cranelift (the `jit` feature) logs every function it defines at info
+    // level, with the whole function's IR: about 1.2 MB per compile of the
+    // NES console, written from the JIT compile thread.
+    let log_filter = format!(
+        "{},cranelift_jit=warn,cranelift_codegen=warn,cranelift_module=warn",
+        bevy::log::DEFAULT_FILTER
+    );
+    let mut app = app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: GAME_TITLE.to_string(),
+                    canvas: Some(GAME_WEB_TAG.to_owned()),
+                    fit_canvas_to_parent: true,
+                    prevent_default_event_handling: true,
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(bevy::log::LogPlugin {
+                filter: log_filter,
+                ..default()
+            }),
+    );
 
     if !disable_egui {
         app = app.add_plugins((EguiPlugin::default(), WorkshopUiPlugin));

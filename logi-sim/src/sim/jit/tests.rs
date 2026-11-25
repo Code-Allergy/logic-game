@@ -284,7 +284,15 @@ fn counters_are_the_same_with_the_jit() {
         bitblast(&fixtures::cpu(&fixtures::MULTIPLY_PROGRAM)),
     ] {
         let p = program(&d, &Options::default());
-        let mut want = Sim::new(Arc::clone(&p));
+        // The interpreter guarded like the JIT (`guard_interpreter`), so
+        // both skip the same work.
+        let mut want = Sim::with_options(
+            Arc::clone(&p),
+            SimOptions {
+                guard_interpreter: true,
+                ..SimOptions::default()
+            },
+        );
         let mut got = Sim::with_options(Arc::clone(&p), SimOptions::jit());
         assert!(got.jit_active());
         for k in 0..200u64 {

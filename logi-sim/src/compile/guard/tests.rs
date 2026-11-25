@@ -124,19 +124,19 @@ fn on_off(name: &str, d: &Design, ticks: u64) {
         let p = Arc::new(compile(d, &o).unwrap());
         let off = SimOptions {
             guard: false,
-            ..SimOptions::default()
+            ..guarded_options()
         };
         // Every region size down to single instructions.
         let small = SimOptions {
             guard_min: 1,
-            ..SimOptions::default()
+            ..guarded_options()
         };
         for on in [
-            SimOptions::default(),
+            guarded_options(),
             small.clone(),
             SimOptions {
                 guard_min: 4,
-                ..SimOptions::default()
+                ..guarded_options()
             },
             SimOptions {
                 phases: false,
@@ -149,10 +149,10 @@ fn on_off(name: &str, d: &Design, ticks: u64) {
         ] {
             check_pair(&p, ticks, 5, &off, &on).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
-        check_jit(&p, ticks, 6, &SimOptions::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        check_jit(&p, ticks, 6, &guarded_options()).unwrap_or_else(|e| panic!("{name}: {e}"));
         check_jit(&p, ticks, 8, &small).unwrap_or_else(|e| panic!("{name}: {e}"));
         check_batches(&p, 7).unwrap_or_else(|e| panic!("{name}: {e}"));
-        check_design_with(d, 5, ticks.min(100), &o, &SimOptions::default())
+        check_design_with(d, 5, ticks.min(100), &o, &guarded_options())
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         let own = own(&p);
         let e = phases::exposed(&p);
@@ -366,13 +366,13 @@ fn a_probed_net_inside_a_cone_reads_exactly() {
         },
     ] {
         let p = Arc::new(compile(&d, &o).unwrap());
-        let mut on = Sim::new(Arc::clone(&p));
+        let mut on = Sim::with_options(Arc::clone(&p), guarded_options());
         assert!(on.guarded().0 > 0, "the fused bodies are guarded");
         let mut off = Sim::with_options(
             Arc::clone(&p),
             SimOptions {
                 guard: false,
-                ..SimOptions::default()
+                ..guarded_options()
             },
         );
         assert!(on.read_net(&[], t3).is_some());
@@ -455,7 +455,7 @@ fn random_designs_are_exact_with_guards() {
             Arc::clone(&p),
             SimOptions {
                 guard_min: 1,
-                ..SimOptions::default()
+                ..guarded_options()
             },
         );
         guarded += (s.guarded().0 > 0) as u32;
@@ -470,4 +470,13 @@ fn guarded_bodies_are_not_guarded_again() {
     let p = compile(&d, &Options::default()).unwrap();
     let g = fused(&p, 1).expect("the CPU has enabled registers");
     assert!(guard_with(p.slot_count as usize, &g, None, 1).is_none());
+}
+
+/// The defaults with guards on in the interpreter as well as the JIT
+/// (`SimOptions::guard_interpreter`), so both runtimes are tested guarded.
+fn guarded_options() -> SimOptions {
+    SimOptions {
+        guard_interpreter: true,
+        ..SimOptions::default()
+    }
 }

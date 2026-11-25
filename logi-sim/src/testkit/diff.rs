@@ -307,24 +307,30 @@ pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
         ..SimOptions::default()
     };
     let mut want = Sim::with_options(Arc::clone(p), plain);
+    // Guards in the interpreter too (`SimOptions::guard_interpreter`).
+    let on = SimOptions {
+        guard_interpreter: true,
+        ..SimOptions::default()
+    };
     let variants = [
         SimOptions::default(),
+        on.clone(),
         SimOptions {
             phases: false,
-            ..SimOptions::default()
+            ..on.clone()
         },
         SimOptions {
             fuse: false,
-            ..SimOptions::default()
+            ..on.clone()
         },
         SimOptions {
             guard: false,
-            ..SimOptions::default()
+            ..on.clone()
         },
         // Guards down to single-instruction regions.
         SimOptions {
             guard_min: 1,
-            ..SimOptions::default()
+            ..on.clone()
         },
         // Supersteps (JIT only) off, cut into small chunks (most values
         // cross a chunk), and over several clock periods.

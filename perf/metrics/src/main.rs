@@ -283,8 +283,9 @@ fn cpi(name: &str, options: &str, secs: f64) {
 /// Interpreter against JIT (`SimOptions::jit`, logi-sim feature `jit`):
 /// µs per tick tick by tick (inputs changing every tick, as `ticks`) and
 /// in `run(1000)` batches, best of 3 over about `secs` seconds, with
-/// guards on and off (`-ng`), the JIT without supersteps (`jit-noss`),
-/// and the executed ops per tick; for the
+/// the interpreter with and without guards (`-g`, `guard_interpreter`),
+/// the JIT with and without them (`-ng`), the JIT without supersteps
+/// (`jit-noss`), and the executed ops per tick; for the
 /// gallery CPUs also µs per retired CPU instruction over a program run;
 /// and the JIT's compile time for this program.
 fn jit_compare(name: &str, options: &str, secs: f64) {
@@ -292,7 +293,12 @@ fn jit_compare(name: &str, options: &str, secs: f64) {
     let t0 = std::time::Instant::now();
     let p = Arc::new(compile(&d, &named_options(options)).unwrap());
     let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
+    // The interpreter's default runs unguarded; `interp_g` guards it.
     let interp = SimOptions::default();
+    let interp_g = SimOptions {
+        guard_interpreter: true,
+        ..SimOptions::default()
+    };
     let jit = SimOptions {
         jit: true,
         ..SimOptions::default()
@@ -313,12 +319,8 @@ fn jit_compare(name: &str, options: &str, secs: f64) {
             })
             .fold(f64::MAX, f64::min)
     };
-    let best_jit = build(&jit) - build(&interp);
-    let guard_ms = build(&interp)
-        - build(&SimOptions {
-            guard: false,
-            ..interp.clone()
-        });
+    let best_jit = build(&jit) - build(&interp_g);
+    let guard_ms = build(&interp_g) - build(&interp);
     println!(
         "{name} {options}: {} instrs, {} commits; program compile {compile_ms:.2} ms, JIT compile {best_jit:.2} ms (every body), guards {guard_ms:.3} ms",
         p.instrs.len(),
@@ -331,7 +333,7 @@ fn jit_compare(name: &str, options: &str, secs: f64) {
         guard: false,
         ..o.clone()
     };
-    let (interp_ng, jit_ng) = (ng(&interp), ng(&jit));
+    let jit_ng = ng(&jit);
     // Supersteps (`SimOptions::superstep`) off, for comparison.
     let jit_noss = SimOptions {
         superstep: false,
@@ -339,7 +341,7 @@ fn jit_compare(name: &str, options: &str, secs: f64) {
     };
     for (label, o) in [
         ("interp", &interp),
-        ("interp-ng", &interp_ng),
+        ("interp-g", &interp_g),
         ("jit", &jit),
         ("jit-ng", &jit_ng),
         ("jit-noss", &jit_noss),
