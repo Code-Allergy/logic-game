@@ -6,7 +6,7 @@
   "circuits": [
     {
       "id": "3eb03244-3b1f-4d94-ab6f-5c9cd9254e59",
-      "name": "nes_linebuf",
+      "name": "nes",
       "revision": 2,
       "nodes": [
         {

@@ -82,6 +82,7 @@ def strip(args):
         circuit(doc, cart)  # both cartridges must be there
     empty_carts(doc)
     doc["name"] = "nes"
+    root(doc)["name"] = "nes"
     save(COMMITTED, doc)
     print(f"wrote {COMMITTED}/manifest.json (cartridges empty)")
     if args.rom:
