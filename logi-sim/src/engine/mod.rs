@@ -152,6 +152,10 @@ pub struct EngineCore {
     spec_queue: VecDeque<SpecRequest>,
     /// Jobs handed out for the running program and not yet installed back.
     spec_inflight: usize,
+    /// The automatic plan was handed out for the running program and its
+    /// build has not come back: the `Sim` asks again after a plan window,
+    /// but one plan build (seconds) at a time is all that is wanted.
+    plan_inflight: bool,
 }
 
 /// A specialization build to run off the tick loop: `request` was made by
@@ -208,6 +212,7 @@ impl EngineCore {
             spec_driven: false,
             spec_queue: VecDeque::new(),
             spec_inflight: 0,
+            plan_inflight: false,
         }
     }
 
@@ -432,11 +437,12 @@ impl EngineCore {
         };
         if self.spec_queue.is_empty() && self.spec_inflight < SPEC_INFLIGHT {
             let mut fresh = sim.spec_requests();
-            for r in &mut fresh {
-                // Tiered: the `Sim` is interpreted at first, native code
-                // has arrived by now.
-                if self.jit_tiered {
-                    r.set_native(true);
+            // A tiered `Sim` builds units only once native code is really
+            // installed (not after a failed or refused JIT compile).
+            if self.jit_tiered {
+                let native = sim.jit_active();
+                for r in &mut fresh {
+                    r.set_native(native);
                 }
             }
             // The plan first (stable: bodies keep their order).
@@ -446,6 +452,14 @@ impl EngineCore {
         while self.spec_inflight < SPEC_INFLIGHT
             && let Some(request) = self.spec_queue.pop_front()
         {
+            if request.body().is_none() {
+                if self.plan_inflight {
+                    // Asked again while the plan builds: the `Sim` asks
+                    // once more after another window if it must.
+                    continue;
+                }
+                self.plan_inflight = true;
+            }
             self.spec_inflight += 1;
             out.push(SpecJob {
                 revision: self.revision,
@@ -465,6 +479,9 @@ impl EngineCore {
             return false;
         }
         self.spec_inflight = self.spec_inflight.saturating_sub(1);
+        if built.body().is_none() {
+            self.plan_inflight = false;
+        }
         match &mut self.sim {
             Some(sim) => sim.install_spec(built),
             None => false,
@@ -688,7 +705,7 @@ pub use threaded::Engine;
 #[cfg(not(target_arch = "wasm32"))]
 mod threaded {
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+    use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
@@ -727,8 +744,27 @@ mod threaded {
         Shutdown,
     }
 
+    /// A job if one waits; `Err` once the worker is gone.
+    pub(super) fn poll(rx: &Receiver<Job>) -> Result<Option<Job>, ()> {
+        match rx.try_recv() {
+            Ok(job) => Ok(Some(job)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(()),
+        }
+    }
+
+    /// Queue a spec build; only the newest plan is kept (an older one is
+    /// replaced: the program it was for has been replaced, or the `Sim`
+    /// asked again).
+    pub(super) fn enqueue(backlog: &mut VecDeque<SpecJob>, job: SpecJob) {
+        if job.is_plan() {
+            backlog.retain(|j| !j.is_plan());
+        }
+        backlog.push_back(job);
+    }
+
     /// Work for the compile thread.
-    enum Job {
+    pub(super) enum Job {
         Compile(Arc<Design>, u64),
         Spec(SpecJob),
     }
@@ -816,7 +852,10 @@ mod threaded {
                                 Ok(job) => Some(job),
                                 Err(_) => break,
                             },
-                            None => compile_rx.try_recv().ok(),
+                            None => match poll(&compile_rx) {
+                                Ok(job) => job,
+                                Err(()) => break,
+                            },
                         };
                         let Some(job) = job else {
                             let i = backlog
@@ -835,7 +874,7 @@ mod threaded {
                         };
                         let (design, rev) = match job {
                             Job::Spec(job) => {
-                                backlog.push_back(job);
+                                enqueue(&mut backlog, job);
                                 continue;
                             }
                             Job::Compile(design, rev) => (design, rev),
@@ -845,7 +884,7 @@ mod threaded {
                         while let Ok(newer) = compile_rx.try_recv() {
                             match newer {
                                 Job::Compile(d, r) => (design, rev) = (d, r),
-                                Job::Spec(job) => backlog.push_back(job),
+                                Job::Spec(job) => enqueue(&mut backlog, job),
                             }
                         }
                         let result = compile_cached(&design, &compile_options, &mut cache, |_| {})
@@ -864,7 +903,7 @@ mod threaded {
                         if let (Some(p), true) = (program, jit_options.jit) {
                             while let Ok(newer) = compile_rx.try_recv() {
                                 match newer {
-                                    Job::Spec(job) => backlog.push_back(job),
+                                    Job::Spec(job) => enqueue(&mut backlog, job),
                                     edit => next = Some(edit),
                                 }
                             }

@@ -797,6 +797,70 @@ fn spec_waits_for_native_code_then_coexists_with_it() {
     assert!(!late.spec_jobs().is_empty());
 }
 
+/// The `Sim` asks for the plan again after a plan window; while its
+/// build is out the core hands out no second one (a plan build takes
+/// seconds), and a refused or installed result frees the slot.
+#[test]
+fn spec_plan_is_built_once_at_a_time() {
+    let spec = SimOptions {
+        spec: Some(quick_spec()),
+        ..SimOptions::default()
+    };
+    let (mut core, ..) = micro_core(spec, true);
+    let mut plans = Vec::new();
+    for _ in 0..40 {
+        run_ticks(&mut core, 400);
+        plans.extend(core.spec_jobs().into_iter().filter(SpecJob::is_plan));
+    }
+    assert_eq!(plans.len(), 1, "one plan in flight, not one per window");
+    let job = plans.pop().unwrap();
+    assert!(core.install_spec(job.revision, job.build()));
+    assert_eq!(core.sim().unwrap().spec_stats().stale, 0);
+    // Past a program swap the slot is free again.
+    let (d2, ..) = micro_design(true);
+    core.load(&d2, 2);
+    let mut plans = 0;
+    for _ in 0..40 {
+        run_ticks(&mut core, 400);
+        plans += core.spec_jobs().iter().filter(|j| j.is_plan()).count();
+    }
+    assert_eq!(plans, 1);
+}
+
+/// Bodies of a tiered program built after its native code failed to
+/// arrive carry no units (they would never run and would count against
+/// the code budget).
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn spec_without_native_code_builds_no_units() {
+    let spec = SimOptions {
+        spec: Some(quick_spec()),
+        ..SimOptions::jit()
+    };
+    let (d, x, ld, acc, mode) = micro_design(false);
+    let mut core = EngineCore::new(Options::debug());
+    core.drive_spec(true);
+    core.jit_tiered = true;
+    core.set_sim_options(spec);
+    core.load(&d, 1);
+    core.set_input(x, 0x5a);
+    core.set_input(ld, 1);
+    core.set_probes(probes(acc, mode));
+    core.jit_given_up(1);
+    let mut bytes = 0;
+    for _ in 0..40 {
+        run_ticks(&mut core, 300);
+        for job in core.spec_jobs() {
+            let b = job.build();
+            bytes += b.code_bytes();
+            core.install_spec(job.revision, b);
+        }
+    }
+    assert!(core.sim().unwrap().spec_stats().installed > 1);
+    assert_eq!(bytes, 0, "units built for a program that runs none");
+    assert_eq!(core.sim().unwrap().spec_stats().code_bytes, 0);
+}
+
 // ── Threaded engine ──────────────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1010,6 +1074,36 @@ mod threaded {
                 );
             }
         }
+    }
+
+    /// The compile thread keeps only the newest plan of its backlog, and
+    /// reads a gone worker as the end (not as an empty queue).
+    #[test]
+    fn compile_thread_backlog_and_disconnect() {
+        use super::super::threaded::{Job, enqueue, poll};
+        use std::collections::VecDeque;
+        use std::sync::mpsc::channel;
+        let spec = SimOptions {
+            spec: Some(quick_spec()),
+            ..SimOptions::default()
+        };
+        let mut backlog = VecDeque::new();
+        let mut programs = Vec::new();
+        for _ in 0..3 {
+            let (mut core, ..) = micro_core(spec.clone(), true);
+            run_ticks(&mut core, 600);
+            let plan = core.spec_jobs().pop().expect("a plan");
+            assert!(plan.is_plan());
+            programs.push(Arc::clone(&plan.program));
+            enqueue(&mut backlog, plan);
+        }
+        assert_eq!(backlog.len(), 1);
+        assert!(Arc::ptr_eq(&backlog[0].program, &programs[2]), "newest");
+
+        let (tx, rx) = channel::<Job>();
+        assert!(matches!(poll(&rx), Ok(None)));
+        drop(tx);
+        assert!(poll(&rx).is_err(), "worker gone");
     }
 
     #[test]

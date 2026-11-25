@@ -523,6 +523,9 @@ Differences from the sketch below, which P7 and P8 build on:
   "third" is the plan and two bodies. Until the plan arrives the runtime
   runs without supersteps (a hooked `Sim`), hence the first intervals
   (-20% on Blade Buster for 15 s); keyed supersteps (P8) are the fix.
+  After the review fix (one plan build in flight per program, the compile
+  thread keeps the newest plan only) the first and third install land
+  together: NES 3.2 s (7.1M ticks), Blade Buster 6.3 s (10.0M ticks).
   Longest gap between tick-count updates (frame stalls): 10 to 40 ms with
   spec off and 15 to 30 ms on, nothing at the install of the plan.
 
