@@ -101,11 +101,16 @@ fn main() -> Result<(), String> {
     if executed {
         let program =
             Arc::new(compile(&design, &Options::default()).map_err(|e| format!("{e:?}"))?);
-        for (what, guard) in [("guards on", true), ("guards off", false)] {
+        for (what, guard, known_bits) in [
+            ("guards on", true, true),
+            ("guards off", false, true),
+            ("no known bits", true, false),
+        ] {
             let mut sim = Sim::with_options(
                 Arc::clone(&program),
                 SimOptions {
                     guard,
+                    known_bits,
                     guard_interpreter: guard,
                     guard_min: std::env::var("GUARD_MIN")
                         .ok()
@@ -121,8 +126,9 @@ fn main() -> Result<(), String> {
                 return Err("no counts: build with --features counters".into());
             }
             println!(
-                "{what:10}: {:.1} instructions executed per tick ({} ticks)",
+                "{what:13}: {:.1} instructions, {:.1} ops executed per tick ({} ticks)",
                 c.instrs as f64 / ticks as f64,
+                c.ops() as f64 / ticks as f64,
                 ticks
             );
         }
@@ -166,12 +172,20 @@ fn main() -> Result<(), String> {
             guard: false,
             ..o.clone()
         };
-        let runs: [(&str, SimOptions, bool); 13] = [
+        let runs: [(&str, SimOptions, bool); 14] = [
             ("JIT: run(n), variants + fusion", jit.clone(), true),
             (
                 "JIT: run(n), no superstep",
                 SimOptions {
                     superstep: false,
+                    ..jit.clone()
+                },
+                true,
+            ),
+            (
+                "JIT: run(n), no known bits",
+                SimOptions {
+                    known_bits: false,
                     ..jit.clone()
                 },
                 true,
@@ -339,6 +353,13 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
         ),
         ("JIT", SimOptions::jit()),
         ("JIT, no guards", no_guard(SimOptions::jit())),
+        (
+            "JIT, no known bits",
+            SimOptions {
+                known_bits: false,
+                ..SimOptions::jit()
+            },
+        ),
         (
             "JIT, no superstep",
             SimOptions {
