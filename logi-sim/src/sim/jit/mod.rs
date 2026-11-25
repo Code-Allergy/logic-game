@@ -86,6 +86,10 @@ pub const COMMIT_CHUNK: usize = 256;
 /// 4.9x slower.
 pub const MAX_BODY: usize = 1 << 15;
 
+/// Whether native code probes its stack: where the system needs it (see
+/// `JitProgram::compile_with`).
+const PROBE_STACK: bool = cfg!(windows);
+
 /// A settle chunk: `(slots, mems, tick)`. `mems` points to one pointer per
 /// memory of the program.
 pub type SettleFn = unsafe extern "C" fn(*mut u64, *const *mut u64, u64);
@@ -277,6 +281,21 @@ impl JitProgram {
                 },
             )
             .map_err(|e| err(&e))?;
+        // Windows commits a thread's stack a page at a time, through one
+        // guard page: a function whose frame is larger than a page must
+        // touch every page on its way down, or its first access below the
+        // guard page is an access violation. Chunks of many items
+        // (`SimOptions::superstep_chunk`) have such frames. The probes are
+        // inline (no call to a `__probestack` symbol), and only functions
+        // with a frame over a page get any.
+        if PROBE_STACK {
+            flags
+                .set("enable_probestack", "true")
+                .map_err(|e| err(&e))?;
+            flags
+                .set("probestack_strategy", "inline")
+                .map_err(|e| err(&e))?;
+        }
         let isa = cranelift_native::builder()
             .map_err(|e| err(&e))?
             .finish(settings::Flags::new(flags))
