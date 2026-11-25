@@ -11,7 +11,15 @@
 //! ```sh
 //! cargo run -p logi-sim --release --example spec_keys -- nes/workspace \
 //!     [--demo] [--warm 1500000] [--sample 600000] [--bodies 64] [--top 12] [--min-loss 2] [--check 300]
+//!     [--bench 1000000 --rounds 3]
 //! ```
+//!
+//! `--bench N` then runs the greedy keys (bodies for the `--bodies` most
+//! frequent keys of each phase) in the runtime (`SimOptions::spec`, JIT
+//! with the feature `jit`) against the runtime without: `--rounds`
+//! alternating rounds of `N` ticks after `--warm`, ticks per second (and
+//! executed operations per tick with the feature `counters`), and the
+//! state and memories must be equal at the end.
 //!
 //! `--demo` patches a small program into the PRG ROM that renders like a
 //! game (sprites and background on, OAM DMA every frame), writing `$1E`
@@ -35,7 +43,7 @@ use logi_sim::compile::spec::{
     Candidate, KeyClass, KeyField, KeyLayout, SpecContext, possible_bits,
 };
 use logi_sim::compile::{Body, Commit, Instr, Op, Options, Program, compile, phases};
-use logi_sim::sim::Sim;
+use logi_sim::sim::{PhasePlan, Sim, SimOptions, SpecOptions, SpecPlan};
 
 struct Args {
     folder: String,
@@ -46,6 +54,8 @@ struct Args {
     top: usize,
     min_loss: f64,
     check: usize,
+    bench: u64,
+    rounds: u64,
 }
 
 fn args() -> Result<Args, String> {
@@ -59,6 +69,8 @@ fn args() -> Result<Args, String> {
         top: 12,
         min_loss: 2.0,
         check: 300,
+        bench: 0,
+        rounds: 3,
     };
     while let Some(x) = it.next() {
         let mut num = |what: &str| -> Result<u64, String> {
@@ -74,6 +86,8 @@ fn args() -> Result<Args, String> {
             "--top" => a.top = num("--top")? as usize,
             "--min-loss" => a.min_loss = num("--min-loss")? as f64,
             "--check" => a.check = num("--check")? as usize,
+            "--bench" => a.bench = num("--bench")?,
+            "--rounds" => a.rounds = num("--rounds")?,
             f if a.folder.is_empty() => a.folder = f.to_string(),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -417,6 +431,7 @@ fn main() -> Result<(), String> {
     let t3 = Instant::now();
     let mut saved = 0.0;
     let mut greedy: Vec<KeyLayout> = Vec::new();
+    let mut greedy_keys: Vec<Vec<u64>> = Vec::new();
     for phase in &phases_ {
         println!(
             "\n== phase {}: {} candidates ({} ROM words, {} flags, {} registers)",
@@ -543,6 +558,7 @@ fn main() -> Result<(), String> {
         for f in &layout.fields {
             println!("    {} mask {:#x}", name(&names, f.slot), f.mask);
         }
+        greedy_keys.push(best.as_ref().map_or(Vec::new(), |b| b.keys.clone()));
         greedy.push(layout);
     }
     let period = phases_.len() as f64;
@@ -578,7 +594,154 @@ fn main() -> Result<(), String> {
         );
     }
 
+    if a.bench > 0 {
+        let plan = SpecPlan {
+            phases: greedy
+                .iter()
+                .zip(&greedy_keys)
+                .map(|(layout, keys)| {
+                    (!layout.fields.is_empty()).then(|| PhasePlan {
+                        layout: layout.clone(),
+                        keys: keys.clone(),
+                    })
+                })
+                .collect(),
+        };
+        bench(&program, plan, &a)?;
+    }
+
     hand_picked(p, &w, &names, &phases_, &possible, &a);
+    Ok(())
+}
+
+#[cfg(feature = "jit")]
+fn code_size(on: &Sim, off: &Sim) -> String {
+    let kib = |s: &Sim| s.jit_code().map_or(0, |j| j.code_bytes / 1024);
+    format!(
+        " ({} KiB of native code, {} KiB without)",
+        kib(on),
+        kib(off)
+    )
+}
+
+#[cfg(not(feature = "jit"))]
+fn code_size(_: &Sim, _: &Sim) -> String {
+    String::new()
+}
+
+/// The runtime with the greedy keys (bodies for the keys `--bodies` most
+/// frequent in the profile) against the runtime without, both JIT-compiled
+/// when the feature is on: after `--warm` ticks each, `--rounds` rounds of
+/// `--bench` ticks in `run` batches of 30000, the two alternating (the
+/// machine may be shared: every round is printed). Then every state element
+/// and memory must be the same. With the feature `counters`, also the
+/// executed operations per tick.
+fn bench(program: &Arc<Program>, plan: SpecPlan, a: &Args) -> Result<(), String> {
+    println!("\n== runtime: greedy plan, spec on against off");
+    let base = SimOptions {
+        jit: cfg!(feature = "jit"),
+        ..SimOptions::default()
+    };
+    let t = Instant::now();
+    let on_options = SimOptions {
+        spec: Some(SpecOptions {
+            plan: Some(Arc::new(plan)),
+        }),
+        ..base.clone()
+    };
+    let mut on = Sim::with_options(Arc::clone(program), on_options);
+    let build = t.elapsed().as_secs_f64();
+    let mut off = Sim::with_options(Arc::clone(program), base);
+    let st = on.spec_stats();
+    println!(
+        "  jit {}: {} keyed phases, {} bodies, built in {:.2} s{}",
+        on.jit_active(),
+        st.keyed_phases,
+        st.bodies,
+        build,
+        code_size(&on, &off)
+    );
+    let batch = 30_000u64;
+    let go = |s: &mut Sim, n: u64| -> f64 {
+        let t = Instant::now();
+        let mut left = n;
+        while left > 0 {
+            let k = left.min(batch);
+            s.run(k);
+            left -= k;
+        }
+        n as f64 / t.elapsed().as_secs_f64() / 1e3
+    };
+    go(&mut on, a.warm);
+    go(&mut off, a.warm);
+    let (mut r_on, mut r_off) = (Vec::new(), Vec::new());
+    let (h0, m0) = (on.spec_stats().hits, on.spec_stats().misses);
+    #[cfg(feature = "counters")]
+    let mut ops = (0u64, 0u64, 0u64);
+    for round in 0..a.rounds {
+        #[cfg(feature = "counters")]
+        {
+            on.reset_counters();
+            off.reset_counters();
+        }
+        // Alternate which goes first.
+        let (x, y) = if round % 2 == 0 {
+            let x = go(&mut on, a.bench);
+            (x, go(&mut off, a.bench))
+        } else {
+            let y = go(&mut off, a.bench);
+            (go(&mut on, a.bench), y)
+        };
+        #[cfg(feature = "counters")]
+        {
+            ops.0 += on.counters().ops();
+            ops.1 += off.counters().ops();
+            ops.2 += on.counters().ticks;
+        }
+        println!(
+            "  round {round}: on {x:.0} k ticks/s, off {y:.0} k ticks/s ({:+.1}%)",
+            (x / y - 1.0) * 100.0
+        );
+        r_on.push(x);
+        r_off.push(y);
+    }
+    let med = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let (lo_on, hi_on) = (
+        r_on.iter().cloned().fold(f64::MAX, f64::min),
+        r_on.iter().cloned().fold(0.0, f64::max),
+    );
+    let (lo_off, hi_off) = (
+        r_off.iter().cloned().fold(f64::MAX, f64::min),
+        r_off.iter().cloned().fold(0.0, f64::max),
+    );
+    let (mo, mf) = (med(&mut r_on), med(&mut r_off));
+    let st = on.spec_stats();
+    let (h, m) = (st.hits - h0, st.misses - m0);
+    println!(
+        "  median: on {mo:.0} ({lo_on:.0}..{hi_on:.0}), off {mf:.0} ({lo_off:.0}..{hi_off:.0}) k ticks/s: {:+.1}%; {:.1}% of keyed ticks hit",
+        (mo / mf - 1.0) * 100.0,
+        100.0 * h as f64 / (h + m).max(1) as f64
+    );
+    #[cfg(feature = "counters")]
+    println!(
+        "  executed ops per tick: on {:.1}, off {:.1}",
+        ops.0 as f64 / ops.2.max(1) as f64,
+        ops.1 as f64 / ops.2.max(1) as f64
+    );
+    let ticks = a.warm + a.rounds * a.bench;
+    if on.export_state() != off.export_state() {
+        return Err(format!("state differs after {ticks} ticks"));
+    }
+    let p = &**program;
+    for m in 0..p.mems.len() as u32 {
+        if on.mem(m) != off.mem(m) {
+            return Err(format!("memory {m} differs after {ticks} ticks"));
+        }
+    }
+    println!("  state and memories equal after {ticks} ticks");
     Ok(())
 }
 
