@@ -809,7 +809,9 @@ impl Runner<'_> {
             rec.first.push((tick, row.clone()));
         }
         let keep = EXCERPT.max(rec.expected.as_ref().map_or(0, |e| e.context + 1));
-        if rec.recent.len() == keep {
+        // `keep` shrinks when a comparison ends: drop down to it, or the
+        // buffer would never be at the limit again and keep every row.
+        while rec.recent.len() >= keep {
             rec.recent.pop_front();
         }
         rec.recent.push_back((tick, row.clone()));
