@@ -191,8 +191,10 @@ const _: fn() = || {
 /// later program at the same address.
 pub(crate) struct RunKey {
     pub program: std::sync::Weak<Program>,
-    pub full: Vec<u8>,
-    pub fused: Vec<u8>,
+    pub full: Vec<u16>,
+    pub fused: Vec<u16>,
+    /// Whether the fused bodies fold ROM contents (`SimOptions::known_bits`).
+    pub folded: bool,
 }
 
 /// Owns a `JITModule` and frees its code when dropped (a `JITModule` alone

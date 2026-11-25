@@ -138,6 +138,19 @@ pub struct SimOptions {
     pub superstep_ticks: u64,
     /// Items (instructions and commits) per superstep chunk function.
     pub superstep_chunk: usize,
+    /// Known-bits fused bodies (issue #117, adaptive specialization):
+    /// every fused-run body is rebuilt by [`crate::compile::spec`] with no
+    /// key, folding what the program's possible bits of state and ports
+    /// imply (ROM reads with partly known addresses, constant bits,
+    /// demanded-bits dead code). Needs `fuse`.
+    ///
+    /// The folds read ROM contents, so a write to a ROM
+    /// ([`Sim::set_mem_word`], [`Sim::import_state`]) switches them off
+    /// for that `Sim` (it runs the unfolded fused bodies, as with this
+    /// option off) until [`Sim::reset`]. The constant-address ROM folds of
+    /// the compiler and the phase variants are part of the [`Program`]
+    /// and stay: they are not covered (see `set_mem_word`).
+    pub known_bits: bool,
 }
 
 /// Default [`SimOptions::par_min`] (see the design doc, section 13).
@@ -158,6 +171,7 @@ impl Default for SimOptions {
             superstep: true,
             superstep_ticks: DEFAULT_SUPERSTEP_TICKS,
             superstep_chunk: DEFAULT_SUPERSTEP_CHUNK,
+            known_bits: true,
         }
     }
 }
@@ -176,6 +190,7 @@ impl SimOptions {
             phases: false,
             guard: false,
             superstep: false,
+            known_bits: false,
             ..Self::default()
         }
     }
@@ -318,6 +333,140 @@ fn parts<'a>(p: &'a Program, body: Option<&'a Body>) -> (&'a [Block], &'a [Instr
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Mutation for the tests: a ROM write does not switch the folds off.
+    static SKIP_ROM_SWITCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The bodies a `Sim` runs and which of them runs when.
+struct Layout {
+    runs: Vec<Run>,
+    period: u64,
+    full: Vec<u16>,
+    fused: Vec<u16>,
+    /// Some fused body is a known-bits body.
+    folded: bool,
+}
+
+/// What a ROM write sets aside (see [`Sim::rom_changed`]).
+struct Stash {
+    runs: Vec<Run>,
+    full: Vec<u16>,
+    fused: Vec<u16>,
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    jit: Option<Arc<jit::JitProgram>>,
+}
+
+impl Layout {
+    /// The program's own body for every tick.
+    fn own() -> Self {
+        Layout {
+            runs: Vec::new(),
+            period: 1,
+            full: vec![0],
+            fused: vec![0],
+            folded: false,
+        }
+    }
+}
+
+/// The bodies of `program` under `options`: clock-phase variants, fused-run
+/// bodies (with known-bits folds when `known_bits`), guards.
+fn build_layout(program: &Arc<Program>, options: &SimOptions, known_bits: bool) -> Layout {
+    let Layout {
+        mut runs,
+        mut period,
+        mut full,
+        mut fused,
+        mut folded,
+    } = Layout::own();
+    {
+        {
+            use crate::compile::{guard, phases, spec};
+            let guards = options.guard && (options.jit || options.guard_interpreter);
+            let add = |runs: &mut Vec<Run>, body: Option<Body>| {
+                runs.push(Run::new(program, body, options.stream));
+                u16::try_from(runs.len()).expect("run index fits u16")
+            };
+            let n_slots = program.slot_count as usize;
+            // Full settles are observed: guard only what nothing exposes,
+            // and nothing under `Options::debug`.
+            let exposed = (guards && !program.debug_options).then(|| phases::exposed(program));
+            let guard_full = |b: &Body| {
+                let e = exposed.as_deref()?;
+                guard::guard_with(n_slots, b, Some(e), options.guard_min)
+            };
+            let possible = (known_bits && options.fuse).then(|| spec::possible_bits(program));
+            // A fused-run body: pruned to its commits' cone, folded by
+            // the known bits (no key), then guarded.
+            let mut fused_body = |b: &Body, phase: Option<u64>| {
+                let pruned = phases::prune(program, b);
+                let base = pruned.as_ref().unwrap_or(b);
+                let known = possible
+                    .as_deref()
+                    .and_then(|poss| spec::SpecContext::new(program, base, poss, phase))
+                    .map(|c| c.fallback(program, &[]))
+                    .filter(|k| k.instrs.len() < base.instrs.len());
+                folded |= known.is_some();
+                let pruned = known.or(pruned);
+                let guarded = guards
+                    .then(|| {
+                        let b = pruned.as_ref().unwrap_or(b);
+                        guard::guard_with(n_slots, b, None, options.guard_min)
+                    })
+                    .flatten();
+                guarded.or(pruned)
+            };
+            let own = || Body {
+                blocks: program.blocks.clone(),
+                instrs: program.instrs.clone(),
+                imms: program.imms.clone(),
+                commits: program.commits.clone(),
+                guards: Vec::new(),
+            };
+            match program.phases.as_deref() {
+                Some(ph) if options.phases => {
+                    period = u64::from(ph.period);
+                    full.clear();
+                    fused.clear();
+                    for (k, v) in ph.variants.iter().enumerate() {
+                        let f = add(&mut runs, Some(guard_full(v).unwrap_or_else(|| v.clone())));
+                        full.push(f);
+                        let body = options
+                            .fuse
+                            .then(|| fused_body(v, Some(k as u64)))
+                            .flatten();
+                        fused.push(match body {
+                            Some(b) => add(&mut runs, Some(b)),
+                            None => f,
+                        });
+                    }
+                }
+                _ => {
+                    if program.packs.is_empty() && (options.fuse || exposed.is_some()) {
+                        let own = own();
+                        if let Some(b) = guard_full(&own) {
+                            full[0] = add(&mut runs, Some(b));
+                            fused[0] = full[0];
+                        }
+                        if let Some(b) = options.fuse.then(|| fused_body(&own, None)).flatten() {
+                            fused[0] = add(&mut runs, Some(b));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Layout {
+        runs,
+        period,
+        full,
+        fused,
+        folded,
+    }
+}
+
 pub struct Sim {
     program: Arc<Program>,
     /// The program's own body, lowered (shared with the pool).
@@ -329,10 +478,20 @@ pub struct Sim {
     period: u64,
     /// Per tick residue: the body that settles an observed tick and
     /// commits after it.
-    full: Vec<u8>,
+    full: Vec<u16>,
     /// Per tick residue: the body that settles a tick only its own commit
     /// observes (tick fusion), with the same commits as `full`.
-    fused: Vec<u8>,
+    fused: Vec<u16>,
+    /// Whether some fused body is a known-bits body (reads ROM contents
+    /// to fold; see [`SimOptions::known_bits`]).
+    folded: bool,
+    /// The body that settled the slots now: the next commit is its own
+    /// (a known-bits body may not compute what the full body's commits
+    /// read). Between calls it is the full body of the tick.
+    last: u16,
+    /// The folded layout and its native code, set aside by a ROM write
+    /// until [`Sim::reset`].
+    stash: Option<Box<Stash>>,
     options: SimOptions,
     /// Worker threads, when `options.threads > 1` and some rank is large
     /// enough. Declared before `slots` and `mems`, so it is dropped (and
@@ -413,70 +572,17 @@ impl Sim {
         let code = Arc::new(code);
         let pool = start_pool(&program, &code, &options);
         // Variants, fusion and guards run single-threaded only.
-        let mut runs = Vec::new();
-        let (mut period, mut full, mut fused) = (1u64, vec![0u8], vec![0u8]);
-        if pool.is_none() {
-            use crate::compile::{guard, phases};
-            let guards = options.guard && (options.jit || options.guard_interpreter);
-            let add = |runs: &mut Vec<Run>, body: Option<Body>| {
-                runs.push(Run::new(&program, body, options.stream));
-                runs.len() as u8
-            };
-            let n_slots = program.slot_count as usize;
-            // Full settles are observed: guard only what nothing exposes,
-            // and nothing under `Options::debug`.
-            let exposed = (guards && !program.debug_options).then(|| phases::exposed(&program));
-            let guard_full = |b: &Body| {
-                let e = exposed.as_deref()?;
-                guard::guard_with(n_slots, b, Some(e), options.guard_min)
-            };
-            // A fused-run body: pruned to its commits' cone, then guarded.
-            let fused_body = |b: &Body| {
-                let pruned = phases::prune(&program, b);
-                let guarded = guards
-                    .then(|| {
-                        let b = pruned.as_ref().unwrap_or(b);
-                        guard::guard_with(n_slots, b, None, options.guard_min)
-                    })
-                    .flatten();
-                guarded.or(pruned)
-            };
-            let own = || Body {
-                blocks: program.blocks.clone(),
-                instrs: program.instrs.clone(),
-                imms: program.imms.clone(),
-                commits: program.commits.clone(),
-                guards: Vec::new(),
-            };
-            match program.phases.as_deref() {
-                Some(ph) if options.phases => {
-                    period = u64::from(ph.period);
-                    full.clear();
-                    fused.clear();
-                    for v in &ph.variants {
-                        let f = add(&mut runs, Some(guard_full(v).unwrap_or_else(|| v.clone())));
-                        full.push(f);
-                        let body = options.fuse.then(|| fused_body(v)).flatten();
-                        fused.push(match body {
-                            Some(b) => add(&mut runs, Some(b)),
-                            None => f,
-                        });
-                    }
-                }
-                _ => {
-                    if program.packs.is_empty() && (options.fuse || exposed.is_some()) {
-                        let own = own();
-                        if let Some(b) = guard_full(&own) {
-                            full[0] = add(&mut runs, Some(b));
-                            fused[0] = full[0];
-                        }
-                        if let Some(b) = options.fuse.then(|| fused_body(&own)).flatten() {
-                            fused[0] = add(&mut runs, Some(b));
-                        }
-                    }
-                }
-            }
-        }
+        let Layout {
+            runs,
+            period,
+            full,
+            fused,
+            folded,
+        } = if pool.is_none() {
+            build_layout(&program, &options, options.known_bits)
+        } else {
+            Layout::own()
+        };
         for r in &runs {
             if let Some(b) = &r.body {
                 check_body(
@@ -490,6 +596,9 @@ impl Sim {
             period,
             full,
             fused,
+            folded,
+            last: 0,
+            stash: None,
             options,
             pool,
             slots: vec![0; program.slot_count as usize],
@@ -595,8 +704,10 @@ impl Sim {
             let l = self.period;
             let n = o.superstep_ticks.max(1).div_ceil(l) * l;
             for i in 0..n {
+                // A superstep follows a fused settle: its commits are the
+                // fused body's.
                 parts.push(jit::Part::Commit {
-                    body: self.full[(i % l) as usize] as usize,
+                    body: self.fused[(i % l) as usize] as usize,
                 });
                 parts.push(jit::Part::Settle {
                     body: self.fused[((i + 1) % l) as usize] as usize,
@@ -631,6 +742,7 @@ impl Sim {
             program: Arc::downgrade(&self.program),
             full: self.full.clone(),
             fused: self.fused.clone(),
+            folded: self.folded,
         });
         Ok(code)
     }
@@ -649,6 +761,7 @@ impl Sim {
                 std::ptr::eq(k.program.as_ptr(), Arc::as_ptr(&self.program))
                     && k.full == self.full
                     && k.fused == self.fused
+                    && k.folded == self.folded
             }) && c.bodies.len() == self.runs.len() + 1
                 && self.pool.is_none();
             if !fits {
@@ -811,7 +924,7 @@ impl Sim {
 
     /// The body that settles the current tick when it is observed.
     #[inline]
-    fn full_run(&self) -> u8 {
+    fn full_run(&self) -> u16 {
         self.full[(self.tick % self.period) as usize]
     }
 
@@ -821,7 +934,7 @@ impl Sim {
             self.counters.ticks += 1;
         }
         // The commit belongs to the body that settled the previous tick.
-        self.commit(self.full_run());
+        self.commit(self.last);
         self.tick += 1;
         self.settle(self.full_run());
     }
@@ -885,11 +998,9 @@ impl Sim {
         {
             self.counters.ticks += 1;
         }
-        let k = (self.tick % self.period) as usize;
-        self.commit(self.full[k]);
+        self.commit(self.last);
         self.tick += 1;
         let k = (self.tick % self.period) as usize;
-        // The pruned body has the same commits as the full one.
         self.settle(self.fused[k]);
     }
 
@@ -934,7 +1045,7 @@ impl Sim {
             c.mem_writes += self.mem_writes.iter().sum::<u64>() - before;
             for i in 0..ticks {
                 let (full, fused) = (
-                    self.full[((self.tick + i) % self.period) as usize],
+                    self.fused[((self.tick + i) % self.period) as usize],
                     self.fused[((self.tick + i + 1) % self.period) as usize],
                 );
                 let commits = match full {
@@ -966,9 +1077,10 @@ impl Sim {
         }
         debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
         self.tick += ticks;
+        self.last = self.fused[(self.tick % self.period) as usize];
     }
 
-    fn commit(&mut self, run: u8) {
+    fn commit(&mut self, run: u16) {
         let p = &*self.program;
         let commits = match run {
             0 => &p.commits,
@@ -1099,7 +1211,7 @@ impl Sim {
 
     /// Apply the staged root inputs to their slots, then evaluate `run`
     /// (0: the full program or variant; otherwise a fused-run body).
-    fn settle(&mut self, run: u8) {
+    fn settle(&mut self, run: u16) {
         let p = &*self.program;
         for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
             self.slots[port.slot as usize] = v;
@@ -1108,7 +1220,8 @@ impl Sim {
     }
 
     /// Run the blocks of `run` once, from the input slots as they are.
-    fn evaluate(&mut self, run: u8) {
+    fn evaluate(&mut self, run: u16) {
+        self.last = run;
         self.evaluate_body(run);
         // Guarded blocks that did not run: a guard's conditions are slots
         // no later instruction writes, so they still say what ran.
@@ -1126,7 +1239,7 @@ impl Sim {
         }
     }
 
-    fn evaluate_body(&mut self, run: u8) {
+    fn evaluate_body(&mut self, run: u16) {
         #[cfg(feature = "counters")]
         {
             let c = &mut self.counters;
@@ -1229,6 +1342,7 @@ impl Sim {
         for v in &mut self.mem_writes {
             *v += 1;
         }
+        self.rom_restored();
         self.tick = 0;
         self.settle(self.full_run());
     }
@@ -1266,6 +1380,7 @@ impl Sim {
     pub fn import_state(&mut self, snap: &StateSnapshot) {
         self.mems_touched();
         let program = Arc::clone(&self.program);
+        let mut rom_changed = false;
         for key in &program.state_keys {
             match key.loc {
                 StateLoc::Slot(s) => {
@@ -1281,6 +1396,7 @@ impl Sim {
                     let mem = &mut self.mems[m as usize];
                     match snap.mems.get(&key.path) {
                         Some((ab, w, data)) if *ab == d.addr_bits && *w == d.width => {
+                            rom_changed |= !d.writable && *mem != *data;
                             mem.copy_from_slice(data);
                         }
                         _ => {
@@ -1290,6 +1406,9 @@ impl Sim {
                     }
                 }
             }
+        }
+        if rom_changed {
+            self.rom_changed();
         }
         self.tick = snap.tick;
         self.settle(self.full_run());
@@ -1328,10 +1447,77 @@ impl Sim {
     /// [`Sim::resettle`] or the next tick. A ROM's word changes for this
     /// simulation until [`Sim::reset`]. Panics if `addr` is past the end.
     pub fn set_mem_word(&mut self, index: u32, addr: usize, value: u64) {
-        let width = self.program.mems[index as usize].width;
+        let d = &self.program.mems[index as usize];
+        let (width, rom) = (d.width, !d.writable);
         self.mems_touched();
-        self.mems[index as usize][addr] = value & mask(width);
+        let old = std::mem::replace(&mut self.mems[index as usize][addr], value & mask(width));
         self.mem_writes[index as usize] += 1;
+        if rom && old != value & mask(width) {
+            self.rom_changed();
+        }
+    }
+
+    /// A ROM word changed: the known-bits fused bodies fold ROM reads
+    /// from the program's contents ([`SimOptions::known_bits`]), so set
+    /// them aside and run the unfolded fused bodies until [`Sim::reset`]
+    /// puts the contents back. (Native code is compiled again for the
+    /// unfolded bodies when the `Sim` ran native code.) Folds the
+    /// compiler and the phase variants did are part of the [`Program`] and
+    /// are not undone: a poke of a ROM word they folded (a
+    /// constant-address read) never reaches that read, with or without
+    /// this switch.
+    fn rom_changed(&mut self) {
+        #[cfg(test)]
+        if SKIP_ROM_SWITCH.get() {
+            return;
+        }
+        if !self.folded {
+            return;
+        }
+        let off = build_layout(&self.program, &self.options, false);
+        debug_assert!(off.period == self.period && !off.folded);
+        self.stash = Some(Box::new(Stash {
+            runs: std::mem::replace(&mut self.runs, off.runs),
+            full: std::mem::replace(&mut self.full, off.full),
+            fused: std::mem::replace(&mut self.fused, off.fused),
+            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            jit: self.jit.take(),
+        }));
+        self.folded = false;
+        // Between calls the slots are those of a full settle.
+        self.last = self.full_run();
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        if self.stash.as_ref().is_some_and(|s| s.jit.is_some()) {
+            self.jit = self.compile_jit().ok().map(Arc::new);
+        }
+    }
+
+    /// Undo [`Sim::rom_changed`] (the ROM holds the program's contents).
+    fn rom_restored(&mut self) {
+        let Some(stash) = self.stash.take() else {
+            return;
+        };
+        let Stash {
+            runs,
+            full,
+            fused,
+            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            jit,
+        } = *stash;
+        self.runs = runs;
+        self.full = full;
+        self.fused = fused;
+        self.folded = true;
+        self.last = self.full_run();
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        {
+            // Keep the backend the caller has now: native code (the stashed
+            // code, or compiled again) only when it runs native code, so a
+            // `install_jit(None)` since the ROM write stays in effect.
+            if self.jit.is_some() {
+                self.jit = jit.or_else(|| self.compile_jit().ok().map(Arc::new));
+            }
+        }
     }
 
     /// Evaluate every net again from the current state, at the current

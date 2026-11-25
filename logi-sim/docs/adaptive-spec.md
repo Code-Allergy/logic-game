@@ -395,6 +395,22 @@ parallel (separate files), then P5b, P7, P8, P9.
 | P8 | keyed supersteps with side exits; measure against P4's per-tick path | `sim/jit/superstep.rs`, `sim/mod.rs` | P4, superstep merged | opus |
 | P9 | benches and docs: `nes_bench` rows (spec on/off, hits, live bodies), `perf-metrics` row, `ARCHITECTURE.md`, `PROFILING.md`, tune defaults | `examples/nes_bench.rs`, `xtask/`, docs | P5b (P7 for the game) | haiku |
 
+P2 and P3 are implemented (`SimOptions::known_bits`, on by default; run
+indices are `u16`). Findings that shape P4:
+
+- A known-bits body may alias or drop slots the general body writes, so
+  the commit after a fused settle must be the settled body's own, not the
+  full body's (`Sim::last`, set by every settle; between calls it is the
+  full body). `tick()`, `fused_tick` and the superstep commit with it.
+  A fused body can no longer be assumed to leave the full commits' operands
+  in their slots.
+- A ROM write that changes a word (`set_mem_word`, `import_state`) sets the
+  folded layout aside and rebuilds the plain fused bodies (and the JIT code
+  when active); `reset` puts the stash back. `RunKey` carries `folded`, so
+  native code built for the other layout is refused. The compiler's and the
+  phase variants' constant-address ROM folds live in the `Program` and are
+  not covered: a poke of such a word never reaches the folded read.
+
 Test plans:
 
 - **P2**: `check_batches`, `check_jit`, `check_pair` unchanged and green

@@ -255,7 +255,7 @@ pub fn standard_configs() -> Vec<GenConfig> {
 pub const JIT: bool = cfg!(all(feature = "jit", not(target_arch = "wasm32")));
 
 /// Tick, outputs, state, every net, memories and memory versions.
-type Observed = (
+pub(crate) type Observed = (
     u64,
     Vec<u64>,
     Vec<(String, u64)>,
@@ -266,7 +266,7 @@ type Observed = (
 
 /// Everything a caller can observe of `sim`: tick, outputs, state, every
 /// net in the debug map, memories and their versions.
-fn observe(sim: &Sim) -> Observed {
+pub(crate) fn observe(sim: &Sim) -> Observed {
     let p = sim.program();
     let outs = (0..p.ports.outputs.len()).map(|k| sim.output(k)).collect();
     let mut state: Vec<(String, u64)> = sim

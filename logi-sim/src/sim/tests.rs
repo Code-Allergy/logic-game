@@ -1288,6 +1288,292 @@ fn guards_follow_the_jit_and_its_tier_layout() {
     );
 }
 
+// ── Run indices ──────────────────────────────────────────────────────────
+
+/// `Sim::with_options`, then the fused body of every tick residue copied
+/// into `extra` further runs, the tick using the last copy: run indices
+/// well past 255 (a design with many phases, or many specialized keys).
+fn sim_with_many_runs(p: &Arc<Program>, options: SimOptions, extra: usize) -> Sim {
+    let mut sim = Sim::with_options(Arc::clone(p), options);
+    for i in 0..sim.fused.len() {
+        for table in 0..2 {
+            let src = if table == 0 {
+                sim.full[i]
+            } else {
+                sim.fused[i]
+            } as usize;
+            let body = (src > 0).then(|| sim.runs[src - 1].body.clone()).flatten();
+            for _ in 0..extra {
+                let run = Run::new(&sim.program, body.clone(), sim.options.stream);
+                sim.runs.push(run);
+            }
+            let last = sim.runs.len() as u16;
+            if table == 0 {
+                sim.full[i] = last;
+            } else {
+                sim.fused[i] = last;
+            }
+        }
+    }
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    if sim.options.jit && sim.jit.is_some() {
+        let code = sim.compile_jit().expect("the JIT compiles the extra runs");
+        assert!(sim.install_jit(Some(Arc::new(code))));
+    }
+    sim
+}
+
+/// More than 255 runs: commits and settles through run index 300 equal the
+/// normal run layout, interpreted and JIT-compiled, tick by tick and in
+/// batches.
+#[test]
+fn more_than_255_runs_commit_through_run_300() {
+    let mut options = vec![SimOptions::default()];
+    if cfg!(all(feature = "jit", not(target_arch = "wasm32"))) {
+        options.push(SimOptions::jit());
+    }
+    for d in [
+        fixtures::cpu(&fixtures::LOOP_PROGRAM),
+        fixtures::register_file(3, 8),
+    ] {
+        let p = Arc::new(compile(&d, &Options::default()).unwrap());
+        for o in &options {
+            let mut want = Sim::with_options(Arc::clone(&p), o.clone());
+            let mut got = sim_with_many_runs(&p, o.clone(), 300);
+            assert!(
+                got.runs.len() >= 600
+                    && got.full.iter().any(|&f| f > 255)
+                    && got.fused.iter().any(|&f| f > 300)
+            );
+            for round in 0..12u64 {
+                for (port, q) in p.ports.inputs.iter().enumerate() {
+                    let v = (round * 0x9e37 + port as u64 * 31) & mask_of(q.width);
+                    want.set_input(port, v);
+                    got.set_input(port, v);
+                }
+                let n = [1, 2, 3, 7, 16, 5][round as usize % 6];
+                if round % 2 == 0 {
+                    want.run(n);
+                    got.run(n);
+                } else {
+                    for _ in 0..n {
+                        want.tick();
+                        got.tick();
+                    }
+                }
+                assert!(
+                    diff::observe(&want) == diff::observe(&got),
+                    "round {round} differs"
+                );
+            }
+        }
+    }
+}
+
+fn mask_of(w: u8) -> u64 {
+    if w >= 64 { u64::MAX } else { (1u64 << w) - 1 }
+}
+
+// ── Known-bits fused bodies ──────────────────────────────────────────────
+
+/// A counter indexes a ROM whose words fit in two bits: the known-bits
+/// body folds the flag "the upper six bits are 0" to 1 and drops the
+/// mux arm that only runs when it is 0. Poking a word above 3 makes that
+/// arm live.
+fn rom_flag() -> Design {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let one = b.one();
+    let zero = b.zero(1);
+    let cnt = b.counter(4, one, zero);
+    let words: Vec<u64> = (0..16).map(|k| k % 4).collect();
+    let rom = b.rom(cnt, 8, &words);
+    let hi = b.split(rom, 2, 6);
+    let flag = b.eq_const(hi, 0);
+    let c8 = b.zext(cnt, 8);
+    let (sum, _) = b.add(x, c8, None);
+    let xo = b.xor(x, c8);
+    let rotated = b.not(sum);
+    let live = b.and(rotated, xo);
+    let pick = b.mux(flag, live, sum);
+    let r1 = b.register(one, pick);
+    let r2 = b.register(one, rom);
+    b.output("r1", r1);
+    b.output("r2", r2);
+    d
+}
+
+fn jit_options() -> Vec<SimOptions> {
+    let mut v = vec![SimOptions::default()];
+    if cfg!(all(feature = "jit", not(target_arch = "wasm32"))) {
+        v.push(SimOptions::jit());
+    }
+    v
+}
+
+/// Batches of `run` on `got` against single ticks of `want`, every
+/// observable compared at each boundary.
+fn same_over_batches(want: &mut Sim, got: &mut Sim, rounds: u64) -> Result<(), String> {
+    for round in 0..rounds {
+        let n = [1, 2, 3, 7, 16, 5, 40][round as usize % 7];
+        for _ in 0..n {
+            want.tick();
+        }
+        got.run(n);
+        if diff::observe(want) != diff::observe(got) {
+            return Err(format!("round {round} (+{n}) differs"));
+        }
+    }
+    Ok(())
+}
+
+/// A ROM word the known-bits fused body folds is poked: with the switch-off
+/// the batches equal single ticks of an unspecialized `Sim` that took the
+/// same pokes; without it (`SKIP_ROM_SWITCH`) the stale fold is caught.
+#[test]
+fn rom_pokes_switch_the_known_bits_folds_off() {
+    {
+        let p = Arc::new(compile(&rom_flag(), &Options::default()).unwrap());
+        let roms: Vec<u32> = (0..p.mems.len() as u32)
+            .filter(|&m| !p.mems[m as usize].writable)
+            .collect();
+        assert!(!roms.is_empty(), "the CPU has a program ROM");
+        let plain = SimOptions {
+            fuse: false,
+            phases: false,
+            guard: false,
+            known_bits: false,
+            ..SimOptions::default()
+        };
+        let caught = |skip: bool, o: &SimOptions| -> bool {
+            SKIP_ROM_SWITCH.set(skip);
+            let mut want = Sim::with_options(Arc::clone(&p), plain.clone());
+            let mut got = Sim::with_options(Arc::clone(&p), o.clone());
+            assert!(got.folded, "the fused body folds the ROM's flag");
+            let mut diverged = false;
+            for (k, &m) in roms.iter().cycle().take(40).enumerate() {
+                let addr = (k * 5) % p.mems[m as usize].init.len().max(1);
+                let v = (k as u64 * 0x9e37_79b9) ^ 0x55;
+                want.set_mem_word(m, addr, v);
+                got.set_mem_word(m, addr, v);
+                want.resettle();
+                got.resettle();
+                diverged |= same_over_batches(&mut want, &mut got, 7).is_err();
+                if !skip {
+                    assert!(!got.folded, "the poke switched the folds off");
+                    // The state of both stays in step from here on.
+                    same_over_batches(&mut want, &mut got, 7).unwrap();
+                }
+                if diverged {
+                    break;
+                }
+            }
+            SKIP_ROM_SWITCH.set(false);
+            diverged
+        };
+        for o in jit_options() {
+            assert!(!caught(false, &o), "a poked ROM runs as it should");
+            assert!(caught(true, &o), "a skipped switch-off is caught ({o:?})");
+        }
+    }
+}
+
+/// A reset puts the ROM contents and the folded bodies back.
+#[test]
+fn reset_restores_the_known_bits_folds() {
+    let p = Arc::new(compile(&rom_flag(), &Options::default()).unwrap());
+    let rom = (0..p.mems.len() as u32)
+        .find(|&m| !p.mems[m as usize].writable)
+        .unwrap();
+    for o in jit_options() {
+        let mut sim = Sim::with_options(Arc::clone(&p), o.clone());
+        let fresh = Sim::with_options(Arc::clone(&p), o.clone());
+        assert!(sim.folded);
+        let w = sim.mem(rom)[0];
+        sim.set_mem_word(rom, 0, w ^ 1);
+        assert!(!sim.folded);
+        // The same value again is no change.
+        sim.set_mem_word(rom, 0, w);
+        sim.reset();
+        assert!(sim.folded && sim.jit_active() == fresh.jit_active());
+        let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+        // Same writes and reset (memory versions count them).
+        want.set_mem_word(rom, 0, w ^ 1);
+        want.set_mem_word(rom, 0, w);
+        want.reset();
+        same_over_batches(&mut want, &mut sim, 14).unwrap();
+    }
+}
+
+/// A ROM write, then `install_jit(None)`, then a reset: the folded bodies
+/// come back and the `Sim` stays interpreted, as the caller chose.
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[test]
+fn reset_after_a_rom_write_keeps_the_chosen_backend() {
+    let p = Arc::new(compile(&rom_flag(), &Options::default()).unwrap());
+    let rom = (0..p.mems.len() as u32)
+        .find(|&m| !p.mems[m as usize].writable)
+        .unwrap();
+    let mut sim = Sim::with_options(Arc::clone(&p), SimOptions::jit());
+    assert!(sim.jit_active());
+    let w = sim.mem(rom)[0];
+    sim.set_mem_word(rom, 0, w ^ 1);
+    assert!(
+        sim.jit_active(),
+        "native code again for the unfolded bodies"
+    );
+    assert!(sim.install_jit(None));
+    sim.reset();
+    assert!(sim.folded && !sim.jit_active(), "interpreted, as chosen");
+    let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+    want.set_mem_word(rom, 0, w ^ 1);
+    want.reset();
+    same_over_batches(&mut want, &mut sim, 14).unwrap();
+    // Native code stays native through the same sequence.
+    let mut native = Sim::with_options(Arc::clone(&p), SimOptions::jit());
+    native.set_mem_word(rom, 0, w ^ 1);
+    native.reset();
+    assert!(native.folded && native.jit_active());
+}
+
+/// Features `counters`: known-bits bodies execute no more operations than
+/// the general fused bodies, and fewer on some design.
+#[cfg(feature = "counters")]
+#[test]
+fn known_bits_bodies_execute_fewer_ops() {
+    let (mut with, mut without) = (0u64, 0u64);
+    for d in [
+        fixtures::cpu(&fixtures::LOOP_PROGRAM),
+        fixtures::cpu(&fixtures::MULTIPLY_PROGRAM),
+        fixtures::register_file(3, 8),
+        fixtures::fifo(3, 8),
+        crate::testkit::bitblast::bitblast(&fixtures::fifo(3, 8)),
+        fixtures::counter(8),
+        rom_flag(),
+    ] {
+        let p = Arc::new(compile(&d, &Options::default()).unwrap());
+        let ops = |known_bits| {
+            let mut s = Sim::with_options(
+                Arc::clone(&p),
+                SimOptions {
+                    known_bits,
+                    ..SimOptions::default()
+                },
+            );
+            s.reset_counters();
+            s.run(200);
+            s.counters().ops()
+        };
+        let (a, b) = (ops(true), ops(false));
+        assert!(a <= b, "{}: {a} > {b}", d.root_def().name);
+        with += a;
+        without += b;
+    }
+    assert!(with < without, "{with} !< {without}");
+}
+
 // ── Shift ops (issue #117) ───────────────────────────────────────────────
 
 /// A program of one instruction `y = op(a, b)` over two 64-bit inputs: a
