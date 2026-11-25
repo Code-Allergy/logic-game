@@ -11,7 +11,7 @@
 //! ```sh
 //! cargo run -p logi-sim --release --example spec_keys -- nes/workspace \
 //!     [--demo] [--warm 1500000] [--sample 600000] [--bodies 64] [--top 12] [--min-loss 2] [--check 300]
-//!     [--bench 1000000 --rounds 3]
+//!     [--bench 1000000 --rounds 3] [--period-keys 3000000]
 //! ```
 //!
 //! `--bench N` then runs the greedy keys (bodies for the `--bodies` most
@@ -31,6 +31,10 @@
 //! runs to the end of the profile (`--warm` + `--sample`), then `N` ticks
 //! are timed in `--rounds` interleaved rounds, then again from `--later`;
 //! state and memories must agree at the end.
+//!
+//! `--period-keys N` reports how the plan's keys of whole clock periods
+//! repeat over `N` ticks after the profile (what supersteps keyed per
+//! period could cover; `docs/adaptive-spec.md`, "P8 as built").
 //!
 //! `--demo` patches a small program into the PRG ROM that renders like a
 //! game (sprites and background on, OAM DMA every frame), writing `$1E`
@@ -71,6 +75,7 @@ struct Args {
     later: u64,
     auto_window: u64,
     auto_samples: usize,
+    period_keys: u64,
 }
 
 fn args() -> Result<Args, String> {
@@ -90,6 +95,7 @@ fn args() -> Result<Args, String> {
         later: 20_000_000,
         auto_window: SpecOptions::default().plan_window,
         auto_samples: SpecOptions::default().samples,
+        period_keys: 0,
     };
     while let Some(x) = it.next() {
         let mut num = |what: &str| -> Result<u64, String> {
@@ -111,6 +117,7 @@ fn args() -> Result<Args, String> {
             "--later" => a.later = num("--later")?,
             "--auto-window" => a.auto_window = num("--auto-window")?,
             "--auto-samples" => a.auto_samples = num("--auto-samples")? as usize,
+            "--period-keys" => a.period_keys = num("--period-keys")?,
             f if a.folder.is_empty() => a.folder = f.to_string(),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -589,6 +596,9 @@ fn main() -> Result<(), String> {
         t3.elapsed().as_secs_f64()
     );
 
+    if a.period_keys > 0 {
+        period_keys(&program, &layouts, a.warm + a.sample, a.period_keys);
+    }
     if a.adaptive > 0 {
         return adaptive_bench(&program, &phases_, &layouts, &a);
     }
@@ -1415,4 +1425,82 @@ fn adaptive_bench(
         want.tick_count()
     );
     Ok(())
+}
+
+/// `--period-keys N`: the keys of whole clock periods (the tuple of every
+/// phase's key over one period, as a superstep would cover it: the
+/// settles of phases 1, 2, ..., 0) on `N` ticks of the run after the
+/// profile. How many distinct tuples, the share of periods the most
+/// frequent ones cover (an upper bound on what supersteps per period key
+/// could run under a cap), how often the tuple a period would be
+/// predicted to have (the previous one; the one that followed the
+/// previous one last time) is right, and how often each phase's key
+/// changes from one period to the next.
+fn period_keys(program: &Arc<Program>, layouts: &[KeyLayout], from: u64, n: u64) {
+    println!("\n== period keys ({n} ticks from tick {from})");
+    let p = &**program;
+    let period = layouts.len() as u64;
+    let mut sim = Sim::new(Arc::clone(program));
+    sim.run(from);
+    while !sim.tick_count().is_multiple_of(period) {
+        sim.tick();
+    }
+    let mut tuples: Vec<Vec<u64>> = Vec::new();
+    let mut cur = Vec::new();
+    let mut slots = vec![0u64; p.slot_count as usize];
+    for _ in 0..n {
+        sim.tick();
+        let k = (sim.tick_count() % period) as usize;
+        for f in &layouts[k].fields {
+            slots[f.slot as usize] = sim.read(f.slot);
+        }
+        cur.push(layouts[k].pack(&slots));
+        if k == 0 {
+            tuples.push(std::mem::take(&mut cur));
+        }
+    }
+    let mut count: HashMap<&[u64], u64> = HashMap::new();
+    for t in &tuples {
+        *count.entry(t).or_default() += 1;
+    }
+    let mut v: Vec<u64> = count.values().copied().collect();
+    v.sort_unstable_by(|a, b| b.cmp(a));
+    let total = tuples.len().max(1) as f64;
+    let cover = |m: usize| v.iter().take(m).sum::<u64>() as f64 / total * 100.0;
+    println!(
+        "  {} periods, {} distinct period keys; the most frequent 16 cover {:.1}% of periods, 64 {:.1}%, 256 {:.1}%",
+        tuples.len(),
+        v.len(),
+        cover(16),
+        cover(64),
+        cover(256)
+    );
+    let (mut same, mut next, mut ticks) = (0u64, 0u64, 0u64);
+    let mut succ: HashMap<&[u64], &[u64]> = HashMap::new();
+    for w in tuples.windows(2) {
+        same += u64::from(w[0] == w[1]);
+        if let Some(&s) = succ.get(&w[0][..]) {
+            // Ticks a superstep for the predicted key would run before
+            // its first side exit.
+            let ok = s.iter().zip(&w[1]).take_while(|(a, b)| a == b).count();
+            next += u64::from(ok == w[1].len());
+            ticks += ok as u64;
+        }
+        succ.insert(&w[0], &w[1]);
+    }
+    println!(
+        "  predicted right: the previous period's key {:.1}%, the key that followed it last time {:.1}% ({:.1}% of ticks before the first wrong phase)",
+        same as f64 / total * 100.0,
+        next as f64 / total * 100.0,
+        ticks as f64 / total / period as f64 * 100.0
+    );
+    for (i, k) in (1..=period).map(|i| (i % period) as usize).enumerate() {
+        let distinct: std::collections::HashSet<u64> = tuples.iter().map(|t| t[i]).collect();
+        let changes = tuples.windows(2).filter(|w| w[0][i] != w[1][i]).count();
+        println!(
+            "  phase {k}: {} distinct keys, changes in {:.1}% of periods",
+            distinct.len(),
+            changes as f64 / total * 100.0
+        );
+    }
 }

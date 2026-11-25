@@ -160,8 +160,10 @@ pub struct SimOptions {
     /// in a fused tick of a phase the plan keys, run the key's prefix,
     /// then the body built for the key's value, or the fallback (the
     /// general body without the prefix's work) on a miss. Needs `fuse`;
-    /// single-threaded only. While a phase is keyed, [`Sim::run`] runs no
-    /// supersteps. Like the known-bits bodies, a ROM write switches it off
+    /// single-threaded only. While a phase is keyed (or an automatic plan
+    /// is awaited), [`Sim::run`] runs no supersteps; an automatic plan
+    /// that keys no phase brings the superstep with it (compiled with the
+    /// plan). Like the known-bits bodies, a ROM write switches it off
     /// until [`Sim::reset`]. Off (`None`) by default.
     pub spec: Option<SpecOptions>,
 }
@@ -750,53 +752,19 @@ impl Sim {
     pub fn compile_jit(&self) -> Result<jit::JitProgram, jit::JitError> {
         let p = &*self.program;
         let bodies = self.body_refs();
-        // The superstep: whole clock periods of fused ticks, starting at
-        // phase 0 (see `Sim::run`). None while a phase is keyed: the
-        // superstep would run the general fused bodies (the two are
-        // alternatives until supersteps check keys).
-        let o = &self.options;
-        let (mut parts, mut live_end) = (Vec::new(), Vec::new());
-        if o.superstep
-            && o.fuse
-            && self.pool.is_none()
-            && self.spec.phases.is_empty()
-            && !self.spec.awaiting_plan
-        {
-            let l = self.period;
-            let n = o.superstep_ticks.max(1).div_ceil(l) * l;
-            for i in 0..n {
-                // A superstep follows a fused settle: its commits are the
-                // fused body's.
-                parts.push(jit::Part::Commit {
-                    body: self.fused[(i % l) as usize] as usize,
-                });
-                parts.push(jit::Part::Settle {
-                    body: self.fused[((i + 1) % l) as usize] as usize,
-                    offset: i + 1,
-                });
-            }
-            // Read after a superstep before anything writes them: what any
-            // commit reads, and every state slot.
-            let mut seen = vec![false; p.slot_count as usize];
-            for b in &bodies {
-                for c in b.commits {
-                    let mut reads = c.reads().to_vec();
-                    if let Commit::Copy { state, .. } = *c {
-                        reads.push(state);
-                    }
-                    for s in reads {
-                        if !std::mem::replace(&mut seen[s as usize], true) {
-                            live_end.push(s);
-                        }
-                    }
-                }
-            }
-        }
+        // No superstep while a phase is keyed or a plan is awaited:
+        // supersteps run the general fused bodies (an automatic plan that
+        // keys nothing brings its own, `Spec::superstep`).
+        let (parts, live_end) = if self.spec.phases.is_empty() && !self.spec.awaiting_plan {
+            self.super_parts(&bodies).unwrap_or_default()
+        } else {
+            Default::default()
+        };
         let sup = (!parts.is_empty()).then(|| jit::SuperRef {
             parts: &parts,
             ticks: parts.len() as u64 / 2,
             live_end: &live_end,
-            chunk: o.superstep_chunk,
+            chunk: self.options.superstep_chunk,
         });
         let mut code = jit::JitProgram::compile_with(p, &bodies, sup.as_ref())?;
         code.key = Some(jit::RunKey {
@@ -807,6 +775,101 @@ impl Sim {
             spec: self.spec.key.clone(),
         });
         Ok(code)
+    }
+
+    /// The superstep of the layout's fused bodies (`bodies`, as
+    /// [`Sim::body_refs`]), when the options ask for one: whole clock
+    /// periods of fused ticks, starting at phase 0 (see `Sim::run`), and
+    /// the slots read after it. Runs the general fused bodies: the caller
+    /// checks that no phase is keyed.
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    fn super_parts(&self, bodies: &[jit::BodyRef<'_>]) -> Option<(Vec<jit::Part>, Vec<u32>)> {
+        let o = &self.options;
+        if !(o.superstep && o.fuse && self.pool.is_none()) {
+            return None;
+        }
+        let l = self.period;
+        let n = o.superstep_ticks.max(1).div_ceil(l) * l;
+        let mut parts = Vec::new();
+        for i in 0..n {
+            // A superstep follows a fused settle: its commits are the
+            // fused body's.
+            parts.push(jit::Part::Commit {
+                body: self.fused[(i % l) as usize] as usize,
+            });
+            parts.push(jit::Part::Settle {
+                body: self.fused[((i + 1) % l) as usize] as usize,
+                offset: i + 1,
+            });
+        }
+        // Read after a superstep before anything writes them: what any
+        // commit reads, and every state slot.
+        let mut live_end = Vec::new();
+        let mut seen = vec![false; self.program.slot_count as usize];
+        for b in bodies {
+            for c in b.commits {
+                let mut reads = c.reads().to_vec();
+                if let Commit::Copy { state, .. } = *c {
+                    reads.push(state);
+                }
+                for s in reads {
+                    if !std::mem::replace(&mut seen[s as usize], true) {
+                        live_end.push(s);
+                    }
+                }
+            }
+        }
+        Some((parts, live_end))
+    }
+
+    /// [`Sim::super_parts`] as a self-contained request (for an automatic
+    /// plan that may key nothing): the bodies it names, owned, numbered in
+    /// the order the parts first name them.
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    fn super_build(&self) -> Option<spec::SuperBuild> {
+        let bodies = self.body_refs();
+        let (parts, live_end) = self.super_parts(&bodies)?;
+        let mut runs: Vec<u16> = Vec::new();
+        let mut local = |r: usize| match runs.iter().position(|&x| usize::from(x) == r) {
+            Some(i) => i,
+            None => {
+                runs.push(r as u16);
+                runs.len() - 1
+            }
+        };
+        let parts: Vec<jit::Part> = parts
+            .into_iter()
+            .map(|part| match part {
+                jit::Part::Commit { body } => jit::Part::Commit { body: local(body) },
+                jit::Part::Settle { body, offset } => jit::Part::Settle {
+                    body: local(body),
+                    offset,
+                },
+            })
+            .collect();
+        let p = &*self.program;
+        let own = || Body {
+            blocks: p.blocks.clone(),
+            instrs: p.instrs.clone(),
+            imms: p.imms.clone(),
+            commits: p.commits.clone(),
+            guards: Vec::new(),
+        };
+        let owned = runs
+            .iter()
+            .map(|&r| match r {
+                0 => own(),
+                k => self.runs[k as usize - 1].body.clone().unwrap_or_else(own),
+            })
+            .collect();
+        Some(spec::SuperBuild {
+            bodies: owned,
+            runs,
+            ticks: parts.len() as u64 / 2,
+            parts,
+            live_end,
+            chunk: self.options.superstep_chunk,
+        })
     }
 
     /// Run from `code` from now on, or interpret again with `None`.
@@ -1024,11 +1087,7 @@ impl Sim {
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
         if self.options.superstep
             && !self.spec.hooked
-            && let Some((entry, n)) = self
-                .jit
-                .as_ref()
-                .and_then(|j| j.superstep())
-                .map(|s| (s.entry, s.info.ticks))
+            && let Some((entry, n)) = self.super_fn()
             && left > n
         {
             // The first tick applies the inputs (supersteps do not), and
@@ -1115,6 +1174,20 @@ impl Sim {
         self.evaluate(run);
     }
 
+    /// The superstep `run` uses, and the ticks it advances: the installed
+    /// native code's, or the one an automatic plan brought (only while
+    /// native code is installed).
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[inline]
+    fn super_fn(&self) -> Option<(jit::SuperFn, u64)> {
+        let j = self.jit.as_ref()?;
+        let s = match j.superstep() {
+            Some(s) => s,
+            None => self.spec.superstep.as_ref()?.code.superstep(),
+        };
+        Some((s.entry, s.info.ticks))
+    }
+
     /// The JIT's superstep, from a settled tick at phase 0: as many
     /// `fused_tick`s as it holds, after the first tick of a `run` (so the
     /// inputs are already in their slots).
@@ -1122,10 +1195,18 @@ impl Sim {
     fn superstep(&mut self, entry: jit::SuperFn, ticks: u64) {
         #[cfg(not(test))]
         debug_assert_eq!(self.tick % self.period, 0);
+        // The superstep's guards, numbered by its bodies: the program's
+        // runs, or (an automatic plan's) those of `SpecSuper::runs`.
         #[cfg(feature = "counters")]
-        let j = Arc::clone(self.jit.as_ref().expect("a superstep"));
+        let (j, sup) = (self.jit.clone(), self.spec.superstep.clone());
         #[cfg(feature = "counters")]
-        let info = &j.superstep().expect("a superstep").info;
+        let (info, map) = match j.as_ref().and_then(|j| j.superstep()) {
+            Some(s) => (&s.info, None),
+            None => {
+                let s = sup.as_ref().expect("a superstep");
+                (s.code.info(), Some(&s.runs[..]))
+            }
+        };
         if !self.mem_ptrs_fresh {
             self.mem_ptrs.clear();
             self.mem_ptrs
@@ -1177,8 +1258,15 @@ impl Sim {
                 c.instrs += per.instrs;
                 c.packed_words += per.packed_words;
             }
-            for (k, r) in self.runs.iter().enumerate().take(self.spec.base) {
-                let base = info.skip_base[k + 1];
+            let bodies: Vec<(usize, u16)> = match map {
+                None => (1..=self.spec.base).map(|k| (k, k as u16)).collect(),
+                Some(runs) => runs.iter().copied().enumerate().collect(),
+            };
+            for (i, run) in bodies {
+                let Some(r) = (run as usize).checked_sub(1).map(|k| &self.runs[k]) else {
+                    continue;
+                };
+                let base = info.skip_base[i];
                 for (g, &(blocks, instrs)) in r.guard_cost.iter().enumerate() {
                     let n = std::mem::take(&mut self.skips[base + g]);
                     c.blocks -= n * blocks;

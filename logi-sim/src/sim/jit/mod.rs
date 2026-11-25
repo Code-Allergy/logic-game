@@ -55,7 +55,7 @@ mod unit_tests;
 #[cfg(test)]
 pub(crate) use superstep::MUTATION;
 pub use superstep::{JitSuper, Part, SuperFn, SuperInfo, SuperRef};
-pub use unit::{JitUnit, compile_unit};
+pub use unit::{JitUnit, SuperUnit, compile_superstep, compile_unit};
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::I64;
@@ -261,13 +261,12 @@ impl JitProgram {
         let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
         let mut owned = new_module()?;
         let module = owned.0.as_mut().expect("just created");
-        let ptr = module.target_config().pointer_type();
         let mut ctx = module.make_context();
         let mut fctx = FunctionBuilderContext::new();
         let mut ids: Vec<Option<Ids>> = Vec::with_capacity(bodies.len());
         let mut count = 0usize;
         let mut n = 0u32;
-        let (mut bytes, mut super_bytes) = (0usize, 0usize);
+        let mut bytes = 0usize;
         for body in bodies {
             ids.push(compile_body(
                 module, &mut ctx, &mut fctx, p, body, &mut n, &mut count, &mut bytes,
@@ -281,109 +280,10 @@ impl JitProgram {
                 matches!(ids.get(body), Some(Some((_, Some(_)))))
             });
             if ok {
-                let st = superstep::stream(bodies, s);
-                let plan = superstep::plan(p, bodies, &st, s.live_end);
-                let mut skip_base = Vec::with_capacity(bodies.len());
-                let mut skip_len = 0;
-                for b in bodies {
-                    skip_base.push(skip_len);
-                    skip_len += b.guards.len();
-                }
-                let (mut w, mut dead, mut items) = (0usize, 0usize, 0usize);
-                let mut fns = Vec::with_capacity(st.chunks.len());
-                let mut continues = 0;
-                for ch in &st.chunks {
-                    items += ch.len();
-                    // No callee-saved registers: the chunks are only called
-                    // by the entry below, which keeps nothing in registers.
-                    ctx.func.signature.call_conv = cranelift_codegen::isa::CallConv::Winch;
-                    ctx.func.signature.params.clear();
-                    ctx.func.signature.params.extend([
-                        AbiParam::new(ptr),
-                        AbiParam::new(ptr),
-                        AbiParam::new(I64),
-                        AbiParam::new(ptr),
-                        AbiParam::new(ptr),
-                    ]);
-                    ctx.func.name = UserFuncName::user(0, n);
-                    dead += superstep::build_chunk(
-                        module.target_config(),
-                        &mut ctx.func,
-                        &mut fctx,
-                        p,
-                        bodies,
-                        &st,
-                        ch,
-                        &plan,
-                        &mut w,
-                        &skip_base,
-                        continues,
-                    );
-                    continues = ch.last().map_or(0, |&(_, seg)| seg);
-                    let id = module
-                        .declare_function(&format!("super{n}"), Linkage::Local, &ctx.func.signature)
-                        .map_err(|e| err(&e))?;
-                    n += 1;
-                    module.define_function(id, &mut ctx).map_err(|e| err(&e))?;
-                    let size = code_size(&ctx);
-                    bytes += size;
-                    super_bytes += size;
-                    module.clear_context(&mut ctx);
-                    fns.push(id);
-                }
-                debug_assert_eq!(w, plan.store.len());
-                {
-                    // One entry (`SuperFn`) calling every chunk directly.
-                    let params = [
-                        AbiParam::new(ptr),
-                        AbiParam::new(ptr),
-                        AbiParam::new(I64),
-                        AbiParam::new(ptr),
-                        AbiParam::new(ptr),
-                    ];
-                    ctx.func.signature.params.extend(params);
-                    ctx.func.name = UserFuncName::user(0, n);
-                    let refs: Vec<_> = fns
-                        .iter()
-                        .map(|&id| module.declare_func_in_func(id, &mut ctx.func))
-                        .collect();
-                    {
-                        let cfg = module.target_config();
-                        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-                        let blk = b.create_block();
-                        b.append_block_params_for_function_params(blk);
-                        b.switch_to_block(blk);
-                        b.seal_block(blk);
-                        let args = b.block_params(blk).to_vec();
-                        for r in refs {
-                            b.ins().call(r, &args);
-                        }
-                        b.ins().return_(&[]);
-                        b.finalize(cfg);
-                    }
-                    let id = module
-                        .declare_function(&format!("super{n}"), Linkage::Local, &ctx.func.signature)
-                        .map_err(|e| err(&e))?;
-                    module.define_function(id, &mut ctx).map_err(|e| err(&e))?;
-                    let size = code_size(&ctx);
-                    bytes += size;
-                    super_bytes += size;
-                    module.clear_context(&mut ctx);
-                    sup = Some((
-                        id,
-                        SuperInfo {
-                            ticks: s.ticks,
-                            chunks: fns.len(),
-                            skip_base,
-                            skip_len,
-                            items,
-                            dead,
-                            writes: plan.store.len(),
-                            stores: plan.store.iter().filter(|&&x| x).count(),
-                            code_bytes: super_bytes,
-                        },
-                    ));
-                }
+                let (id, info) =
+                    define_superstep(module, &mut ctx, &mut fctx, p, bodies, s, &mut n)?;
+                bytes += info.code_bytes;
+                sup = Some((id, info));
             }
         }
         module.finalize_definitions().map_err(|e| err(&e))?;
@@ -420,6 +320,124 @@ impl JitProgram {
             key: None,
             _module: Mutex::new(owned),
         })
+    }
+}
+
+/// Define the chunks and the entry of superstep `s` over `bodies` in
+/// `module` (every body it names checked by the caller: compiled, or
+/// compilable, with a native commit). `n` numbers the functions.
+fn define_superstep(
+    module: &mut JITModule,
+    ctx: &mut cranelift_codegen::Context,
+    fctx: &mut FunctionBuilderContext,
+    p: &Program,
+    bodies: &[BodyRef<'_>],
+    s: &SuperRef<'_>,
+    n: &mut u32,
+) -> Result<(FuncId, SuperInfo), JitError> {
+    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
+    let ptr = module.target_config().pointer_type();
+    let mut super_bytes = 0usize;
+    let st = superstep::stream(bodies, s);
+    let plan = superstep::plan(p, bodies, &st, s.live_end);
+    let mut skip_base = Vec::with_capacity(bodies.len());
+    let mut skip_len = 0;
+    for b in bodies {
+        skip_base.push(skip_len);
+        skip_len += b.guards.len();
+    }
+    let (mut w, mut dead, mut items) = (0usize, 0usize, 0usize);
+    let mut fns = Vec::with_capacity(st.chunks.len());
+    let mut continues = 0;
+    for ch in &st.chunks {
+        items += ch.len();
+        // No callee-saved registers: the chunks are only called
+        // by the entry below, which keeps nothing in registers.
+        ctx.func.signature.call_conv = cranelift_codegen::isa::CallConv::Winch;
+        ctx.func.signature.params.clear();
+        ctx.func.signature.params.extend([
+            AbiParam::new(ptr),
+            AbiParam::new(ptr),
+            AbiParam::new(I64),
+            AbiParam::new(ptr),
+            AbiParam::new(ptr),
+        ]);
+        ctx.func.name = UserFuncName::user(0, *n);
+        dead += superstep::build_chunk(
+            module.target_config(),
+            &mut ctx.func,
+            fctx,
+            p,
+            bodies,
+            &st,
+            ch,
+            &plan,
+            &mut w,
+            &skip_base,
+            continues,
+        );
+        continues = ch.last().map_or(0, |&(_, seg)| seg);
+        let id = module
+            .declare_function(&format!("super{}", *n), Linkage::Local, &ctx.func.signature)
+            .map_err(|e| err(&e))?;
+        *n += 1;
+        module.define_function(id, ctx).map_err(|e| err(&e))?;
+        let size = code_size(ctx);
+        super_bytes += size;
+        module.clear_context(ctx);
+        fns.push(id);
+    }
+    debug_assert_eq!(w, plan.store.len());
+    {
+        // One entry (`SuperFn`) calling every chunk directly.
+        let params = [
+            AbiParam::new(ptr),
+            AbiParam::new(ptr),
+            AbiParam::new(I64),
+            AbiParam::new(ptr),
+            AbiParam::new(ptr),
+        ];
+        ctx.func.signature.params.extend(params);
+        ctx.func.name = UserFuncName::user(0, *n);
+        let refs: Vec<_> = fns
+            .iter()
+            .map(|&id| module.declare_func_in_func(id, &mut ctx.func))
+            .collect();
+        {
+            let cfg = module.target_config();
+            let mut b = FunctionBuilder::new(&mut ctx.func, fctx);
+            let blk = b.create_block();
+            b.append_block_params_for_function_params(blk);
+            b.switch_to_block(blk);
+            b.seal_block(blk);
+            let args = b.block_params(blk).to_vec();
+            for r in refs {
+                b.ins().call(r, &args);
+            }
+            b.ins().return_(&[]);
+            b.finalize(cfg);
+        }
+        let id = module
+            .declare_function(&format!("super{}", *n), Linkage::Local, &ctx.func.signature)
+            .map_err(|e| err(&e))?;
+        module.define_function(id, ctx).map_err(|e| err(&e))?;
+        let size = code_size(ctx);
+        super_bytes += size;
+        module.clear_context(ctx);
+        Ok((
+            id,
+            SuperInfo {
+                ticks: s.ticks,
+                chunks: fns.len(),
+                skip_base,
+                skip_len,
+                items,
+                dead,
+                writes: plan.store.len(),
+                stores: plan.store.iter().filter(|&&x| x).count(),
+                code_bytes: super_bytes,
+            },
+        ))
     }
 }
 

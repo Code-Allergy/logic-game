@@ -26,7 +26,11 @@ use cranelift_frontend::FunctionBuilderContext;
 use cranelift_module::Module;
 use smallvec::SmallVec;
 
-use super::{BodyRef, CommitFn, JitBody, JitError, Owned, SettleFn, compile_body, new_module};
+use super::{
+    BodyRef, CommitFn, JitBody, JitError, JitSuper, MAX_BODY, Owned, Part, SettleFn, SuperFn,
+    SuperInfo, SuperRef, compile_body, define_superstep, new_module,
+};
+use crate::compile::Commit;
 use crate::compile::Program;
 use crate::sim::{Sim, parts};
 
@@ -222,6 +226,80 @@ impl JitUnit {
                 m.as_mut_ptr()
             })
             .collect()
+    }
+}
+
+/// A superstep compiled on its own (`Sim`'s superstep when the layout's
+/// native code has none: an automatic plan that keys no phase), freed on
+/// drop like a [`JitUnit`].
+pub struct SuperUnit {
+    sup: JitSuper,
+    /// Owns the code; declared last.
+    _module: Mutex<Owned>,
+}
+
+const _: fn() = || {
+    fn shareable<T: Send + Sync>() {}
+    shareable::<SuperUnit>();
+};
+
+/// Compile superstep `s` over `bodies` of `p` into a module of its own.
+/// Fails for a program or body that does not pass `Sim`'s checks, for a
+/// part naming a body that is missing, unused, larger than [`MAX_BODY`]
+/// or has a `MemClear` commit, and when Cranelift fails.
+pub fn compile_superstep(
+    p: &Program,
+    bodies: &[BodyRef<'_>],
+    s: &SuperRef<'_>,
+) -> Result<SuperUnit, JitError> {
+    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
+    crate::sim::check(p).map_err(|e| JitError(format!("bad program: {}", e.0)))?;
+    for part in s.parts {
+        let (Part::Commit { body } | Part::Settle { body, .. }) = *part;
+        let b = bodies
+            .get(body)
+            .ok_or_else(|| JitError(format!("no body {body}")))?;
+        let items: usize = b.blocks.iter().map(|x| x.len as usize).sum();
+        if !b.used
+            || items > MAX_BODY
+            || b.commits
+                .iter()
+                .any(|c| matches!(c, Commit::MemClear { .. }))
+        {
+            return Err(JitError(format!("body {body} cannot be in a superstep")));
+        }
+        crate::sim::check_body(p, b.blocks, b.instrs, b.imms, b.commits, b.guards)
+            .map_err(|e| JitError(format!("bad body: {}", e.0)))?;
+    }
+    if s.live_end.iter().any(|&x| x >= p.slot_count) {
+        return Err(JitError("bad live slot".into()));
+    }
+    let mut owned = new_module()?;
+    let module = owned.0.as_mut().expect("just created");
+    let mut ctx = module.make_context();
+    let mut fctx = FunctionBuilderContext::new();
+    let mut n = 0u32;
+    let (id, info) = define_superstep(module, &mut ctx, &mut fctx, p, bodies, s, &mut n)?;
+    module.finalize_definitions().map_err(|e| err(&e))?;
+    // SAFETY: `id` was defined with the `SuperFn` signature, and the code
+    // stays alive as long as `owned`, which the result owns.
+    let entry =
+        unsafe { std::mem::transmute::<*const u8, SuperFn>(module.get_finalized_function(id)) };
+    Ok(SuperUnit {
+        sup: JitSuper { entry, info },
+        _module: Mutex::new(owned),
+    })
+}
+
+impl SuperUnit {
+    /// The superstep (for `Sim`, which calls it with its buffers).
+    pub(crate) fn superstep(&self) -> &JitSuper {
+        &self.sup
+    }
+
+    /// What it is made of.
+    pub fn info(&self) -> &SuperInfo {
+        &self.sup.info
     }
 }
 
