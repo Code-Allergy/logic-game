@@ -44,6 +44,9 @@ fn main() -> Result<(), String> {
     let mut profile = 300_000u64;
     let mut warm = 1_500_000u64;
     let mut phases: Vec<u8> = Vec::new();
+    let mut ports2: Vec<String> = Vec::new();
+    let mut slots2: Vec<(u32, u8)> = Vec::new();
+    let mut nkeys2 = 24usize;
     let mut it = args.iter().skip(1);
     while let Some(a) = it.next() {
         let mut v = || it.next().cloned().unwrap_or_default();
@@ -54,6 +57,8 @@ fn main() -> Result<(), String> {
                 slots.push((x.parse().map_err(|_| "slot")?, w.parse().map_err(|_| "width")?));
             }
             "--port" => ports.push(v()),
+            "--port2" => ports2.push(v()),
+            "--keys2" => nkeys2 = v().parse().map_err(|_| "keys2")?,
             "--ticks" => ticks = v().parse().map_err(|_| "ticks")?,
             "--keys" => nkeys = v().parse().map_err(|_| "keys")?,
             "--rounds" => rounds = v().parse().map_err(|_| "rounds")?,
@@ -67,7 +72,7 @@ fn main() -> Result<(), String> {
     let ws = suite::read_workspace(Path::new(folder))?;
     let design = design_of(&ws)?;
     let program = Arc::new(nes_demo::maybe(compile(&design, &Options::default()).map_err(|e| format!("{e:?}"))?));
-    for spec in &ports {
+    for (which, spec) in ports.iter().map(|p| (1, p)).chain(ports2.iter().map(|p| (2, p))) {
         // chip/sub/name[:W]: a named node's output net (any node kind, an
         // Output port reads its input net) in the instance at chip/sub.
         let (path_name, w) = match spec.rsplit_once(':') {
@@ -112,61 +117,77 @@ fn main() -> Result<(), String> {
             continue;
         }
         println!("{spec}: s{real} w{width}");
-        slots.push((real, width));
+        if which == 1 {
+            slots.push((real, width));
+        } else {
+            slots2.push((real, width));
+        }
     }
     slots.dedup();
 
     // Profile the keys (tick by tick, every slot fresh).
-    let mut sim = Sim::with_options(
-        Arc::clone(&program),
-        SimOptions {
-            guard: false,
-            ..SimOptions::jit()
-        },
-    );
-    let pack = |sim: &Sim| {
-        let mut key = 0u64;
-        let mut shift = 0;
-        for &(s, w) in &slots {
-            key |= (sim.read(s) & logi_sim::netlist::mask(w)) << shift;
-            shift += u32::from(w);
+    let profile_keys = |slots: &[(u32, u8)], phases: &dyn Fn(u8) -> bool, nkeys: usize| -> Vec<u64> {
+        let mut sim = Sim::with_options(
+            Arc::clone(&program),
+            SimOptions {
+                guard: false,
+                ..SimOptions::jit()
+            },
+        );
+        let pack = |sim: &Sim| {
+            let mut key = 0u64;
+            let mut shift = 0;
+            for &(s, w) in slots {
+                key |= (sim.read(s) & logi_sim::netlist::mask(w)) << shift;
+                shift += u32::from(w);
+            }
+            key
+        };
+        sim.run(warm);
+        let mut hist: HashMap<u64, u64> = HashMap::new();
+        let mut changes = 0u64;
+        let mut prev = u64::MAX;
+        let mut seen = 0u64;
+        for _ in 0..profile {
+            sim.tick();
+            let ph = (sim.tick_count() % 3) as u8;
+            if !phases(ph) {
+                continue;
+            }
+            seen += 1;
+            let k = pack(&sim);
+            *hist.entry(k).or_default() += 1;
+            if k != prev {
+                changes += 1;
+                prev = k;
+            }
         }
-        key
+        let mut h: Vec<(u64, u64)> = hist.into_iter().collect();
+        h.sort_by(|a, b| b.1.cmp(&a.1));
+        let keys: Vec<u64> = h.iter().take(nkeys).map(|x| x.0).collect();
+        let covered: u64 = h.iter().take(nkeys).map(|x| x.1).sum();
+        println!(
+            "profile {seen} ticks: {} distinct keys, key changes {changes} ({:.4}/tick); top {} cover {:.3}%",
+            h.len(),
+            changes as f64 / seen.max(1) as f64,
+            keys.len(),
+            covered as f64 / seen.max(1) as f64 * 100.0
+        );
+        for (k, n) in h.iter().take(4) {
+            println!("  key {k:#x}: {:.2}%", *n as f64 / seen.max(1) as f64 * 100.0);
+        }
+        keys
     };
-    sim.run(warm);
-    let mut hist: HashMap<u64, u64> = HashMap::new();
-    let mut changes = 0u64;
-    let mut prev = u64::MAX;
-    for _ in 0..profile {
-        sim.tick();
-        let ph = (sim.tick_count() % 3) as u8;
-        if !phases.is_empty() && !phases.contains(&ph) {
-            continue;
-        }
-        let k = pack(&sim);
-        *hist.entry(k).or_default() += 1;
-        if k != prev {
-            changes += 1;
-            prev = k;
-        }
-    }
-    let mut h: Vec<(u64, u64)> = hist.into_iter().collect();
-    h.sort_by(|a, b| b.1.cmp(&a.1));
-    let keys: Vec<u64> = h.iter().take(nkeys).map(|x| x.0).collect();
-    let covered: u64 = h.iter().take(nkeys).map(|x| x.1).sum();
-    println!(
-        "profile {profile} ticks: {} distinct keys, key changes {changes} ({:.4}/tick); top {} cover {:.3}%",
-        h.len(),
-        changes as f64 / profile as f64,
-        keys.len(),
-        covered as f64 / profile as f64 * 100.0
-    );
-    for (k, n) in h.iter().take(8) {
-        println!("  key {k:#x}: {:.2}%", *n as f64 / profile as f64 * 100.0);
-    }
+    let in1 = |ph: u8| phases.is_empty() || phases.contains(&ph);
+    let keys = profile_keys(&slots, &in1, nkeys);
+    let plan2 = (!slots2.is_empty()).then(|| {
+        let keys2 = profile_keys(&slots2, &|ph| !in1(ph), nkeys2);
+        Arc::new(SpecPlan { slots: slots2.clone(), keys: keys2, phases: Vec::new() })
+    });
     let plan = Arc::new(SpecPlan { slots: slots.clone(), keys, phases: phases.clone() });
     let spec_opts = SimOptions {
         spec: Some(Arc::clone(&plan)),
+        spec2: plan2.clone(),
         ..SimOptions::jit()
     };
 

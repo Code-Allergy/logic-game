@@ -121,6 +121,8 @@ pub struct SimOptions {
     /// Issue #117 experiments: state-keyed specialization. See
     /// [`SpecPlan`]. Single-threaded, with phases and fusion, only.
     pub spec: Option<Arc<SpecPlan>>,
+    /// A second plan for the phases `spec` does not list.
+    pub spec2: Option<Arc<SpecPlan>>,
 }
 
 /// Issue #117 experiments (value speculation, counter regions): fused-run
@@ -164,6 +166,7 @@ impl Default for SimOptions {
             guard: true,
             guard_min: crate::compile::guard::MIN_REGION,
             spec: None,
+            spec2: None,
         }
     }
 }
@@ -327,6 +330,8 @@ pub struct Sim {
     /// (0: none needed), and the body per key.
     spec_prefix: Vec<u8>,
     spec_table: Vec<crate::compile::FastMap<u64, u8>>,
+    /// Per phase, the plan keying it.
+    spec_plan: Vec<Option<Arc<SpecPlan>>>,
     /// Ticks of `run` that ran a specialized body, and that did not.
     pub spec_hits: u64,
     pub spec_misses: u64,
@@ -474,7 +479,8 @@ impl Sim {
         }
         let mut spec_prefix = Vec::new();
         let mut spec_table = Vec::new();
-        if let (Some(plan), Some(ph), None, true, true) = (
+        let mut spec_plan = Vec::new();
+        if let (Some(plan0), Some(ph), None, true, true) = (
             options.spec.clone(),
             program.phases.as_deref(),
             pool.as_ref(),
@@ -484,11 +490,17 @@ impl Sim {
             use crate::compile::{FastMap, guard, phases};
             let n_slots = program.slot_count as usize;
             for (k, v) in ph.variants.iter().enumerate() {
-                if !plan.phases.is_empty() && !plan.phases.contains(&(k as u8)) {
+                let plan = if plan0.phases.is_empty() || plan0.phases.contains(&(k as u8)) {
+                    Arc::clone(&plan0)
+                } else if let Some(p2) = options.spec2.clone() {
+                    p2
+                } else {
                     spec_prefix.push(0);
                     spec_table.push(FastMap::default());
+                    spec_plan.push(None);
                     continue;
-                }
+                };
+                spec_plan.push(Some(Arc::clone(&plan)));
                 let roots: Vec<u32> = plan.slots.iter().map(|s| s.0).collect();
                 let pre = phases::prune_to(&program, v, roots, Vec::new());
                 let pre = pre.unwrap_or_else(|| Body {
@@ -545,6 +557,7 @@ impl Sim {
             last: 0,
             spec_prefix,
             spec_table,
+            spec_plan,
             spec_hits: 0,
             spec_misses: 0,
             options,
@@ -879,7 +892,7 @@ impl Sim {
                     self.counters.settles -= 1;
                 }
             }
-            let plan = self.options.spec.as_ref().unwrap();
+            let plan = self.spec_plan[k].as_ref().unwrap();
             let mut key = 0u64;
             let mut shift = 0;
             for &(s, w) in &plan.slots {
