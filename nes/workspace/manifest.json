@@ -2,12 +2,12 @@
   "format": "gatequest-workspace",
   "version": 5,
   "name": "nes",
-  "root": "3eb03244-3b1f-4d94-ab6f-5c9cd9254e59",
+  "root": "079c6a2b-64e4-4e46-8e29-d34f51093822",
   "circuits": [
     {
-      "id": "3eb03244-3b1f-4d94-ab6f-5c9cd9254e59",
+      "id": "079c6a2b-64e4-4e46-8e29-d34f51093822",
       "name": "nes",
-      "revision": 2,
+      "revision": 3,
       "nodes": [
         {
           "id": "e9cb61c6-f2c8-5292-aa66-b04608dc09f8",
@@ -1853,7 +1853,7 @@
           },
           "to": {
             "node": "e569bbbe-662c-5ece-9b26-7baba1e2102b",
-            "pin": 6
+            "pin": 7
           }
         },
         {
@@ -1919,7 +1919,7 @@
           },
           "to": {
             "node": "e569bbbe-662c-5ece-9b26-7baba1e2102b",
-            "pin": 8
+            "pin": 9
           }
         },
         {
@@ -1963,7 +1963,7 @@
           },
           "to": {
             "node": "e569bbbe-662c-5ece-9b26-7baba1e2102b",
-            "pin": 5
+            "pin": 6
           }
         },
         {
@@ -1974,7 +1974,7 @@
           },
           "to": {
             "node": "e569bbbe-662c-5ece-9b26-7baba1e2102b",
-            "pin": 7
+            "pin": 8
           }
         },
         {
@@ -1985,7 +1985,7 @@
           },
           "to": {
             "node": "e569bbbe-662c-5ece-9b26-7baba1e2102b",
-            "pin": 9
+            "pin": 10
           }
         },
         {
@@ -1996,7 +1996,7 @@
           },
           "to": {
             "node": "e569bbbe-662c-5ece-9b26-7baba1e2102b",
-            "pin": 2
+            "pin": 3
           }
         },
         {
@@ -2007,7 +2007,7 @@
           },
           "to": {
             "node": "e569bbbe-662c-5ece-9b26-7baba1e2102b",
-            "pin": 3
+            "pin": 4
           }
         },
         {
@@ -2018,7 +2018,7 @@
           },
           "to": {
             "node": "e569bbbe-662c-5ece-9b26-7baba1e2102b",
-            "pin": 4
+            "pin": 5
           }
         },
         {
@@ -2590,6 +2590,17 @@
           },
           "to": {
             "node": "97325c72-9af0-5a6b-a814-ecb61c88c910",
+            "pin": 2
+          }
+        },
+        {
+          "id": "931ae81c-0a5e-5f1f-8c2f-725955cdb502",
+          "from": {
+            "node": "913a1c71-47c6-505d-aeed-50c60a3841d0",
+            "pin": 0
+          },
+          "to": {
+            "node": "e569bbbe-662c-5ece-9b26-7baba1e2102b",
             "pin": 2
           }
         }
@@ -115582,7 +115593,7 @@
     {
       "id": "bd4b5ebb-1f2d-5d28-b6a4-284813ed84d3",
       "name": "joypad",
-      "revision": 1,
+      "revision": 2,
       "nodes": [
         {
           "id": "53571bda-edcf-5a4c-8198-800b5b7a1a41",
@@ -115874,6 +115885,26 @@
           "label": "q",
           "x": 2920.0,
           "y": 0.0
+        },
+        {
+          "id": "f0fca823-ca37-59ab-8dc4-99286a50bb4f",
+          "kind": {
+            "type": "Input",
+            "w": 1
+          },
+          "label": "ce",
+          "x": 40.0,
+          "y": -520.0
+        },
+        {
+          "id": "b6af936d-fb58-593e-9d9c-5e40808056f6",
+          "kind": {
+            "type": "And",
+            "w": 1
+          },
+          "label": "load",
+          "x": 200.0,
+          "y": -520.0
         }
       ],
       "wires": [
@@ -116051,17 +116082,6 @@
           "to": {
             "node": "77139e15-dcca-5c96-92c7-fa6645827fa4",
             "pin": 2
-          }
-        },
-        {
-          "id": "c3d0276f-94bd-587f-854d-a2358430f550",
-          "from": {
-            "node": "05c9bffe-e170-519f-b7b6-5c86ddeb542d",
-            "pin": 0
-          },
-          "to": {
-            "node": "e99b72b0-903e-59a3-bf16-07b86248e90d",
-            "pin": 0
           }
         },
         {
@@ -116347,6 +116367,39 @@
           },
           "to": {
             "node": "8a8f441a-2660-5a4e-8605-d7a5843d5cfa",
+            "pin": 0
+          }
+        },
+        {
+          "id": "b3f4f0c3-9ad2-5209-995f-390eccd89b75",
+          "from": {
+            "node": "05c9bffe-e170-519f-b7b6-5c86ddeb542d",
+            "pin": 0
+          },
+          "to": {
+            "node": "b6af936d-fb58-593e-9d9c-5e40808056f6",
+            "pin": 0
+          }
+        },
+        {
+          "id": "4a959222-fd0b-5362-8857-28f662f8462f",
+          "from": {
+            "node": "f0fca823-ca37-59ab-8dc4-99286a50bb4f",
+            "pin": 0
+          },
+          "to": {
+            "node": "b6af936d-fb58-593e-9d9c-5e40808056f6",
+            "pin": 1
+          }
+        },
+        {
+          "id": "4df32d09-6c37-5cc0-93e8-cc82874cba9b",
+          "from": {
+            "node": "b6af936d-fb58-593e-9d9c-5e40808056f6",
+            "pin": 0
+          },
+          "to": {
+            "node": "e99b72b0-903e-59a3-bf16-07b86248e90d",
             "pin": 0
           }
         }
@@ -135017,7 +135070,7 @@
     {
       "id": "f5ba1743-f663-5bbe-aa43-b65a99aede4b",
       "name": "por",
-      "revision": 1,
+      "revision": 2,
       "nodes": [
         {
           "id": "4878ace6-24b7-523f-b5cb-60b66080dc59",
@@ -135031,46 +135084,6 @@
           "y": 120.0
         },
         {
-          "id": "6a5e2c27-5147-52b1-ba68-a4d73e981085",
-          "kind": {
-            "type": "Delay",
-            "w": 1
-          },
-          "label": "d[0]",
-          "x": 200.0,
-          "y": 0.0
-        },
-        {
-          "id": "ae516759-5132-5668-b9e5-82cca4bc77f3",
-          "kind": {
-            "type": "Delay",
-            "w": 1
-          },
-          "label": "d[1]",
-          "x": 40.0,
-          "y": 40.0
-        },
-        {
-          "id": "0b65b665-64bf-5af5-96ca-a1cfc909a9ab",
-          "kind": {
-            "type": "Delay",
-            "w": 1
-          },
-          "label": "d[2]",
-          "x": 40.0,
-          "y": -40.0
-        },
-        {
-          "id": "257fa435-b409-5f69-8495-22131d5f1644",
-          "kind": {
-            "type": "Delay",
-            "w": 1
-          },
-          "label": "d[3]",
-          "x": 40.0,
-          "y": -120.0
-        },
-        {
           "id": "ebfd000a-8d7e-5a88-8dcc-672cc1a8ed25",
           "kind": {
             "type": "Output",
@@ -135079,57 +135092,100 @@
           "label": "ok",
           "x": 360.0,
           "y": 0.0
+        },
+        {
+          "id": "cb5e0980-8a32-5b7b-b21e-ee25c38ea014",
+          "kind": {
+            "type": "Delay",
+            "w": 4
+          },
+          "label": "s",
+          "x": 200.0,
+          "y": -200.0
+        },
+        {
+          "id": "02ee586c-6bdc-5ec7-990e-e510ac26edd6",
+          "kind": {
+            "type": "Add",
+            "w": 4
+          },
+          "label": "fill",
+          "x": 40.0,
+          "y": -160.0
+        },
+        {
+          "id": "eb2ef6a2-ec94-5d4e-8b28-2ee1697354d5",
+          "kind": {
+            "type": "Split",
+            "w": 4,
+            "lo": 3,
+            "len": 1
+          },
+          "label": "top",
+          "x": 40.0,
+          "y": -240.0
         }
       ],
       "wires": [
         {
-          "id": "c4a37730-9cfd-510d-b015-2fc43c1d8e0a",
+          "id": "a8c810cb-1d3d-5869-b786-d3c284e31fb1",
+          "from": {
+            "node": "cb5e0980-8a32-5b7b-b21e-ee25c38ea014",
+            "pin": 0
+          },
+          "to": {
+            "node": "02ee586c-6bdc-5ec7-990e-e510ac26edd6",
+            "pin": 0
+          }
+        },
+        {
+          "id": "c3eb11a6-94f6-507a-b5e4-85c097f733cf",
+          "from": {
+            "node": "cb5e0980-8a32-5b7b-b21e-ee25c38ea014",
+            "pin": 0
+          },
+          "to": {
+            "node": "02ee586c-6bdc-5ec7-990e-e510ac26edd6",
+            "pin": 1
+          }
+        },
+        {
+          "id": "6c935440-fca7-5d11-a929-b3626b1dc3b4",
+          "from": {
+            "node": "cb5e0980-8a32-5b7b-b21e-ee25c38ea014",
+            "pin": 0
+          },
+          "to": {
+            "node": "eb2ef6a2-ec94-5d4e-8b28-2ee1697354d5",
+            "pin": 0
+          }
+        },
+        {
+          "id": "64148e6f-e223-5043-af14-108abdcbad10",
           "from": {
             "node": "4878ace6-24b7-523f-b5cb-60b66080dc59",
             "pin": 0
           },
           "to": {
-            "node": "6a5e2c27-5147-52b1-ba68-a4d73e981085",
-            "pin": 0
+            "node": "02ee586c-6bdc-5ec7-990e-e510ac26edd6",
+            "pin": 2
           }
         },
         {
-          "id": "9c47d2f6-5d3b-5dd6-abbf-c72b13ee8b43",
+          "id": "72635573-ef4f-5e5d-a6bc-62b851e2a3b4",
           "from": {
-            "node": "6a5e2c27-5147-52b1-ba68-a4d73e981085",
+            "node": "02ee586c-6bdc-5ec7-990e-e510ac26edd6",
             "pin": 0
           },
           "to": {
-            "node": "ae516759-5132-5668-b9e5-82cca4bc77f3",
+            "node": "cb5e0980-8a32-5b7b-b21e-ee25c38ea014",
             "pin": 0
           }
         },
         {
-          "id": "3e2d1fa2-bdde-5104-b11d-bb710f7bec5c",
+          "id": "b4b79643-7b92-5dbd-a8e1-bde24b92040f",
           "from": {
-            "node": "ae516759-5132-5668-b9e5-82cca4bc77f3",
-            "pin": 0
-          },
-          "to": {
-            "node": "0b65b665-64bf-5af5-96ca-a1cfc909a9ab",
-            "pin": 0
-          }
-        },
-        {
-          "id": "253975b6-bf56-5448-ac00-f1bee00cbb3c",
-          "from": {
-            "node": "0b65b665-64bf-5af5-96ca-a1cfc909a9ab",
-            "pin": 0
-          },
-          "to": {
-            "node": "257fa435-b409-5f69-8495-22131d5f1644",
-            "pin": 0
-          }
-        },
-        {
-          "id": "122f2f5a-1d24-5995-be1c-4932230ab082",
-          "from": {
-            "node": "257fa435-b409-5f69-8495-22131d5f1644",
+            "node": "eb2ef6a2-ec94-5d4e-8b28-2ee1697354d5",
             "pin": 0
           },
           "to": {
@@ -143115,7 +143171,8 @@
               "set": {
                 "start": 1,
                 "left": 1,
-                "strobe": 1
+                "strobe": 1,
+                "ce": 1
               },
               "ticks": 2,
               "expect": {

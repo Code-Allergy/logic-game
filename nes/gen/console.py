@@ -56,10 +56,14 @@ chip("div3",
          {"ticks": 1, "expect": {"ce": 0}}, {"ticks": 1, "expect": {"ce": 0}},
          {"ticks": 1, "expect": {"ce": 1}}]}}])
 
-# Power-on reset: low for the first four ticks.
+# Power-on reset: low for the first four ticks. A 4-bit shift register
+# filling with 1s, as one word: s' = s + s + 1 (s << 1 | 1, which stays at
+# $F); `ok` is its top bit.
 chip("por",
-     [{"name": "one", "type": "Const", "value": 1}, gate("d", "Delay", 4), out("ok")],
-     [["one", "d[0]"], ["d[0..3]", "d[1..4]"], ["d[3]", "ok"]],
+     [{"name": "one", "type": "Const", "value": 1}, {"name": "s", "type": "Delay", "w": 4},
+      {"name": "fill", "type": "Add", "w": 4}, {"name": "top", "type": "Split", "w": 4, "lo": 3, "len": 1},
+      out("ok")],
+     [["s", "fill.a", "fill.b", "top"], ["one", "fill.cin"], ["fill.sum", "s"], ["top", "ok"]],
      [{"name": "function", "sequence": {"steps": [
          {"ticks": 3, "expect": {"ok": 0}}, {"ticks": 1, "expect": {"ok": 1}}]}}])
 
@@ -115,21 +119,27 @@ chip("cart_mmc3",
 # The standard controller: an 8-bit shift register. While `strobe` is high
 # every bit loads its button; each `shift` (a read of $4016) moves the next
 # button to `q`: A, B, Select, Start, Up, Down, Left, Right, then 1s.
+# `strobe` reloads only on CPU cycles (`ce`, as `shift` already is), so on
+# the other two ticks of three the register provably holds and the
+# compiler drops it. (The pad is read live on a CPU cycle either way.)
+# The bits stay separate: the buttons are eight one-bit keyboard inputs,
+# and gathering them into a word would cost more than the eight muxes.
 BUTTONS = ["a", "b", "select", "start", "up", "down", "left", "right"]
 # Keyboard keys for pad 1 while the simulation runs (`sim::keybind`): the
 # usual emulator layout.
 KEYS = {"a": "KeyX", "b": "KeyZ", "select": "ShiftRight", "start": "Enter",
         "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight"}
 chip("joypad",
-     [inp(b) for b in BUTTONS] + [inp("strobe"), inp("shift"),
+     [inp(b) for b in BUTTONS] + [inp("strobe"), inp("shift"), inp("ce"),
       {"name": "one", "type": "Const", "value": 1},
-      use("sr", "dffe", 8), use("m", "mux2", 8), gate("en", "Or"), out("q")],
+      use("sr", "dffe", 8), use("m", "mux2", 8), gate("load", "And"), gate("en", "Or"), out("q")],
      [[b, f"m[{i}].B"] for i, b in enumerate(BUTTONS)] +
-     [["strobe", "m.S", "en.a"], ["shift", "en.b"], ["en", "sr.En"], ["m.Y", "sr.D"],
+     [["strobe", "m.S", "load.a"], ["ce", "load.b"], ["load", "en.a"], ["shift", "en.b"],
+      ["en", "sr.En"], ["m.Y", "sr.D"],
       ["sr[1..8].Q", "m[0..7].A"], ["one", "m[7].A"], ["sr[0].Q", "q"]],
      [{"name": "read order", "sequence": {"steps": [
          # Start and Left held; strobe, then eight reads, then 1s.
-         {"set": {"start": 1, "left": 1, "strobe": 1}, "ticks": 2, "expect": {"q": 0}},
+         {"set": {"start": 1, "left": 1, "strobe": 1, "ce": 1}, "ticks": 2, "expect": {"q": 0}},
          {"set": {"strobe": 0}, "ticks": 1, "expect": {"q": 0}},
          # shift reaches the register a tick after it is set: q is still A.
          {"set": {"shift": 1}, "ticks": 1, "expect": {"q": 0}},
@@ -219,7 +229,7 @@ root = [
         ["p1", "p1_rd.a", "p1_wr.a", "p1_bit.b"], ["io_rd", "p1_rd.b"],
         ["p1_rd", "p1_shift.a"], ["div.ce", "p1_shift.b", "p1_wrc.b"], ["p1_shift", "pad1.shift"],
         ["wr", "p1_wr.b"], ["p1_wr", "p1_wrc.a"], ["p1_wrc", "strobe.En"], ["bus_d.Y:0", "strobe.D"],
-        ["strobe.Q", "pad1.strobe"], ["pad1.q", "p1_bit.a"],
+        ["strobe.Q", "pad1.strobe"], ["div.ce", "pad1.ce"], ["pad1.q", "p1_bit.a"],
         *[["p1_" + b, f"pad1.{b}"] for b in BUTTONS],
         ["p1_bit", "din.D4:0"], ["zero", "din.D4:1", "din.D4:2", "din.D4:3", "din.D4:4"],
         ["latch.Q:5..8", "din.D4:5..8"],
