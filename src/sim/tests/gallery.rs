@@ -1922,6 +1922,25 @@ fn truth_tables_preserve_every_demo_and_gallery_item() {
     }
 }
 
+/// Cone tables (issue #117, `Options::cone_tables`) against none, on
+/// every demo and gallery item, under the editor's options and the
+/// defaults: the same outputs and state every tick.
+#[test]
+fn cone_tables_preserve_every_demo_and_gallery_item() {
+    use logi_sim::compile::Options;
+    let catalog = demos();
+    for item in catalog.demos.iter().chain(&catalog.gallery) {
+        let design = crate::sim::netlist::design_of(&item.workspace).unwrap();
+        let ticks = if item.id == "cpu16" { 3000 } else { 150 };
+        for debug in [true, false] {
+            options_match(&item.id, &design, debug, ticks, |o| Options {
+                cone_tables: true,
+                ..o
+            });
+        }
+    }
+}
+
 /// The JIT backend (logi-sim feature `jit`, e.g. `cargo test --lib
 /// --features logi-sim/jit`; without it this compares the interpreter with
 /// itself) is bit-exact on every demo and gallery item, and on the gate
