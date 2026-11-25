@@ -114,6 +114,21 @@ pub fn specialize(p: &Program) -> Option<Phases> {
     })
 }
 
+/// The variant of `p` for tick residue `k` (of `period`, 1 for a program
+/// without phases) under `assume` (see `Spec::variant_with`). Issue #117
+/// experiments: value speculation.
+/// Slots in `pre` were computed before this settle (by a prefix body),
+/// so the variant neither recomputes nor folds them.
+pub fn specialize_assuming(
+    p: &Program,
+    k: u64,
+    assume: &FastMap<u32, u64>,
+    pre: &[bool],
+) -> Body {
+    let exposed = exposed(p);
+    Spec::new(p).variant_with(p, &exposed, k, assume, pre)
+}
+
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         (a, b) = (b, a % b);
@@ -196,12 +211,34 @@ impl Spec {
 
     /// The variant for ticks `t` with `t % period == k`.
     fn variant(&self, p: &Program, exposed: &[bool], k: u64) -> Body {
+        self.variant_with(p, exposed, k, &FastMap::default(), &[])
+    }
+
+    /// The variant for ticks `t` with `t % period == k` in which every
+    /// slot of `assume` holds its value (state and input slots at the
+    /// start of the settle, instruction results once computed). Valid
+    /// only for settles where the assumption holds (issue #117
+    /// experiments: value speculation).
+    fn variant_with(
+        &self,
+        p: &Program,
+        exposed: &[bool],
+        k: u64,
+        assume: &FastMap<u32, u64>,
+        pre: &[bool],
+    ) -> Body {
+        let is_pre = |s: u32| pre.get(s as usize).copied().unwrap_or(false);
         let n = p.slot_count as usize;
         let mut val = vec![Val::Own; n];
         // Rewritten operands of every instruction that stays `Own`.
         let mut own: Vec<[Opnd; 3]> = vec![[Opnd::Slot(ZERO_SLOT); 3]; p.instrs.len()];
         for &(s, v) in &p.consts {
             val[s as usize] = Val::Const(v);
+        }
+        for (&s, &v) in assume {
+            if self.writer[s as usize] == NONE {
+                val[s as usize] = Val::Const(v);
+            }
         }
         let opnd = |val: &[Val], s: u32| match val[s as usize] {
             Val::Own => Opnd::Slot(s),
@@ -274,9 +311,14 @@ impl Spec {
                         _ => Val::Own,
                     }
                 };
-                if v == Val::Own {
+                if v == Val::Own || assume.contains_key(&d) {
                     own[idx as usize] = ops;
                 }
+                let v = match assume.get(&d) {
+                    Some(&c) => Val::Const(c),
+                    None if is_pre(d) => Val::Own,
+                    None => v,
+                };
                 val[d as usize] = v;
             }
         }
@@ -288,7 +330,13 @@ impl Spec {
             let r = c.reads().map(|s| opnd(&val, s));
             let off = |o: Opnd| matches!(o, Opnd::Const(0, _));
             let keep = match *c {
-                Commit::Copy { state, .. } => r[0] != Opnd::Slot(state),
+                Commit::Copy { state, .. } => {
+                    r[0] != Opnd::Slot(state)
+                        && !matches!(
+                            (r[0], val[state as usize]),
+                            (Opnd::Const(a, _), Val::Const(b)) if a == b
+                        )
+                }
                 Commit::RamWrite { .. } | Commit::MemClear { .. } => !off(r[0]),
                 Commit::RamWriteMasked { .. } => !off(r[0]),
             };
@@ -342,8 +390,8 @@ impl Spec {
             }
             need[s as usize] = true;
             let w = self.writer[s as usize];
-            if w == NONE {
-                continue; // a port, constant or state slot
+            if w == NONE || is_pre(s) {
+                continue; // a port, constant or state slot, or precomputed
             }
             let (op, rank) = self.op_rank[w as usize];
             let orig = p.instrs[w as usize];
@@ -452,6 +500,13 @@ fn same(a: Opnd, b: Opnd) -> bool {
 /// nothing but the commit that follows it, so its settle only needs the
 /// commits' cone. `None` when that saves nothing, or for a packed body.
 pub fn prune(p: &Program, body: &Body) -> Option<Body> {
+    let roots: Vec<u32> = body.commits.iter().flat_map(|c| c.reads()).collect();
+    prune_to(p, body, roots, body.commits.clone())
+}
+
+/// `body` restricted to the cone of `roots`, with `commits` (issue #117
+/// experiments: the prefix that computes a specialization key).
+pub fn prune_to(p: &Program, body: &Body, roots: Vec<u32>, commits: Vec<Commit>) -> Option<Body> {
     if body.blocks.iter().any(|b| b.packed) {
         return None;
     }
@@ -467,7 +522,7 @@ pub fn prune(p: &Program, body: &Body) -> Option<Body> {
         }
     }
     let mut live = vec![false; body.instrs.len()];
-    let mut work: Vec<u32> = body.commits.iter().flat_map(|c| c.reads()).collect();
+    let mut work: Vec<u32> = roots;
     while let Some(s) = work.pop() {
         let w = writer[s as usize];
         if w == NONE || live[w as usize] {
@@ -486,7 +541,7 @@ pub fn prune(p: &Program, body: &Body) -> Option<Body> {
         return None;
     }
     let mut out = Body {
-        commits: body.commits.clone(),
+        commits,
         ..Body::default()
     };
     for b in &body.blocks {

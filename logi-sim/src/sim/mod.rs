@@ -118,6 +118,35 @@ pub struct SimOptions {
     /// ([`crate::compile::guard::MIN_REGION`] by default; smaller values
     /// guard more, smaller cones).
     pub guard_min: usize,
+    /// Issue #117 experiments: state-keyed specialization. See
+    /// [`SpecPlan`]. Single-threaded, with phases and fusion, only.
+    pub spec: Option<Arc<SpecPlan>>,
+}
+
+/// Issue #117 experiments (value speculation, counter regions): fused-run
+/// bodies specialized on the values of a few slots. Each tick of
+/// `Sim::run` first evaluates the cone of `slots` (a prefix; nothing when
+/// they are all state or input slots), packs their values into a key
+/// (each masked to its width, the first slot in the low bits) and, when a
+/// body was built for that key, settles it instead of the general one:
+/// the slots are constants there, folded through the logic like the
+/// clocks of a phase variant. Other keys run the general body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecPlan {
+    /// `(slot, width)`.
+    pub slots: Vec<(u32, u8)>,
+    /// Keys to build bodies for (per phase).
+    pub keys: Vec<u64>,
+    /// Phases to specialize (empty: all).
+    pub phases: Vec<u8>,
+}
+
+impl SpecPlan {
+    /// The value of slot `i` in `key`.
+    pub fn field(&self, key: u64, i: usize) -> u64 {
+        let shift: u32 = self.slots[..i].iter().map(|s| u32::from(s.1)).sum();
+        (key >> shift) & mask(self.slots[i].1)
+    }
 }
 
 /// Default [`SimOptions::par_min`] (see the design doc, section 13).
@@ -134,6 +163,7 @@ impl Default for SimOptions {
             jit: false,
             guard: true,
             guard_min: crate::compile::guard::MIN_REGION,
+            spec: None,
         }
     }
 }
@@ -291,6 +321,15 @@ pub struct Sim {
     /// Per tick residue: the body that settles a tick only its own commit
     /// observes (tick fusion), with the same commits as `full`.
     fused: Vec<u8>,
+    /// The body that settled last (its commits come next).
+    last: u8,
+    /// `SimOptions::spec`: per phase, the prefix body computing the key
+    /// (0: none needed), and the body per key.
+    spec_prefix: Vec<u8>,
+    spec_table: Vec<crate::compile::FastMap<u64, u8>>,
+    /// Ticks of `run` that ran a specialized body, and that did not.
+    pub spec_hits: u64,
+    pub spec_misses: u64,
     options: SimOptions,
     /// Worker threads, when `options.threads > 1` and some rank is large
     /// enough. Declared before `slots` and `mems`, so it is dropped (and
@@ -420,6 +459,7 @@ impl Sim {
                 }
                 _ => {
                     if program.packs.is_empty() && (options.fuse || exposed.is_some()) {
+                        // (no phases: spec plans are not supported)
                         let own = own();
                         if let Some(b) = guard_full(&own) {
                             full[0] = add(&mut runs, Some(b));
@@ -430,6 +470,63 @@ impl Sim {
                         }
                     }
                 }
+            }
+        }
+        let mut spec_prefix = Vec::new();
+        let mut spec_table = Vec::new();
+        if let (Some(plan), Some(ph), None, true, true) = (
+            options.spec.clone(),
+            program.phases.as_deref(),
+            pool.as_ref(),
+            options.phases,
+            options.fuse,
+        ) {
+            use crate::compile::{FastMap, guard, phases};
+            let n_slots = program.slot_count as usize;
+            for (k, v) in ph.variants.iter().enumerate() {
+                if !plan.phases.is_empty() && !plan.phases.contains(&(k as u8)) {
+                    spec_prefix.push(0);
+                    spec_table.push(FastMap::default());
+                    continue;
+                }
+                let roots: Vec<u32> = plan.slots.iter().map(|s| s.0).collect();
+                let pre = phases::prune_to(&program, v, roots, Vec::new());
+                let pre = pre.unwrap_or_else(|| Body {
+                    commits: Vec::new(),
+                    guards: Vec::new(),
+                    ..v.clone()
+                });
+                let mut is_pre = vec![false; n_slots];
+                for i in &pre.instrs {
+                    is_pre[i.dst as usize] = true;
+                }
+                spec_prefix.push(if pre.instrs.is_empty() {
+                    0
+                } else {
+                    runs.push(Run::new(&program, Some(pre), options.stream));
+                    runs.len() as u8
+                });
+                let mut table = FastMap::default();
+                for &key in &plan.keys {
+                    let assume: FastMap<u32, u64> = plan
+                        .slots
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| (s.0, plan.field(key, i)))
+                        .collect();
+                    let body =
+                        phases::specialize_assuming(&program, k as u64, &assume, &is_pre);
+                    let pruned = phases::prune(&program, &body).unwrap_or(body);
+                    let b = if options.guard {
+                        guard::guard_with(n_slots, &pruned, None, options.guard_min)
+                            .unwrap_or(pruned)
+                    } else {
+                        pruned
+                    };
+                    runs.push(Run::new(&program, Some(b), options.stream));
+                    table.insert(key, runs.len() as u8);
+                }
+                spec_table.push(table);
             }
         }
         for r in &runs {
@@ -445,6 +542,11 @@ impl Sim {
             period,
             full,
             fused,
+            last: 0,
+            spec_prefix,
+            spec_table,
+            spec_hits: 0,
+            spec_misses: 0,
             options,
             pool,
             slots: vec![0; program.slot_count as usize],
@@ -508,8 +610,15 @@ impl Sim {
     pub fn compile_jit(&self) -> Result<jit::JitProgram, jit::JitError> {
         let p = &*self.program;
         let mut bodies = Vec::with_capacity(self.runs.len() + 1);
-        let in_full = |k: usize| self.full.iter().any(|&f| f as usize == k);
-        let used = |k: usize| in_full(k) || self.fused.iter().any(|&f| f as usize == k);
+        let in_full = |k: usize| {
+            self.full.iter().any(|&f| f as usize == k)
+                || (k > 0 && self.spec_prefix.iter().any(|&f| f as usize == k))
+        };
+        let used = |k: usize| {
+            in_full(k)
+                || self.fused.iter().any(|&f| f as usize == k)
+                || self.spec_table.iter().any(|t| t.values().any(|&f| f as usize == k))
+        };
         bodies.push(jit::BodyRef {
             blocks: &p.blocks,
             instrs: &p.instrs,
@@ -728,7 +837,7 @@ impl Sim {
             self.counters.ticks += 1;
         }
         // The commit belongs to the body that settled the previous tick.
-        self.commit(self.full_run());
+        self.commit(self.last);
         self.tick += 1;
         self.settle(self.full_run());
     }
@@ -750,12 +859,44 @@ impl Sim {
             {
                 self.counters.ticks += 1;
             }
-            let k = (self.tick % self.period) as usize;
-            self.commit(self.full[k]);
+            self.commit(self.last);
             self.tick += 1;
             let k = (self.tick % self.period) as usize;
-            // The pruned body has the same commits as the full one.
-            self.settle(self.fused[k]);
+            if self.spec_table.get(k).is_none_or(|t| t.is_empty()) {
+                self.settle(self.fused[k]);
+                continue;
+            }
+            // Specialized bodies: the key's cone first.
+            let p = &*self.program;
+            for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
+                self.slots[port.slot as usize] = v;
+            }
+            let pre = self.spec_prefix[k];
+            if pre != 0 {
+                self.evaluate_body(pre);
+                #[cfg(feature = "counters")]
+                {
+                    self.counters.settles -= 1;
+                }
+            }
+            let plan = self.options.spec.as_ref().unwrap();
+            let mut key = 0u64;
+            let mut shift = 0;
+            for &(s, w) in &plan.slots {
+                key |= (self.slots[s as usize] & mask(w)) << shift;
+                shift += u32::from(w);
+            }
+            let run = match self.spec_table[k].get(&key) {
+                Some(&r) => {
+                    self.spec_hits += 1;
+                    r
+                }
+                None => {
+                    self.spec_misses += 1;
+                    self.fused[k]
+                }
+            };
+            self.evaluate(run);
         }
         self.tick();
     }
@@ -901,6 +1042,7 @@ impl Sim {
 
     /// Run the blocks of `run` once, from the input slots as they are.
     fn evaluate(&mut self, run: u8) {
+        self.last = run;
         self.evaluate_body(run);
         // Guarded blocks that did not run: a guard's conditions are slots
         // no later instruction writes, so they still say what ran.
