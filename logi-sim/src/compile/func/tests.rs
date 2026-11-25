@@ -996,3 +996,38 @@ fn near_miss_registers_are_not_one_register() {
         check_all(&format!("reg8 {defect:?}"), &wrap(d, r, 1));
     }
 }
+
+/// Two unrelated functions in one chip: `Y0 = &A`, `Y1 = &B`, of gates.
+fn two_ands_def(d: &mut Design) -> DefId {
+    let def = d.add_definition("two_ands");
+    let mut b = Builder::new(d, def);
+    for (port, out) in [("A", "Y0"), ("B", "Y1")] {
+        let x = b.input(port, 4);
+        let bits: Vec<NetId> = (0..4).map(|k| b.bit(x, k)).collect();
+        let lo = b.and(bits[0], bits[1]);
+        let hi = b.and(bits[2], bits[3]);
+        let y = b.and(lo, hi);
+        b.output(out, y);
+    }
+    def
+}
+
+/// An output of a chip may feed an input that this output does not read:
+/// no loop, in gates. A truth table reads every input for every output,
+/// so such a chip must not become one (it was a cycle of instructions,
+/// and the compiler panicked).
+#[test]
+fn a_chip_fed_from_its_own_unrelated_output_compiles() {
+    let mut d = Design::new("root");
+    let def = two_ands_def(&mut d);
+    let r = d.root;
+    let mut b = Builder::new(&mut d, r);
+    let p = b.input("P", 4);
+    let inst = b.node(NodeKind::Instance(def), &[Some(p), None]);
+    let (y0, y1) = (b.out(inst, 0), b.out(inst, 1));
+    let back = b.merge(&[y0, y0, y0, y0]);
+    b.connect(back, (inst, 1));
+    b.output("Y0", y0);
+    b.output("Y1", y1);
+    check_tables("fed back", &d);
+}

@@ -58,6 +58,13 @@ pub(crate) struct Replacement {
     /// child's abstraction when analysing a parent (a parent's flat
     /// expands the child's gates instead).
     pub table: bool,
+    /// A table some output of which does not read some input port in the
+    /// gates. As a table that output reads the port all the same (through
+    /// the index), which the loop check did not see: if the circuit
+    /// around an instance feeds the output back to the port, the table
+    /// would close a cycle of instructions. `emit` checks for one and
+    /// falls back to the gates.
+    pub partial: bool,
 }
 
 impl Replacement {

@@ -358,7 +358,16 @@ pub fn compile_cached(
         Default::default()
     };
     pass_done(Pass::Match);
-    let mut p = emit::emit(elab, options, &analysis, &mut pass_done);
+    let mut p = match emit::emit(elab, options, &analysis, true, &mut pass_done) {
+        Ok(p) => p,
+        // Rare: the circuit feeds a table's output back to a port that
+        // output does not read in the gates. Those chips stay gates.
+        Err(emit::TableCycle) => {
+            let elab = elaborate::Elab::new(design);
+            emit::emit(elab, options, &analysis, false, &mut pass_done)
+                .unwrap_or_else(|_| unreachable!("no partial table was emitted"))
+        }
+    };
     if options.clock_phases {
         p.phases = phases::specialize(&p).map(std::sync::Arc::new);
     }

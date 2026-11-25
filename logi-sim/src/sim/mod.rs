@@ -601,6 +601,17 @@ impl Sim {
         self.inputs[port] = value & mask(self.program.ports.inputs[port].width);
     }
 
+    /// Root input `port` as last given to [`Self::set_input`].
+    pub fn input(&self, port: PortId) -> u64 {
+        self.inputs[port]
+    }
+
+    /// Root input `port` as the logic saw it at the last settle: a value
+    /// set since then is not in it yet.
+    pub fn settled_input(&self, port: PortId) -> u64 {
+        self.slots[self.program.ports.inputs[port].slot as usize]
+    }
+
     /// Set a root input by name. Panics if there is no such port.
     #[track_caller]
     pub fn set(&mut self, name: &str, value: u64) {

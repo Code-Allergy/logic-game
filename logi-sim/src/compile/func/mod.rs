@@ -70,6 +70,12 @@ impl DefInfo {
         self.repl.as_ref().is_some_and(|r| r.table)
     }
 
+    /// A table that adds dependencies the gates do not have (see
+    /// `Replacement::partial`).
+    pub(crate) fn is_partial_table(&self) -> bool {
+        self.repl.as_ref().is_some_and(|r| r.table && r.partial)
+    }
+
     /// The gate-level flat of `def` for reading internal nets.
     pub(crate) fn inspect(&self, design: &Design, def: DefId) -> Option<Arc<Flat>> {
         self.inspect

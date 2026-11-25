@@ -1457,6 +1457,19 @@ pub(crate) fn table(flat: &Flat, gate_cost: usize) -> Option<(Replacement, Proof
     if cost >= gate_cost {
         return None;
     }
+    // Every output of a table reads every input port (through the index).
+    // In gates an output reads only the ports of its own cone: where some
+    // output does not read some port, the table is `partial` (see
+    // `Replacement::partial`).
+    let support = bit_support(flat, &ports)?;
+    let reads_every_port = flat.outputs.iter().all(|&v| {
+        let read = support[v as usize].iter().fold(0u128, |a, &b| a | b);
+        ports
+            .off
+            .iter()
+            .zip(&ports.wi)
+            .all(|(&off, &w)| read >> off & mask(w) as u128 != 0)
+    });
     let mut contents = Vec::with_capacity(1 << ports.bits);
     let mut vals = vec![0u64; flat.values()];
     let mut ins = vec![0u64; nin];
@@ -1473,6 +1486,7 @@ pub(crate) fn table(flat: &Flat, gate_cost: usize) -> Option<(Replacement, Proof
     }
     let mut r = Replacement {
         table: true,
+        partial: !reads_every_port,
         desc: format!("table of {} input bits", ports.bits),
         ..Replacement::default()
     };

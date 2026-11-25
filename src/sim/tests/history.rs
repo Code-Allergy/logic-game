@@ -549,3 +549,33 @@ fn undo_cost_on_cpu16() {
          next frame {next_frame:?}"
     );
 }
+
+#[test]
+fn a_workspace_opened_unsaved_has_nothing_to_undo_and_stays_unsaved() {
+    let mut app = app();
+    let workspace = demo("half_adder");
+    app.world_mut().write_message(LoadWorkspaceEvent {
+        name: workspace.root.name.clone(),
+        workspace: Arc::new(workspace),
+        read_only: false,
+        unsaved: true,
+    });
+    settle(&mut app);
+    assert!(dirty(&app));
+    assert_eq!(steps(&app), (0, 0), "opening is not an edit");
+    let loaded = root_doc(&mut app);
+    assert!(!loaded.nodes.is_empty());
+    undo(&mut app);
+    assert_eq!(root_doc(&mut app), loaded, "undo must not empty it");
+    assert!(dirty(&app));
+
+    // An edit and its undo: back at the opened circuit, still unsaved.
+    create_gate(&mut app, GateKind::Input { w: 1 }, "extra");
+    undo(&mut app);
+    assert_eq!(root_doc(&mut app), loaded);
+    assert!(dirty(&app));
+    app.world_mut()
+        .resource_mut::<WorkspaceRevision>()
+        .mark_saved();
+    assert!(!dirty(&app));
+}

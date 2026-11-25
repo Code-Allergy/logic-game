@@ -396,3 +396,43 @@ fn chips_and_tests_made_through_the_session_live_in_the_app() {
     assert!(e.contains("without the game"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn an_edit_of_only_the_tests_is_unsaved_and_can_be_undone() {
+    let (mut app, link) = app();
+    let (mut s, dir) = session(link, "app-tests-only");
+    let circuit = json!({"ops": [
+        {"add": [{"name": "A", "type": "Input"}, {"name": "Y", "type": "Output"}]},
+        {"wire": [["A", "Y"]]}
+    ]});
+    drive(&mut app, || s.edit_tool(object(circuit), None, false)).unwrap();
+    app.update();
+    app.world_mut()
+        .resource_mut::<WorkspaceRevision>()
+        .mark_saved();
+    let steps = app.world().resource::<UndoHistory>().undo_len();
+
+    let tests = json!({"ops": [{"tests": [
+        {"name": "wire", "table": {"inputs": ["A"], "outputs": ["Y"], "rows": [[0, 0], [1, 1]]}}
+    ]}]});
+    drive(&mut app, || s.edit_tool(object(tests), None, false)).unwrap();
+    app.update();
+    app.update();
+    assert_eq!(app.world().resource::<WorkspaceTests>().0.len(), 1);
+    assert!(
+        app.world().resource::<WorkspaceRevision>().is_dirty(),
+        "the new test is not saved yet"
+    );
+    assert_eq!(app.world().resource::<UndoHistory>().undo_len(), steps + 1);
+
+    app.world_mut().write_message(HistoryCommand::Undo);
+    app.update();
+    app.update();
+    assert!(app.world().resource::<WorkspaceTests>().0.is_empty());
+    assert!(!app.world().resource::<WorkspaceRevision>().is_dirty());
+    app.world_mut().write_message(HistoryCommand::Redo);
+    app.update();
+    app.update();
+    assert_eq!(app.world().resource::<WorkspaceTests>().0.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}

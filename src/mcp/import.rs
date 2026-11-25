@@ -214,6 +214,12 @@ pub fn add_as_chips(
         ));
     }
 
+    // The imported circuits are wired for one another's new ports: only
+    // the placements the workspace already had follow a replaced chip.
+    let incoming: HashSet<Uuid> = circuits
+        .iter()
+        .map(|doc| remap.get(&doc.id).copied().unwrap_or(doc.id))
+        .collect();
     let mut done = Vec::new();
     for doc in circuits {
         let mut doc = doc.clone();
@@ -240,7 +246,7 @@ pub fn add_as_chips(
         match replaced.and_then(|id| ws.definitions.get(&id).cloned()) {
             Some(old) => {
                 doc.revision = old.revision + 1;
-                let dropped = batch::rebind_instances(ws, &old, &doc);
+                let dropped = batch::rebind_instances_except(ws, &old, &doc, &incoming);
                 ws.definitions.insert(doc.id, Arc::new(doc));
                 done.push(line);
                 done.extend(dropped.into_iter().map(|d| format!("  dropped wire {d}")));

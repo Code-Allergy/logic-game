@@ -513,6 +513,17 @@ pub fn rebind_instances(
     old: &CircuitDocument,
     new: &CircuitDocument,
 ) -> Vec<String> {
+    rebind_instances_except(ws, old, new, &HashSet::new())
+}
+
+/// [`rebind_instances`], leaving the circuits `wired` alone: their wires
+/// were made for the new ports already.
+pub fn rebind_instances_except(
+    ws: &mut WorkspaceDocument,
+    old: &CircuitDocument,
+    new: &CircuitDocument,
+    wired: &HashSet<Uuid>,
+) -> Vec<String> {
     /// Ports as `(label, width)`.
     type Ports = Vec<(String, u8)>;
     let ports = |doc: &CircuitDocument| -> (Ports, Ports) {
@@ -594,9 +605,12 @@ pub fn rebind_instances(
         doc.wires = wires;
         true
     };
-    fix(&mut ws.root);
+    if !wired.contains(&ws.root.id) {
+        fix(&mut ws.root);
+    }
     for def in ws.definitions.values_mut() {
         if def.id != chip
+            && !wired.contains(&def.id)
             && def.nodes.iter().any(
                 |n| matches!(n.kind, GateKind::SubCircuit { definition } if definition == chip),
             )

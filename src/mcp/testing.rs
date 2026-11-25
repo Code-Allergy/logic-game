@@ -162,6 +162,36 @@ fn equivalent(ws: &WorkspaceDocument, body: &Value) -> Result<Equivalent, String
     })
 }
 
+/// Both circuits of an `equivalent` test have the same ports. Checked
+/// when the test is stored and again whenever it runs: either circuit
+/// may have been edited since, and comparing only the ports they still
+/// share would pass a chip that lost an output.
+fn same_ports(
+    ws: &WorkspaceDocument,
+    e: &Equivalent,
+    inputs: &[Port],
+    outputs: &[Port],
+) -> Result<(), String> {
+    let other = ports(circuit_at(ws, e.to));
+    if (inputs, outputs) == (other.0.as_slice(), other.1.as_slice()) {
+        return Ok(());
+    }
+    let list = |p: &[Port]| {
+        p.iter()
+            .map(|p| format!("{}[{}]", p.name, p.w))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    Err(format!(
+        "the ports differ: this chip has in {} | out {}; \"{}\" has in {} | out {}",
+        list(inputs),
+        list(outputs),
+        e.to_name,
+        list(&other.0),
+        list(&other.1)
+    ))
+}
+
 /// Check that `test` can run on the circuit at `place`: its shape, and
 /// the ports and chips it names. Nothing is simulated.
 pub fn validate(ws: &WorkspaceDocument, place: Place, test: &Value) -> Result<(), String> {
@@ -172,25 +202,7 @@ pub fn validate(ws: &WorkspaceDocument, place: Place, test: &Value) -> Result<()
         match kind {
             "equivalent" => {
                 let e = equivalent(ws, body)?;
-                let other = ports(circuit_at(ws, e.to));
-                if (inputs.clone(), outputs.clone()) != other {
-                    let list = |p: &[Port]| {
-                        p.iter()
-                            .map(|p| format!("{}[{}]", p.name, p.w))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    };
-                    return Err(format!(
-                        "the ports differ: this chip has in {} | out {}; \"{}\" has in {} | \
-                         out {}",
-                        list(&inputs),
-                        list(&outputs),
-                        e.to_name,
-                        list(&other.0),
-                        list(&other.1)
-                    ));
-                }
-                Ok(())
+                same_ports(ws, &e, &inputs, &outputs)
             }
             "script" => match body {
                 Value::Object(script) if script.get("steps").is_some_and(Value::is_array) => Ok(()),
@@ -305,6 +317,7 @@ pub fn run_test(ws: &WorkspaceDocument, place: Place, test: &Value) -> Result<u6
     match kind {
         "equivalent" => {
             let e = equivalent(ws, body)?;
+            same_ports(ws, &e, &inputs, &outputs)?;
             let mut a = fresh_sim(&rooted_ws)?;
             let mut b =
                 fresh_sim(&rooted(ws, e.to)).map_err(|err| format!("\"{}\": {err}", e.to_name))?;

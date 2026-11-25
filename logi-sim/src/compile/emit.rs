@@ -62,12 +62,19 @@ struct Sub {
     outs: Vec<u32>,
 }
 
+/// A partial table (`Replacement::partial`) closed a cycle of
+/// instructions: the design must be emitted without partial tables.
+pub(super) struct TableCycle;
+
+/// `partial_tables`: whether instances may run as partial tables. With
+/// them the result is `Err` when one closed a cycle; without, always `Ok`.
 pub(super) fn emit(
     mut e: Elab<'_>,
     opts: &Options,
     analysis: &Analysis,
+    partial_tables: bool,
     mut pass_done: impl FnMut(super::Pass),
-) -> Program {
+) -> Result<Program, TableCycle> {
     let design = e.design;
     let n = e.n_nets as usize;
 
@@ -90,7 +97,10 @@ pub(super) fn emit(
             let Some(info) = analysis.get(e.insts[i].def) else {
                 continue;
             };
-            if !info.matched() || (info.is_table() && !opts.tables) {
+            if !info.matched()
+                || (info.is_table() && !opts.tables)
+                || (info.is_partial_table() && !partial_tables)
+            {
                 continue;
             }
             let pdef = &design.defs[e.insts[p as usize].def];
@@ -347,6 +357,14 @@ pub(super) fn emit(
         }
     }
 
+    // A partial table reads ports its gates do not: the loop check passed
+    // on the gates, so only here can such a read close a cycle.
+    if subs.iter().any(|s| s.info.is_partial_table())
+        && try_levelize(&em.ops, &em.instrs, em.widths.len()).is_none()
+    {
+        return Err(TableCycle);
+    }
+
     // ── Simplify ───────────────────────────────────────────────────────────
     if opts.const_fold || opts.alias || opts.cse || (opts.dce && !opts.debug) {
         let probe_slots: Vec<u32> = opts
@@ -598,7 +616,7 @@ pub(super) fn emit(
         add_shadows(&mut p, &e, &subs, &top, &pending);
     }
     pass_done(super::Pass::Renumber);
-    p
+    Ok(p)
 }
 
 /// Make the state key of each original state element held in a wider
@@ -1372,6 +1390,11 @@ fn lower_screen(
 /// its slot operands; 0 if none) and a topological order. Kahn's algorithm,
 /// iterative.
 pub(super) fn levelize(ops: &[Op], instrs: &[Instr], slots: usize) -> (Vec<u32>, Vec<u32>) {
+    try_levelize(ops, instrs, slots).expect("internal error: instruction cycle after loop check")
+}
+
+/// [`levelize`], or `None` when the instructions have a cycle.
+fn try_levelize(ops: &[Op], instrs: &[Instr], slots: usize) -> Option<(Vec<u32>, Vec<u32>)> {
     let n = instrs.len();
     let mut producer = vec![u32::MAX; slots];
     for (k, ins) in instrs.iter().enumerate() {
@@ -1422,10 +1445,8 @@ pub(super) fn levelize(ops: &[Op], instrs: &[Instr], slots: usize) -> (Vec<u32>,
             }
         }
     }
-    assert_eq!(
-        order.len(),
-        n,
-        "internal error: instruction cycle after loop check"
-    );
-    (rank, order)
+    if order.len() != n {
+        return None;
+    }
+    Some((rank, order))
 }

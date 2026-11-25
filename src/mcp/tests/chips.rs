@@ -647,3 +647,40 @@ fn a_chip_that_is_not_placed_yet_is_built_too() {
         "{errors:?}"
     );
 }
+
+#[test]
+fn a_reimported_hierarchy_keeps_the_wires_of_its_new_ports() {
+    // A workspace with chips `child` (one input) and `top`, which uses it.
+    let (mut ws, _) = edit(
+        &empty(),
+        json!({"edits": [
+            {"circuit": "child", "ops": [
+                {"add": [{"name": "B", "type": "Input"}, {"name": "Y", "type": "Output"}]},
+                {"wire": [["B", "Y"]]}]},
+            {"circuit": "top", "ops": [
+                {"add": [{"name": "In", "type": "Input"}, {"name": "c", "use": "child"},
+                         {"name": "Out", "type": "Output"}]},
+                {"wire": [["In", "c.B"], ["c.Y", "Out"]]}]}
+        ]}),
+    );
+    // The design again: `child` has a new input before `B`, so `B` is now
+    // pin 1, and the new `top` is wired for that.
+    let (mut again, _) = edit(
+        &empty(),
+        json!({"edits": [
+            {"circuit": "child", "ops": [
+                {"add": [{"name": "A", "type": "Input"}, {"name": "B", "type": "Input"},
+                         {"name": "g", "type": "And"}, {"name": "Y", "type": "Output"}]},
+                {"wire": [["A", "g.a"], ["B", "g.b"], ["g", "Y"]]}]},
+            {"ops": [
+                {"add": [{"name": "In", "type": "Input"}, {"name": "In2", "type": "Input"},
+                         {"name": "c", "use": "child"}, {"name": "Out", "type": "Output"}]},
+                {"wire": [["In2", "c.A"], ["In", "c.B"], ["c.Y", "Out"]]}]}
+        ]}),
+    );
+    again.root.name = "top".into();
+    let done = crate::mcp::import::add_as_chips(&mut ws, &again, true).unwrap();
+    assert!(!done.iter().any(|l| l.contains("dropped wire")), "{done:?}");
+    let top = ws.definitions.values().find(|d| d.name == "top").unwrap();
+    assert_eq!(top.wires, again.root.wires);
+}

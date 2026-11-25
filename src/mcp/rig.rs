@@ -57,7 +57,7 @@ use std::sync::Arc;
 
 use logi_sim::compile::{NodePath, Op, Options, Program, StateLoc};
 use logi_sim::netlist::{DefId, Design, NetId, NodeId, NodeKind};
-use logi_sim::sim::Sim;
+use logi_sim::sim::{Sim, StateSnapshot};
 use uuid::Uuid;
 
 use super::batch::{Names, Place, circuit_at, names_of};
@@ -185,6 +185,29 @@ enum Write {
     },
 }
 
+/// A [`Rig`]'s simulation at one moment ([`Rig::snapshot`]).
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub state: StateSnapshot,
+    /// The root inputs the logic had seen, and as last set.
+    settled: Vec<u64>,
+    staged: Vec<u64>,
+}
+
+/// Import `state` into `sim` and settle it with the inputs `settled`,
+/// leaving `staged` to reach the logic at the next tick (as
+/// [`Sim::set_input`] values do). `Sim::import_state` alone would settle
+/// with the staged inputs, a tick early.
+fn import(sim: &mut Sim, state: &StateSnapshot, settled: &[u64], staged: &[u64]) {
+    for (port, value) in settled.iter().enumerate() {
+        sim.set_input(port, *value);
+    }
+    sim.import_state(state);
+    for (port, value) in staged.iter().enumerate() {
+        sim.set_input(port, *value);
+    }
+}
+
 /// A private simulation of one circuit.
 pub struct Rig {
     /// The workspace with the circuit under test as its root.
@@ -197,8 +220,6 @@ pub struct Rig {
     probes: Vec<(Vec<NodeId>, NetId)>,
     /// Every net is readable (the fallback when probes do not suffice).
     debug: bool,
-    /// Inputs as last set, to carry over a recompile.
-    inputs: HashMap<String, u64>,
     names: HashMap<Uuid, Names>,
     /// Compiler options; the probes and `debug` the rig needs are added.
     options: Options,
@@ -269,7 +290,6 @@ impl Rig {
             sim,
             probes: Vec::new(),
             debug: false,
-            inputs: HashMap::new(),
             names: HashMap::new(),
             options,
             slot_keys: HashMap::new(),
@@ -333,8 +353,8 @@ impl Rig {
         self.sim.tick_count()
     }
 
-    /// Set a root input (seen by the logic at the next tick).
-    pub fn set(&mut self, name: &str, value: u64) -> Result<(), String> {
+    /// The root input `name`, if `value` fits it.
+    pub fn check_input(&self, name: &str, value: u64) -> Result<usize, String> {
         let ports = &self.sim.program().ports;
         let Some(port) = ports.input(name) else {
             let names: Vec<&str> = ports
@@ -353,8 +373,13 @@ impl Rig {
                 "{value} (0x{value:X}) does not fit input \"{name}\" ({width} bits)"
             ));
         }
+        Ok(port)
+    }
+
+    /// Set a root input (seen by the logic at the next tick).
+    pub fn set(&mut self, name: &str, value: u64) -> Result<(), String> {
+        let port = self.check_input(name, value)?;
         self.sim.set_input(port, value);
-        self.inputs.insert(name.to_string(), value);
         Ok(())
     }
 
@@ -371,12 +396,40 @@ impl Rig {
         self.sim.reset();
     }
 
-    pub fn snapshot(&self) -> logi_sim::sim::StateSnapshot {
-        self.sim.export_state()
+    /// The whole simulation: state, tick, and the root inputs (those the
+    /// logic has seen and those set since).
+    pub fn snapshot(&self) -> Snapshot {
+        let (settled, staged) = self.input_values();
+        Snapshot {
+            state: self.sim.export_state(),
+            settled,
+            staged,
+        }
     }
 
-    pub fn restore(&mut self, snapshot: &logi_sim::sim::StateSnapshot) {
-        self.sim.import_state(snapshot);
+    pub fn restore(&mut self, snapshot: &Snapshot) {
+        import(
+            &mut self.sim,
+            &snapshot.state,
+            &snapshot.settled,
+            &snapshot.staged,
+        );
+    }
+
+    /// The root inputs as of the last settle, and as last set.
+    fn input_values(&self) -> (Vec<u64>, Vec<u64>) {
+        let ports = 0..self.sim.program().ports.inputs.len();
+        (
+            ports.clone().map(|p| self.sim.settled_input(p)).collect(),
+            ports.map(|p| self.sim.input(p)).collect(),
+        )
+    }
+
+    /// Put `state` into the simulation, the root inputs keeping their
+    /// timing: one set since the last tick still waits for the next.
+    fn import_state(&mut self, state: &StateSnapshot) {
+        let (settled, staged) = self.input_values();
+        import(&mut self.sim, state, &settled, &staged);
     }
 
     fn names(&mut self, doc: &CircuitDocument) -> &Names {
@@ -684,12 +737,9 @@ impl Rig {
         };
         let program = compile(&self.ws, &self.design, &self.map, &options)?;
         let mut sim = Sim::try_new(Arc::new(program)).map_err(|e| e.0)?;
-        for (name, value) in &self.inputs {
-            if let Some(port) = sim.program().ports.input(name) {
-                sim.set_input(port, *value);
-            }
-        }
-        sim.import_state(&state);
+        // The same design: the same root inputs, in the same order.
+        let (settled, staged) = self.input_values();
+        import(&mut sim, &state, &settled, &staged);
         self.sim = sim;
         self.index_keys();
         Ok(())
@@ -769,7 +819,7 @@ impl Rig {
             return Err("that memory holds no state in this simulation".into());
         };
         memfile::place(words, memory.addr_bits, load)?;
-        self.sim.import_state(&state);
+        self.import_state(&state);
         Ok(())
     }
 }

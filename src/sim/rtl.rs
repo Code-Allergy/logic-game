@@ -199,7 +199,9 @@ pub fn import_yosys_json(text: &str, options: &ImportOptions) -> Result<Import, 
         let module = &modules[m];
         let mut children: Vec<&str> = cells(module)
             .filter_map(|(_, c)| c.get("type").and_then(Value::as_str))
-            .filter(|t| !t.starts_with('$') && modules.contains_key(*t))
+            // A module of the file, whatever its name: Yosys names the
+            // module of a parametrized instance `$paramod...`.
+            .filter(|t| modules.contains_key(*t))
             .map(|t| modules.get_key_value(t).unwrap().0.as_str())
             .collect();
         children.reverse();
@@ -816,7 +818,7 @@ impl ModuleBuilder<'_> {
                 }
                 self.xs += c.xs.get();
             }
-            t if t.starts_with('$') => {
+            t if t.starts_with('$') && !self.modules.contains_key(t) => {
                 if let Some(why) = arith::refusal(t).or_else(|| state::refusal(t)) {
                     return err(format!("cell type {t} is not supported: {why}"));
                 }

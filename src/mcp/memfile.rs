@@ -176,15 +176,17 @@ fn hex_words(text: &str) -> Result<Vec<u64>, String> {
 /// `contents` as far as needed).
 pub fn place(contents: &mut Vec<u64>, addr_bits: u8, load: &Load) -> Result<(), String> {
     let size = 1usize << addr_bits;
-    let end = load.at + load.words.len();
-    if end > size {
-        return Err(format!(
-            "{} words at {} end at {end}, past the memory's {size} words ({addr_bits} address \
-             bits)",
-            load.words.len(),
-            load.at
-        ));
-    }
+    let end = load
+        .at
+        .checked_add(load.words.len())
+        .filter(|end| *end <= size)
+        .ok_or_else(|| {
+            format!(
+                "{} words at {} end past the memory's {size} words ({addr_bits} address bits)",
+                load.words.len(),
+                load.at
+            )
+        })?;
     if contents.len() < end {
         contents.resize(end, 0);
     }
