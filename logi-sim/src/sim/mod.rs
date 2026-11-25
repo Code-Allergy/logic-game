@@ -1670,10 +1670,11 @@ impl Sim {
         self.last = self.full_run();
         #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
         {
-            let had = self.jit.is_some();
-            self.jit = jit;
-            if had && self.jit.is_none() {
-                self.jit = self.compile_jit().ok().map(Arc::new);
+            // Keep the backend the caller has now: native code (the stashed
+            // code, or compiled again) only when it runs native code, so a
+            // `install_jit(None)` since the ROM write stays in effect.
+            if self.jit.is_some() {
+                self.jit = jit.or_else(|| self.compile_jit().ok().map(Arc::new));
             }
         }
     }
@@ -1882,6 +1883,7 @@ fn check_body(
                 Op::Sext if !(1..=64).contains(&i.b) => return bad(format!("bad sext in {i:?}")),
                 Op::Shr if i.b >= 64 => return bad(format!("bad shift in {i:?}")),
                 Op::Concat if i.c >= 64 => return bad(format!("bad shift in {i:?}")),
+                Op::Shl if i.b >= 64 || i.c >= 64 => return bad(format!("bad shift in {i:?}")),
                 Op::AddCarry if imm > 64 => return bad(format!("bad width in {i:?}")),
                 _ => {}
             }
