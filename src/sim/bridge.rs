@@ -224,10 +224,8 @@ impl SimBridge {
             // Feature `jit`: the Cranelift backend, tiered (logi-sim #117).
             SimRuntime::Threaded => Runtime::Threaded(Engine::spawn_with(
                 Options::debug(),
-                logi_sim::sim::SimOptions {
-                    jit: cfg!(feature = "jit"),
-                    ..Default::default()
-                },
+                // The JIT and adaptive specialization (`SimOptions::spec`).
+                logi_sim::sim::SimOptions::interactive(),
             )),
             #[cfg(target_arch = "wasm32")]
             SimRuntime::Threaded => Runtime::Local {
