@@ -152,13 +152,30 @@ fn main() -> Result<(), String> {
             start.elapsed().as_secs_f64(),
             describe(&program)
         );
-        let jit = SimOptions::jit();
+        // `SUPERSTEP_TICKS` and `SUPERSTEP_CHUNK` override the superstep's
+        // length and chunk size (for sweeps).
+        let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
+        let jit = SimOptions {
+            superstep_ticks: env("SUPERSTEP_TICKS")
+                .unwrap_or(SimOptions::default().superstep_ticks),
+            superstep_chunk: env("SUPERSTEP_CHUNK")
+                .map_or(SimOptions::default().superstep_chunk, |c| c as usize),
+            ..SimOptions::jit()
+        };
         let no_guard = |o: &SimOptions| SimOptions {
             guard: false,
             ..o.clone()
         };
-        let runs: [(&str, SimOptions, bool); 12] = [
+        let runs: [(&str, SimOptions, bool); 13] = [
             ("JIT: run(n), variants + fusion", jit.clone(), true),
+            (
+                "JIT: run(n), no superstep",
+                SimOptions {
+                    superstep: false,
+                    ..jit.clone()
+                },
+                true,
+            ),
             ("JIT: run(n), no guards", no_guard(&jit), true),
             ("JIT: tick() loop, no guards", no_guard(&jit), false),
             (
@@ -242,8 +259,26 @@ fn main() -> Result<(), String> {
                 }
             }
             let rate = ticks as f64 / start.elapsed().as_secs_f64();
+            #[cfg(feature = "jit")]
+            let code = sim.jit_code().map_or(String::new(), |j| {
+                let sup = j.superstep().map_or(String::new(), |s| {
+                    let s = &s.info;
+                    format!(
+                        "; superstep of {} ticks: {} items, {} chunks, {} KB, {} of {} writes stored",
+                        s.ticks,
+                        s.items - s.dead,
+                        s.chunks,
+                        s.code_bytes / 1024,
+                        s.stores,
+                        s.writes
+                    )
+                });
+                format!(", {} KB{sup}", j.code_bytes / 1024)
+            });
+            #[cfg(not(feature = "jit"))]
+            let code = String::new();
             let jit_note = if jit_on {
-                format!(", JIT compiled in {built:.2} s")
+                format!(", JIT compiled in {built:.2} s{code}")
             } else {
                 String::new()
             };
@@ -304,6 +339,13 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
         ),
         ("JIT", SimOptions::jit()),
         ("JIT, no guards", no_guard(SimOptions::jit())),
+        (
+            "JIT, no superstep",
+            SimOptions {
+                superstep: false,
+                ..SimOptions::jit()
+            },
+        ),
     ];
     let mut sims: Vec<Sim> = configs
         .iter()
@@ -361,7 +403,11 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
     let mut t = 0;
     let mut n = 0u64;
     while t < short {
+        // 1 to 7 ticks, and every few batches up to 41 (supersteps).
         n = n * 5 % 7 + 1;
+        if t % 5 == 0 {
+            n = n * 6 - 1;
+        }
         for _ in 0..n {
             want.tick();
         }
@@ -376,7 +422,7 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
             }
         }
     }
-    println!("{short} ticks in batches of 1 to 7: the same state at every boundary");
+    println!("{short} ticks in batches of 1 to 41: the same state at every boundary");
     Ok(())
 }
 

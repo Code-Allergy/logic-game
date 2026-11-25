@@ -169,6 +169,21 @@ over one opcode. A tick allocates nothing.
   interpreted at once and native when the compile thread is done.
   `testkit::diff::check_jit` compares it with the interpreter every tick.
 
+- **Supersteps** (`sim/jit/superstep.rs`, `SimOptions::superstep`, JIT
+  only). Inside a `Sim::run`, after a first fused tick (which applies the
+  inputs) and single fused ticks up to phase 0, whole clock periods run
+  as one native call: the commits and fused settles of `L` ticks (or a
+  multiple, `SimOptions::superstep_ticks`) concatenated into one stream,
+  cut into chunk functions (`SimOptions::superstep_chunk` items, called
+  by one entry, with no callee-saved registers). Within a chunk, committed
+  state is forwarded into the next settle as SSA values, and a slot write
+  is stored only if a later chunk, a read after the guarded range that
+  wrote it, or something after the superstep (any commit's operands,
+  every state slot) reads it; values nothing reads are not computed. The
+  remaining ticks run as before. With `counters`, skipped guarded ranges
+  are counted in native code, so the counts are those of tick-by-tick
+  fused runs.
+
 ### `engine`: pacing, probes and edits
 
 - `EngineCore` owns the `Sim`: tick-rate pacing (`Rate`), single steps,
