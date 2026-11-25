@@ -231,6 +231,27 @@ impl SimOptions {
         }
     }
 
+    /// The options of an interactive engine ([`crate::engine::Engine`]):
+    /// the JIT, tiered by the engine, and with it adaptive state-keyed
+    /// specialization with an automatic plan ([`SpecOptions::default`]),
+    /// whose bodies the engine builds on its compile thread. Results are
+    /// those of the defaults; the threaded engine ran 25 to 45% faster on
+    /// the NES console and 25% on an MMC3 game once the bodies were in
+    /// (3.5 to 14 s into the run: the plan is sampled first, and meanwhile
+    /// the runtime runs without supersteps, an MMC3 game 20% slower for
+    /// about 10 s; see `docs/adaptive-spec.md`). Without the `jit` feature this is
+    /// [`SimOptions::default`]: the interpreter alone gains little, and
+    /// wasm has no compile thread (`LocalEngine` would stall a `run` for
+    /// the plan's build).
+    pub fn interactive() -> Self {
+        Self {
+            jit: cfg!(all(feature = "jit", not(target_arch = "wasm32"))),
+            spec: cfg!(all(feature = "jit", not(target_arch = "wasm32")))
+                .then(SpecOptions::default),
+            ..Self::default()
+        }
+    }
+
     /// The defaults with `threads` threads.
     pub fn threaded(threads: usize) -> Self {
         Self {

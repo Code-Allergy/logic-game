@@ -569,6 +569,63 @@ Measured first, then built what pays:
   `check_batches`. The doc's P8 test plan (side exits at every tick
   offset, a skipped key check) belongs to the keyed supersteps not built.
 
+### P7 as built (engine)
+
+- **Switch.** `SimOptions::spec` is the switch (`None` by default, so
+  library users and tests are unchanged). `SimOptions::interactive()` is
+  the game's setting: the JIT plus `SpecOptions::default()` where the `jit`
+  feature runs (native, not wasm); otherwise `SimOptions::default()`.
+  `src/sim/bridge.rs` uses it for the threaded engine (one line). The
+  engine honors any `SimOptions` with `spec` set; it forces
+  `inline_build` off for the `Sim`s it drives.
+- **Core.** `EngineCore::drive_spec(true)` (the threaded `Engine` sets it
+  when `spec` is on) means the caller builds. After each batch
+  `spec_jobs()` takes the `Sim`'s `spec_requests()` (only when its own
+  queue is empty), puts the plan first and hands out at most
+  `SPEC_INFLIGHT` (8) `SpecJob { revision, program, request }`; the rest
+  wait in the core, and the `Sim` bounds what it asks for by its caps.
+  `install_spec(revision, built)` installs between batches if the
+  revision still runs (and the `Sim` checks program, ROM generation and
+  room). `install` of a new program clears the queue and the in-flight
+  count: old results are dropped by revision.
+- **Order on the compile thread.** An edit first; then, once it is
+  compiled, the JIT compile of that program; then the plan; then bodies,
+  one at a time, polling for a newer edit between them (a plan build, up
+  to seconds, is not interrupted). Builds for any revision but the one
+  compiled last are dropped there. `Msg::Jitted` is now sent for every
+  compiled program (`None`: failed or skipped for a newer edit).
+- **Tiered programs.** `spec_jobs()` hands out nothing until the native
+  code is installed (or `jit_given_up` says it is not coming), so that
+  every body is built with its native unit; requests of a tiered `Sim` get
+  `set_native(true)`. Without it bodies built early would stay
+  interpreted inside a native program.
+- **`LocalEngine` / wasm.** Not driven: a `Sim` with `spec` builds inline
+  and one `run` stalls for the automatic plan's build (seconds). The
+  game's wasm branch does not set `spec`.
+- **Debug options.** `Options::debug()` (the game's) keeps every net
+  probeable, but fused ticks do not observe the slots between ticks, so
+  specialization applies and gains as much (below).
+- **Measured** (`examples/engine_spec.rs`: threaded engine, JIT, unlimited
+  rate, k ticks/s per 5 s interval, shared 4-core machine; spec off,
+  then on):
+
+  | | off | on, first intervals | on, steady | first body / third |
+  |---|---|---|---|---|
+  | NES console, default options | 2.4M | 2.06M, 2.49M | 3.0M to 3.5M (+30%) | 3.5 s (7.4M ticks) / 6.1 s |
+  | NES console, `Options::debug()` | 2.45M | 2.1M, 3.5M | 3.4M to 3.9M (+45%) | 3.6 s / 5.8 s |
+  | Blade Buster (MMC3) | 2.15M | 1.6M for 15 s | 2.4M to 2.9M (+25%) | 5.9 s (9.8M ticks) / 13.7 s |
+  | NES console, no JIT | 0.6M | 0.58M | 0.88M (+40%, noisy) | 7.5 s |
+
+  The first body is the plan (the sampling window plus its build);
+  "third" is the plan and two bodies. Until the plan arrives the runtime
+  runs without supersteps (a hooked `Sim`), hence the first intervals
+  (-20% on Blade Buster for 15 s); keyed supersteps (P8) are the fix.
+  After the review fix (one plan build in flight per program, the compile
+  thread keeps the newest plan only) the first and third install land
+  together: NES 3.2 s (7.1M ticks), Blade Buster 6.3 s (10.0M ticks).
+  Longest gap between tick-count updates (frame stalls): 10 to 40 ms with
+  spec off and 15 to 30 ms on, nothing at the install of the plan.
+
 ### Per fused tick (`Sim::run`, the path without a superstep)
 
 ```text
@@ -728,7 +785,7 @@ parallel (separate files), then P5b, P7, P8, P9.
 | P5a | per-body JIT units: `jit::compile_unit`, `JitUnit`, freeing (**done**) | new `sim/jit/unit.rs`, `sim/jit/mod.rs` (share emission) | P3 | sonnet |
 | P5b | adaptive tables: miss counters, hot detection, `spec_requests`/`build_spec`/`install_spec`, LRU eviction, caps, `spec_stats` (**done**) | `sim/spec.rs`, `sim/mod.rs` | P4, P5a | opus |
 | P6 | automatic plan: `spec::choose_plan(contexts, samples, opts) -> SpecPlan` (pure, the report's greedy + `prune_bits`), runtime sampling window (**done**; the window with P5b) | `compile/spec.rs` (pure part), `sim/spec.rs` | P1 (pure part: none) | sonnet |
-| P7 | engine integration: compile-thread builds, revision checks, `LocalEngine` inline | `engine/mod.rs`, `engine/tests.rs` | P5b | sonnet |
+| P7 | engine integration: compile-thread builds, revision checks, `LocalEngine` inline (**done**) | `engine/mod.rs`, `engine/tests.rs`, `examples/engine_spec.rs` | P5b | sonnet |
 | P8 | keyed supersteps with side exits; measure against P4's per-tick path (**measured**: not built; the superstep with a plan that keys nothing, and the keyed tick loop, **done**) | `sim/jit/superstep.rs`, `sim/mod.rs` | P4, superstep merged | opus |
 | P9 | benches and docs: `nes_bench` rows (spec on/off, hits, live bodies), `perf-metrics` row, `ARCHITECTURE.md`, `PROFILING.md`, tune defaults | `examples/nes_bench.rs`, `xtask/`, docs | P5b (P7 for the game) | haiku |
 
