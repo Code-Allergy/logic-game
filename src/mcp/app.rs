@@ -627,7 +627,18 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                   gates: Query<(Entity, &GateLabel, &GateType), RootItems>,
                   mut set: MessageWriter<SetInputValue>|
                   -> Result<String, String> {
-                // Inputs first, so a step in the same call sees them.
+                // Everything is checked before anything is changed: a
+                // request that is refused leaves the simulation alone.
+                if !matches!(
+                    action.as_str(),
+                    "run" | "pause" | "step" | "reset" | "status" | "rate" | "set"
+                ) {
+                    return Err(format!(
+                        "unknown action \"{action}\" (actions: run, pause, step, reset, \
+                         rate, set, status)"
+                    ));
+                }
+                let mut writes: Vec<(Entity, u64)> = Vec::new();
                 for (label, value) in &inputs {
                     let found: Vec<(Entity, u8)> = gates
                         .iter()
@@ -645,13 +656,14 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                     if *w < 64 && *value >> *w != 0 {
                         return Err(format!("{value} does not fit input \"{label}\" ({w} bits)"));
                     }
-                    set.write(SetInputValue {
-                        entity: *entity,
-                        value: *value,
-                    });
+                    writes.push((*entity, *value));
+                }
+                // Inputs first, so a step in the same call sees them.
+                for (entity, value) in writes {
+                    set.write(SetInputValue { entity, value });
                     // The simulation gets it now; the message keeps the
                     // part's own record in step.
-                    bridge.set_input(*entity, *value);
+                    bridge.set_input(entity, value);
                 }
                 if let Some(rate) = hz {
                     match rate {
@@ -670,13 +682,8 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                         bridge.step(ticks);
                     }
                     "reset" => bridge.reset(),
-                    "status" | "rate" | "set" => {}
-                    other => {
-                        return Err(format!(
-                            "unknown action \"{other}\" (actions: run, pause, step, reset, \
-                             rate, set, status)"
-                        ));
-                    }
+                    // Checked above.
+                    _ => {}
                 }
                 Ok(format!(
                     "{}, tick {}, rate {}\n",

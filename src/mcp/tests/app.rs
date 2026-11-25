@@ -500,3 +500,26 @@ fn a_save_names_the_session_chips_it_leaves_out() {
         ["loose"]
     );
 }
+
+#[test]
+fn a_refused_transport_request_changes_nothing() {
+    let (mut app, link) = app();
+    let (mut s, dir) = session(link, "app-transport-refused");
+    drive(&mut app, || s.edit_tool(object(counter()), None, false)).unwrap();
+    app.update();
+    app.update();
+    let transport = |s: &mut Session, command: Value| s.transport_tool(object(command));
+    // A good input before a bad one, and a good input with a bad action.
+    for command in [
+        json!({"action": "set", "inputs": {"En": 1, "Missing": 0}}),
+        json!({"action": "set", "inputs": {"En": 2}}),
+        json!({"action": "nonsense", "hz": 5, "inputs": {"En": 1}}),
+    ] {
+        drive(&mut app, || transport(&mut s, command.clone())).unwrap_err();
+        app.update();
+        app.update();
+        let state = drive(&mut app, || s.app_tool("state")).unwrap();
+        assert!(state.contains("in En=0"), "{command}: {state}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
