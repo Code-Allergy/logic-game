@@ -263,7 +263,7 @@
     },
     "tick.cpu16.default.run_ops": {
       "kind": "ops",
-      "value": 154
+      "value": 141
     },
     "tick.cpu16.editor.allocs": {
       "kind": "allocs",
@@ -275,7 +275,7 @@
     },
     "tick.cpu16.editor.run_ops": {
       "kind": "ops",
-      "value": 154
+      "value": 141
     },
     "tick.cpu16_rtl.default.allocs": {
       "kind": "allocs",
@@ -287,7 +287,7 @@
     },
     "tick.cpu16_rtl.default.run_ops": {
       "kind": "ops",
-      "value": 150
+      "value": 149
     },
     "tick.cpu16_rtl.editor.allocs": {
       "kind": "allocs",
@@ -299,7 +299,7 @@
     },
     "tick.cpu16_rtl.editor.run_ops": {
       "kind": "ops",
-      "value": 150
+      "value": 149
     },
     "tick.dag32_10k.default.allocs": {
       "kind": "allocs",
@@ -335,7 +335,7 @@
     },
     "tick.testkit_cpu.default.run_ops": {
       "kind": "ops",
-      "value": 32
+      "value": 29
     }
   }
 }
