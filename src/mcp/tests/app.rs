@@ -468,3 +468,35 @@ fn a_request_whose_caller_gave_up_is_not_served_later() {
     assert_ne!(app.world().resource::<ActiveCircuit>().name, "late");
     assert!(labels(&mut app).is_empty());
 }
+
+#[test]
+fn a_save_names_the_session_chips_it_leaves_out() {
+    use crate::sim::{CircuitDocument, DocNode, GateKind};
+    let chip = |name: &str| CircuitDocument::new(name);
+    let (placed, inner, loose) = (chip("placed"), chip("inner"), chip("loose"));
+    let other = chip("of another workspace");
+    let mut placed = placed;
+    placed.add(DocNode::new(
+        GateKind::SubCircuit {
+            definition: inner.id,
+        },
+        Vec2::ZERO,
+    ));
+    let mut root = CircuitDocument::new("root");
+    root.add(DocNode::new(
+        GateKind::SubCircuit {
+            definition: placed.id,
+        },
+        Vec2::ZERO,
+    ));
+    // The session made three chips; the library also has one it did not.
+    let session: std::collections::HashSet<_> = [placed.id, inner.id, loose.id].into();
+    let mut library = CircuitLibrary::default();
+    for def in [placed, inner, loose, other] {
+        library.definitions.insert(def.id, Arc::new(def));
+    }
+    assert_eq!(
+        crate::mcp::app::unplaced(&library, &root, &session),
+        ["loose"]
+    );
+}

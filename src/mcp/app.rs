@@ -33,10 +33,10 @@ use crate::editor::files::{OpenRequest, open_now};
 use crate::sim::history::{HistoryWorld, Snapshot};
 use crate::sim::source::parse_int_text;
 use crate::sim::{
-    ActiveCircuit, AuthoringFeedback, CircuitReader, CircuitView, GateKind, GateLabel, GateType,
-    GateValues, InputDrive, LoadWorkspaceEvent, RootItems, SaveWorkspaceEvent, SelectedGate,
-    SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, UndoHistory, WorkspaceDocument,
-    WorkspaceRevision, WorkspaceTests,
+    ActiveCircuit, AuthoringFeedback, CircuitDocument, CircuitReader, CircuitView, GateKind,
+    GateLabel, GateType, GateValues, InputDrive, LoadWorkspaceEvent, RootItems, SaveWorkspaceEvent,
+    SelectedGate, SetInputValue, SimBridge, SimDiagnostics, SimulationConfig, UndoHistory,
+    WorkspaceDocument, WorkspaceRevision, WorkspaceTests,
 };
 use crate::{GameState, sim::CircuitLibrary};
 
@@ -482,7 +482,44 @@ fn finish_save(world: &mut World, inbox: &mut McpInbox) {
         None if !dirty && renamed => Ok(format!("saved \"{name}\"")),
         None => Err("the editor did not save (is this the web build?)".to_string()),
     };
+    // The editor saves what the root reaches: say which of the session's
+    // chips that left out, so that the save does not pass for all of it.
+    let chips = inbox.chips.clone();
+    let left_out = world
+        .run_system_once(move |reader: CircuitReader, library: Res<CircuitLibrary>| {
+            unplaced(&library, &reader.root_document(), &chips)
+        })
+        .unwrap_or_default();
+    let result = result.map(|said| match left_out.as_slice() {
+        [] => said,
+        names => format!(
+            "{said}\nNOT saved: {} (not placed anywhere; the game saves the chips the \
+             circuit uses). Place them and save again to keep them.",
+            names
+                .iter()
+                .map(|n| format!("chip \"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    });
     let _ = pending.reply.send(result);
+}
+
+/// The names of the session's `chips` that `root` does not reach (and
+/// that no chip it reaches uses), sorted: a save leaves them out.
+pub(crate) fn unplaced(
+    library: &CircuitLibrary,
+    root: &CircuitDocument,
+    chips: &HashSet<Uuid>,
+) -> Vec<String> {
+    let reached = library.reachable_from(root);
+    let mut names: Vec<String> = chips
+        .iter()
+        .filter(|id| **id != root.id && !reached.contains_key(*id))
+        .filter_map(|id| library.get(*id).map(|def| def.name.clone()))
+        .collect();
+    names.sort();
+    names
 }
 
 fn read(world: &mut World, chips: &HashSet<Uuid>) -> Result<AppWorkspace, String> {
