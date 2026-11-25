@@ -18,6 +18,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -70,25 +71,42 @@ pub enum AppRequest {
 /// gesture, or a window that is not being drawn, holds it up).
 pub const APP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A request on its way to the app, and whether its caller gave up
+/// waiting: the app drops it then, or an edit the caller was told had
+/// failed would still be made once frames resume (and made twice when
+/// the caller tries again).
+struct Queued {
+    request: AppRequest,
+    abandoned: Arc<AtomicBool>,
+}
+
 /// The session's end: each call sends a request and waits for the app.
 pub struct ChannelLink {
-    requests: Sender<AppRequest>,
+    requests: Sender<Queued>,
     pub timeout: Duration,
 }
 
 impl ChannelLink {
     fn call<T>(&self, request: impl FnOnce(Reply<T>) -> AppRequest) -> Result<T, String> {
         let (reply, answer) = channel();
+        let abandoned = Arc::new(AtomicBool::new(false));
         self.requests
-            .send(request(reply))
+            .send(Queued {
+                request: request(reply),
+                abandoned: Arc::clone(&abandoned),
+            })
             .map_err(|_| "the game is not running any more".to_string())?;
         match answer.recv_timeout(self.timeout) {
             Ok(result) => result,
-            Err(_) => Err(format!(
-                "the game did not answer in {} s (a drag or a text edit in progress holds \
-                 requests back; so does a window that is not being drawn)",
-                self.timeout.as_secs()
-            )),
+            Err(_) => {
+                abandoned.store(true, Ordering::Relaxed);
+                Err(format!(
+                    "the game did not answer in {} s (a drag or a text edit in progress holds \
+                     requests back; so does a window that is not being drawn); nothing was \
+                     done",
+                    self.timeout.as_secs()
+                ))
+            }
         }
     }
 }
@@ -152,8 +170,8 @@ struct PendingStep {
 /// The app's end: the requests that came in and are waiting.
 #[derive(Resource)]
 pub struct McpInbox {
-    requests: Mutex<Receiver<AppRequest>>,
-    waiting: VecDeque<AppRequest>,
+    requests: Mutex<Receiver<Queued>>,
+    waiting: VecDeque<Queued>,
     saving: Option<PendingSave>,
     stepping: Option<PendingStep>,
     /// Chips that came through this link (an edit, an opened workspace).
@@ -238,10 +256,14 @@ pub fn serve_requests(world: &mut World) {
         inbox.settle -= 1;
     } else if !gesture(world) {
         while inbox.saving.is_none() && inbox.stepping.is_none() && inbox.settle == 0 {
-            let Some(request) = inbox.waiting.pop_front() else {
+            let Some(queued) = inbox.waiting.pop_front() else {
                 break;
             };
-            serve(world, &mut inbox, request);
+            // Its caller stopped waiting and was told so.
+            if queued.abandoned.load(Ordering::Relaxed) {
+                continue;
+            }
+            serve(world, &mut inbox, queued.request);
         }
     }
     world.insert_resource(inbox);

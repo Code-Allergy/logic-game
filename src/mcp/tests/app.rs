@@ -436,3 +436,35 @@ fn an_edit_of_only_the_tests_is_unsaved_and_can_be_undone() {
     assert_eq!(app.world().resource::<WorkspaceTests>().0.len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_request_whose_caller_gave_up_is_not_served_later() {
+    let (mut app, mut link) = app();
+    link.timeout = Duration::from_millis(20);
+    // A gesture holds requests back for longer than the caller waits.
+    app.world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+    let demo = (*catalog().unwrap().get("half_adder").unwrap().workspace).clone();
+    let e = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| link.open("late".into(), demo, false));
+        while !worker.is_finished() {
+            app.update();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker.join().unwrap().unwrap_err()
+    });
+    assert!(
+        e.contains("did not answer") && e.contains("nothing was done"),
+        "{e}"
+    );
+    // The gesture ends: the abandoned request must not open the workspace.
+    app.world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .release(MouseButton::Left);
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_ne!(app.world().resource::<ActiveCircuit>().name, "late");
+    assert!(labels(&mut app).is_empty());
+}
