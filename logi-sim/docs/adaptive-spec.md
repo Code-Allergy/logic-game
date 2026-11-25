@@ -243,10 +243,16 @@ Differences from the sketch above, which P5b builds on:
 - Measured (`spec_keys --bench`, greedy keys with bodies for the 64 most
   frequent keys per phase, JIT, spec on against the default JIT with
   supersteps; executed ops from a `counters` build): NES demo 739 -> 375
-  ops per tick; Blade Buster (MMC3, after 6M ticks) 805 -> 437. Speed:
-  see the P4 report numbers in the PR (the shared machine's spread is
-  large); 192 bodies take 1.5 to 1.9 MiB of native code (0.2 MiB
-  without), which is what P5b's caps are for.
+  ops per tick; Blade Buster (MMC3, after 6M ticks) 805 -> 437. Speed
+  (k ticks/s, median of 5 alternating rounds of 1M ticks, range in
+  brackets, on a shared 4-core machine): NES demo 3145 (2749..3338)
+  against 2246 (1856..2425), +40%; Blade Buster with 64 bodies per phase
+  1955 (1701..1970) against 1663 (1518..1971), +18%, with 16 per phase
+  (91% hit) 2761 (2616..2906) against 2105 (1970..2233), +31%. State
+  and memories equal after 6.5M and 11M ticks. 192 bodies take 1.5 to
+  1.9 MiB of native code (0.2 MiB without), 48 bodies 0.7 MiB: the
+  I-cache, not the op count, decides past a few dozen bodies, which is
+  what P5b's caps are for.
 
 ### Per fused tick (`Sim::run`, the path without a superstep)
 
