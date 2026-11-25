@@ -320,6 +320,9 @@ impl Reader<'_> {
             };
             let memory = self.state.rig.memory(&part)?;
             let load = memfile::read(&Value::Object(spec), memory.width)?;
+            // Checked now, so that a load that does not fit costs no
+            // simulation.
+            memfile::end(memory.addr_bits, &load)?;
             Ok(Step::Load { memory, load })
         } else if let Some(v) = take(&mut map, "store") {
             done(&map)?;
