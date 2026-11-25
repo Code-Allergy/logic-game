@@ -392,6 +392,11 @@ impl Layout {
 /// bodies, guards, and, when `folds` (the ROMs hold the program's
 /// contents), known-bits fused bodies (`options.known_bits`) and the
 /// specialized bodies of `options.spec`.
+/// Run indices specialized bodies leave free for the plain runs added
+/// after them: a full and a fused body per clock phase (at most 8 phases)
+/// and the program's own, with room to spare.
+const SPEC_RUN_RESERVE: usize = 64;
+
 fn build_layout(program: &Arc<Program>, options: &SimOptions, folds: bool) -> Layout {
     use crate::compile::{guard, phases, spec as cspec};
     let Layout {
@@ -452,8 +457,12 @@ fn build_layout(program: &Arc<Program>, options: &SimOptions, folds: bool) -> La
         };
         let phase_plan = plan.and_then(|p| p.phases.get(k)?.as_ref());
         if let (Some(pp), Some(cx)) = (phase_plan, cx.as_ref()) {
-            let mut add_spec =
-                |body: Body| (runs.len() < usize::from(u16::MAX)).then(|| add(runs, Some(body)));
+            // Leave room for the runs every later phase still adds (its
+            // full and fused bodies) under the u16 run index.
+            let mut add_spec = |body: Body| {
+                (runs.len() < usize::from(u16::MAX) - SPEC_RUN_RESERVE)
+                    .then(|| add(runs, Some(body)))
+            };
             let guard_spec = |body: Body| guard_fused(&body).unwrap_or(body);
             let ps = spec::PhaseSpec::build(program, cx, pp, f, &mut add_spec, &guard_spec);
             folded |= ps.is_some();
@@ -1142,7 +1151,7 @@ impl Sim {
     }
 
     /// The specialized runs, for telling layouts apart: per keyed phase,
-    /// its index, prefix, fallback and every key with its run.
+    /// its index, prefix, fallback, key fields and every key with its run.
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     fn spec_layout(&self) -> Vec<u64> {
         let mut out = Vec::new();
@@ -1150,6 +1159,9 @@ impl Sim {
             let Some(ps) = ps else { continue };
             out.extend([k as u64, ps.prefix.map_or(u64::MAX, u64::from)]);
             out.push(u64::from(ps.fallback));
+            let f = ps.field_words();
+            out.push(f.len() as u64);
+            out.extend(f);
             let e = ps.entries();
             out.push(e.len() as u64);
             for (key, run) in e {

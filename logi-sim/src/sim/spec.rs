@@ -90,6 +90,19 @@ pub(super) struct PhaseSpec {
     pub misses: u64,
 }
 
+impl PhaseSpec {
+    /// The key's fields as words (slot, mask per field), for telling run
+    /// layouts apart: bodies for the same keys but other fields assume
+    /// other bits.
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    pub(super) fn field_words(&self) -> Vec<u64> {
+        self.fields
+            .iter()
+            .flat_map(|f| [u64::from(f.slot), f.mask])
+            .collect()
+    }
+}
+
 /// What specialization did in a `Sim` ([`super::Sim::spec_stats`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpecStats {
