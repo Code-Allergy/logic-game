@@ -512,18 +512,30 @@ pub(crate) fn expected(spec: &Value, columns: &[Signal]) -> Result<Expected, Str
                 let mut row = blank();
                 let mut seen = false;
                 let mut position = 0;
+                // The column a `NAME:` without a value named: its value is
+                // the next token (`PPU:  0`, `A: 1F`).
+                let mut named: Option<usize> = None;
                 for token in &tokens {
                     // `A:1F` names its column.
                     if let Some((name, v)) = token.split_once(':')
                         && let Some(c) = column(name)
                     {
-                        // `PPU:  0` leaves its value to the next token.
-                        if !v.is_empty() {
+                        named = None;
+                        if v.is_empty() {
+                            named = Some(c);
+                        } else {
                             row[c] = Some(value(v).ok_or_else(|| {
                                 format!("{path}: line {}: \"{token}\" is not a value", n + 1)
                             })?);
                             seen = true;
                         }
+                        continue;
+                    }
+                    if let Some(c) = named.take() {
+                        row[c] = Some(value(token).ok_or_else(|| {
+                            format!("{path}: line {}: \"{token}\" is not a value", n + 1)
+                        })?);
+                        seen = true;
                         continue;
                     }
                     let target = match &positions {
