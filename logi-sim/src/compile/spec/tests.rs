@@ -14,7 +14,7 @@ use crate::testkit::{GenConfig, Rng, fixtures, generate};
 
 /// Every fused-run body of `p` with its tick residue: one per clock-phase
 /// variant, or the program's own.
-fn fused_bodies(p: &Program) -> Vec<(Body, Option<u64>)> {
+pub(super) fn fused_bodies(p: &Program) -> Vec<(Body, Option<u64>)> {
     let fuse = |b: Body| phases::prune(p, &b).unwrap_or(b);
     match p.phases.as_deref() {
         Some(ph) => ph
@@ -143,7 +143,7 @@ fn commit(p: &Program, body: &Body, slots: &mut [u64], mems: &mut [Vec<u64>]) {
 }
 
 /// The state slots of `p` (written by a commit).
-fn state_slots(p: &Program) -> Vec<u32> {
+pub(super) fn state_slots(p: &Program) -> Vec<u32> {
     let mut v: Vec<u32> = p
         .commits
         .iter()
@@ -159,15 +159,15 @@ fn state_slots(p: &Program) -> Vec<u32> {
 
 /// A machine state: slots and memories.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct State {
-    slots: Vec<u64>,
-    mems: Vec<Vec<u64>>,
+pub(super) struct State {
+    pub(super) slots: Vec<u64>,
+    pub(super) mems: Vec<Vec<u64>>,
 }
 
 /// A random state of `p`: inputs, state slots and RAM contents anything
 /// within their possible bits (what pokes and imports can set), the rest
 /// as a settle leaves it.
-fn random_state(p: &Program, sim: &mut Sim, possible: &[u64], rng: &mut Rng) -> State {
+pub(super) fn random_state(p: &Program, sim: &mut Sim, possible: &[u64], rng: &mut Rng) -> State {
     for port in 0..p.ports.inputs.len() {
         sim.set_input(port, rng.next_u64());
     }
@@ -200,7 +200,7 @@ fn random_state(p: &Program, sim: &mut Sim, possible: &[u64], rng: &mut Rng) -> 
 
 /// The state after one fused tick of `bodies` (each run in order over
 /// the slots, then the last one's commits).
-fn step(p: &Program, bodies: &[&Body], s: &State, tick: u64) -> State {
+pub(super) fn step(p: &Program, bodies: &[&Body], s: &State, tick: u64) -> State {
     let mut out = s.clone();
     for b in bodies {
         settle(p, b, &mut out.slots, &out.mems, tick);
@@ -210,7 +210,7 @@ fn step(p: &Program, bodies: &[&Body], s: &State, tick: u64) -> State {
 }
 
 /// What a commit's effect leaves observable: state slots and memories.
-fn observed(p: &Program, s: &State) -> (Vec<u64>, Vec<Vec<u64>>) {
+pub(super) fn observed(p: &Program, s: &State) -> (Vec<u64>, Vec<Vec<u64>>) {
     let st = state_slots(p)
         .iter()
         .map(|&x| s.slots[x as usize])
@@ -227,7 +227,7 @@ fn agrees(p: &Program, general: &Body, prefix: &Body, body: &Body, s: &State, ti
 }
 
 /// `s` with the key bits of `layout` set to `key`'s (state keys only).
-fn force(layout: &KeyLayout, key: u64, s: &State) -> State {
+pub(super) fn force(layout: &KeyLayout, key: u64, s: &State) -> State {
     let mut out = s.clone();
     for (slot, k) in layout.assume(key) {
         let x = &mut out.slots[slot as usize];
@@ -385,7 +385,7 @@ fn diff(a: &Body, b: &Body) -> String {
 /// written from an input (`ctl`), a 4-bit counter with a region flag, and
 /// a ROM word indexed by the counter. Bit 3 of `ctl` reaches only an
 /// output, so no fused body reads it.
-fn controlled() -> Design {
+pub(super) fn controlled() -> Design {
     let mut d = Design::new("top");
     let r = d.root;
     let mut b = d.builder(r);
@@ -747,4 +747,72 @@ fn a_long_clock_period_is_not_a_slot() {
         p.slot_count
     );
     check_design("clock 1000", &d, 6, 4);
+}
+
+/// `{y, k'b0}` cut to `w` bits (a zero-low concat: a `Shl`).
+fn shl_lit(
+    b: &mut crate::netlist::Builder<'_>,
+    y: crate::netlist::NetId,
+    k: u8,
+    w: u8,
+) -> crate::netlist::NetId {
+    let wy = b.width(y);
+    let lo = b.zero(k);
+    let keep = (w - k).min(wy);
+    let hi = if keep == wy { y } else { b.split(y, 0, keep) };
+    let r = b.merge(&[lo, hi]);
+    if keep + k < w { b.zext(r, w) } else { r }
+}
+
+/// Registers through a 3-stage barrel shifter (a `ShlV`) and literal
+/// shifts (`Shl`), with the amount and a mode in state: keys on the
+/// amount, the mode and the shifted words.
+fn shifter() -> Design {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let we = b.input("we", 1);
+    let din = b.input("din", 8);
+    let amt_in = b.input("amt", 3);
+    let one = b.one();
+    let x = b.register(we, din);
+    let v = b.register(one, amt_in);
+    let mode = b.register(we, amt_in);
+    let mut y = x;
+    for (bit, k) in [(0u8, 1u8), (1, 2), (2, 4)] {
+        let t = shl_lit(&mut b, y, k, 8);
+        let s = b.bit(v, bit);
+        y = b.mux(s, y, t);
+    }
+    let lit = shl_lit(&mut b, x, 3, 8);
+    let m = b.bit(mode, 0);
+    let pick = b.mux(m, y, lit);
+    let acc = b.register(one, pick);
+    let hi = shl_lit(&mut b, acc, 2, 8);
+    let out = b.register(one, hi);
+    b.output("acc", acc);
+    b.output("out", out);
+    d
+}
+
+/// `Shl` and `ShlV` (issue #117) through possible bits, known bits and
+/// demanded bits: specialized bodies stay exact on every key value.
+#[test]
+fn shift_ops_specialize_exactly() {
+    let d = shifter();
+    let p = compile(&d, &Options::default()).unwrap();
+    let has = |op: Op| p.blocks.iter().any(|b| b.op == op);
+    assert!(has(Op::Shl) && has(Op::ShlV), "{:?}", p.blocks);
+    // The shift amount `v` is read in full by the `ShlV`: its 3 bits are
+    // in the exact support.
+    let possible = possible_bits(&p);
+    let (body, phase) = fused_bodies(&p).remove(0);
+    let cx = SpecContext::new(&p, &body, &possible, phase).unwrap();
+    let supports: Vec<u64> = state_slots(&p)
+        .iter()
+        .map(|&s| cx.exact_support(s))
+        .collect();
+    assert!(supports.contains(&0b111), "{supports:?}");
+    let n = check_design("shifter", &d, 12, 8);
+    assert!(n > 0, "{n}");
 }
