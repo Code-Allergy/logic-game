@@ -477,6 +477,23 @@ fn named_options(options: &str) -> Options {
     match options {
         "default" => Options::default(),
         "editor" => Options::debug(),
+        // Cone tables (issue #117) on and off, for comparison.
+        "default-cones" => Options {
+            cone_tables: true,
+            ..Options::default()
+        },
+        "editor-cones" => Options {
+            cone_tables: true,
+            ..Options::debug()
+        },
+        "default-nocones" => Options {
+            cone_tables: false,
+            ..Options::default()
+        },
+        "editor-nocones" => Options {
+            cone_tables: false,
+            ..Options::debug()
+        },
         // Word lifting (issue #117) off, for comparison.
         "default-nolift" => Options {
             lift: false,
@@ -521,7 +538,7 @@ fn named_options(options: &str) -> Options {
             ..Options::unoptimized()
         },
         other => panic!(
-            "options {other:?}: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch, default-nowords, editor-nowords, default-nophases or editor-nophases"
+            "options {other:?}: default, editor, raw, default-nolift, editor-nolift, default-nomatch, editor-nomatch, default-nowords, editor-nowords, default-nophases, editor-nophases, default-cones, editor-cones, default-nocones or editor-nocones"
         ),
     }
 }

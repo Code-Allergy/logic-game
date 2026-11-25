@@ -11,6 +11,8 @@
 //! `--compare` runs the same ticks on the interpreter and on the JIT (each
 //! with variants and fusion) and requires every state element and every
 //! memory (the screen, RAMs, OAM, palette) to be the same at the end.
+//! `--cones` estimates K-input cone tables (issue #117) on the compiled
+//! program, and `--cone-tables` compiles with `Options::cone_tables`.
 //! `--blocks` reports where the ops of a tick are: each chip under the
 //! root (and inside large ones) compiled on its own, with its op mix. The
 //! settle is straight-line code that runs every op of its variant each
@@ -29,15 +31,18 @@ fn main() -> Result<(), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let compare = args.iter().any(|a| a == "--compare");
     let blocks = args.iter().any(|a| a == "--blocks");
+    let cones = args.iter().any(|a| a == "--cones");
+    // `--cone-tables`: compile with `Options::cone_tables`.
+    let cone_tables = args.iter().any(|a| a == "--cone-tables");
     // `--only <text>`: run only the configurations whose name contains it.
     let only = args.iter().position(|a| a == "--only").map(|k| {
         let v = args.get(k + 1).cloned().unwrap_or_default();
         args.drain(k..(k + 2).min(args.len()));
         v
     });
-    args.retain(|a| a != "--compare" && a != "--blocks");
+    args.retain(|a| a != "--compare" && a != "--blocks" && a != "--cones" && a != "--cone-tables");
     let folder = args.first().ok_or(
-        "usage: nes_bench <workspace folder> [--compare | --blocks] [--only <name>] [ticks]",
+        "usage: nes_bench <workspace folder> [--compare | --blocks | --cones] [--cone-tables] [--only <name>] [ticks]",
     )?;
     let ticks: u64 = args
         .get(1)
@@ -46,14 +51,37 @@ fn main() -> Result<(), String> {
     let ws = suite::read_workspace(Path::new(folder))?;
     let design = design_of(&ws)?;
     if compare {
-        return compare_jit(&design, ticks);
+        let options = Options {
+            cone_tables,
+            ..Options::default()
+        };
+        return compare_jit(&design, &options, ticks);
     }
     if blocks {
         return block_costs(&ws);
     }
+    if cones {
+        let options = Options {
+            cone_tables,
+            ..Options::default()
+        };
+        return cone_stats(&design, &options);
+    }
     for (name, options) in [
-        ("default", Options::default()),
-        ("debug (editor)", Options::debug()),
+        (
+            "default",
+            Options {
+                cone_tables,
+                ..Options::default()
+            },
+        ),
+        (
+            "debug (editor)",
+            Options {
+                cone_tables,
+                ..Options::debug()
+            },
+        ),
     ] {
         let start = Instant::now();
         let program = Arc::new(compile(&design, &options).map_err(|e| format!("{e:?}"))?);
@@ -166,7 +194,13 @@ fn main() -> Result<(), String> {
 }
 
 fn describe(p: &Program) -> String {
-    let base = p.work();
+    let rom: usize = p
+        .mems
+        .iter()
+        .filter(|m| !m.writable)
+        .map(|m| m.init.len())
+        .sum();
+    let base = format!("{} ({} ROM words)", p.work(), rom);
     match &p.phases {
         Some(ph) => {
             let per: Vec<String> = ph.variants.iter().map(|b| b.ops().to_string()).collect();
@@ -186,8 +220,12 @@ fn describe(p: &Program) -> String {
 /// first difference. Then a shorter run compared at every batch boundary:
 /// fused batches of 1 to 7 ticks (guards on, interpreter and JIT) against
 /// single ticks with guards off.
-fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), String> {
-    let program = Arc::new(compile(design, &Options::default()).map_err(|e| format!("{e:?}"))?);
+fn compare_jit(
+    design: &logi_sim::netlist::Design,
+    options: &Options,
+    ticks: u64,
+) -> Result<(), String> {
+    let program = Arc::new(compile(design, options).map_err(|e| format!("{e:?}"))?);
     let no_guard = |o: SimOptions| SimOptions { guard: false, ..o };
     let configs = [
         ("interpreter, no guards", no_guard(SimOptions::default())),
@@ -344,5 +382,72 @@ fn block_costs(ws: &gate_quest::sim::WorkspaceDocument) -> Result<(), String> {
         "\nroot glue: {} ops (the console's own decode and wiring, and what compiling blocks together saves or adds)",
         total.size.instructions as i64 - listed as i64
     );
+    Ok(())
+}
+
+/// Cone tabling estimates (issue #117): per K, for the unspecialized body
+/// and each clock-phase variant of the program as compiled (with
+/// `--cone-tables`, after the pass), the instructions the sinks need and
+/// what K-input table mapping of that body would leave, with every
+/// exposed slot a sink (a full settle) or only commits and outputs (a
+/// fused tick). Static counts: guarded regions the runtime skips count
+/// in full.
+fn cone_stats(design: &logi_sim::netlist::Design, options: &Options) -> Result<(), String> {
+    use logi_sim::compile::cones::{Cfg, stats};
+    let p = compile(design, options).map_err(|e| format!("{e:?}"))?;
+    let nph = p.phases.as_ref().map_or(0, |ph| ph.variants.len());
+    let name_of = |slot: u32| -> String {
+        let nets = p.debug.nets_in_slot(slot);
+        let Some((path, _)) = nets.first() else {
+            return "?".into();
+        };
+        let mut inst = p.debug.instance(path).unwrap_or(0);
+        let mut names = Vec::new();
+        loop {
+            names.push(
+                design.defs[p.debug.instances[inst as usize].def]
+                    .name
+                    .clone(),
+            );
+            match p.debug.instances[inst as usize].parent {
+                Some((q, _)) => inst = q,
+                None => break,
+            }
+        }
+        names.reverse();
+        names.join("/")
+    };
+    for k in [6, 8, 10, 12, 14] {
+        let cfg = Cfg {
+            k,
+            ..Cfg::default()
+        };
+        for fused in [false, true] {
+            let mut bodies: Vec<Option<usize>> = vec![None];
+            bodies.extend((0..nph).map(Some));
+            for b in bodies {
+                let st = stats(&p, b, fused, &cfg);
+                println!(
+                    "K={k:2} {:5} {:12} base {:5} mapped {:5} ({:+.1}%), {} tables, {} ops covered, {} words",
+                    if fused { "fused" } else { "full" },
+                    b.map_or("unspecialized".to_string(), |v| format!("variant {v}")),
+                    st.base,
+                    st.mapped,
+                    (st.mapped as f64 / st.base.max(1) as f64 - 1.0) * 100.0,
+                    st.tables,
+                    st.covered,
+                    st.words
+                );
+                if k == 12 && fused && b == Some(0) {
+                    for (ops, bits, idx, slot) in &st.top {
+                        println!(
+                            "    {ops:4} ops, {bits:2} bits, index {idx}: {}",
+                            name_of(*slot)
+                        );
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
