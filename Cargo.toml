@@ -31,6 +31,9 @@ mcp = ["dep:rmcp", "dep:tokio", "dep:axum"]
 # only), tiered: every edit runs interpreted at once and switches to native
 # code when it is compiled. Off by default for now.
 jit = ["logi-sim/jit"]
+# Deterministic work counters on the simulator (logi-sim feature
+# `counters`), for benchmarks that report executed ops.
+counters = ["logi-sim/counters"]
 
 [dependencies]
 logi-sim = { path = "logi-sim" }
