@@ -59,7 +59,7 @@
     },
     "program.cpu16.default.blocks": {
       "kind": "size",
-      "value": 53
+      "value": 54
     },
     "program.cpu16.default.commits": {
       "kind": "size",
@@ -67,7 +67,7 @@
     },
     "program.cpu16.default.instrs": {
       "kind": "size",
-      "value": 302
+      "value": 301
     },
     "program.cpu16.default.packed_lanes": {
       "kind": "size",
@@ -79,15 +79,15 @@
     },
     "program.cpu16.default.phase_ops": {
       "kind": "size",
-      "value": 265
+      "value": 264
     },
     "program.cpu16.default.slots": {
       "kind": "size",
-      "value": 392
+      "value": 391
     },
     "program.cpu16.editor.blocks": {
       "kind": "size",
-      "value": 63
+      "value": 64
     },
     "program.cpu16.editor.commits": {
       "kind": "size",
@@ -95,7 +95,7 @@
     },
     "program.cpu16.editor.instrs": {
       "kind": "size",
-      "value": 333
+      "value": 332
     },
     "program.cpu16.editor.packed_lanes": {
       "kind": "size",
@@ -107,11 +107,11 @@
     },
     "program.cpu16.editor.phase_ops": {
       "kind": "size",
-      "value": 296
+      "value": 295
     },
     "program.cpu16.editor.slots": {
       "kind": "size",
-      "value": 423
+      "value": 422
     },
     "program.cpu16_rtl.default.blocks": {
       "kind": "size",
@@ -123,7 +123,7 @@
     },
     "program.cpu16_rtl.default.instrs": {
       "kind": "size",
-      "value": 135
+      "value": 134
     },
     "program.cpu16_rtl.default.packed_lanes": {
       "kind": "size",
@@ -135,11 +135,11 @@
     },
     "program.cpu16_rtl.default.phase_ops": {
       "kind": "size",
-      "value": 150
+      "value": 149
     },
     "program.cpu16_rtl.default.slots": {
       "kind": "size",
-      "value": 169
+      "value": 168
     },
     "program.cpu16_rtl.editor.blocks": {
       "kind": "size",
@@ -151,7 +151,7 @@
     },
     "program.cpu16_rtl.editor.instrs": {
       "kind": "size",
-      "value": 137
+      "value": 136
     },
     "program.cpu16_rtl.editor.packed_lanes": {
       "kind": "size",
@@ -163,11 +163,11 @@
     },
     "program.cpu16_rtl.editor.phase_ops": {
       "kind": "size",
-      "value": 152
+      "value": 151
     },
     "program.cpu16_rtl.editor.slots": {
       "kind": "size",
-      "value": 171
+      "value": 170
     },
     "program.dag32_10k.default.blocks": {
       "kind": "size",
@@ -259,7 +259,7 @@
     },
     "tick.cpu16.default.ops": {
       "kind": "ops",
-      "value": 264
+      "value": 263
     },
     "tick.cpu16.default.run_ops": {
       "kind": "ops",
@@ -271,7 +271,7 @@
     },
     "tick.cpu16.editor.ops": {
       "kind": "ops",
-      "value": 295
+      "value": 294
     },
     "tick.cpu16.editor.run_ops": {
       "kind": "ops",
@@ -283,11 +283,11 @@
     },
     "tick.cpu16_rtl.default.ops": {
       "kind": "ops",
-      "value": 150
+      "value": 149
     },
     "tick.cpu16_rtl.default.run_ops": {
       "kind": "ops",
-      "value": 150
+      "value": 149
     },
     "tick.cpu16_rtl.editor.allocs": {
       "kind": "allocs",
@@ -295,11 +295,11 @@
     },
     "tick.cpu16_rtl.editor.ops": {
       "kind": "ops",
-      "value": 152
+      "value": 151
     },
     "tick.cpu16_rtl.editor.run_ops": {
       "kind": "ops",
-      "value": 150
+      "value": 149
     },
     "tick.dag32_10k.default.allocs": {
       "kind": "allocs",

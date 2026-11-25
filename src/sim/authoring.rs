@@ -154,6 +154,13 @@ impl AuthoringFeedback {
     }
 }
 
+/// How the last save went: what was said, as a success or a refusal.
+/// [`AuthoringFeedback`] holds only the words, the same field for both;
+/// whoever asked for a save and must report its outcome (the MCP server)
+/// reads this. `None` until a save is tried, and when one is asked for.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct SaveOutcome(pub Option<Result<String, String>>);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Components
 // ─────────────────────────────────────────────────────────────────────────────

@@ -828,6 +828,19 @@ fn expected_rows_are_read_strictly() {
     let out = script(&ws, run(json!({"file": log, "radix": 16})));
     assert!(!out.failed, "{}", out.text);
     assert!(out.text.contains("compared 2 rows with"), "{}", out.text);
+    // A name and its value may be apart (`A: 1`): the value is the name's,
+    // whatever the order of the recorded columns.
+    std::fs::write(&log, "B: 00 A: 0000\nB: 00  A: 0001\n").unwrap();
+    let out = script(&ws, run(json!({"file": log, "radix": 16})));
+    assert!(!out.failed, "{}", out.text);
+    assert!(out.text.contains("compared 2 rows with"), "{}", out.text);
+    std::fs::write(&log, "B: 00 A: 0007\n").unwrap();
+    let out = script(&ws, run(json!({"file": log, "radix": 16})));
+    assert!(
+        out.text.contains("A: expected 0x0007, got 0x0000"),
+        "{}",
+        out.text
+    );
     // A value that cannot be read is an error, not a column left unchecked.
     std::fs::write(&log, "A:GG B:00\n").unwrap();
     let e = script_error(&ws, run(json!({"file": log, "radix": 16})));

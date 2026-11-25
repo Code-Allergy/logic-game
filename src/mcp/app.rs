@@ -360,8 +360,12 @@ fn serve(world: &mut World, inbox: &mut McpInbox, request: AppRequest) {
                 .run_system_once(
                     move |active: Res<ActiveCircuit>,
                           mut feedback: ResMut<AuthoringFeedback>,
+                          mut outcome: Option<ResMut<crate::sim::SaveOutcome>>,
                           mut save: MessageWriter<SaveWorkspaceEvent>| {
                         feedback.message = None;
+                        if let Some(outcome) = outcome.as_mut() {
+                            outcome.0 = None;
+                        }
                         save.write(SaveWorkspaceEvent {
                             name: name.clone().unwrap_or_else(|| active.name.clone()),
                         });
@@ -460,7 +464,13 @@ fn finish_save(world: &mut World, inbox: &mut McpInbox) {
     let message = world
         .get_resource::<AuthoringFeedback>()
         .and_then(|f| f.message.clone());
-    if message.is_none() && pending.frames > 0 {
+    // What the save system says it did: the words alone do not tell a
+    // save from a refusal, and neither does a workspace that was clean
+    // before (a refused save leaves it clean).
+    let outcome = world
+        .get_resource::<crate::sim::SaveOutcome>()
+        .and_then(|o| o.0.clone());
+    if outcome.is_none() && message.is_none() && pending.frames > 0 {
         pending.frames -= 1;
         return;
     }
@@ -476,11 +486,14 @@ fn finish_save(world: &mut World, inbox: &mut McpInbox) {
         .requested
         .as_ref()
         .is_none_or(|r| r.trim().eq_ignore_ascii_case(name.trim()));
-    let result = match message {
-        Some(message) if !dirty && renamed => Ok(message),
-        Some(message) => Err(message),
-        None if !dirty && renamed => Ok(format!("saved \"{name}\"")),
-        None => Err("the editor did not save (is this the web build?)".to_string()),
+    let result = match (outcome, message) {
+        (Some(outcome), _) => outcome,
+        // No outcome recorded (an app without the resource): go by what
+        // can be seen.
+        (None, Some(message)) if !dirty && renamed => Ok(message),
+        (None, Some(message)) => Err(message),
+        (None, None) if !dirty && renamed => Ok(format!("saved \"{name}\"")),
+        (None, None) => Err("the editor did not save (is this the web build?)".to_string()),
     };
     // The editor saves what the root reaches: say which of the session's
     // chips that left out, so that the save does not pass for all of it.
