@@ -45,8 +45,13 @@
 
 use std::sync::Mutex;
 
+mod superstep;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use superstep::MUTATION;
+pub use superstep::{JitSuper, Part, SuperFn, SuperInfo, SuperRef};
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::I64;
@@ -155,8 +160,12 @@ impl JitBody {
 /// ```
 pub struct JitProgram {
     pub(crate) bodies: Vec<Option<JitBody>>,
+    /// The superstep, if one was asked for and could be compiled.
+    pub(crate) superstep: Option<JitSuper>,
     /// Instructions compiled (packed words count one each).
     pub instrs: usize,
+    /// Bytes of native code, every function included.
+    pub code_bytes: usize,
     /// Which `Sim` layout this was compiled for (set by
     /// `Sim::compile_jit`, checked by `Sim::install_jit`).
     pub(crate) key: Option<RunKey>,
@@ -221,6 +230,22 @@ impl JitProgram {
     /// Compile `bodies` of `p`, which passed `Sim`'s `check` (so did every
     /// body).
     pub fn compile(p: &Program, bodies: &[BodyRef<'_>]) -> Result<Self, JitError> {
+        Self::compile_with(p, bodies, None)
+    }
+
+    /// The superstep, if compiled (see `superstep.rs`).
+    pub fn superstep(&self) -> Option<&JitSuper> {
+        self.superstep.as_ref()
+    }
+
+    /// [`JitProgram::compile`], plus a superstep over `bodies` (every body
+    /// it names must be compiled as well, without a `MemClear` commit;
+    /// otherwise no superstep is built).
+    pub fn compile_with(
+        p: &Program,
+        bodies: &[BodyRef<'_>],
+        superstep: Option<&SuperRef<'_>>,
+    ) -> Result<Self, JitError> {
         let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
         let mut flags = settings::builder();
         // The IR is already simplified (constant folding, CSE and DCE ran in
@@ -268,6 +293,7 @@ impl JitProgram {
         let mut ids: Vec<Option<Ids>> = Vec::with_capacity(bodies.len());
         let mut count = 0usize;
         let mut n = 0u32;
+        let (mut bytes, mut super_bytes) = (0usize, 0usize);
         for body in bodies {
             let items: usize = body.blocks.iter().map(|b| b.len as usize).sum();
             if !body.used || items > MAX_BODY {
@@ -328,6 +354,7 @@ impl JitProgram {
                     .map_err(|e| err(&e))?;
                 n += 1;
                 module.define_function(id, &mut ctx).map_err(|e| err(&e))?;
+                bytes += code_size(&ctx);
                 module.clear_context(&mut ctx);
                 settle.push(id);
             }
@@ -355,6 +382,7 @@ impl JitProgram {
                         .map_err(|e| err(&e))?;
                     n += 1;
                     module.define_function(id, &mut ctx).map_err(|e| err(&e))?;
+                    bytes += code_size(&ctx);
                     module.clear_context(&mut ctx);
                     out.push(id);
                 }
@@ -363,6 +391,119 @@ impl JitProgram {
                 None
             };
             ids.push(Some((settle, commit)));
+        }
+        // The superstep: only over bodies compiled with a native commit.
+        let mut sup = None;
+        if let Some(s) = superstep {
+            let ok = s.parts.iter().all(|part| {
+                let (Part::Commit { body } | Part::Settle { body, .. }) = *part;
+                matches!(ids.get(body), Some(Some((_, Some(_)))))
+            });
+            if ok {
+                let st = superstep::stream(bodies, s);
+                let plan = superstep::plan(p, bodies, &st, s.live_end);
+                let mut skip_base = Vec::with_capacity(bodies.len());
+                let mut skip_len = 0;
+                for b in bodies {
+                    skip_base.push(skip_len);
+                    skip_len += b.guards.len();
+                }
+                let (mut w, mut dead, mut items) = (0usize, 0usize, 0usize);
+                let mut fns = Vec::with_capacity(st.chunks.len());
+                let mut continues = 0;
+                for ch in &st.chunks {
+                    items += ch.len();
+                    // No callee-saved registers: the chunks are only called
+                    // by the entry below, which keeps nothing in registers.
+                    ctx.func.signature.call_conv = cranelift_codegen::isa::CallConv::Winch;
+                    ctx.func.signature.params.clear();
+                    ctx.func.signature.params.extend([
+                        AbiParam::new(ptr),
+                        AbiParam::new(ptr),
+                        AbiParam::new(I64),
+                        AbiParam::new(ptr),
+                        AbiParam::new(ptr),
+                    ]);
+                    ctx.func.name = UserFuncName::user(0, n);
+                    dead += superstep::build_chunk(
+                        module.target_config(),
+                        &mut ctx.func,
+                        &mut fctx,
+                        p,
+                        bodies,
+                        &st,
+                        ch,
+                        &plan,
+                        &mut w,
+                        &skip_base,
+                        continues,
+                    );
+                    continues = ch.last().map_or(0, |&(_, seg)| seg);
+                    let id = module
+                        .declare_function(&format!("super{n}"), Linkage::Local, &ctx.func.signature)
+                        .map_err(|e| err(&e))?;
+                    n += 1;
+                    module.define_function(id, &mut ctx).map_err(|e| err(&e))?;
+                    let size = code_size(&ctx);
+                    bytes += size;
+                    super_bytes += size;
+                    module.clear_context(&mut ctx);
+                    fns.push(id);
+                }
+                debug_assert_eq!(w, plan.store.len());
+                {
+                    // One entry (`SuperFn`) calling every chunk directly.
+                    let params = [
+                        AbiParam::new(ptr),
+                        AbiParam::new(ptr),
+                        AbiParam::new(I64),
+                        AbiParam::new(ptr),
+                        AbiParam::new(ptr),
+                    ];
+                    ctx.func.signature.params.extend(params);
+                    ctx.func.name = UserFuncName::user(0, n);
+                    let refs: Vec<_> = fns
+                        .iter()
+                        .map(|&id| module.declare_func_in_func(id, &mut ctx.func))
+                        .collect();
+                    {
+                        let cfg = module.target_config();
+                        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                        let blk = b.create_block();
+                        b.append_block_params_for_function_params(blk);
+                        b.switch_to_block(blk);
+                        b.seal_block(blk);
+                        let args = b.block_params(blk).to_vec();
+                        for r in refs {
+                            b.ins().call(r, &args);
+                        }
+                        b.ins().return_(&[]);
+                        b.finalize(cfg);
+                    }
+                    let id = module
+                        .declare_function(&format!("super{n}"), Linkage::Local, &ctx.func.signature)
+                        .map_err(|e| err(&e))?;
+                    module.define_function(id, &mut ctx).map_err(|e| err(&e))?;
+                    let size = code_size(&ctx);
+                    bytes += size;
+                    super_bytes += size;
+                    module.clear_context(&mut ctx);
+                    sup = Some((
+                        id,
+                        SuperInfo {
+                            ticks: s.ticks,
+                            chunks: fns.len(),
+                            skip_base,
+                            skip_len,
+                            items,
+                            dead,
+                            writes: plan.store.len(),
+                            stores: plan.store.iter().filter(|&&x| x).count(),
+                            code_bytes: super_bytes,
+                        },
+                    ));
+                }
+            }
         }
         module.finalize_definitions().map_err(|e| err(&e))?;
         let module = &*module;
@@ -383,13 +524,27 @@ impl JitProgram {
                 })
             })
             .collect();
+        let superstep = sup.map(|(id, info)| JitSuper {
+            // SAFETY: as above.
+            entry: unsafe {
+                std::mem::transmute::<*const u8, SuperFn>(module.get_finalized_function(id))
+            },
+            info,
+        });
         Ok(JitProgram {
             bodies,
+            superstep,
             instrs: count,
+            code_bytes: bytes,
             key: None,
             _module: Mutex::new(owned),
         })
     }
+}
+
+/// Bytes of machine code `ctx` holds after `define_function`.
+fn code_size(ctx: &cranelift_codegen::Context) -> usize {
+    ctx.compiled_code().map_or(0, |c| c.code_buffer().len())
 }
 
 /// One unit of a chunk: an instruction or a packed word.
@@ -479,6 +634,13 @@ struct Slots {
 }
 
 impl Slots {
+    fn new(base: Value, capacity: usize) -> Self {
+        Slots {
+            base,
+            vals: HashMap::with_capacity(capacity),
+        }
+    }
+
     fn addr(&self, b: &mut FunctionBuilder<'_>, slot: u32) -> (Value, i32) {
         let off = slot as u64 * 8;
         match i32::try_from(off) {
@@ -539,11 +701,7 @@ fn build_settle(
     b.seal_block(entry);
     let params = b.block_params(entry).to_vec();
     let (slots, mems, tick) = (params[0], params[1], params[2]);
-    let ptr_ty = b.func.dfg.value_type(mems);
-    let mut sl = Slots {
-        base: slots,
-        vals: HashMap::with_capacity(items.len() * 2),
-    };
+    let mut sl = Slots::new(slots, items.len() * 2);
     // Slots this chunk reads: a result computed in a guarded run is only
     // in the SSA cache until the run ends, so a later read in the chunk
     // loads it from its slot.
@@ -600,162 +758,12 @@ fn build_settle(
             Item::Instr { op, k } => {
                 let i = body.instrs[k as usize];
                 let m = body.imms[k as usize];
-                let (sa, sb, sc) = op.slot_operands();
-                let a = if sa { Some(sl.read(&mut b, i.a)) } else { None };
-                let bb = if sb { Some(sl.read(&mut b, i.b)) } else { None };
-                let c = if sc { Some(sl.read(&mut b, i.c)) } else { None };
-                let (a, bv, c) = (
-                    a.unwrap_or_else(|| b.ins().iconst(I64, 0)),
-                    bb.unwrap_or(slots),
-                    c.unwrap_or(slots),
-                );
-                let ins = &mut b;
-                let r = match op {
-                    Op::Copy => a,
-                    Op::Not => {
-                        let x = ins.ins().bnot(a);
-                        ins.ins().band_imm_u(x, m as i64)
-                    }
-                    Op::And => ins.ins().band(a, bv),
-                    Op::Or => ins.ins().bor(a, bv),
-                    Op::Xor => ins.ins().bxor(a, bv),
-                    Op::Nand => {
-                        let x = ins.ins().band(a, bv);
-                        let x = ins.ins().bnot(x);
-                        ins.ins().band_imm_u(x, m as i64)
-                    }
-                    Op::Nor => {
-                        let x = ins.ins().bor(a, bv);
-                        let x = ins.ins().bnot(x);
-                        ins.ins().band_imm_u(x, m as i64)
-                    }
-                    Op::Xnor => {
-                        let x = ins.ins().bxor(a, bv);
-                        let x = ins.ins().bnot(x);
-                        ins.ins().band_imm_u(x, m as i64)
-                    }
-                    Op::Mux => ins.ins().select(a, c, bv),
-                    Op::Switch => {
-                        let z = ins.ins().iconst(I64, 0);
-                        ins.ins().select(a, bv, z)
-                    }
-                    Op::AddSum => {
-                        let x = ins.ins().iadd(a, bv);
-                        let x = ins.ins().iadd(x, c);
-                        ins.ins().band_imm_u(x, m as i64)
-                    }
-                    Op::AddCarry => add_carry(ins, a, bv, c, m),
-                    Op::Eq => {
-                        let x = ins.ins().icmp(IntCC::Equal, a, bv);
-                        bool64(ins, x)
-                    }
-                    Op::LtU => {
-                        let x = ins.ins().icmp(IntCC::UnsignedLessThan, a, bv);
-                        bool64(ins, x)
-                    }
-                    Op::ReduceOr => {
-                        let x = ins.ins().icmp_imm_u(IntCC::NotEqual, a, 0);
-                        bool64(ins, x)
-                    }
-                    Op::ReduceAnd => {
-                        let x = ins.ins().icmp_imm_u(IntCC::Equal, a, m as i64);
-                        bool64(ins, x)
-                    }
-                    Op::ReduceXor => {
-                        let x = ins.ins().popcnt(a);
-                        ins.ins().band_imm_u(x, 1)
-                    }
-                    Op::Shr => {
-                        let x = ins.ins().ushr_imm_u(a, i64::from(i.b));
-                        ins.ins().band_imm_u(x, m as i64)
-                    }
-                    Op::Concat => {
-                        let x = ins.ins().ishl_imm_u(bv, i64::from(i.c));
-                        ins.ins().bor(a, x)
-                    }
-                    Op::Sext => {
-                        // `if (a >> (b - 1)) & 1 == 1 { (a | !mask(b)) & m } else { a }`
-                        let w = i.b;
-                        let bit = ins.ins().ushr_imm_u(a, i64::from(w - 1));
-                        let bit = ins.ins().band_imm_u(bit, 1);
-                        let ext = ins.ins().bor_imm_u(a, !mask(w as u8) as i64);
-                        let ext = ins.ins().band_imm_u(ext, m as i64);
-                        ins.ins().select(bit, ext, a)
-                    }
-                    Op::Clock => {
-                        // `((tick + c) % a) < b`
-                        let t = ins.ins().iadd_imm_u(tick, i64::from(i.c));
-                        let r = ins.ins().urem_imm_u(t, i64::from(i.a));
-                        let x = ins
-                            .ins()
-                            .icmp_imm_u(IntCC::UnsignedLessThan, r, i64::from(i.b));
-                        bool64(ins, x)
-                    }
-                    Op::MemRead => {
-                        let mp = *mem_ptrs.entry(i.b).or_insert_with(|| {
-                            ins.ins().load(
-                                ptr_ty,
-                                flags(),
-                                mems,
-                                (i.b as usize * size_of::<usize>()) as i32,
-                            )
-                        });
-                        let len_mask = (1u64 << p.mems[i.b as usize].addr_bits) - 1;
-                        let idx = ins.ins().band_imm_u(a, len_mask as i64);
-                        let off = ins.ins().ishl_imm_u(idx, 3);
-                        let off = if ptr_ty == I64 {
-                            off
-                        } else {
-                            ins.ins().ireduce(ptr_ty, off)
-                        };
-                        let addr = ins.ins().iadd(mp, off);
-                        ins.ins().load(I64, flags(), addr, 0)
-                    }
-                    Op::SrNext => {
-                        // `if b != 0 { 0 } else if a != 0 { 1 } else { c }`
-                        let one = ins.ins().iconst(I64, 1);
-                        let z = ins.ins().iconst(I64, 0);
-                        let x = ins.ins().select(a, one, c);
-                        ins.ins().select(bv, z, x)
-                    }
-                };
+                let r = emit_instr(&mut b, &mut sl, &mut mem_ptrs, p, (mems, tick, 0), op, i, m);
                 sl.write(&mut b, i.dst, r, store(i.dst));
             }
             Item::Pack { op, k } => {
                 let pk = p.packs[k as usize];
-                let n = arity(op);
-                let mut v = [slots; 3];
-                for (j, o) in operands(&pk).into_iter().enumerate().take(n) {
-                    v[j] = pack_operand(&mut b, &mut sl, p, o);
-                }
-                let [a, bv, c] = v;
-                let ins = &mut b;
-                let r = match op {
-                    Op::Copy => a,
-                    Op::Not => ins.ins().bnot(a),
-                    Op::And | Op::Switch => ins.ins().band(a, bv),
-                    Op::Or => ins.ins().bor(a, bv),
-                    Op::Xor => ins.ins().bxor(a, bv),
-                    Op::Nand => {
-                        let x = ins.ins().band(a, bv);
-                        ins.ins().bnot(x)
-                    }
-                    Op::Nor => {
-                        let x = ins.ins().bor(a, bv);
-                        ins.ins().bnot(x)
-                    }
-                    Op::Xnor => {
-                        let x = ins.ins().bxor(a, bv);
-                        ins.ins().bnot(x)
-                    }
-                    Op::Mux => {
-                        // `(a & c) | (!a & b)`
-                        let x = ins.ins().band(a, c);
-                        let y = ins.ins().band_not(bv, a);
-                        ins.ins().bor(x, y)
-                    }
-                    _ => unreachable!("checked: not a packable op"),
-                };
+                let r = emit_pack(&mut b, &mut sl, p, op, &pk);
                 sl.write(&mut b, pk.dst, r, store(pk.dst));
                 let s0 = pk.scatter_start as usize;
                 for x in &p.scatters[s0..s0 + pk.scatter_len as usize] {
@@ -839,78 +847,268 @@ fn build_commit(
     b.seal_block(entry);
     let params = b.block_params(entry).to_vec();
     let (slots, mems, writes) = (params[0], params[1], params[2]);
-    let ptr = b.func.dfg.value_type(mems);
     // Commits are sequential: a copy's load sees every store before it.
     // Values are not cached across a RAM write's control flow, so each
     // commit loads its own operands (the program has few RAM writes).
-    let mut sl = Slots {
-        base: slots,
-        vals: HashMap::new(),
-    };
+    let mut sl = Slots::new(slots, 0);
     for c in commits {
         match *c {
             Commit::Copy { state, next } => {
                 let v = sl.read(&mut b, next);
                 sl.write(&mut b, state, v, true);
             }
-            Commit::RamWrite {
-                mem,
-                we,
-                addr,
-                data,
-            }
-            | Commit::RamWriteMasked {
-                mem,
-                mask: we,
-                addr,
-                data,
-            } => {
-                let masked = matches!(c, Commit::RamWriteMasked { .. });
-                let en = sl.read(&mut b, we);
-                let a = sl.read(&mut b, addr);
-                let d = sl.read(&mut b, data);
-                let then = b.create_block();
-                let done = b.create_block();
-                b.ins().brif(en, then, &[], done, &[]);
-                b.switch_to_block(then);
-                b.seal_block(then);
-                let mp = b.ins().load(
-                    ptr,
-                    flags(),
-                    mems,
-                    (mem as usize * size_of::<usize>()) as i32,
-                );
-                let len_mask = (1u64 << p.mems[mem as usize].addr_bits) - 1;
-                let idx = b.ins().band_imm_u(a, len_mask as i64);
-                let off = b.ins().ishl_imm_u(idx, 3);
-                let off = if ptr == I64 {
-                    off
-                } else {
-                    b.ins().ireduce(ptr, off)
-                };
-                let at = b.ins().iadd(mp, off);
-                let word = if masked {
-                    // `(*m & !bits) | (data & bits)`
-                    let old = b.ins().load(I64, flags(), at, 0);
-                    let keep = b.ins().band_not(old, en);
-                    let new = b.ins().band(d, en);
-                    b.ins().bor(keep, new)
-                } else {
-                    d
-                };
-                b.ins().store(flags(), word, at, 0);
-                let wo = (mem as usize * 8) as i32;
-                let n = b.ins().load(I64, flags(), writes, wo);
-                let n = b.ins().iadd_imm_u(n, 1);
-                b.ins().store(flags(), n, writes, wo);
-                b.ins().jump(done, &[]);
-                b.switch_to_block(done);
-                b.seal_block(done);
-                // Slots are unchanged by a RAM write; the cache stays valid.
+            Commit::RamWrite { .. } | Commit::RamWriteMasked { .. } => {
+                emit_ram_write(&mut b, &mut sl, p, c, mems, writes);
             }
             Commit::MemClear { .. } => unreachable!("bodies with MemClear commit in Rust"),
         }
     }
     b.ins().return_(&[]);
     b.finalize(cfg);
+}
+
+/// The value of instruction `i` (opcode `op`, literal `m`) at tick
+/// `tick + tick_off`, reading its operands through the slot cache.
+#[allow(clippy::too_many_arguments)]
+fn emit_instr(
+    b: &mut FunctionBuilder<'_>,
+    sl: &mut Slots,
+    mem_ptrs: &mut HashMap<u32, Value>,
+    p: &Program,
+    (mems, tick, tick_off): (Value, Value, u64),
+    op: Op,
+    i: Instr,
+    m: u64,
+) -> Value {
+    let slots = sl.base;
+    let ptr_ty = b.func.dfg.value_type(mems);
+    let (sa, sb, sc) = op.slot_operands();
+    let a = if sa { Some(sl.read(b, i.a)) } else { None };
+    let bb = if sb { Some(sl.read(b, i.b)) } else { None };
+    let c = if sc { Some(sl.read(b, i.c)) } else { None };
+    let (a, bv, c) = (
+        a.unwrap_or_else(|| b.ins().iconst(I64, 0)),
+        bb.unwrap_or(slots),
+        c.unwrap_or(slots),
+    );
+    let ins = b;
+    match op {
+        Op::Copy => a,
+        Op::Not => {
+            let x = ins.ins().bnot(a);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::And => ins.ins().band(a, bv),
+        Op::Or => ins.ins().bor(a, bv),
+        Op::Xor => ins.ins().bxor(a, bv),
+        Op::Nand => {
+            let x = ins.ins().band(a, bv);
+            let x = ins.ins().bnot(x);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::Nor => {
+            let x = ins.ins().bor(a, bv);
+            let x = ins.ins().bnot(x);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::Xnor => {
+            let x = ins.ins().bxor(a, bv);
+            let x = ins.ins().bnot(x);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::Mux => ins.ins().select(a, c, bv),
+        Op::Switch => {
+            let z = ins.ins().iconst(I64, 0);
+            ins.ins().select(a, bv, z)
+        }
+        Op::AddSum => {
+            let x = ins.ins().iadd(a, bv);
+            let x = ins.ins().iadd(x, c);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::AddCarry => add_carry(ins, a, bv, c, m),
+        Op::Eq => {
+            let x = ins.ins().icmp(IntCC::Equal, a, bv);
+            bool64(ins, x)
+        }
+        Op::LtU => {
+            let x = ins.ins().icmp(IntCC::UnsignedLessThan, a, bv);
+            bool64(ins, x)
+        }
+        Op::ReduceOr => {
+            let x = ins.ins().icmp_imm_u(IntCC::NotEqual, a, 0);
+            bool64(ins, x)
+        }
+        Op::ReduceAnd => {
+            let x = ins.ins().icmp_imm_u(IntCC::Equal, a, m as i64);
+            bool64(ins, x)
+        }
+        Op::ReduceXor => {
+            let x = ins.ins().popcnt(a);
+            ins.ins().band_imm_u(x, 1)
+        }
+        Op::Shr => {
+            let x = ins.ins().ushr_imm_u(a, i64::from(i.b));
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::Concat => {
+            let x = ins.ins().ishl_imm_u(bv, i64::from(i.c));
+            ins.ins().bor(a, x)
+        }
+        Op::Sext => {
+            // `if (a >> (b - 1)) & 1 == 1 { (a | !mask(b)) & m } else { a }`
+            let w = i.b;
+            let bit = ins.ins().ushr_imm_u(a, i64::from(w - 1));
+            let bit = ins.ins().band_imm_u(bit, 1);
+            let ext = ins.ins().bor_imm_u(a, !mask(w as u8) as i64);
+            let ext = ins.ins().band_imm_u(ext, m as i64);
+            ins.ins().select(bit, ext, a)
+        }
+        Op::Clock => {
+            // `((tick + c) % a) < b`
+            let t = ins
+                .ins()
+                .iadd_imm_u(tick, (tick_off + u64::from(i.c)) as i64);
+            let r = ins.ins().urem_imm_u(t, i64::from(i.a));
+            let x = ins
+                .ins()
+                .icmp_imm_u(IntCC::UnsignedLessThan, r, i64::from(i.b));
+            bool64(ins, x)
+        }
+        Op::MemRead => {
+            let mp = *mem_ptrs.entry(i.b).or_insert_with(|| {
+                ins.ins().load(
+                    ptr_ty,
+                    flags(),
+                    mems,
+                    (i.b as usize * size_of::<usize>()) as i32,
+                )
+            });
+            let len_mask = (1u64 << p.mems[i.b as usize].addr_bits) - 1;
+            let idx = ins.ins().band_imm_u(a, len_mask as i64);
+            let off = ins.ins().ishl_imm_u(idx, 3);
+            let off = if ptr_ty == I64 {
+                off
+            } else {
+                ins.ins().ireduce(ptr_ty, off)
+            };
+            let addr = ins.ins().iadd(mp, off);
+            ins.ins().load(I64, flags(), addr, 0)
+        }
+        Op::SrNext => {
+            // `if b != 0 { 0 } else if a != 0 { 1 } else { c }`
+            let one = ins.ins().iconst(I64, 1);
+            let z = ins.ins().iconst(I64, 0);
+            let x = ins.ins().select(a, one, c);
+            ins.ins().select(bv, z, x)
+        }
+    }
+}
+
+/// The value of packed word `pk` (opcode `op`).
+fn emit_pack(b: &mut FunctionBuilder<'_>, sl: &mut Slots, p: &Program, op: Op, pk: &Pack) -> Value {
+    let slots = sl.base;
+    let n = arity(op);
+    let mut v = [slots; 3];
+    for (j, o) in operands(pk).into_iter().enumerate().take(n) {
+        v[j] = pack_operand(b, sl, p, o);
+    }
+    let [a, bv, c] = v;
+    let ins = b;
+    match op {
+        Op::Copy => a,
+        Op::Not => ins.ins().bnot(a),
+        Op::And | Op::Switch => ins.ins().band(a, bv),
+        Op::Or => ins.ins().bor(a, bv),
+        Op::Xor => ins.ins().bxor(a, bv),
+        Op::Nand => {
+            let x = ins.ins().band(a, bv);
+            ins.ins().bnot(x)
+        }
+        Op::Nor => {
+            let x = ins.ins().bor(a, bv);
+            ins.ins().bnot(x)
+        }
+        Op::Xnor => {
+            let x = ins.ins().bxor(a, bv);
+            ins.ins().bnot(x)
+        }
+        Op::Mux => {
+            // `(a & c) | (!a & b)`
+            let x = ins.ins().band(a, c);
+            let y = ins.ins().band_not(bv, a);
+            ins.ins().bor(x, y)
+        }
+        _ => unreachable!("checked: not a packable op"),
+    }
+}
+
+/// A RAM write commit (`RamWrite` or `RamWriteMasked`): slots are
+/// unchanged, so the slot cache stays valid.
+fn emit_ram_write(
+    b: &mut FunctionBuilder<'_>,
+    sl: &mut Slots,
+    p: &Program,
+    c: &Commit,
+    mems: Value,
+    writes: Value,
+) {
+    let ptr = b.func.dfg.value_type(mems);
+    let (mem, we, addr, data) = match *c {
+        Commit::RamWrite {
+            mem,
+            we,
+            addr,
+            data,
+        }
+        | Commit::RamWriteMasked {
+            mem,
+            mask: we,
+            addr,
+            data,
+        } => (mem, we, addr, data),
+        _ => unreachable!("a RAM write"),
+    };
+    let masked = matches!(c, Commit::RamWriteMasked { .. });
+    let en = sl.read(b, we);
+    let a = sl.read(b, addr);
+    let d = sl.read(b, data);
+    let then = b.create_block();
+    let done = b.create_block();
+    b.ins().brif(en, then, &[], done, &[]);
+    b.switch_to_block(then);
+    b.seal_block(then);
+    let mp = b.ins().load(
+        ptr,
+        flags(),
+        mems,
+        (mem as usize * size_of::<usize>()) as i32,
+    );
+    let len_mask = (1u64 << p.mems[mem as usize].addr_bits) - 1;
+    let idx = b.ins().band_imm_u(a, len_mask as i64);
+    let off = b.ins().ishl_imm_u(idx, 3);
+    let off = if ptr == I64 {
+        off
+    } else {
+        b.ins().ireduce(ptr, off)
+    };
+    let at = b.ins().iadd(mp, off);
+    let word = if masked {
+        // `(*m & !bits) | (data & bits)`
+        let old = b.ins().load(I64, flags(), at, 0);
+        let keep = b.ins().band_not(old, en);
+        let new = b.ins().band(d, en);
+        b.ins().bor(keep, new)
+    } else {
+        d
+    };
+    b.ins().store(flags(), word, at, 0);
+    let wo = (mem as usize * 8) as i32;
+    let n = b.ins().load(I64, flags(), writes, wo);
+    let n = b.ins().iadd_imm_u(n, 1);
+    b.ins().store(flags(), n, writes, wo);
+    b.ins().jump(done, &[]);
+    b.switch_to_block(done);
+    b.seal_block(done);
+    // Slots are unchanged by a RAM write; the cache stays valid.
 }

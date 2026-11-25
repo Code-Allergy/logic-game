@@ -332,6 +332,22 @@ pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
             guard_min: 1,
             ..on.clone()
         },
+        // Supersteps (JIT only) off, cut into small chunks (most values
+        // cross a chunk), and over several clock periods.
+        SimOptions {
+            superstep: false,
+            ..SimOptions::default()
+        },
+        SimOptions {
+            superstep_chunk: 5,
+            guard_min: 1,
+            ..SimOptions::default()
+        },
+        SimOptions {
+            superstep_ticks: 7,
+            superstep_chunk: 100_000,
+            ..SimOptions::default()
+        },
     ];
     // With the JIT compiled in, every variant also runs JIT-compiled.
     let jit = variants.iter().filter(|_| JIT).map(|o| SimOptions {
@@ -350,7 +366,9 @@ pub fn check_batches(p: &Arc<Program>, seed: u64) -> Result<(), String> {
         }
     }
     let mut rng = Rng::new(seed);
-    let lens = [1u64, 2, 3, 5, 8, 7, 1, 1, 16, 9, 4, 6, 11, 2, 3];
+    let lens = [
+        1u64, 2, 3, 5, 8, 7, 1, 1, 16, 9, 4, 6, 11, 2, 3, 25, 17, 40, 13, 2,
+    ];
     let mut saved = None;
     for (round, &n) in lens.iter().enumerate() {
         for (port, q) in p.ports.inputs.iter().enumerate() {
@@ -469,7 +487,9 @@ pub fn check_pair(
         }
         match rng.below(40) {
             0..=4 => {
-                let n = 1 + rng.below(20) as u64;
+                // Mostly short runs, some spanning several supersteps.
+                let most = if rng.below(4) == 0 { 60 } else { 20 };
+                let n = 1 + rng.below(most) as u64;
                 want.run(n);
                 got.run(n);
                 t += n;
