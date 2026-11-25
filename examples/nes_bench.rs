@@ -17,6 +17,14 @@
 //! `--press frame:input:frames,...` holds a root input (a `p1_*` button)
 //! at 1 from that frame for that many frames, in both; `--screen file`
 //! stores the last frame's screen memory.
+//! `--attribute [depth]` compiles the whole workspace once and attributes
+//! every op of its clock-phase variants to the block whose net it writes
+//! (a slot shared by a chip's port and its parent counts for the deeper
+//! one): ops per tick in context, and how many sit in guarded ranges that
+//! may be skipped.
+//! `--executed` (build with `--features counters`) counts the instructions
+//! the interpreter actually executes per tick in `run(n)` batches, with
+//! guards on and off: what guards skip at run time.
 //! `--blocks` reports where the ops of a tick are: each chip under the
 //! root (and inside large ones) compiled on its own, with its op mix. The
 //! settle is straight-line code that runs every op of its variant each
@@ -35,6 +43,12 @@ fn main() -> Result<(), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let compare = args.iter().any(|a| a == "--compare");
     let blocks = args.iter().any(|a| a == "--blocks");
+    let executed = args.iter().any(|a| a == "--executed");
+    let attribute = args.iter().position(|a| a == "--attribute").map(|k| {
+        let depth = args.get(k + 1).and_then(|d| d.parse::<usize>().ok());
+        args.drain(k..(k + 1 + usize::from(depth.is_some())).min(args.len()));
+        depth.unwrap_or(2)
+    });
     // `--only <text>`: run only the configurations whose name contains it.
     let only = args.iter().position(|a| a == "--only").map(|k| {
         let v = args.get(k + 1).cloned().unwrap_or_default();
@@ -55,7 +69,7 @@ fn main() -> Result<(), String> {
     };
     let presses = parse_presses(&value_of("--press").unwrap_or_default())?;
     let screen = value_of("--screen");
-    args.retain(|a| a != "--compare" && a != "--blocks");
+    args.retain(|a| a != "--compare" && a != "--blocks" && a != "--executed");
     let folder = args.first().ok_or(
         "usage: nes_bench <workspace folder> [--compare | --blocks | --against <workspace> [--press ...] [--screen file]] [--only <name>] [ticks]",
     )?;
@@ -70,6 +84,43 @@ fn main() -> Result<(), String> {
     }
     if blocks {
         return block_costs(&ws);
+    }
+    #[cfg(not(feature = "counters"))]
+    if executed {
+        return Err("--executed needs the counters: build with --features counters".into());
+    }
+    #[cfg(feature = "counters")]
+    if executed {
+        let program =
+            Arc::new(compile(&design, &Options::default()).map_err(|e| format!("{e:?}"))?);
+        for (what, guard) in [("guards on", true), ("guards off", false)] {
+            let mut sim = Sim::with_options(
+                Arc::clone(&program),
+                SimOptions {
+                    guard,
+                    guard_min: std::env::var("GUARD_MIN")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(SimOptions::default().guard_min),
+                    ..SimOptions::default()
+                },
+            );
+            sim.reset_counters();
+            sim.run(ticks);
+            let c = sim.counters();
+            if c.instrs == 0 {
+                return Err("no counts: build with --features counters".into());
+            }
+            println!(
+                "{what:10}: {:.1} instructions executed per tick ({} ticks)",
+                c.instrs as f64 / ticks as f64,
+                ticks
+            );
+        }
+        return Ok(());
+    }
+    if let Some(depth) = attribute {
+        return attribute_ops(&ws, depth);
     }
     if let Some(other) = against {
         let other = design_of(&suite::read_workspace(Path::new(&other))?)?;
@@ -483,4 +534,152 @@ fn parse_presses(text: &str) -> Result<Vec<(u64, String, u64)>, String> {
             }
         })
         .collect()
+}
+
+/// Ops of the compiled design attributed to instance paths (see `--attribute`).
+fn attribute_ops(ws: &gate_quest::sim::WorkspaceDocument, depth: usize) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    let (design, map) = gate_quest::sim::netlist::design_map_of(ws)?;
+    // (definition, node) -> the part's label in the workspace.
+    let mut labels: std::collections::HashMap<
+        (logi_sim::netlist::DefId, logi_sim::netlist::NodeId),
+        String,
+    > = std::collections::HashMap::new();
+    let circuits = std::iter::once(&ws.root).chain(ws.definitions.values().map(|d| &**d));
+    for c in circuits {
+        let (Some(&def), Some(nodes)) = (map.defs.get(&c.id), map.nodes.get(&c.id)) else {
+            continue;
+        };
+        for n in &c.nodes {
+            if let (Some(&node), Some(l)) = (nodes.get(&n.id), &n.label) {
+                labels.insert((def, node), l.clone());
+            }
+        }
+    }
+    let p = compile(&design, &Options::default()).map_err(|e| format!("{e:?}"))?;
+    let dm = &p.debug;
+    // Label path of every instance, cut to `depth` levels.
+    let label = |inst: u32| -> Vec<String> {
+        let mut names = Vec::new();
+        let mut i = inst;
+        while let Some((parent, node)) = dm.instances[i as usize].parent {
+            let def = dm.instances[parent as usize].def;
+            names.push(
+                labels
+                    .get(&(def, node))
+                    .cloned()
+                    .unwrap_or_else(|| "?".into()),
+            );
+            i = parent;
+        }
+        names.reverse();
+        names
+    };
+    let paths: Vec<Vec<String>> = (0..dm.instances.len() as u32).map(label).collect();
+    // The deepest instance that names each slot.
+    let mut owner: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for (inst, nets) in dm.net_slots.iter().enumerate() {
+        for (_, &slot) in nets {
+            let deeper = owner
+                .get(&slot)
+                .is_none_or(|&o| paths[o as usize].len() < paths[inst].len());
+            if deeper {
+                owner.insert(slot, inst as u32);
+            }
+        }
+    }
+    let Some(phases) = &p.phases else {
+        return Err("no clock-phase variants: this mode counts the variants' ops".into());
+    };
+    let key_of = |dst: u32| -> String {
+        match owner.get(&dst) {
+            Some(&o) => {
+                let path = &paths[o as usize];
+                if path.is_empty() {
+                    "(root)".to_string()
+                } else {
+                    path[..path.len().min(depth)].join("/")
+                }
+            }
+            None => "(no authored net)".to_string(),
+        }
+    };
+    // Ops of `body` per block: (ops, ops inside guarded ranges).
+    let count = |body: &logi_sim::compile::Body| -> BTreeMap<String, (u32, u32)> {
+        let mut by: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        for (bi, block) in body.blocks.iter().enumerate() {
+            let guarded = body
+                .guards
+                .iter()
+                .any(|g| (g.start..g.end).contains(&(bi as u32)));
+            let dsts: Vec<u32> = if block.packed {
+                vec![u32::MAX; block.len as usize]
+            } else {
+                body.instrs[block.start as usize..(block.start + block.len) as usize]
+                    .iter()
+                    .map(|i| i.dst)
+                    .collect()
+            };
+            for dst in dsts {
+                let e = by.entry(key_of(dst)).or_default();
+                e.0 += 1;
+                e.1 += u32::from(guarded);
+            }
+        }
+        by
+    };
+    // As the Sim builds them: a full settle runs the variant; a fused tick
+    // (every tick of a run(n) batch but the last) runs the variant pruned
+    // to its commits' cone, then guarded.
+    let full: Vec<_> = phases.variants.iter().map(count).collect();
+    let fused: Vec<_> = phases
+        .variants
+        .iter()
+        .map(|v| {
+            let pruned = logi_sim::compile::phases::prune(&p, v).unwrap_or_else(|| v.clone());
+            let guarded = logi_sim::compile::guard::guard_with(
+                p.slot_count as usize,
+                &pruned,
+                None,
+                logi_sim::compile::guard::MIN_REGION,
+            )
+            .unwrap_or(pruned);
+            count(&guarded)
+        })
+        .collect();
+    let mut keys: Vec<String> = full
+        .iter()
+        .chain(&fused)
+        .flat_map(|m| m.keys().cloned())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let get = |m: &BTreeMap<String, (u32, u32)>, k: &str| m.get(k).copied().unwrap_or((0, 0));
+    keys.sort_by_key(|k| std::cmp::Reverse(get(&full[0], k).0));
+    let sum = |ms: &[BTreeMap<String, (u32, u32)>]| -> Vec<u32> {
+        ms.iter().map(|m| m.values().map(|v| v.0).sum()).collect()
+    };
+    println!(
+        "full settle: {:?} ops per variant; fused tick: {:?} ops per variant (phase where the CPU's ce is 1 is the one that differs)",
+        sum(&full),
+        sum(&fused)
+    );
+    println!(
+        "  {:32} {:>6}  {:>22}  {:>22}",
+        "block", "full", "fused ops per phase", "of them guarded"
+    );
+    for k in keys {
+        let f = get(&full[0], &k).0;
+        let fu: Vec<u32> = fused.iter().map(|m| get(m, &k).0).collect();
+        let gu: Vec<u32> = fused.iter().map(|m| get(m, &k).1).collect();
+        if f == 0 && fu.iter().all(|&x| x == 0) {
+            continue;
+        }
+        println!(
+            "  {k:32} {f:6}  {:>22}  {:>22}",
+            format!("{fu:?}"),
+            format!("{gu:?}")
+        );
+    }
+    Ok(())
 }
