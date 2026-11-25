@@ -690,7 +690,7 @@ pub(super) fn run(
     let repro = results
         .iter()
         .find_map(|r| r.story.as_ref())
-        .map(|s| repro(config, s));
+        .map(|s| repro(config, s, options.unoptimized));
     Ok((
         Body::Harte {
             registers: names,
@@ -711,8 +711,11 @@ fn report_limit() -> usize {
     10
 }
 
-/// A `run` script that replays one case on a fresh simulation.
-fn repro(config: &Config, story: &Story) -> Value {
+/// A `run` script that replays one case on a fresh simulation, compiled
+/// as the suite compiled it (`unoptimized`: without the passes
+/// `options_of` turns off), so that a failure of only the unoptimized
+/// program is still there when the script is run.
+fn repro(config: &Config, story: &Story, unoptimized: bool) -> Value {
     let case = &story.case;
     let mut signals = serde_json::Map::new();
     for (n, p) in config.signals.iter().chain(&config.registers) {
@@ -819,6 +822,13 @@ fn repro(config: &Config, story: &Story) -> Value {
     let mut script = serde_json::Map::new();
     if let Some(c) = &config.circuit {
         script.insert("circuit".into(), Value::String(c.clone()));
+    }
+    if unoptimized {
+        // Read by the `run` tool (`Session::run_tool`).
+        script.insert(
+            "off".into(),
+            serde_json::json!(crate::mcp::compiled::PASSES),
+        );
     }
     script.insert("signals".into(), Value::Object(signals));
     script.insert("steps".into(), Value::Array(steps));

@@ -121,14 +121,66 @@ pub fn serve(server: Server, folder: Option<PathBuf>) -> Result<Endpoint, String
     };
     if let Some(folder) = folder {
         let path = folder.join(ENDPOINT_FILE);
-        let written =
-            std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&path, endpoint.json()));
+        let written = std::fs::create_dir_all(&folder)
+            .and_then(|()| write_private(&path, endpoint.json().as_bytes()));
         match written {
             Ok(()) => endpoint.file = Some(path),
             Err(e) => eprintln!("gatequest-mcp: could not write {}: {e}", path.display()),
         }
     }
     Ok(endpoint)
+}
+
+/// Write `contents` to `path` for its owner only. The file holds the
+/// token, and whoever has the token can use every tool (which read and
+/// write files with the game's rights): on a machine with other accounts
+/// it must not be readable by them. On Unix the file is made, or an
+/// existing one changed to, mode 0600 before the token is written; on
+/// other systems the folder's own protection applies.
+fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // The mode above is for a new file: one left by an earlier run
+        // keeps the mode it had.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn the_endpoint_file_is_for_its_owner_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "gatequest-mcp-endpoint-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(super::ENDPOINT_FILE);
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        super::write_private(&path, b"first").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        // A file an earlier version left readable by others is closed too.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::write_private(&path, b"second").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 fn unauthorized() -> Response {

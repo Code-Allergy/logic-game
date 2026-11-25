@@ -237,14 +237,15 @@ fn op_of(blocks: &[Block], len: usize) -> Vec<Op> {
 
 /// The bits an instruction's result can have, from its operands'.
 fn possible_of(op: Op, i: &Instr, imm: u64, pos: &[u64], mems: &[MemDesc]) -> u64 {
-    let a = pos[i.a as usize];
+    // Lazily: a `Clock`'s fields are literals, not slots.
+    let a = || pos[i.a as usize];
     let b = || pos[i.b as usize];
     let c = || pos[i.c as usize];
     match op {
-        Op::Copy => a,
+        Op::Copy => a(),
         Op::Not | Op::Nand | Op::Nor | Op::Xnor | Op::AddSum => imm,
-        Op::And => a & b(),
-        Op::Or | Op::Xor => a | b(),
+        Op::And => a() & b(),
+        Op::Or | Op::Xor => a() | b(),
         Op::Mux => b() | c(),
         Op::Switch => b(),
         Op::AddCarry
@@ -255,13 +256,13 @@ fn possible_of(op: Op, i: &Instr, imm: u64, pos: &[u64], mems: &[MemDesc]) -> u6
         | Op::ReduceXor
         | Op::Clock
         | Op::SrNext => 1,
-        Op::Shr => a.checked_shr(i.b).unwrap_or(0) & imm,
-        Op::Concat => a | b().checked_shl(i.c).unwrap_or(0),
+        Op::Shr => a().checked_shr(i.b).unwrap_or(0) & imm,
+        Op::Concat => a() | b().checked_shl(i.c).unwrap_or(0),
         Op::Sext => {
-            if i.b >= 1 && (a >> (i.b - 1)) & 1 == 1 {
-                a | (imm & !mask(i.b as u8))
+            if i.b >= 1 && (a() >> (i.b - 1)) & 1 == 1 {
+                a() | (imm & !mask(i.b as u8))
             } else {
-                a
+                a()
             }
         }
         Op::MemRead => mems.get(i.b as usize).map_or(ALL, |m| mask(m.width)),
@@ -760,14 +761,16 @@ impl SpecContext {
                         Opnd::Const(c, _) => Some(Val::Const(c & dm)),
                     }
                 };
-            let pa = self.possible[i.a as usize];
+            // Lazily: only ops with slot operands read them (a `Clock`'s
+            // fields are literals).
+            let pa = || self.possible[i.a as usize];
             let pb = || self.possible[i.b as usize];
-            let ka = kn[i.a as usize];
+            let ka = || kn[i.a as usize];
             let kb = || kn[i.b as usize];
             let v = match op {
                 Op::Copy => alias(ops[0]),
                 Op::Mux => {
-                    let s = ka;
+                    let s = ka();
                     if s.nonzero() {
                         alias(ops[2])
                     } else if s.zero() || ops[1] == ops[2] {
@@ -776,12 +779,12 @@ impl SpecContext {
                         None
                     }
                 }
-                Op::Switch if ka.nonzero() => alias(ops[1]),
+                Op::Switch if ka().nonzero() => alias(ops[1]),
                 // `a & b` is `a` where `b` is 1 wherever `a` can be.
-                Op::And if (dm & pa) & !kb().ones == 0 => alias(ops[0]),
-                Op::And if (dm & pb()) & !ka.ones == 0 => alias(ops[1]),
+                Op::And if (dm & pa()) & !kb().ones == 0 => alias(ops[0]),
+                Op::And if (dm & pb()) & !ka().ones == 0 => alias(ops[1]),
                 Op::Or | Op::Xor if dm & !kb().zeros == 0 => alias(ops[0]),
-                Op::Or | Op::Xor if dm & !ka.zeros == 0 => alias(ops[1]),
+                Op::Or | Op::Xor if dm & !ka().zeros == 0 => alias(ops[1]),
                 Op::Concat
                     if dm
                         & !(kb().zeros.checked_shl(i.c).unwrap_or(0) | mask(i.c.min(64) as u8))
@@ -1289,15 +1292,36 @@ impl KeyLayout {
         key
     }
 
-    /// The assumption a key value makes: each field's masked bits.
+    /// `fields` as a layout, or `None` when their masks hold more than 64
+    /// bits (a key word could not hold them).
+    pub fn try_new(fields: Vec<KeyField>) -> Option<Self> {
+        let layout = KeyLayout { fields };
+        layout.fits().then_some(layout)
+    }
+
+    /// Whether every masked bit fits in one key word.
+    pub fn fits(&self) -> bool {
+        self.width() <= 64
+    }
+
+    /// The assumption a key value makes: each field's masked bits. Bits
+    /// past the 64th of an oversized layout (which [`Self::pack`] cannot
+    /// hold) are not assumed: the key says nothing about them.
     pub fn assume(&self, key: u64) -> Vec<(u32, Known)> {
-        let mut at = 0;
+        let mut at = 0u32;
         self.fields
             .iter()
             .map(|f| {
-                let v = pdep(key.checked_shr(at).unwrap_or(0), f.mask);
+                // The field's lowest `64 - at` mask bits are in the key.
+                let room = 64u32.saturating_sub(at);
+                let held = if room >= 64 {
+                    f.mask
+                } else {
+                    pdep(mask(room as u8), f.mask)
+                };
+                let v = pdep(key.checked_shr(at).unwrap_or(0), held);
                 at += f.mask.count_ones();
-                (f.slot, Known::bits(f.mask, v))
+                (f.slot, Known::bits(held, v))
             })
             .collect()
     }

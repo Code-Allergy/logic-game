@@ -366,6 +366,26 @@ fn a_wrong_register_ram_byte_or_bus_cycle_is_reported_exactly() {
     let written = report.write(&out_dir).unwrap();
     assert_eq!(written.len(), 3);
     assert!(out_dir.join("repro.json").is_file());
+
+    // The script of an unoptimized run asks for the same compilation.
+    assert!(script.get("off").is_none(), "{script}");
+    let unoptimized = RunOptions {
+        unoptimized: true,
+        ..options(2)
+    };
+    let report = run_suite(&ws, &dir, accumulator_config(), &unoptimized);
+    let Body::Harte {
+        repro: Some(script),
+        ..
+    } = &report.body
+    else {
+        panic!("no repro script");
+    };
+    assert_eq!(
+        script["off"],
+        json!(crate::mcp::compiled::PASSES),
+        "{script}"
+    );
 }
 
 #[test]
