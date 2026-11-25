@@ -95,7 +95,8 @@ def install(args):
     if os.path.exists(os.path.join(args.into, "manifest.json")):
         shutil.copy(os.path.join(args.into, "manifest.json"), os.path.join(args.into, "manifest.json.bak"))
     save(args.into, load(COMMITTED))
-    print(f"installed the committed workspace in {args.into} (no ROM yet: use insert)")
+    print(f"installed the committed workspace in {args.into} (nestest in the NROM cartridge; "
+          "insert puts another ROM in)")
 
 
 def insert(args):
