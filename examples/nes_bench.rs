@@ -106,6 +106,7 @@ fn main() -> Result<(), String> {
                 Arc::clone(&program),
                 SimOptions {
                     guard,
+                    guard_interpreter: guard,
                     guard_min: std::env::var("GUARD_MIN")
                         .ok()
                         .and_then(|v| v.parse().ok())
