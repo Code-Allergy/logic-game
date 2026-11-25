@@ -126,6 +126,18 @@ pub struct SimOptions {
     /// ([`crate::compile::guard::MIN_REGION`] by default; smaller values
     /// guard more, smaller cones).
     pub guard_min: usize,
+    /// Supersteps (issue #117; `sim/jit/superstep.rs`): with the JIT and
+    /// tick fusion, [`Sim::run`] runs whole clock periods (at least
+    /// `superstep_ticks` ticks, a multiple of the clock-phase period) as
+    /// one stream of native code, forwarding committed state into the
+    /// next settle and storing only what is read later. Single-threaded,
+    /// JIT only (the interpreter runs tick by tick).
+    pub superstep: bool,
+    /// Fewest ticks per superstep (rounded up to a multiple of the
+    /// clock-phase period).
+    pub superstep_ticks: u64,
+    /// Items (instructions and commits) per superstep chunk function.
+    pub superstep_chunk: usize,
 }
 
 /// Default [`SimOptions::par_min`] (see the design doc, section 13).
@@ -143,9 +155,17 @@ impl Default for SimOptions {
             guard: true,
             guard_interpreter: false,
             guard_min: crate::compile::guard::MIN_REGION,
+            superstep: true,
+            superstep_ticks: DEFAULT_SUPERSTEP_TICKS,
+            superstep_chunk: DEFAULT_SUPERSTEP_CHUNK,
         }
     }
 }
+
+/// Default [`SimOptions::superstep_ticks`].
+pub const DEFAULT_SUPERSTEP_TICKS: u64 = 1;
+/// Default [`SimOptions::superstep_chunk`].
+pub const DEFAULT_SUPERSTEP_CHUNK: usize = 64;
 
 impl SimOptions {
     /// Everything off: the M3 runtime.
@@ -155,6 +175,7 @@ impl SimOptions {
             fuse: false,
             phases: false,
             guard: false,
+            superstep: false,
             ..Self::default()
         }
     }
@@ -339,6 +360,10 @@ pub struct Sim {
     mem_ptrs: Vec<usize>,
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     mem_ptrs_fresh: bool,
+    /// Per guard of every body, how often a superstep skipped it
+    /// (feature `counters`; see `jit::JitSuper::skip_base`).
+    #[cfg(all(feature = "counters", feature = "jit", not(target_arch = "wasm32")))]
+    skips: Vec<u64>,
     #[cfg(feature = "counters")]
     counters: Counters,
     /// What one settle of the program's own body executes (`blocks`,
@@ -479,6 +504,8 @@ impl Sim {
             mem_ptrs: Vec::new(),
             #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
             mem_ptrs_fresh: false,
+            #[cfg(all(feature = "counters", feature = "jit", not(target_arch = "wasm32")))]
+            skips: Vec::new(),
             #[cfg(feature = "counters")]
             counters: Counters::default(),
             #[cfg(feature = "counters")]
@@ -520,6 +547,13 @@ impl Sim {
         false
     }
 
+    /// The native code installed, if any (diagnostics: code size, chunks,
+    /// the superstep).
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    pub fn jit_code(&self) -> Option<&jit::JitProgram> {
+        self.jit.as_deref()
+    }
+
     /// Compile every body this `Sim` runs (the program's own and each run)
     /// with the JIT, without installing it. Thread-safe and independent of
     /// the `Sim`'s state, so it can run off the hot path; see
@@ -553,7 +587,46 @@ impl Sim {
                 fused_only: !in_full(k + 1),
             });
         }
-        let mut code = jit::JitProgram::compile(p, &bodies)?;
+        // The superstep: whole clock periods of fused ticks, starting at
+        // phase 0 (see `Sim::run`).
+        let o = &self.options;
+        let (mut parts, mut live_end) = (Vec::new(), Vec::new());
+        if o.superstep && o.fuse && self.pool.is_none() {
+            let l = self.period;
+            let n = o.superstep_ticks.max(1).div_ceil(l) * l;
+            for i in 0..n {
+                parts.push(jit::Part::Commit {
+                    body: self.full[(i % l) as usize] as usize,
+                });
+                parts.push(jit::Part::Settle {
+                    body: self.fused[((i + 1) % l) as usize] as usize,
+                    offset: i + 1,
+                });
+            }
+            // Read after a superstep before anything writes them: what any
+            // commit reads, and every state slot.
+            let mut seen = vec![false; p.slot_count as usize];
+            for b in &bodies {
+                for c in b.commits {
+                    let mut reads = c.reads().to_vec();
+                    if let Commit::Copy { state, .. } = *c {
+                        reads.push(state);
+                    }
+                    for s in reads {
+                        if !std::mem::replace(&mut seen[s as usize], true) {
+                            live_end.push(s);
+                        }
+                    }
+                }
+            }
+        }
+        let sup = (!parts.is_empty()).then(|| jit::SuperRef {
+            parts: &parts,
+            ticks: parts.len() as u64 / 2,
+            live_end: &live_end,
+            chunk: o.superstep_chunk,
+        });
+        let mut code = jit::JitProgram::compile_with(p, &bodies, sup.as_ref())?;
         code.key = Some(jit::RunKey {
             program: Arc::downgrade(&self.program),
             full: self.full.clone(),
@@ -765,19 +838,134 @@ impl Sim {
         if ticks == 0 {
             return;
         }
-        for _ in 1..ticks {
-            #[cfg(feature = "counters")]
-            {
-                self.counters.ticks += 1;
+        #[cfg_attr(
+            not(all(feature = "jit", not(target_arch = "wasm32"))),
+            expect(unused_mut)
+        )]
+        let mut left = ticks - 1;
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        if self.options.superstep
+            && let Some((entry, n)) = self
+                .jit
+                .as_ref()
+                .and_then(|j| j.superstep())
+                .map(|s| (s.entry, s.info.ticks))
+            && left > n
+        {
+            // The first tick applies the inputs (supersteps do not), and
+            // a superstep starts at phase 0.
+            self.fused_tick();
+            left -= 1;
+            let period = self.period;
+            #[cfg(test)]
+            let aligned = |t: u64| jit::MUTATION.get() == 2 || t.is_multiple_of(period);
+            #[cfg(not(test))]
+            let aligned = |t: u64| t.is_multiple_of(period);
+            while left > 0 && !aligned(self.tick) {
+                self.fused_tick();
+                left -= 1;
             }
-            let k = (self.tick % self.period) as usize;
-            self.commit(self.full[k]);
-            self.tick += 1;
-            let k = (self.tick % self.period) as usize;
-            // The pruned body has the same commits as the full one.
-            self.settle(self.fused[k]);
+            while left >= n {
+                // `entry` stays valid: the code cannot change within `run`.
+                self.superstep(entry, n);
+                left -= n;
+            }
+        }
+        for _ in 0..left {
+            self.fused_tick();
         }
         self.tick();
+    }
+
+    /// One tick of a `run` that is not the last: commit, then settle only
+    /// what the next commit reads.
+    #[inline]
+    fn fused_tick(&mut self) {
+        #[cfg(feature = "counters")]
+        {
+            self.counters.ticks += 1;
+        }
+        let k = (self.tick % self.period) as usize;
+        self.commit(self.full[k]);
+        self.tick += 1;
+        let k = (self.tick % self.period) as usize;
+        // The pruned body has the same commits as the full one.
+        self.settle(self.fused[k]);
+    }
+
+    /// The JIT's superstep, from a settled tick at phase 0: as many
+    /// `fused_tick`s as it holds, after the first tick of a `run` (so the
+    /// inputs are already in their slots).
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    fn superstep(&mut self, entry: jit::SuperFn, ticks: u64) {
+        #[cfg(not(test))]
+        debug_assert_eq!(self.tick % self.period, 0);
+        #[cfg(feature = "counters")]
+        let j = Arc::clone(self.jit.as_ref().expect("a superstep"));
+        #[cfg(feature = "counters")]
+        let info = &j.superstep().expect("a superstep").info;
+        if !self.mem_ptrs_fresh {
+            self.mem_ptrs.clear();
+            self.mem_ptrs
+                .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+            self.mem_ptrs_fresh = true;
+        }
+        #[cfg(feature = "counters")]
+        let before: u64 = self.mem_writes.iter().sum();
+        #[cfg(feature = "counters")]
+        self.skips.resize(info.skip_len, 0);
+        #[cfg(feature = "counters")]
+        let skips = self.skips.as_mut_ptr();
+        #[cfg(not(feature = "counters"))]
+        let skips = std::ptr::null_mut();
+        let (s, m, w) = (
+            self.slots.as_mut_ptr(),
+            self.mem_ptrs.as_ptr() as *const *mut u64,
+            self.mem_writes.as_mut_ptr(),
+        );
+        // SAFETY: as in `commit` and `evaluate_body`: `entry` is the
+        // superstep of the installed code, every body of which passed
+        // `check_body`; `skips` has `skip_len` entries (and is not
+        // touched without the counters).
+        unsafe { entry(s, m, self.tick, w, skips) };
+        #[cfg(feature = "counters")]
+        {
+            let c = &mut self.counters;
+            c.mem_writes += self.mem_writes.iter().sum::<u64>() - before;
+            for i in 0..ticks {
+                let (full, fused) = (
+                    self.full[((self.tick + i) % self.period) as usize],
+                    self.fused[((self.tick + i + 1) % self.period) as usize],
+                );
+                let commits = match full {
+                    0 => self.program.commits.len(),
+                    k => self.runs[k as usize - 1]
+                        .body
+                        .as_ref()
+                        .map_or(self.program.commits.len(), |b| b.commits.len()),
+                };
+                let per = match fused {
+                    0 => &self.per_settle,
+                    k => &self.runs[k as usize - 1].per_settle,
+                };
+                c.ticks += 1;
+                c.settles += 1;
+                c.commits += commits as u64;
+                c.blocks += per.blocks;
+                c.instrs += per.instrs;
+                c.packed_words += per.packed_words;
+            }
+            for (k, r) in self.runs.iter().enumerate() {
+                let base = info.skip_base[k + 1];
+                for (g, &(blocks, instrs)) in r.guard_cost.iter().enumerate() {
+                    let n = std::mem::take(&mut self.skips[base + g]);
+                    c.blocks -= n * blocks;
+                    c.instrs -= n * instrs;
+                }
+            }
+        }
+        debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+        self.tick += ticks;
     }
 
     fn commit(&mut self, run: u8) {

@@ -283,8 +283,9 @@ fn cpi(name: &str, options: &str, secs: f64) {
 /// Interpreter against JIT (`SimOptions::jit`, logi-sim feature `jit`):
 /// µs per tick tick by tick (inputs changing every tick, as `ticks`) and
 /// in `run(1000)` batches, best of 3 over about `secs` seconds, with
-/// the interpreter with and without guards (`-g`, `guard_interpreter`)
-/// and the JIT with and without them (`-ng`), and the executed ops per tick; for the
+/// the interpreter with and without guards (`-g`, `guard_interpreter`),
+/// the JIT with and without them (`-ng`), the JIT without supersteps
+/// (`jit-noss`), and the executed ops per tick; for the
 /// gallery CPUs also µs per retired CPU instruction over a program run;
 /// and the JIT's compile time for this program.
 fn jit_compare(name: &str, options: &str, secs: f64) {
@@ -333,11 +334,17 @@ fn jit_compare(name: &str, options: &str, secs: f64) {
         ..o.clone()
     };
     let jit_ng = ng(&jit);
+    // Supersteps (`SimOptions::superstep`) off, for comparison.
+    let jit_noss = SimOptions {
+        superstep: false,
+        ..jit.clone()
+    };
     for (label, o) in [
         ("interp", &interp),
         ("interp-g", &interp_g),
         ("jit", &jit),
         ("jit-ng", &jit_ng),
+        ("jit-noss", &jit_noss),
     ] {
         let mut row = format!("  {label:9}");
         // Executed ops per tick, tick by tick and in batches.
