@@ -278,12 +278,21 @@ fn counters_are_the_same_with_the_jit() {
         fixtures::cpu(&fixtures::MULTIPLY_PROGRAM),
         fixtures::register_file_ram2(4, 64, &[u64::MAX, 1]),
         fixtures::fifo(4, 12),
+        // Clock phases and guards inside supersteps.
+        clocked(&[3]),
+        clocked(&[2, 4]),
+        bitblast(&fixtures::cpu(&fixtures::MULTIPLY_PROGRAM)),
     ] {
         let p = program(&d, &Options::default());
         let mut want = Sim::new(Arc::clone(&p));
         let mut got = Sim::with_options(Arc::clone(&p), SimOptions::jit());
         assert!(got.jit_active());
         for k in 0..200u64 {
+            if k % 50 == 0 {
+                // Several supersteps in one run.
+                want.run(40);
+                got.run(40);
+            }
             for port in 0..p.ports.inputs.len() {
                 want.set_input(port, (k * 2654435761) >> 3);
                 got.set_input(port, (k * 2654435761) >> 3);
@@ -317,4 +326,103 @@ fn oversized_bodies_stay_interpreted() {
     let code = s.jit.as_ref().expect("the JIT ran");
     assert!(code.bodies[0].is_none(), "the full body is interpreted");
     check_jit(&p, 6, 6, &SimOptions::default()).unwrap();
+}
+
+/// Master/slave registers, a latch and a RAM written on clock high, per
+/// clock of `periods` (common period: their least common multiple).
+fn clocked(periods: &[u32]) -> Design {
+    use crate::netlist::NodeKind;
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let we = b.input("we", 1);
+    let mut acc = x;
+    for (k, &period) in periods.iter().enumerate() {
+        let clk = b.clock(period, 1.max(period / 2), k as u32 % period);
+        let nclk = b.not(clk);
+        let (slave, q) = b.state_placeholder(NodeKind::Register { w: 8 });
+        let step = b.xor(q, acc);
+        let (sum, _) = b.add(q, step, None);
+        let master = b.register(nclk, sum);
+        b.connect(clk, (slave, 0));
+        b.connect(master, (slave, 1));
+        let held = b.dlatch(clk, sum);
+        let wen = b.and(we, clk);
+        let addr = b.split(q, 0, 3);
+        let m = b.ram(addr, wen, held, &[]);
+        acc = b.xor(m, held);
+        b.output(format!("q{k}"), q);
+    }
+    b.output("y", acc);
+    d
+}
+
+/// Supersteps over every common clock period up to 8 (and none):
+/// against single unfused ticks at every batch boundary, and against the
+/// interpreter tick by tick, with chunks of every size and supersteps of
+/// several periods.
+#[test]
+fn supersteps_match_single_ticks_over_every_common_period() {
+    for (periods, l) in [
+        (&[][..], 1),
+        (&[2][..], 2),
+        (&[3][..], 3),
+        (&[4, 2][..], 4),
+        (&[2, 3][..], 6),
+        (&[8, 4][..], 8),
+    ] {
+        let d = clocked(periods);
+        for options in [Options::default(), Options::debug()] {
+            let p = program(&d, &options);
+            let s = Sim::with_options(Arc::clone(&p), SimOptions::jit());
+            let sup = s
+                .jit_code()
+                .and_then(|j| j.superstep())
+                .expect("a superstep");
+            assert_eq!(sup.info.ticks, l, "periods {periods:?}");
+            check_batches(&p, l).unwrap_or_else(|e| panic!("periods {periods:?}: {e}"));
+            for (ticks, chunk) in [(1, 1), (1, 3), (5, 7), (16, 64), (9, 100_000)] {
+                let o = SimOptions {
+                    superstep_ticks: ticks,
+                    superstep_chunk: chunk,
+                    guard_min: 1,
+                    ..SimOptions::default()
+                };
+                check_jit(&p, 300, l + ticks, &o)
+                    .unwrap_or_else(|e| panic!("periods {periods:?} {ticks}/{chunk}: {e}"));
+            }
+        }
+    }
+}
+
+/// Deliberate superstep bugs (see `superstep::MUTATION`) are caught by
+/// `check_batches`.
+#[test]
+fn superstep_mutations_are_caught() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            super::MUTATION.set(0);
+        }
+    }
+    let _reset = Reset;
+    let designs = [
+        clocked(&[3]),
+        clocked(&[2, 4]),
+        fixtures::cpu(&fixtures::LOOP_PROGRAM),
+    ];
+    let programs: Vec<_> = designs
+        .iter()
+        .map(|d| program(d, &Options::default()))
+        .collect();
+    for p in &programs {
+        check_batches(p, 1).unwrap();
+    }
+    for m in 1..=3 {
+        super::MUTATION.set(m);
+        let caught = programs.iter().any(|p| check_batches(p, 1).is_err());
+        super::MUTATION.set(0);
+        assert!(caught, "mutation {m} is not caught");
+    }
 }
