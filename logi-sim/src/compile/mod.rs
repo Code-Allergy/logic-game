@@ -5,12 +5,15 @@
 //! definitions (see [`func`]), lower, simplify (constant
 //! folding, alias elimination, CSE, dead-code elimination; see
 //! `simplify.rs`), word lifting (bit-sliced logic back to word ops; see
-//! `lift.rs`), word-level cleanup (see `words.rs`), levelize, emit, and
+//! `lift.rs`), word-level cleanup (see `words.rs`), cone tables (see
+//! `cones.rs`), levelize, emit, and
 //! clock-phase specialization (see [`phases`]).
 //!
 //! All passes are iterative; nothing recurses on circuit depth or instance
 //! nesting.
 
+#[doc(hidden)]
+pub mod cones;
 mod elaborate;
 mod emit;
 pub mod func;
@@ -87,6 +90,16 @@ pub struct Options {
     /// as one ROM read (plus the index concatenation and output slices).
     /// Its internal nets stay readable through shadow slots.
     pub tables: bool,
+    /// Cone tables (issue #117; see `cones.rs`): combinational cones of
+    /// the word-level program, across chip boundaries, with at most
+    /// [`cones::DEFAULT_K`] input bits and more instructions than their
+    /// index costs, run as one ROM read each. Without `debug`, nets left
+    /// inside a table are no longer computed (like dead code); with it
+    /// they stay computed for reading, and only a fused tick
+    /// (`SimOptions::fuse`) runs the tables alone. Off by default: on the
+    /// NES console it cuts executed ops per fused tick by about 5%, with
+    /// no throughput change measurable above noise.
+    pub cone_tables: bool,
     /// Nets to keep observable under dead-code elimination:
     /// `(instance path, NetId)`.
     pub probes: Vec<(Vec<NodeId>, NetId)>,
@@ -167,6 +180,7 @@ impl Default for Options {
             words: true,
             clock_phases: true,
             tables: true,
+            cone_tables: false,
             probes: Vec::new(),
             slot_order: SlotOrder::default(),
             pack: PackMode::Auto,
@@ -191,6 +205,7 @@ impl Options {
             words: false,
             clock_phases: false,
             tables: false,
+            cone_tables: false,
             probes: Vec::new(),
             slot_order: SlotOrder::Production,
             pack: PackMode::Off,

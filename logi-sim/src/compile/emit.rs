@@ -405,6 +405,24 @@ pub(super) fn emit(
     } else {
         views
     };
+    let mut views = views;
+    if opts.cone_tables {
+        let probe_slots: Vec<u32> = opts
+            .probes
+            .iter()
+            .filter_map(|(path, net)| debug.slot(path, *net))
+            .chain(probe_extra.iter().copied())
+            .collect();
+        super::cones::run(
+            &mut em,
+            &ports,
+            &mut debug,
+            &probe_slots,
+            &mut views,
+            opts,
+            &super::cones::Cfg::default(),
+        );
+    }
     pass_done(super::Pass::Words);
 
     // ── Levelize and group into blocks ─────────────────────────────────────

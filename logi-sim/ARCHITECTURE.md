@@ -90,6 +90,12 @@ primitives. Names live in a side table.
    master and slave latches of a word of flip-flops) are merged into one
    word. Nets and state elements that lose their slot become views; the
    result is kept only if it is cheaper.
+   **Cone tables** (`cones.rs`, `Options::cone_tables`, off by
+   default): combinational cones of the word-level program, across
+   chip boundaries, with at most 12 input bits (cuts found with priority
+   cuts, chosen by area flow, never past a mux arm the runtime guards)
+   run as one ROM read each; without `debug`, nets left inside a table
+   are not computed, as for dead code.
 8. **Levelize and emit** (`emit.rs`): rank every instruction, sort by
    `(rank, op)` into blocks, and number slots (`Options::slot_order`).
 9. **Pack** (`pack.rs`, `Options::pack`): optionally pack runs of 1-bit
