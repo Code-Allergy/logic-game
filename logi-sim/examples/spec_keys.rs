@@ -777,8 +777,6 @@ fn eval(op: Op, i: &Instr, imm: u64, s: &[u64], mems: &[Vec<u64>], tick: u64) ->
         Op::ReduceAnd => (a == imm) as u64,
         Op::ReduceXor => u64::from(a.count_ones() & 1),
         Op::Shr => a.checked_shr(i.b).unwrap_or(0) & imm,
-        Op::Shl => ((a >> i.c) << i.b) & imm,
-        Op::ShlV => (a << (b() & 63)) & imm,
         Op::Concat => a | b().checked_shl(i.c).unwrap_or(0),
         Op::Sext => {
             if (a >> (i.b - 1)) & 1 == 1 {
