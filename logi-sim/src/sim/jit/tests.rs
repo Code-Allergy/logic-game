@@ -231,6 +231,7 @@ fn compiled_code_can_be_installed_and_removed() {
         instrs: &p.instrs,
         imms: &p.imms,
         commits: &p.commits,
+        guards: &[],
         used: true,
         fused_only: false,
     };

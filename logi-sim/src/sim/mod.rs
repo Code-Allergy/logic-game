@@ -55,7 +55,9 @@ mod tests;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::compile::{Block, Body, Commit, Instr, NodePath, Op, Program, StateLoc, ZERO_SLOT};
+use crate::compile::{
+    Block, Body, Commit, Guard, Instr, NodePath, Op, Program, StateLoc, ZERO_SLOT,
+};
 use crate::netlist::{NetId, NodeId, mask};
 
 /// Index of a root port, in port order.
@@ -105,6 +107,17 @@ pub struct SimOptions {
     /// a native target, and one thread; otherwise (or if compiling fails)
     /// the interpreter runs. Off by default.
     pub jit: bool,
+    /// Enable-guarded cones (issue #117, stage 6; `compile::guard`): skip
+    /// the instructions that only compute a mux arm the select does not
+    /// pick (the data input of a register whose enable is 0). Applies to
+    /// fused-run bodies, and to full settles of a program not compiled
+    /// with `Options::debug`, where only slots nothing exposes are
+    /// skipped. Single-threaded only.
+    pub guard: bool,
+    /// Fewest instructions a guarded region holds
+    /// ([`crate::compile::guard::MIN_REGION`] by default; smaller values
+    /// guard more, smaller cones).
+    pub guard_min: usize,
 }
 
 /// Default [`SimOptions::par_min`] (see the design doc, section 13).
@@ -119,6 +132,8 @@ impl Default for SimOptions {
             fuse: true,
             phases: true,
             jit: false,
+            guard: true,
+            guard_min: crate::compile::guard::MIN_REGION,
         }
     }
 }
@@ -130,6 +145,7 @@ impl SimOptions {
             stream: false,
             fuse: false,
             phases: false,
+            guard: false,
             ..Self::default()
         }
     }
@@ -206,6 +222,10 @@ struct Run {
     /// `packed_words`).
     #[cfg(feature = "counters")]
     per_settle: Counters,
+    /// Per guard of `body`: the blocks and instructions it skips when its
+    /// conditions do not hold.
+    #[cfg(feature = "counters")]
+    guard_cost: Vec<(u64, u64)>,
 }
 
 impl Run {
@@ -226,11 +246,24 @@ impl Run {
                 _ => per_settle.instrs += u64::from(b.len),
             }
         }
+        #[cfg(feature = "counters")]
+        let guard_cost = body.as_ref().map_or(Vec::new(), |b| {
+            b.guards
+                .iter()
+                .map(|g| {
+                    let blocks = &b.blocks[g.start as usize..g.end as usize];
+                    let instrs = blocks.iter().map(|x| u64::from(x.len)).sum();
+                    (blocks.len() as u64, instrs)
+                })
+                .collect()
+        });
         Run {
             body,
             code,
             #[cfg(feature = "counters")]
             per_settle,
+            #[cfg(feature = "counters")]
+            guard_cost,
         }
     }
 }
@@ -333,13 +366,42 @@ impl Sim {
             .collect();
         let code = Arc::new(code);
         let pool = start_pool(&program, &code, &options);
-        // Variants and fusion run single-threaded only.
+        // Variants, fusion and guards run single-threaded only.
         let mut runs = Vec::new();
         let (mut period, mut full, mut fused) = (1u64, vec![0u8], vec![0u8]);
         if pool.is_none() {
+            use crate::compile::{guard, phases};
             let add = |runs: &mut Vec<Run>, body: Option<Body>| {
                 runs.push(Run::new(&program, body, options.stream));
                 runs.len() as u8
+            };
+            let n_slots = program.slot_count as usize;
+            // Full settles are observed: guard only what nothing exposes,
+            // and nothing under `Options::debug`.
+            let exposed =
+                (options.guard && !program.debug_options).then(|| phases::exposed(&program));
+            let guard_full = |b: &Body| {
+                let e = exposed.as_deref()?;
+                guard::guard_with(n_slots, b, Some(e), options.guard_min)
+            };
+            // A fused-run body: pruned to its commits' cone, then guarded.
+            let fused_body = |b: &Body| {
+                let pruned = phases::prune(&program, b);
+                let guarded = options
+                    .guard
+                    .then(|| {
+                        let b = pruned.as_ref().unwrap_or(b);
+                        guard::guard_with(n_slots, b, None, options.guard_min)
+                    })
+                    .flatten();
+                guarded.or(pruned)
+            };
+            let own = || Body {
+                blocks: program.blocks.clone(),
+                instrs: program.instrs.clone(),
+                imms: program.imms.clone(),
+                commits: program.commits.clone(),
+                guards: Vec::new(),
             };
             match program.phases.as_deref() {
                 Some(ph) if options.phases => {
@@ -347,31 +409,34 @@ impl Sim {
                     full.clear();
                     fused.clear();
                     for v in &ph.variants {
-                        let f = add(&mut runs, Some(v.clone()));
+                        let f = add(&mut runs, Some(guard_full(v).unwrap_or_else(|| v.clone())));
                         full.push(f);
-                        let pruned = options
-                            .fuse
-                            .then(|| crate::compile::phases::prune(&program, v))
-                            .flatten();
-                        fused.push(match pruned {
+                        let body = options.fuse.then(|| fused_body(v)).flatten();
+                        fused.push(match body {
                             Some(b) => add(&mut runs, Some(b)),
                             None => f,
                         });
                     }
                 }
                 _ => {
-                    if options.fuse {
-                        let own = Body {
-                            blocks: program.blocks.clone(),
-                            instrs: program.instrs.clone(),
-                            imms: program.imms.clone(),
-                            commits: program.commits.clone(),
-                        };
-                        if let Some(b) = crate::compile::phases::prune(&program, &own) {
+                    if program.packs.is_empty() && (options.fuse || exposed.is_some()) {
+                        let own = own();
+                        if let Some(b) = guard_full(&own) {
+                            full[0] = add(&mut runs, Some(b));
+                            fused[0] = full[0];
+                        }
+                        if let Some(b) = options.fuse.then(|| fused_body(&own)).flatten() {
                             fused[0] = add(&mut runs, Some(b));
                         }
                     }
                 }
+            }
+        }
+        for r in &runs {
+            if let Some(b) = &r.body {
+                check_body(
+                    &program, &b.blocks, &b.instrs, &b.imms, &b.commits, &b.guards,
+                )?;
             }
         }
         let mut sim = Sim {
@@ -450,17 +515,20 @@ impl Sim {
             instrs: &p.instrs,
             imms: &p.imms,
             commits: &p.commits,
+            guards: &[],
             used: used(0),
             fused_only: false,
         });
         for (k, r) in self.runs.iter().enumerate() {
             let (blocks, instrs, imms) = parts(p, r.body.as_ref());
             let commits = r.body.as_ref().map_or(&p.commits[..], |b| &b.commits[..]);
+            let guards = r.body.as_ref().map_or(&[][..], |b| &b.guards[..]);
             bodies.push(jit::BodyRef {
                 blocks,
                 instrs,
                 imms,
                 commits,
+                guards,
                 used: used(k + 1),
                 fused_only: !in_full(k + 1),
             });
@@ -496,6 +564,22 @@ impl Sim {
         }
         self.jit = code;
         true
+    }
+
+    /// Guarded block ranges over every body this `Sim` runs, and the
+    /// instructions they hold (diagnostics; see [`SimOptions::guard`]).
+    pub fn guarded(&self) -> (usize, usize) {
+        let mut out = (0, 0);
+        for b in self.runs.iter().filter_map(|r| r.body.as_ref()) {
+            out.0 += b.guards.len();
+            for g in &b.guards {
+                out.1 += b.blocks[g.start as usize..g.end as usize]
+                    .iter()
+                    .map(|x| x.len as usize)
+                    .sum::<usize>();
+            }
+        }
+        out
     }
 
     /// Threads each settle uses (1 when no worker threads were started).
@@ -806,6 +890,24 @@ impl Sim {
 
     /// Run the blocks of `run` once, from the input slots as they are.
     fn evaluate(&mut self, run: u8) {
+        self.evaluate_body(run);
+        // Guarded blocks that did not run: a guard's conditions are slots
+        // no later instruction writes, so they still say what ran.
+        #[cfg(feature = "counters")]
+        if run > 0 {
+            let r = &self.runs[run as usize - 1];
+            if let Some(b) = &r.body {
+                for (g, &(blocks, instrs)) in b.guards.iter().zip(&r.guard_cost) {
+                    if !g.holds(&self.slots) {
+                        self.counters.blocks -= blocks;
+                        self.counters.instrs -= instrs;
+                    }
+                }
+            }
+        }
+    }
+
+    fn evaluate_body(&mut self, run: u8) {
         #[cfg(feature = "counters")]
         {
             let c = &mut self.counters;
@@ -861,7 +963,27 @@ impl Sim {
             mems: &self.mems,
             tick: self.tick,
         };
-        for b in &code.blocks {
+        let guards = body.map_or(&[][..], |b| &b.guards[..]);
+        let mut at = 0;
+        for g in guards {
+            // SAFETY: as below; `check_body` validated the guard's block
+            // range and condition slots.
+            unsafe {
+                for b in code.blocks.get_unchecked(at..g.start as usize) {
+                    code::exec(&env, b, 0, b.len, s);
+                }
+                if g.conds
+                    .iter()
+                    .all(|c| (*s.add(c.slot as usize) != 0) == c.when)
+                {
+                    for b in code.blocks.get_unchecked(g.start as usize..g.end as usize) {
+                        code::exec(&env, b, 0, b.len, s);
+                    }
+                }
+            }
+            at = g.end as usize;
+        }
+        for b in &code.blocks[at..] {
             // SAFETY: the program passed `check`, `code` was built from it,
             // and `slots` has `slot_count` entries. Nothing else touches the
             // slots meanwhile.
@@ -1080,7 +1202,7 @@ fn check(p: &Program) -> Result<(), BadProgram> {
     if p.slot_count as u64 + 64 * p.lane_words.len() as u64 > u32::MAX as u64 + 1 {
         return bad("too many lane slots".into());
     }
-    check_body(p, &p.blocks, &p.instrs, &p.imms, &p.commits)?;
+    check_body(p, &p.blocks, &p.instrs, &p.imms, &p.commits, &[])?;
     if let Some(ph) = &p.phases {
         if ph.period == 0 || ph.variants.len() != ph.period as usize || ph.period > 255 {
             return bad(format!("bad phases: period {}", ph.period));
@@ -1089,7 +1211,7 @@ fn check(p: &Program) -> Result<(), BadProgram> {
             if v.imms.len() != v.instrs.len() || v.blocks.iter().any(|b| b.packed) {
                 return bad("bad phase variant".into());
             }
-            check_body(p, &v.blocks, &v.instrs, &v.imms, &v.commits)?;
+            check_body(p, &v.blocks, &v.instrs, &v.imms, &v.commits, &v.guards)?;
         }
     }
     for m in &p.mems {
@@ -1154,10 +1276,21 @@ fn check_body(
     instrs: &[Instr],
     imms: &[u64],
     commits: &[Commit],
+    guards: &[Guard],
 ) -> Result<(), BadProgram> {
     let n = p.slot_count;
     let bad = |m: String| Err(BadProgram(m));
     let slot_ok = |s: u32| s < n;
+    let mut at = 0;
+    for g in guards {
+        if g.start < at || g.end < g.start || g.end as usize > blocks.len() {
+            return bad(format!("bad guard {g:?}"));
+        }
+        if g.conds.iter().any(|c| !slot_ok(c.slot)) {
+            return bad(format!("bad guard condition {g:?}"));
+        }
+        at = g.end;
+    }
     for b in blocks {
         let end = b.start as u64 + b.len as u64;
         if b.packed {

@@ -14,6 +14,7 @@
 mod elaborate;
 mod emit;
 pub mod func;
+pub mod guard;
 mod lift;
 mod loops;
 mod pack;

@@ -139,11 +139,25 @@ over one opcode. A tick allocates nothing.
   versions and the tick count evolve exactly as tick by tick; the last
   tick settles everything. `Sim::tick` always settles everything.
 
+- **Enable-guarded cones** (`SimOptions::guard`, `compile/guard.rs`).
+  Each body the `Sim` runs is reordered so that the *exclusive cone* of
+  a mux arm (instructions whose every consumer, transitively, is that
+  arm: typically a register's data input, `next = Mux(en, q, d)`) forms
+  a contiguous guarded range of blocks, run only when the select picks
+  that arm. Nested arms nest (conditions tested outermost first), and
+  sibling regions with the same condition merge. A region sits after its
+  inputs and condition and before its mux. Fused-run bodies are observed
+  only by their commits; full settles also keep every exposed slot
+  (debug map, views, shadows, ports, state) out of every region, and a
+  program compiled with `Options::debug` guards no full settle. Skipped
+  slots keep stale values nothing reads. Regions under
+  `SimOptions::guard_min` instructions stay unguarded.
+
 - **JIT** (`sim/jit/`, feature `jit`, native only; `SimOptions::jit`,
   off by default). Cranelift compiles each body the `Sim` runs (the
   program's own, each clock-phase variant, each fused-run body) into
-  straight-line native settle chunks of at most `jit::CHUNK`
-  instructions, `fn(slots, mems, tick)`, plus commit chunks. Within a
+  native settle chunks of at most `jit::CHUNK` instructions (a guarded
+  range becomes a conditional branch around its code), `fn(slots, mems, tick)`, plus commit chunks. Within a
   chunk every slot is loaded once and every result stays in an SSA value;
   literal fields are immediates; results are stored to their slots (in a
   fused-run body only those its commits or a later chunk read). It runs

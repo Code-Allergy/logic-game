@@ -23,6 +23,12 @@
 //! `Sim::run`), and the next settle writes every slot it reads before
 //! reading it.
 //!
+//! A guarded range of the body (see `compile::guard`) becomes a
+//! conditional branch around its code: the conditions are tested in the
+//! chunk, and values defined inside the range leave the SSA cache when it
+//! ends (later reads load them, so in a fused-run body a result computed
+//! inside a range is also stored when the chunk reads it again).
+//!
 //! Chunks are cut at instruction boundaries (at most [`CHUNK`]
 //! instructions), which bounds Cranelift's compile time and the live
 //! ranges per function, and makes a chunk the natural unit for running
@@ -52,7 +58,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
-use crate::compile::{Block, Commit, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
+use crate::compile::{Block, Commit, Guard, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
 use crate::netlist::mask;
 
 /// Instructions (or packed words) per settle chunk at most. Small chunks
@@ -88,6 +94,9 @@ pub struct BodyRef<'a> {
     pub instrs: &'a [Instr],
     pub imms: &'a [u64],
     pub commits: &'a [Commit],
+    /// Guarded block ranges (see `compile::guard`): a guarded run of
+    /// items becomes a conditional branch around its code.
+    pub guards: &'a [Guard],
     /// Compile this body (`false` leaves a body no tick runs uncompiled).
     pub used: bool,
     /// The body only ever settles a tick inside a `Sim::run` that is not
@@ -277,10 +286,15 @@ impl JitProgram {
             for (k, ch) in chunks.iter().enumerate().rev() {
                 if body.fused_only {
                     lives[k] = live.clone();
-                    for item in ch {
+                    for &(item, seg) in ch {
                         item.reads(p, body, |s| {
                             live.insert(s);
                         });
+                        if seg > 0 {
+                            for c in &body.guards[seg as usize - 1].conds {
+                                live.insert(c.slot);
+                            }
+                        }
                     }
                 }
             }
@@ -407,10 +421,19 @@ impl Item {
     }
 }
 
-/// The body's items in order, cut into chunks of at most [`CHUNK`].
-fn chunks(body: &BodyRef<'_>) -> Vec<Vec<Item>> {
-    let mut out: Vec<Vec<Item>> = vec![Vec::new()];
-    for b in body.blocks {
+/// The body's items in order, cut into chunks of at most [`CHUNK`], each
+/// with its guard (`k + 1` for `body.guards[k]`, 0 for none).
+fn chunks(body: &BodyRef<'_>) -> Vec<Vec<(Item, u32)>> {
+    let mut out: Vec<Vec<(Item, u32)>> = vec![Vec::new()];
+    let mut g = 0;
+    for (bi, b) in body.blocks.iter().enumerate() {
+        while g < body.guards.len() && body.guards[g].end as usize <= bi {
+            g += 1;
+        }
+        let seg = match body.guards.get(g) {
+            Some(x) if x.start as usize <= bi => g as u32 + 1,
+            _ => 0,
+        };
         for k in b.start..b.start + b.len {
             if out.last().is_some_and(|c| c.len() >= CHUNK) {
                 out.push(Vec::new());
@@ -420,7 +443,7 @@ fn chunks(body: &BodyRef<'_>) -> Vec<Vec<Item>> {
             } else {
                 Item::Instr { op: b.op, k }
             };
-            out.last_mut().expect("non-empty").push(item);
+            out.last_mut().expect("non-empty").push((item, seg));
         }
     }
     out
@@ -484,6 +507,15 @@ fn bool64(b: &mut FunctionBuilder<'_>, c: Value) -> Value {
     b.ins().uextend(I64, c)
 }
 
+/// An open guarded run in a settle chunk: the block after it, and the
+/// slot and memory-pointer caches from before it (values defined inside
+/// do not dominate the code after it).
+type Open = (
+    cranelift_codegen::ir::Block,
+    HashMap<u32, Value>,
+    HashMap<u32, Value>,
+);
+
 /// Build one settle chunk.
 fn build_settle(
     cfg: TargetFrontendConfig,
@@ -491,7 +523,7 @@ fn build_settle(
     fctx: &mut FunctionBuilderContext,
     p: &Program,
     body: &BodyRef<'_>,
-    items: &[Item],
+    items: &[(Item, u32)],
     live: Option<&HashSet<u32>>,
 ) {
     let mut b = FunctionBuilder::new(func, fctx);
@@ -506,10 +538,59 @@ fn build_settle(
         base: slots,
         vals: HashMap::with_capacity(items.len() * 2),
     };
-    let store = |s: u32| live.is_none_or(|l| l.contains(&s));
+    // Slots this chunk reads: a result computed in a guarded run is only
+    // in the SSA cache until the run ends, so a later read in the chunk
+    // loads it from its slot.
+    let mut chunk_reads: HashSet<u32> = HashSet::new();
+    if live.is_some() && items.iter().any(|&(_, seg)| seg > 0) {
+        for (item, _) in items {
+            item.reads(p, body, |s| {
+                chunk_reads.insert(s);
+            });
+        }
+    }
     let mut mem_ptrs: HashMap<u32, Value> = HashMap::new();
-    for item in items {
-        match *item {
+    // The guard of the current run of items (0: none), the block after
+    // it, and the caches from before it.
+    let mut cur = 0u32;
+    let mut open: Option<Open> = None;
+    for &(item, seg) in items {
+        if seg != cur {
+            if let Some((merge, vals, ptrs)) = open.take() {
+                b.ins().jump(merge, &[]);
+                b.switch_to_block(merge);
+                b.seal_block(merge);
+                sl.vals = vals;
+                mem_ptrs = ptrs;
+            }
+            if seg > 0 {
+                let mut test: Option<Value> = None;
+                for c in &body.guards[seg as usize - 1].conds {
+                    let v = sl.read(&mut b, c.slot);
+                    let cc = if c.when {
+                        IntCC::NotEqual
+                    } else {
+                        IntCC::Equal
+                    };
+                    let t = b.ins().icmp_imm_u(cc, v, 0);
+                    test = Some(match test {
+                        Some(x) => b.ins().band(x, t),
+                        None => t,
+                    });
+                }
+                let test = test.expect("a guard has conditions");
+                let then = b.create_block();
+                let merge = b.create_block();
+                b.ins().brif(test, then, &[], merge, &[]);
+                b.switch_to_block(then);
+                b.seal_block(then);
+                open = Some((merge, sl.vals.clone(), mem_ptrs.clone()));
+            }
+            cur = seg;
+        }
+        let store =
+            |s: u32| live.is_none_or(|l| l.contains(&s) || (cur > 0 && chunk_reads.contains(&s)));
+        match item {
             Item::Instr { op, k } => {
                 let i = body.instrs[k as usize];
                 let m = body.imms[k as usize];
@@ -678,6 +759,11 @@ fn build_settle(
                 }
             }
         }
+    }
+    if let Some((merge, _, _)) = open.take() {
+        b.ins().jump(merge, &[]);
+        b.switch_to_block(merge);
+        b.seal_block(merge);
     }
     b.ins().return_(&[]);
     b.finalize(cfg);

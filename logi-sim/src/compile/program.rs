@@ -489,6 +489,10 @@ pub struct Program {
     /// [`Op::Clock`] folded to its value at that residue. `None` runs
     /// [`Self::blocks`] and [`Self::commits`] every tick.
     pub phases: Option<Arc<Phases>>,
+    /// Compiled with `Options::debug`: a full settle evaluates every
+    /// instruction (the runtime guards no cone of a full body; see
+    /// `guard.rs`).
+    pub debug_options: bool,
 }
 
 /// The executable part of a program: blocks over `instrs`/`imms`, and the
@@ -500,6 +504,37 @@ pub struct Body {
     pub instrs: Vec<Instr>,
     pub imms: Vec<u64>,
     pub commits: Vec<Commit>,
+    /// Guarded block ranges (issue #117, stage 6; see `guard.rs`), sorted
+    /// and disjoint. Blocks outside every guard always run.
+    pub guards: Vec<Guard>,
+}
+
+/// Blocks `start..end` of a [`Body`] run only when every condition holds,
+/// tested in order (see `guard.rs`). Nothing but the instruction consuming
+/// them reads their results when they are skipped, so they keep stale
+/// values nobody observes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Guard {
+    pub start: u32,
+    pub end: u32,
+    pub conds: Vec<Cond>,
+}
+
+/// `(slots[slot] != 0) == when`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Cond {
+    pub slot: u32,
+    pub when: bool,
+}
+
+impl Guard {
+    /// Whether the guarded blocks run, given the slots.
+    #[inline]
+    pub fn holds(&self, slots: &[u64]) -> bool {
+        self.conds
+            .iter()
+            .all(|c| (slots[c.slot as usize] != 0) == c.when)
+    }
 }
 
 impl Body {
