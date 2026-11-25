@@ -88,6 +88,17 @@ pub struct Options {
     /// as one ROM read (plus the index concatenation and output slices).
     /// Its internal nets stay readable through shadow slots.
     pub tables: bool,
+    /// Shifts by literals (issue #117; part of `words`): a concatenation
+    /// whose low part is constant zero, over a bit field or a whole word
+    /// (`{x[14:0], 1'b0}`: a slice and a concatenation), becomes one
+    /// [`Op::Shl`].
+    pub shifts: bool,
+    /// Barrel shifters (issue #117; part of `words`, needs `shifts`): a
+    /// chain of muxes `y_{i+1} = v[i] ? y_i << 2^i : y_i` over the low bits
+    /// of one amount word `v` (`x << v` written as shift stages) becomes
+    /// one [`Op::ShlV`] by `v[0..=i]`. Intermediate stages that something
+    /// observes stay readable (each is the same shift by fewer bits).
+    pub barrels: bool,
     /// Nets to keep observable under dead-code elimination:
     /// `(instance path, NetId)`.
     pub probes: Vec<(Vec<NodeId>, NetId)>,
@@ -168,6 +179,8 @@ impl Default for Options {
             words: true,
             clock_phases: true,
             tables: true,
+            shifts: true,
+            barrels: true,
             probes: Vec::new(),
             slot_order: SlotOrder::default(),
             pack: PackMode::Auto,
@@ -192,6 +205,8 @@ impl Options {
             words: false,
             clock_phases: false,
             tables: false,
+            shifts: false,
+            barrels: false,
             probes: Vec::new(),
             slot_order: SlotOrder::Production,
             pack: PackMode::Off,

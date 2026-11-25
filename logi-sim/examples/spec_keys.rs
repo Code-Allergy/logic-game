@@ -975,6 +975,8 @@ fn eval(op: Op, i: &Instr, imm: u64, s: &[u64], mems: &[Vec<u64>], tick: u64) ->
                 c()
             }
         }
+        Op::Shl => ((a >> i.c) << i.b) & imm,
+        Op::ShlV => (a << (b() & 63)) & imm,
     }
 }
 

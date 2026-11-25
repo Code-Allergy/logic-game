@@ -336,6 +336,14 @@ fn oversized_bodies_stay_interpreted() {
     check_jit(&p, 6, 6, &SimOptions::default()).unwrap();
 }
 
+/// The JIT's `Shl` and `ShlV` against their definitions (the interpreter
+/// tests in `sim/tests.rs` run the same cases).
+#[test]
+fn shift_ops_match_their_definitions() {
+    crate::sim::tests::shl_semantics(true);
+    crate::sim::tests::shlv_semantics(true);
+}
+
 /// Master/slave registers, a latch and a RAM written on clock high, per
 /// clock of `periods` (common period: their least common multiple).
 fn clocked(periods: &[u32]) -> Design {
@@ -432,5 +440,68 @@ fn superstep_mutations_are_caught() {
         let caught = programs.iter().any(|p| check_batches(p, 1).is_err());
         super::MUTATION.set(0);
         assert!(caught, "mutation {m} is not caught");
+    }
+}
+
+/// `Shl` and `ShlV` inside supersteps: a barrel shifter and a shifted
+/// register on a period-3 clock (master/slave registers), against single
+/// unfused ticks and the interpreter.
+#[test]
+fn shift_ops_run_in_supersteps() {
+    use crate::compile::Op;
+    use crate::netlist::NodeKind;
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let clk = b.clock(3, 1, 0);
+    let nclk = b.not(clk);
+    let x = b.input("x", 16);
+    let v = b.input("v", 5);
+    // `x << v[0..4]` as four mux stages of `{y[15-k:0], k'b0}`.
+    let mut y = x;
+    for i in 0..4u8 {
+        let k = 1u8 << i;
+        let lo = b.zero(k);
+        let hi = b.split(y, 0, 16 - k);
+        let t = b.merge(&[lo, hi]);
+        let s = b.bit(v, i);
+        y = b.mux(s, y, t);
+    }
+    // A register shifted up by one each period, mixed with the barrel.
+    let (slave, q) = b.state_placeholder(NodeKind::Register { w: 16 });
+    let lo = b.zero(1);
+    let hi = b.split(q, 0, 15);
+    let shifted = b.merge(&[lo, hi]);
+    let next = b.xor(shifted, y);
+    let master = b.register(nclk, next);
+    b.connect(clk, (slave, 0));
+    b.connect(master, (slave, 1));
+    b.output("q", q);
+    b.output("y", y);
+    for options in [Options::default(), Options::debug()] {
+        let p = program(&d, &options);
+        for op in [Op::Shl, Op::ShlV] {
+            assert!(
+                p.blocks.iter().any(|b| b.op == op),
+                "{op:?}: {:?}",
+                p.blocks
+            );
+        }
+        let s = Sim::with_options(Arc::clone(&p), SimOptions::jit());
+        let sup = s
+            .jit_code()
+            .and_then(|j| j.superstep())
+            .expect("a superstep");
+        assert_eq!(sup.info.ticks, 3);
+        check_batches(&p, 3).unwrap();
+        for (ticks, chunk) in [(1, 1), (1, 3), (5, 7), (16, 64)] {
+            let o = SimOptions {
+                superstep_ticks: ticks,
+                superstep_chunk: chunk,
+                guard_min: 1,
+                ..SimOptions::default()
+            };
+            check_jit(&p, 300, 3 + ticks, &o).unwrap_or_else(|e| panic!("{ticks}/{chunk}: {e}"));
+        }
     }
 }

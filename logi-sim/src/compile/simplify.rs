@@ -309,6 +309,8 @@ pub(super) fn fold(
         Op::ReduceXor => (a().count_ones() & 1) as u64,
         Op::Shr => (a() >> i.b) & imm,
         Op::Concat => a() | (b() << i.c),
+        Op::Shl => ((a() >> i.c) << i.b) & imm,
+        Op::ShlV => (a() << (b() & 63)) & imm,
         Op::Sext => {
             let x = a();
             if (x >> (i.b - 1)) & 1 == 1 {
@@ -389,6 +391,7 @@ fn const_identity(op: Op, i: &Instr, w: u8, c: &dyn Fn(u32) -> Option<u64>) -> O
             Some(_) => Outcome::Alias(i.b),
             None => Outcome::Keep,
         },
+        Op::Shl | Op::ShlV if ca == Some(0) => Outcome::Const(0),
         Op::AddSum => match (ca, cb, cc) {
             (_, Some(0), Some(0)) => Outcome::Alias(i.a),
             (Some(0), _, Some(0)) => Outcome::Alias(i.b),
@@ -409,6 +412,7 @@ fn alias_identity(op: Op, i: &Instr, imm: u64, widths: &[u8]) -> Outcome {
         Op::And | Op::Or if i.a == i.b => Outcome::Alias(i.a),
         Op::Mux if i.b == i.c => Outcome::Alias(i.b),
         Op::Shr if i.b == 0 && imm == mask(widths[i.a as usize]) => Outcome::Alias(i.a),
+        Op::Shl if i.b == 0 && i.c == 0 && imm == mask(widths[i.a as usize]) => Outcome::Alias(i.a),
         _ => Outcome::Keep,
     }
 }

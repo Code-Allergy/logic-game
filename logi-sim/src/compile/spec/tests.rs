@@ -748,3 +748,71 @@ fn a_long_clock_period_is_not_a_slot() {
     );
     check_design("clock 1000", &d, 6, 4);
 }
+
+/// `{y, k'b0}` cut to `w` bits (a zero-low concat: a `Shl`).
+fn shl_lit(
+    b: &mut crate::netlist::Builder<'_>,
+    y: crate::netlist::NetId,
+    k: u8,
+    w: u8,
+) -> crate::netlist::NetId {
+    let wy = b.width(y);
+    let lo = b.zero(k);
+    let keep = (w - k).min(wy);
+    let hi = if keep == wy { y } else { b.split(y, 0, keep) };
+    let r = b.merge(&[lo, hi]);
+    if keep + k < w { b.zext(r, w) } else { r }
+}
+
+/// Registers through a 3-stage barrel shifter (a `ShlV`) and literal
+/// shifts (`Shl`), with the amount and a mode in state: keys on the
+/// amount, the mode and the shifted words.
+fn shifter() -> Design {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let we = b.input("we", 1);
+    let din = b.input("din", 8);
+    let amt_in = b.input("amt", 3);
+    let one = b.one();
+    let x = b.register(we, din);
+    let v = b.register(one, amt_in);
+    let mode = b.register(we, amt_in);
+    let mut y = x;
+    for (bit, k) in [(0u8, 1u8), (1, 2), (2, 4)] {
+        let t = shl_lit(&mut b, y, k, 8);
+        let s = b.bit(v, bit);
+        y = b.mux(s, y, t);
+    }
+    let lit = shl_lit(&mut b, x, 3, 8);
+    let m = b.bit(mode, 0);
+    let pick = b.mux(m, y, lit);
+    let acc = b.register(one, pick);
+    let hi = shl_lit(&mut b, acc, 2, 8);
+    let out = b.register(one, hi);
+    b.output("acc", acc);
+    b.output("out", out);
+    d
+}
+
+/// `Shl` and `ShlV` (issue #117) through possible bits, known bits and
+/// demanded bits: specialized bodies stay exact on every key value.
+#[test]
+fn shift_ops_specialize_exactly() {
+    let d = shifter();
+    let p = compile(&d, &Options::default()).unwrap();
+    let has = |op: Op| p.blocks.iter().any(|b| b.op == op);
+    assert!(has(Op::Shl) && has(Op::ShlV), "{:?}", p.blocks);
+    // The shift amount `v` is read in full by the `ShlV`: its 3 bits are
+    // in the exact support.
+    let possible = possible_bits(&p);
+    let (body, phase) = fused_bodies(&p).remove(0);
+    let cx = SpecContext::new(&p, &body, &possible, phase).unwrap();
+    let supports: Vec<u64> = state_slots(&p)
+        .iter()
+        .map(|&s| cx.exact_support(s))
+        .collect();
+    assert!(supports.contains(&0b111), "{supports:?}");
+    let n = check_design("shifter", &d, 12, 8);
+    assert!(n > 0, "{n}");
+}

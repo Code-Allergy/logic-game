@@ -208,7 +208,7 @@ fn a_compiled_test_pins_what_the_compiler_does() {
         "not exactly as an adder",
         "\"16-bit 8-to-1 multiplexer\" did not match: output 0: no catalogue function fits",
         "\"16-bit 2-to-1 multiplexer\" must not match, but matched as [Mux",
-        "33 instructions, more than the 10 allowed",
+        "32 instructions, more than the 10 allowed",
     ] {
         assert!(text.contains(said), "{said}: {text}");
     }

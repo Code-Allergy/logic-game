@@ -271,6 +271,7 @@ impl Spec {
                         Op::Or | Op::Xor if zero(a) => of(bb, d),
                         Op::Or | Op::Xor if zero(bb) => of(a, d),
                         Op::Concat if zero(bb) => of(a, d),
+                        Op::Shl | Op::ShlV if zero(a) => Val::Const(0),
                         _ => Val::Own,
                     }
                 };
