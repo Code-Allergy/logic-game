@@ -159,6 +159,18 @@ impl SimOptions {
         }
     }
 
+    /// The interpreted layout of these options for JIT tiering: `jit` off,
+    /// but the bodies laid out as the JIT would run them (guarded when
+    /// `jit` asks for guards), so native code compiled from this layout
+    /// later swaps into a `Sim` built with it.
+    pub fn tier_layout(&self) -> Self {
+        Self {
+            jit: false,
+            guard_interpreter: self.guard_interpreter || self.jit,
+            ..self.clone()
+        }
+    }
+
     /// The defaults with the JIT on (see [`SimOptions::jit`]).
     pub fn jit() -> Self {
         Self {

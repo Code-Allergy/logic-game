@@ -1258,3 +1258,32 @@ fn jit_counters_match_the_interpreter_with_guards() {
         }
     }
 }
+
+/// Guards follow the JIT (`SimOptions::guard_interpreter` off by default):
+/// the interpreter's default runs unguarded, a JIT `Sim` and the tiered
+/// interpreter layout (`SimOptions::tier_layout`) are guarded alike, and
+/// `guard_interpreter` guards the interpreter.
+#[test]
+fn guards_follow_the_jit_and_its_tier_layout() {
+    let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
+    let p = Arc::new(compile(&d, &Options::default()).unwrap());
+    let guarded = |o: SimOptions| Sim::with_options(Arc::clone(&p), o).guarded();
+    let jit = guarded(SimOptions::jit());
+    assert!(jit.0 > 0, "the CPU's register enables guard cones");
+    assert_eq!(guarded(SimOptions::default()), (0, 0));
+    assert_eq!(guarded(SimOptions::jit().tier_layout()), jit);
+    assert_eq!(
+        guarded(SimOptions {
+            guard_interpreter: true,
+            ..SimOptions::default()
+        }),
+        jit
+    );
+    assert_eq!(
+        guarded(SimOptions {
+            guard: false,
+            ..SimOptions::jit()
+        }),
+        (0, 0)
+    );
+}
