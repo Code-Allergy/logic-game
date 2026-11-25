@@ -65,7 +65,7 @@ pub fn widths(p: &Program, bodies: &[&Body]) -> Vec<u8> {
                         Op::And | Op::Or | Op::Xor => g(i.a).max(g(i.b)),
                         Op::Mux => g(i.b).max(g(i.c)),
                         Op::Switch => g(i.b),
-                        Op::AddSum | Op::Shr | Op::Sext => bitlen(imm),
+                        Op::AddSum | Op::Shr | Op::Sext | Op::Shl | Op::ShlV => bitlen(imm),
                         Op::Concat => g(i.a).max(i.c as u8 + g(i.b)),
                         Op::MemRead => p.mems[i.b as usize].width,
                         _ => 1,
@@ -105,6 +105,8 @@ fn kind(op: Op, width: u8, p_imm: u64, w_a: u8, w_b: u8) -> &'static str {
         Sext => "sext",
         Clock => "clock",
         SrNext => "srnext",
+        Shl => "shift (Shl)",
+        ShlV => "variable shift (ShlV)",
     }
 }
 
@@ -273,6 +275,8 @@ fn main() -> Result<(), String> {
     let ablate = flag(&mut args, "--ablate");
     let state = flag(&mut args, "--state");
     let report = flag(&mut args, "--report");
+    let hash = flag(&mut args, "--hash");
+    let bench = flag(&mut args, "--bench");
     let dump = args.iter().position(|a| a == "--dump").map(|k| {
         let v = args[k + 1].clone();
         args.drain(k..k + 2);
@@ -323,6 +327,54 @@ fn main() -> Result<(), String> {
     }
 
     let program = Arc::new(nes_demo::maybe(compile(&design, &Options::default()).map_err(|e| format!("{e:?}"))?));
+    if bench {
+        // `Sim::run` throughput by this thread's CPU time (steadier than
+        // wall time on a shared machine): 7 rounds of `ticks` after the
+        // warm-up; prints the median and the spread.
+        let cpu = || {
+            let s = std::fs::read_to_string("/proc/thread-self/schedstat").unwrap_or_default();
+            s.split_whitespace().next().and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0) / 1e9
+        };
+        let mut sim = Sim::with_options(Arc::clone(&program), SimOptions::jit());
+        sim.run(warm());
+        let mut r = Vec::new();
+        for _ in 0..7 {
+            let c = cpu();
+            sim.run(ticks);
+            r.push(ticks as f64 / (cpu() - c) / 1e3);
+        }
+        let mut x = r.clone();
+        x.sort_by(f64::total_cmp);
+        println!(
+            "k ticks/s (CPU time): median {:.0}, min {:.0}, max {:.0}",
+            x[3], x[0], x[6]
+        );
+        return Ok(());
+    }
+    if hash {
+        // State after `ticks` ticks (fused JIT runs, odd batches), as a
+        // digest, to compare compiles across processes (env-var A/B).
+        let mut sim = Sim::with_options(Arc::clone(&program), SimOptions::jit());
+        let mut t = 0;
+        let mut n = 1u64;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        while t < ticks {
+            n = (n * 7919 + 13) % 50_021 + 1;
+            let n = n.min(ticks - t);
+            sim.run(n);
+            t += n;
+            let st = sim.export_state();
+            let mut words: Vec<_> = st.words.iter().map(|(k, v)| (format!("{k:?}"), *v)).collect();
+            words.sort();
+            format!("{t} {words:?}").hash(&mut h);
+            let mut mems: Vec<_> = st.mems.iter().map(|(k, v)| (format!("{k:?}"), v.2.clone())).collect();
+            mems.sort();
+            format!("{mems:?}").hash(&mut h);
+        }
+        println!("state digest after {t} ticks: {}", format!("{:016x}", h.finish()));
+        return Ok(());
+    }
     let bodies = fused_bodies(&program, true);
     let refs: Vec<&Body> = bodies.iter().collect();
     let w = widths(&program, &refs);

@@ -1471,6 +1471,7 @@ fn check_body(
                 Op::Clock if i.a == 0 => return bad(format!("zero clock period in {i:?}")),
                 Op::Sext if !(1..=64).contains(&i.b) => return bad(format!("bad sext in {i:?}")),
                 Op::Shr if i.b >= 64 => return bad(format!("bad shift in {i:?}")),
+                Op::Shl if i.b >= 64 || i.c >= 64 => return bad(format!("bad shift in {i:?}")),
                 Op::Concat if i.c >= 64 => return bad(format!("bad shift in {i:?}")),
                 Op::AddCarry if imm > 64 => return bad(format!("bad width in {i:?}")),
                 _ => {}

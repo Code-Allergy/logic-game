@@ -308,6 +308,8 @@ pub(super) fn fold(
         Op::ReduceAnd => (a() == imm) as u64,
         Op::ReduceXor => (a().count_ones() & 1) as u64,
         Op::Shr => (a() >> i.b) & imm,
+        Op::Shl => ((a() >> i.c) << i.b) & imm,
+        Op::ShlV => (a() << (b() & 63)) & imm,
         Op::Concat => a() | (b() << i.c),
         Op::Sext => {
             let x = a();

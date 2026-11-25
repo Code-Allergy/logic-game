@@ -669,6 +669,16 @@ fn build_settle(
                         let x = ins.ins().ushr_imm_u(a, i64::from(i.b));
                         ins.ins().band_imm_u(x, m as i64)
                     }
+                    Op::Shl => {
+                        let x = ins.ins().ushr_imm_u(a, i64::from(i.c));
+                        let x = ins.ins().ishl_imm_u(x, i64::from(i.b));
+                        ins.ins().band_imm_u(x, m as i64)
+                    }
+                    Op::ShlV => {
+                        // Cranelift masks the shift amount to the type's width.
+                        let x = ins.ins().ishl(a, bv);
+                        ins.ins().band_imm_u(x, m as i64)
+                    }
                     Op::Concat => {
                         let x = ins.ins().ishl_imm_u(bv, i64::from(i.c));
                         ins.ins().bor(a, x)

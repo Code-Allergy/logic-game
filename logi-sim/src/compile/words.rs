@@ -50,6 +50,17 @@ use super::{FastMap, FastSet, Options};
 use crate::netlist::mask;
 
 const NONE: u32 = u32::MAX;
+
+/// Issue #117 experiments: `LOGI_NO_SHL` / `LOGI_NO_BARREL` turn the new
+/// rewrites off for A/B runs.
+fn shl_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("LOGI_NO_SHL").is_none())
+}
+fn barrel_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    shl_enabled() && *ON.get_or_init(|| std::env::var_os("LOGI_NO_BARREL").is_none())
+}
 /// Rounds of state merging (each may expose new pairs).
 const MAX_ROUNDS: usize = 4;
 /// Depth of nested op merging.
@@ -187,6 +198,11 @@ impl Graph<'_> {
                 if b == c {
                     return b;
                 }
+                if barrel_enabled()
+                    && let Some(r) = self.barrel(a, b, c, w)
+                {
+                    return r;
+                }
                 let sel = *self.node(a);
                 if sel.kind == Kind::Op(Op::Not) && sel.imm == 1 && self.w(sel.a) == 1 {
                     return self.mk(Op::Mux, sel.a, c, b, 0, w);
@@ -290,10 +306,52 @@ impl Graph<'_> {
         })
     }
 
+    /// One stage of a barrel shifter (issue #117 experiments):
+    /// `Mux(v[i], y, y << 2^i)` truncated to `w` bits, where `y` is `y0`
+    /// shifted by `v[0..i]` (or `i == 0`), is `y0 << v[0..=i]`.
+    fn barrel(&mut self, sel: u32, y: u32, t: u32, w: u8) -> Option<u32> {
+        let nt = *self.node(t);
+        if nt.kind != Kind::Op(Op::Shl) || nt.a != y || nt.c != 0 || w > 63 {
+            return None;
+        }
+        let k = nt.b;
+        if !k.is_power_of_two() || nt.imm != mask(w) & (mask(w) << k) || self.w(y) > w {
+            return None;
+        }
+        let (v, i, len) = self.as_slice(sel);
+        if v == sel || len != 1 || 1u32 << i != k {
+            return None;
+        }
+        let ny = *self.node(y);
+        if ny.kind == Kind::Op(Op::ShlV) && ny.imm == mask(w) && ny.w == w {
+            let (va, ia, la) = self.as_slice(ny.b);
+            if va == v && ia == 0 && la == i && i > 0 {
+                let amt = self.slice(v, 0, u32::from(i) + 1);
+                return Some(self.mk(Op::ShlV, ny.a, amt, 0, mask(w), w));
+            }
+        }
+        if i == 0 {
+            return Some(self.mk(Op::ShlV, y, sel, 0, mask(w), w));
+        }
+        None
+    }
+
     /// `p | q << c`, `w` bits wide.
     fn concat(&mut self, p: u32, q: u32, c: u32, w: u8, depth: u32) -> u32 {
         if c >= 64 || self.cval(q) == Some(0) {
             return p;
+        }
+        // Zero low bits: a shift left (issue #117 experiments).
+        if shl_enabled() && self.cval(p) == Some(0) && (self.w(p) as u32) <= c {
+            let nq = *self.node(q);
+            if nq.kind == Kind::Op(Op::Shr) && nq.imm == mask(nq.imm.count_ones() as u8) {
+                let imm = (nq.imm << c) & mask(w);
+                return self.mk(Op::Shl, nq.a, c, nq.b, imm, w);
+            }
+            if nq.kind == Kind::Op(Op::Shl) && nq.b + c < 64 {
+                let imm = (nq.imm << c) & mask(w);
+                return self.mk(Op::Shl, nq.a, nq.b + c, nq.c, imm, w);
+            }
         }
         let (bp, op_, lp) = self.as_slice(p);
         let (bq, oq, lq) = self.as_slice(q);

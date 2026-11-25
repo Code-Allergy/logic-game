@@ -115,6 +115,13 @@ pub enum Op {
     /// SR latch next state: `if b != 0 { 0 } else if a != 0 { 1 } else { c }`
     /// (`a` = s, `b` = r, `c` = state).
     SrNext,
+    /// Shift by literals: `((a >> c) << b) & imm` (`b`, `c` literal shifts
+    /// below 64). Issue #117 experiments: a slice moved up in a
+    /// concatenation with zero low bits.
+    Shl,
+    /// Shift left by a slot: `(a << (b & 63)) & imm`. Issue #117
+    /// experiments: a barrel shifter of muxes.
+    ShlV,
 }
 
 impl Op {
@@ -122,10 +129,12 @@ impl Op {
     pub fn slot_operands(self) -> (bool, bool, bool) {
         use Op::*;
         match self {
-            Copy | Not | ReduceOr | ReduceAnd | ReduceXor | Shr | Sext | MemRead => {
+            Copy | Not | ReduceOr | ReduceAnd | ReduceXor | Shr | Sext | MemRead | Shl => {
                 (true, false, false)
             }
-            And | Or | Xor | Nand | Nor | Xnor | Switch | Eq | LtU | Concat => (true, true, false),
+            And | Or | Xor | Nand | Nor | Xnor | Switch | Eq | LtU | Concat | ShlV => {
+                (true, true, false)
+            }
             Mux | AddSum | AddCarry | SrNext => (true, true, true),
             Clock => (false, false, false),
         }
