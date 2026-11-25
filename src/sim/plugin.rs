@@ -106,6 +106,7 @@ impl Plugin for SimulationRuntimePlugin {
             .init_resource::<UndoHistory>()
             .init_resource::<LoadedRoot>()
             .init_resource::<crate::sim::WorkspaceTests>()
+            .init_resource::<crate::sim::SaveOutcome>()
             .init_resource::<PendingChipUpdates>()
             .add_message::<HistoryCommand>()
             .add_message::<MakeChip>()

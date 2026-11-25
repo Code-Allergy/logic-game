@@ -346,6 +346,11 @@ fn workspaces_are_replaced_through_the_editor_and_demos_stay_read_only() {
         state.contains("workspace: \"half_adder\" (read-only demo)"),
         "{state}"
     );
+    // A refused save is an error, though the workspace is clean (which a
+    // refused save leaves it) and keeps its name.
+    assert!(!app.world().resource::<WorkspaceRevision>().is_dirty());
+    let e = drive(&mut app, || s.workspace_tool("save", None, false)).unwrap_err();
+    assert!(e.contains("read-only"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
