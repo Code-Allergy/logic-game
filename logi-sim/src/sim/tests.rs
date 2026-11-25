@@ -1177,13 +1177,20 @@ fn memory_versions_change_only_on_writes() {
 
 /// Feature `counters`: without guards every tick executes every block and
 /// processes every commit; the counts are exact. With guards (the
-/// default), a skipped guarded range is not counted.
+/// interpreter with `guard_interpreter`), a skipped guarded range is not
+/// counted.
 #[cfg(feature = "counters")]
 #[test]
 fn counters_count_executed_work() {
     let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
     let p = Arc::new(compile(&d, &Options::default()).unwrap());
-    let mut guarded = Sim::new(Arc::clone(&p));
+    let mut guarded = Sim::with_options(
+        Arc::clone(&p),
+        SimOptions {
+            guard_interpreter: true,
+            ..SimOptions::default()
+        },
+    );
     let (_, skippable) = guarded.guarded();
     assert!(skippable > 0, "the CPU's register enables guard cones");
     guarded.reset_counters();
@@ -1237,6 +1244,7 @@ fn jit_counters_match_the_interpreter_with_guards() {
                 SimOptions {
                     jit,
                     guard_min: 1,
+                    guard_interpreter: true,
                     ..SimOptions::default()
                 },
             )

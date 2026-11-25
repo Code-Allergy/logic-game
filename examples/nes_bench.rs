@@ -106,7 +106,14 @@ fn main() -> Result<(), String> {
             ),
             ("JIT: tick() loop", jit, false),
             ("run(n), variants + fusion", SimOptions::default(), true),
-            ("run(n), no guards", no_guard(&SimOptions::default()), true),
+            (
+                "run(n), guards in the interpreter",
+                SimOptions {
+                    guard_interpreter: true,
+                    ..SimOptions::default()
+                },
+                true,
+            ),
             (
                 "run(n), variants only",
                 SimOptions {
@@ -134,8 +141,11 @@ fn main() -> Result<(), String> {
             ),
             ("tick() loop, defaults", SimOptions::default(), false),
             (
-                "tick() loop, no guards",
-                no_guard(&SimOptions::default()),
+                "tick() loop, guards in the interpreter",
+                SimOptions {
+                    guard_interpreter: true,
+                    ..SimOptions::default()
+                },
                 false,
             ),
         ];
@@ -215,7 +225,13 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
     let no_guard = |o: SimOptions| SimOptions { guard: false, ..o };
     let configs = [
         ("interpreter, no guards", no_guard(SimOptions::default())),
-        ("interpreter", SimOptions::default()),
+        (
+            "interpreter",
+            SimOptions {
+                guard_interpreter: true,
+                ..SimOptions::default()
+            },
+        ),
         ("JIT", SimOptions::jit()),
         ("JIT, no guards", no_guard(SimOptions::jit())),
     ];
@@ -263,7 +279,13 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
     let short = (ticks / 20).max(1000);
     let mut want = Sim::with_options(Arc::clone(&program), no_guard(SimOptions::default()));
     let mut got = [
-        Sim::with_options(Arc::clone(&program), SimOptions::default()),
+        Sim::with_options(
+            Arc::clone(&program),
+            SimOptions {
+                guard_interpreter: true,
+                ..SimOptions::default()
+            },
+        ),
         Sim::with_options(Arc::clone(&program), SimOptions::jit()),
     ];
     let mut t = 0;
