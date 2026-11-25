@@ -24,6 +24,16 @@
 //!   arm's concatenation simplifies away (so it never adds instructions).
 //!   The two narrow results are then bit fields of the wide one, and are
 //!   read from it.
+//! - **shifts** (`Options::shifts`): a concatenation whose low part is
+//!   constant zero is one [`Op::Shl`] of the high part (through a slice:
+//!   `{x[14:0], 1'b0}` is `(x << 1) & 0xffff`); a slice of such a shift
+//!   is a slice of its operand, or zero;
+//! - **barrel shifters** (`Options::barrels`): `Mux(v[i], y, y << 2^i)`
+//!   truncated to the width `w`, where `y` is a word of at most `w` bits
+//!   (`i == 0`) or `ShlV(x, v[0..i])` (masked to `w` bits), is
+//!   `ShlV(.., v[0..=i])`. The amount has at most 6 bits (the stage's
+//!   shift `2^i` is below 64), so `ShlV`'s `& 63` never applies, and a
+//!   shift by `w` or more gives 0, as the muxes do.
 //! - **state merging**: state words that something reads only as parts of
 //!   one concatenation (`Concat(A, B)` with `A`, `B` committed by `Copy`)
 //!   are merged into one state word whose next value is the concatenation
@@ -99,6 +109,19 @@ struct Graph<'a> {
     /// Adjacent state pairs `(A, B)` seen concatenated as `Concat(A, B,
     /// width(A))` (merge candidates).
     pairs: Vec<(u32, u32)>,
+    /// `Options::shifts`.
+    shifts: bool,
+    /// `Options::barrels` (with `shifts`).
+    barrels: bool,
+}
+
+/// The bit field `(lo, len)` an `Shl` mask keeps, if it is one run of
+/// ones at or above the shift `b` (so every kept bit is a bit of the
+/// operand, none a shifted-in zero).
+fn shl_field(b: u32, imm: u64) -> Option<(u32, u32)> {
+    let lo = imm.trailing_zeros();
+    let len = imm.count_ones();
+    (imm != 0 && imm == mask(len as u8) << lo && lo >= b).then_some((lo, len))
 }
 
 impl Graph<'_> {
@@ -176,6 +199,20 @@ impl Graph<'_> {
         }
         match op {
             Op::Copy => return a,
+            Op::Shl if imm == 0 => return self.konst(0, w),
+            // A slice (the graph's `Shr` nodes are slices: a mask of low
+            // ones).
+            Op::Shl if b == 0 && imm == mask(imm.count_ones() as u8) => {
+                return self.mk(Op::Shr, a, c, 0, imm, w);
+            }
+            Op::ShlV => {
+                if let Some(k) = self.cval(b) {
+                    return self.mk(Op::Shl, a, (k & 63) as u32, 0, imm, w);
+                }
+                if self.cval(a) == Some(0) {
+                    return self.konst(0, w);
+                }
+            }
             Op::Shr if imm == mask(imm.count_ones() as u8) && imm != 0 => {
                 return self.slice(a, b, imm.count_ones());
             }
@@ -190,6 +227,11 @@ impl Graph<'_> {
                 let sel = *self.node(a);
                 if sel.kind == Kind::Op(Op::Not) && sel.imm == 1 && self.w(sel.a) == 1 {
                     return self.mk(Op::Mux, sel.a, c, b, 0, w);
+                }
+                if self.barrels
+                    && let Some(r) = self.barrel(a, b, c, w)
+                {
+                    return r;
                 }
             }
             Op::And | Op::Or if a == b => return a,
@@ -278,6 +320,16 @@ impl Graph<'_> {
                     return self.slice(nx.b, off - nx.c, len);
                 }
             }
+            Kind::Op(Op::Shl) => {
+                if let Some((lo, flen)) = shl_field(nx.b, nx.imm) {
+                    if off + len <= lo || off >= lo + flen {
+                        return self.konst(0, len as u8);
+                    }
+                    if off >= lo && off + len <= lo + flen {
+                        return self.slice(nx.a, off - nx.b + nx.c, len);
+                    }
+                }
+            }
             _ => {}
         }
         self.intern(Node {
@@ -290,10 +342,60 @@ impl Graph<'_> {
         })
     }
 
+    /// One stage of a barrel shifter (see the module docs):
+    /// `Mux(sel, y, t)`, `w` bits wide, as one `ShlV`, if `sel` is bit `i`
+    /// of a word `v`, `t` is `(y << 2^i) & mask(w)` (an `Shl` of `y` or of
+    /// the word `y` is a slice of), and `y` is a word of
+    /// at most `w` bits (`i == 0`) or `ShlV(x, v[0..i])` masked to `w`
+    /// bits.
+    fn barrel(&mut self, sel: u32, y: u32, t: u32, w: u8) -> Option<u32> {
+        let nt = *self.node(t);
+        let wy = self.w(y);
+        // `t` shifts `y`, or the word `y` is a bit field of (from its
+        // offset), keeping exactly the bits of `y << k` below `w`.
+        let (yb, yo, _) = self.as_slice(y);
+        if nt.kind != Kind::Op(Op::Shl) || nt.a != yb || nt.c != yo as u32 || wy > w {
+            return None;
+        }
+        let k = nt.b;
+        if !k.is_power_of_two() || nt.imm != (mask(wy) << k) & mask(w) {
+            return None;
+        }
+        let (v, i, len) = self.as_slice(sel);
+        if len != 1 || u32::from(i) != k.trailing_zeros() {
+            return None;
+        }
+        debug_assert!(i <= 5, "a literal shift is below 64");
+        if i == 0 {
+            return Some(self.mk(Op::ShlV, y, sel, 0, mask(w), w));
+        }
+        let ny = *self.node(y);
+        if ny.kind == Kind::Op(Op::ShlV) && ny.imm == mask(w) {
+            let (va, ia, la) = self.as_slice(ny.b);
+            if va == v && ia == 0 && la == i && self.w(ny.b) == i {
+                let amt = self.slice(v, 0, u32::from(i) + 1);
+                return Some(self.mk(Op::ShlV, ny.a, amt, 0, mask(w), w));
+            }
+        }
+        None
+    }
+
     /// `p | q << c`, `w` bits wide.
     fn concat(&mut self, p: u32, q: u32, c: u32, w: u8, depth: u32) -> u32 {
         if c >= 64 || self.cval(q) == Some(0) {
             return p;
+        }
+        // A zero low part: a shift of the high part (through a slice of
+        // it, or a shift).
+        if self.shifts && self.cval(p) == Some(0) && (self.w(p) as u32) <= c {
+            let nq = *self.node(q);
+            let (a, b, sh, keep) = match nq.kind {
+                Kind::Op(Op::Shl) if nq.b + c < 64 => (nq.a, nq.b + c, nq.c, nq.imm),
+                Kind::Op(Op::Shr) => (nq.a, c, nq.b, nq.imm),
+                _ => (q, c, 0, mask(nq.w)),
+            };
+            let imm = (keep << c) & mask(w);
+            return self.mk(Op::Shl, a, b, sh, imm, w);
         }
         let (bp, op_, lp) = self.as_slice(p);
         let (bq, oq, lq) = self.as_slice(q);
@@ -403,7 +505,8 @@ impl Graph<'_> {
             }
             let wk = (c + self.w(aq[k]) as u32).min(64) as u8;
             let r = self.concat(ap[k], aq[k], c, wk, depth + 1);
-            if self.node(r).kind == Kind::Op(Op::Concat) {
+            if matches!(self.node(r).kind, Kind::Op(Op::Concat | Op::Shl)) {
+                // Still an instruction: the merge would add it.
                 return None;
             }
             arms[k] = r;
@@ -509,6 +612,8 @@ pub(super) fn clean(
     }
     let keep_nets = opts.debug || !opts.dce;
     let input = Input {
+        shifts: opts.shifts,
+        barrels: opts.shifts && opts.barrels,
         em,
         ports,
         debug,
@@ -619,6 +724,8 @@ struct Input<'a> {
     /// some state words).
     value_w: &'a [u8],
     keep_nets: bool,
+    shifts: bool,
+    barrels: bool,
 }
 
 /// Build, rewrite and emit once, merging the state slots of each group in
@@ -634,6 +741,8 @@ fn attempt(inp: &Input<'_>, groups: &[Vec<u32>]) -> (Attempt, Vec<(u32, u32)>) {
         copy_state: inp.copy_state,
         group_ends: FastMap::default(),
         pairs: Vec::new(),
+        shifts: inp.shifts,
+        barrels: inp.barrels,
     };
     let mut widths_new: Vec<u8> = Vec::new();
 
@@ -1090,6 +1199,19 @@ impl Emission {
                         off -= x.c as u8;
                         n = x.b;
                         continue;
+                    }
+                }
+                Kind::Op(Op::Shl) => {
+                    if let Some((lo, flen)) = shl_field(x.b, x.imm) {
+                        let (o, l) = (off as u32, len as u32);
+                        if o + l <= lo || o >= lo + flen {
+                            return Some((self.zero, 0, 1));
+                        }
+                        if o >= lo && o + l <= lo + flen {
+                            off = (o - x.b + x.c).try_into().ok()?;
+                            n = x.a;
+                            continue;
+                        }
                     }
                 }
                 _ => {}
