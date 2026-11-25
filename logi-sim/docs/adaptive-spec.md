@@ -1,7 +1,9 @@
 # Adaptive state-keyed specialization (issue #117)
 
-Status: compile side implemented (`compile/spec.rs`, package P1 below);
-runtime packages P2 to P9 designed here, not started.
+Status: compile side implemented (`compile/spec.rs`, package P1 below)
+and the pure part of the plan choice (`compile/spec/plan.rs`, P6);
+runtime packages P2 to P5, P7 to P9 and P6's sampling window designed
+here, not started.
 
 ## 1. Goal
 
@@ -156,6 +158,41 @@ every value a running program produces; the report's `--check` repeats
 the equality on 900 ticks of the NES console and catches bodies built for
 a wrong key.
 
+## 3b. Plan choice: `compile::spec::choose_plan` (implemented, P6 pure part)
+
+```rust
+pub fn choose_plan(p: &Program, contexts: &[Option<&SpecContext>],
+                   samples: &[&[Vec<u64>]], opts: &PlanOptions) -> SpecPlan;
+pub fn estimate(p, cx, layout, rows, bodies) -> Estimate;   // one layout's worth
+pub struct PlanOptions { max_key_bits: 32, min_loss: 4.0, max_bodies: 24,
+                         max_distinct: 256, pool: 20, min_gain: 2.0 }
+pub struct SpecPlan { pub phases: Vec<Option<PhasePlan>> }
+pub struct PhasePlan { pub layout: KeyLayout, pub saved: f64,
+                       pub distinct: usize, pub hit: f64 }
+```
+
+`samples[k]` are rows of settled slot values (every slot, indexed by
+slot) of ticks of phase `k`: a window the runtime recorded, or a profile.
+Per phase: each candidate (key = its fold support) is scored alone;
+the best `pool` are combined greedily while a field adds more than
+`min_gain` and the width stays within `max_key_bits`; `prune_bits` then
+drops bits worth less than `min_loss` ops; a phase whose result saves no
+more than `min_gain` (or has no field) gets `None`. Keys with more than
+`max_distinct` distinct values in the samples are never chosen.
+
+The score (`estimate`) is the doc's cost model in *executed* ops per tick
+over the rows: the guarded general body, minus the prefix (all of its
+instructions, unguarded, every tick, hit or miss), minus the guarded
+specialized body for the `max_bodies` most frequent keys and the guarded
+fallback for the rest. Guards matter: a key whose cone the general body
+skips most ticks does not pay for its prefix (tested). The function is
+pure and deterministic (ties broken by candidate order and key value);
+it runs no `Sim`. Open details chosen simply: samples are whole slot rows
+(not only candidate slots), the plan has one layout per phase, and
+`SpecOptions` has no `PlanOptions` of its own yet (P4 maps its caps onto
+them). On the NES demo with `min_loss` 2 it picks the same keys as the
+report's former ad hoc greedy (every kept bit is worth at least 2 ops).
+
 ## 4. Runtime design
 
 ### Data
@@ -178,6 +215,8 @@ pub struct SpecOptions {
 
 pub struct SpecPlan { pub phases: Vec<Option<PhasePlan>> }
 pub struct PhasePlan { pub layout: KeyLayout }        // what is keyed, per phase
+// as implemented (compile::spec): PhasePlan also carries the estimate it was
+// chosen by (`saved`, `distinct`, `hit`); `SpecOptions` maps onto `PlanOptions`.
 
 struct PhaseSpec {                       // in Sim, per phase with a plan
     layout: KeyLayout,
@@ -255,7 +294,8 @@ native code is a second install.
 `window` fused ticks no key runs; `run` samples the candidate slots
 after each fused settle (every 8th tick, 512 rows per phase). Then the
 plan is chosen as `spec_keys` does (P6): candidates scored alone, a
-greedy combination up to `max_key_bits`, then `prune_bits`. The plan
+greedy combination up to `max_key_bits`, then `prune_bits`
+(`compile::spec::choose_plan`, implemented: see section 3b). The plan
 is fixed for the life of the program; the adaptive part is which key
 values have bodies. (Re-planning on a long run of misses is a possible
 follow-up.)

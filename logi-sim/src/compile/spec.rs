@@ -1332,5 +1332,12 @@ pub fn pdep(x: u64, m: u64) -> u64 {
     out
 }
 
+mod plan;
+pub use plan::{
+    Estimate, PhasePlan, PlanOptions, SpecPlan, choose_plan, estimate, executed_ops, guarded,
+};
+
+#[cfg(test)]
+mod plan_tests;
 #[cfg(test)]
 mod tests;

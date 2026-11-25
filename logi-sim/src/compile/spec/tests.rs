@@ -14,7 +14,7 @@ use crate::testkit::{GenConfig, Rng, fixtures, generate};
 
 /// Every fused-run body of `p` with its tick residue: one per clock-phase
 /// variant, or the program's own.
-fn fused_bodies(p: &Program) -> Vec<(Body, Option<u64>)> {
+pub(super) fn fused_bodies(p: &Program) -> Vec<(Body, Option<u64>)> {
     let fuse = |b: Body| phases::prune(p, &b).unwrap_or(b);
     match p.phases.as_deref() {
         Some(ph) => ph
@@ -140,7 +140,7 @@ fn commit(p: &Program, body: &Body, slots: &mut [u64], mems: &mut [Vec<u64>]) {
 }
 
 /// The state slots of `p` (written by a commit).
-fn state_slots(p: &Program) -> Vec<u32> {
+pub(super) fn state_slots(p: &Program) -> Vec<u32> {
     let mut v: Vec<u32> = p
         .commits
         .iter()
@@ -156,15 +156,15 @@ fn state_slots(p: &Program) -> Vec<u32> {
 
 /// A machine state: slots and memories.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct State {
-    slots: Vec<u64>,
-    mems: Vec<Vec<u64>>,
+pub(super) struct State {
+    pub(super) slots: Vec<u64>,
+    pub(super) mems: Vec<Vec<u64>>,
 }
 
 /// A random state of `p`: inputs, state slots and RAM contents anything
 /// within their possible bits (what pokes and imports can set), the rest
 /// as a settle leaves it.
-fn random_state(p: &Program, sim: &mut Sim, possible: &[u64], rng: &mut Rng) -> State {
+pub(super) fn random_state(p: &Program, sim: &mut Sim, possible: &[u64], rng: &mut Rng) -> State {
     for port in 0..p.ports.inputs.len() {
         sim.set_input(port, rng.next_u64());
     }
@@ -197,7 +197,7 @@ fn random_state(p: &Program, sim: &mut Sim, possible: &[u64], rng: &mut Rng) -> 
 
 /// The state after one fused tick of `bodies` (each run in order over
 /// the slots, then the last one's commits).
-fn step(p: &Program, bodies: &[&Body], s: &State, tick: u64) -> State {
+pub(super) fn step(p: &Program, bodies: &[&Body], s: &State, tick: u64) -> State {
     let mut out = s.clone();
     for b in bodies {
         settle(p, b, &mut out.slots, &out.mems, tick);
@@ -207,7 +207,7 @@ fn step(p: &Program, bodies: &[&Body], s: &State, tick: u64) -> State {
 }
 
 /// What a commit's effect leaves observable: state slots and memories.
-fn observed(p: &Program, s: &State) -> (Vec<u64>, Vec<Vec<u64>>) {
+pub(super) fn observed(p: &Program, s: &State) -> (Vec<u64>, Vec<Vec<u64>>) {
     let st = state_slots(p)
         .iter()
         .map(|&x| s.slots[x as usize])
@@ -224,7 +224,7 @@ fn agrees(p: &Program, general: &Body, prefix: &Body, body: &Body, s: &State, ti
 }
 
 /// `s` with the key bits of `layout` set to `key`'s (state keys only).
-fn force(layout: &KeyLayout, key: u64, s: &State) -> State {
+pub(super) fn force(layout: &KeyLayout, key: u64, s: &State) -> State {
     let mut out = s.clone();
     for (slot, k) in layout.assume(key) {
         let x = &mut out.slots[slot as usize];
@@ -382,7 +382,7 @@ fn diff(a: &Body, b: &Body) -> String {
 /// written from an input (`ctl`), a 4-bit counter with a region flag, and
 /// a ROM word indexed by the counter. Bit 3 of `ctl` reaches only an
 /// output, so no fused body reads it.
-fn controlled() -> Design {
+pub(super) fn controlled() -> Design {
     let mut d = Design::new("top");
     let r = d.root;
     let mut b = d.builder(r);
