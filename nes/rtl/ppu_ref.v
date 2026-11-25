@@ -224,40 +224,44 @@ module ppu_oam (input clk, input [7:0] wd, input w2003, input w2004, input clr_a
   ppu_reg8 addr_reg (.clk(clk), .en(1'b1), .d(addr_n), .q(addr));
 endmodule
 
-// One of the eight sprites of a line: its pattern bytes, attributes and
-// x, loaded during the fetch; its pixel at screen column px.
-module ppu_sprite_slot (input clk, input load_meta, input load_lo, input load_hi, input valid,
-                        input [7:0] attr_in, input [7:0] x_in, input [7:0] pd, input [7:0] px,
-                        output [1:0] bits, output [1:0] pal, output prio);
-  wire [7:0] lo, hi, attr, x;
-  wire [7:0] rpd = {pd[0], pd[1], pd[2], pd[3], pd[4], pd[5], pd[6], pd[7]};
-  wire [7:0] pat = ~valid ? 8'h00 : attr[6] ? rpd : pd;      // horizontal flip
-  wire [8:0] off = {1'b0, px} - {1'b0, x};
-  wire in = off < 9'd8;
-  wire [7:0] sl = lo << off[2:0];
-  wire [7:0] sh = hi << off[2:0];
-  assign bits = in ? {sh[7], sl[7]} : 2'b00;
-  assign pal = attr[1:0];
-  assign prio = attr[5];                                      // 1: behind the background
-  ppu_reg8 attr_reg (.clk(clk), .en(load_meta), .d(attr_in), .q(attr));
-  ppu_reg8 x_reg (.clk(clk), .en(load_meta), .d(x_in), .q(x));
-  ppu_reg8 lo_reg (.clk(clk), .en(load_lo), .d(pat), .q(lo));
-  ppu_reg8 hi_reg (.clk(clk), .en(load_hi), .d(pat), .q(hi));
-endmodule
-
-// Sprite evaluation into secondary OAM, the sprite fetches, the slots and
-// the first opaque sprite pixel.
+// Sprite evaluation into secondary OAM, the sprite fetches, and a line
+// buffer that holds the next line's sprite pixels.
+//
+// Evaluation and the fetches are the 2C02's, dot for dot (the MMC3 counts
+// the fetches' A12 rises). Rendering is not: instead of eight sprite units
+// that each work out their pixel on every dot, each fetched sprite is
+// written into a 256-entry line buffer, one pixel per dot, in the eight
+// dots after its pattern-high fetch (sprite k at dots 264 + 8k .. 271 + 8k,
+// so 264..327). A pixel is written only where the buffer is still
+// transparent, and sprites are written in slot order, so the first opaque
+// sprite wins as on the chip. An entry is {sprite 0, priority, palette,
+// pattern bits}.
+//
+// There are two buffers. The fill writes the back one and, once a line's
+// fetch has run (dot 328 of a rendered line), it becomes the front one,
+// which the next line displays; the back one is cleared while the front
+// is displayed (dots 1..256 of lines 0..239 and the pre-render line). A
+// line whose fetch does not run (rendering off in its HBlank, as SMB3 does
+// at its status bar) leaves the front as it was, so the next line shows
+// the last fetched sprites again: the chip's sprite units are not
+// reloaded, and nothing shifted them out while rendering was off.
+//
+// Seen from outside (pixels, priority, sprite 0 hit, overflow) this is the
+// 2C02; it costs one buffer read per dot instead of eight comparisons,
+// shifts and a priority chain.
 module ppu_sprites (input clk, input [8:0] dot, input [8:0] line, input [7:0] ctrl,
                     input [7:0] mask, input [7:0] pd, input [31:0] eval_word,
                     output [5:0] eval_idx, output [13:0] fa, output fetching, output clr_oam_addr,
-                    output reg [1:0] bits, output reg [1:0] pal, output reg prio,
-                    output reg from0, output set_ovf);
+                    output [1:0] bits, output [1:0] pal, output prio,
+                    output from0, output set_ovf);
   reg [31:0] sec [0:7];
+  reg [5:0] buf_ram [0:511];
   wire [3:0] cnt;
-  wire s0_next, s0_line;
+  wire s0_next;
   wire ren = mask[3] | mask[4];
   wire vis = line < 9'd240;
-  wire rl = ren & (vis | line == 9'd261);
+  wire pre = line == 9'd261;
+  wire rl = ren & (vis | pre);
   wire h16 = ctrl[5];
   // Evaluation: OAM entry dot - 65 at dots 65..128 of a visible line.
   assign eval_idx = dot - 9'd65;
@@ -283,41 +287,55 @@ module ppu_sprites (input clk, input [8:0] dot, input [8:0] line, input [7:0] ct
                   : {1'b0, ctrl[3], e[15:8], plane, row[2:0]};
   assign fetching = region & ((dot[2:0] == 3'd5) | (dot[2:0] == 3'd6) | plane);
   assign clr_oam_addr = region;
-  wire s0_line_n = (rl & (dot == 9'd257)) ? s0_next : s0_line;
-  wire [7:0] slot_bit = 8'd1 << k;
-  wire [7:0] lm = (region & (dot[2:0] == 3'd1)) ? slot_bit : 8'd0;
-  wire [7:0] ll = (region & (dot[2:0] == 3'd5)) ? slot_bit : 8'd0;
-  wire [7:0] lh = (region & (dot[2:0] == 3'd7)) ? slot_bit : 8'd0;
+  // The fetched sprite, held while its pixels are written: pattern bytes
+  // (flipped horizontally if asked, zero for an empty slot), shifted out
+  // high bit first, and the buffer column of the next pixel.
+  wire [7:0] lo, hi, wattr;
+  wire [8:0] wx;
+  wire wvalid, ws0, front;
+  wire [7:0] rpd = {pd[0], pd[1], pd[2], pd[3], pd[4], pd[5], pd[6], pd[7]};
+  wire [7:0] pat = ~valid ? 8'h00 : e[22] ? rpd : pd;
+  wire fetch_lo = region & (dot[2:0] == 3'd5);
+  wire capture = region & (dot[2:0] == 3'd7);
+  wire filling = rl & (dot >= 9'd264) & (dot <= 9'd327);
+  wire [7:0] lo_fetched;
+  ppu_reg8 lo_fetch_reg (.clk(clk), .en(fetch_lo), .d(pat), .q(lo_fetched));
+  wire [7:0] lo_n = capture ? lo_fetched : filling ? {lo[6:0], 1'b0} : lo;
+  wire [7:0] hi_n = capture ? pat : filling ? {hi[6:0], 1'b0} : hi;
+  wire [8:0] wx_n = capture ? {1'b0, e[31:24]} : filling ? wx + 9'd1 : wx;
+  wire [7:0] wattr_n = capture ? e[23:16] : wattr;
+  wire wvalid_n = capture ? valid : wvalid;
+  wire ws0_n = capture ? ((k == 3'd0) & s0_next) : ws0;
+  // The line buffers: a dot of a rendered line reads its column of the
+  // front buffer and clears it in the back one; a fill dot writes the held
+  // sprite's next pixel into the back one where it is still transparent.
+  // The two never fall on the same dot. After a fill, the buffers swap.
   wire [7:0] px = dot[7:0] - 8'd1;
-  wire [1:0] b0, b1, b2, b3, b4, b5, b6, b7, p0, p1, p2, p3, p4, p5, p6, p7;
-  wire q0, q1, q2, q3, q4, q5, q6, q7;
-  ppu_sprite_slot slot0 (.clk(clk), .load_meta(lm[0]), .load_lo(ll[0]), .load_hi(lh[0]), .valid(valid), .attr_in(e[23:16]), .x_in(e[31:24]), .pd(pd), .px(px), .bits(b0), .pal(p0), .prio(q0));
-  ppu_sprite_slot slot1 (.clk(clk), .load_meta(lm[1]), .load_lo(ll[1]), .load_hi(lh[1]), .valid(valid), .attr_in(e[23:16]), .x_in(e[31:24]), .pd(pd), .px(px), .bits(b1), .pal(p1), .prio(q1));
-  ppu_sprite_slot slot2 (.clk(clk), .load_meta(lm[2]), .load_lo(ll[2]), .load_hi(lh[2]), .valid(valid), .attr_in(e[23:16]), .x_in(e[31:24]), .pd(pd), .px(px), .bits(b2), .pal(p2), .prio(q2));
-  ppu_sprite_slot slot3 (.clk(clk), .load_meta(lm[3]), .load_lo(ll[3]), .load_hi(lh[3]), .valid(valid), .attr_in(e[23:16]), .x_in(e[31:24]), .pd(pd), .px(px), .bits(b3), .pal(p3), .prio(q3));
-  ppu_sprite_slot slot4 (.clk(clk), .load_meta(lm[4]), .load_lo(ll[4]), .load_hi(lh[4]), .valid(valid), .attr_in(e[23:16]), .x_in(e[31:24]), .pd(pd), .px(px), .bits(b4), .pal(p4), .prio(q4));
-  ppu_sprite_slot slot5 (.clk(clk), .load_meta(lm[5]), .load_lo(ll[5]), .load_hi(lh[5]), .valid(valid), .attr_in(e[23:16]), .x_in(e[31:24]), .pd(pd), .px(px), .bits(b5), .pal(p5), .prio(q5));
-  ppu_sprite_slot slot6 (.clk(clk), .load_meta(lm[6]), .load_lo(ll[6]), .load_hi(lh[6]), .valid(valid), .attr_in(e[23:16]), .x_in(e[31:24]), .pd(pd), .px(px), .bits(b6), .pal(p6), .prio(q6));
-  ppu_sprite_slot slot7 (.clk(clk), .load_meta(lm[7]), .load_lo(ll[7]), .load_hi(lh[7]), .valid(valid), .attr_in(e[23:16]), .x_in(e[31:24]), .pd(pd), .px(px), .bits(b7), .pal(p7), .prio(q7));
-  // The first slot with an opaque pixel wins; with sprites off, or in the
-  // clipped left column, there is none.
-  wire show = mask[4] & ~((px < 8'd8) & ~mask[2]);
-  always @* begin
-    bits = 2'b00; pal = 2'b00; prio = 1'b0; from0 = 1'b0;
-    if (show) begin
-      if (b7 != 2'd0) begin bits = b7; pal = p7; prio = q7; end
-      if (b6 != 2'd0) begin bits = b6; pal = p6; prio = q6; end
-      if (b5 != 2'd0) begin bits = b5; pal = p5; prio = q5; end
-      if (b4 != 2'd0) begin bits = b4; pal = p4; prio = q4; end
-      if (b3 != 2'd0) begin bits = b3; pal = p3; prio = q3; end
-      if (b2 != 2'd0) begin bits = b2; pal = p2; prio = q2; end
-      if (b1 != 2'd0) begin bits = b1; pal = p1; prio = q1; end
-      if (b0 != 2'd0) begin bits = b0; pal = p0; prio = q0; from0 = s0_line; end
-    end
+  wire showing = (vis | pre) & (dot >= 9'd1) & (dot <= 9'd256);
+  wire [1:0] wbits = {hi[7], lo[7]};
+  wire [5:0] under = buf_ram[{~front, wx[7:0]}];
+  wire put = filling & wvalid & (wbits != 2'd0) & ~wx[8] & (under[1:0] == 2'd0);
+  always @(posedge clk) begin
+    if (showing) buf_ram[{~front, px}] <= 6'd0;
+    else if (put) buf_ram[{~front, wx[7:0]}] <= {ws0, wattr[5], wattr[1:0], wbits};
   end
+  wire front_n = (rl & (dot == 9'd328)) ? ~front : front;
+  wire [5:0] got = buf_ram[{front, px}];
+  // With sprites off, or in the clipped left column, there is no sprite.
+  wire show = vis & mask[4] & ~((px < 8'd8) & ~mask[2]);
+  assign bits = show ? got[1:0] : 2'b00;
+  assign pal = got[3:2];
+  assign prio = got[4];                                      // 1: behind the background
+  assign from0 = show & got[5] & (got[1:0] != 2'd0);
   ppu_reg4 cnt_reg (.clk(clk), .en(1'b1), .d(cnt_n), .q(cnt));
   ppu_reg1 s0_next_reg (.clk(clk), .en(1'b1), .d(s0_next_n), .q(s0_next));
-  ppu_reg1 s0_line_reg (.clk(clk), .en(1'b1), .d(s0_line_n), .q(s0_line));
+  ppu_reg8 lo_reg (.clk(clk), .en(1'b1), .d(lo_n), .q(lo));
+  ppu_reg8 hi_reg (.clk(clk), .en(1'b1), .d(hi_n), .q(hi));
+  ppu_reg9 wx_reg (.clk(clk), .en(1'b1), .d(wx_n), .q(wx));
+  ppu_reg8 wattr_reg (.clk(clk), .en(1'b1), .d(wattr_n), .q(wattr));
+  ppu_reg1 wvalid_reg (.clk(clk), .en(1'b1), .d(wvalid_n), .q(wvalid));
+  ppu_reg1 ws0_reg (.clk(clk), .en(1'b1), .d(ws0_n), .q(ws0));
+  ppu_reg1 front_reg (.clk(clk), .en(1'b1), .d(front_n), .q(front));
 endmodule
 
 // Background against sprite: the palette index of the pixel, and sprite 0 hit.
@@ -383,6 +401,9 @@ module ppu_ref (input clk, input [8:0] dot, input [8:0] line,
   assign pwd = cpu_wd;
 endmodule
 
+module ppu_reg9 (input clk, input en, input [8:0] d, output reg [8:0] q);
+  always @(posedge clk) if (en) q <= d;
+endmodule
 module ppu_reg4 (input clk, input en, input [3:0] d, output reg [3:0] q);
   always @(posedge clk) if (en) q <= d;
 endmodule
