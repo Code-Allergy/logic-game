@@ -1287,3 +1287,89 @@ fn guards_follow_the_jit_and_its_tier_layout() {
         (0, 0)
     );
 }
+
+// ── Run indices ──────────────────────────────────────────────────────────
+
+/// `Sim::with_options`, then the fused body of every tick residue copied
+/// into `extra` further runs, the tick using the last copy: run indices
+/// well past 255 (a design with many phases, or many specialized keys).
+fn sim_with_many_runs(p: &Arc<Program>, options: SimOptions, extra: usize) -> Sim {
+    let mut sim = Sim::with_options(Arc::clone(p), options);
+    for i in 0..sim.fused.len() {
+        for table in 0..2 {
+            let src = if table == 0 {
+                sim.full[i]
+            } else {
+                sim.fused[i]
+            } as usize;
+            let body = (src > 0).then(|| sim.runs[src - 1].body.clone()).flatten();
+            for _ in 0..extra {
+                let run = Run::new(&sim.program, body.clone(), sim.options.stream);
+                sim.runs.push(run);
+            }
+            let last = sim.runs.len() as u16;
+            if table == 0 {
+                sim.full[i] = last;
+            } else {
+                sim.fused[i] = last;
+            }
+        }
+    }
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    if sim.options.jit && sim.jit.is_some() {
+        let code = sim.compile_jit().expect("the JIT compiles the extra runs");
+        assert!(sim.install_jit(Some(Arc::new(code))));
+    }
+    sim
+}
+
+/// More than 255 runs: commits and settles through run index 300 equal the
+/// normal run layout, interpreted and JIT-compiled, tick by tick and in
+/// batches.
+#[test]
+fn more_than_255_runs_commit_through_run_300() {
+    let mut options = vec![SimOptions::default()];
+    if cfg!(all(feature = "jit", not(target_arch = "wasm32"))) {
+        options.push(SimOptions::jit());
+    }
+    for d in [
+        fixtures::cpu(&fixtures::LOOP_PROGRAM),
+        fixtures::register_file(3, 8),
+    ] {
+        let p = Arc::new(compile(&d, &Options::default()).unwrap());
+        for o in &options {
+            let mut want = Sim::with_options(Arc::clone(&p), o.clone());
+            let mut got = sim_with_many_runs(&p, o.clone(), 300);
+            assert!(
+                got.runs.len() >= 600
+                    && got.full.iter().any(|&f| f > 255)
+                    && got.fused.iter().any(|&f| f > 300)
+            );
+            for round in 0..12u64 {
+                for (port, q) in p.ports.inputs.iter().enumerate() {
+                    let v = (round * 0x9e37 + port as u64 * 31) & mask_of(q.width);
+                    want.set_input(port, v);
+                    got.set_input(port, v);
+                }
+                let n = [1, 2, 3, 7, 16, 5][round as usize % 6];
+                if round % 2 == 0 {
+                    want.run(n);
+                    got.run(n);
+                } else {
+                    for _ in 0..n {
+                        want.tick();
+                        got.tick();
+                    }
+                }
+                assert!(
+                    diff::observe(&want) == diff::observe(&got),
+                    "round {round} differs"
+                );
+            }
+        }
+    }
+}
+
+fn mask_of(w: u8) -> u64 {
+    if w >= 64 { u64::MAX } else { (1u64 << w) - 1 }
+}

@@ -329,10 +329,10 @@ pub struct Sim {
     period: u64,
     /// Per tick residue: the body that settles an observed tick and
     /// commits after it.
-    full: Vec<u8>,
+    full: Vec<u16>,
     /// Per tick residue: the body that settles a tick only its own commit
     /// observes (tick fusion), with the same commits as `full`.
-    fused: Vec<u8>,
+    fused: Vec<u16>,
     options: SimOptions,
     /// Worker threads, when `options.threads > 1` and some rank is large
     /// enough. Declared before `slots` and `mems`, so it is dropped (and
@@ -414,13 +414,13 @@ impl Sim {
         let pool = start_pool(&program, &code, &options);
         // Variants, fusion and guards run single-threaded only.
         let mut runs = Vec::new();
-        let (mut period, mut full, mut fused) = (1u64, vec![0u8], vec![0u8]);
+        let (mut period, mut full, mut fused) = (1u64, vec![0u16], vec![0u16]);
         if pool.is_none() {
             use crate::compile::{guard, phases};
             let guards = options.guard && (options.jit || options.guard_interpreter);
             let add = |runs: &mut Vec<Run>, body: Option<Body>| {
                 runs.push(Run::new(&program, body, options.stream));
-                runs.len() as u8
+                u16::try_from(runs.len()).expect("run index fits u16")
             };
             let n_slots = program.slot_count as usize;
             // Full settles are observed: guard only what nothing exposes,
@@ -811,7 +811,7 @@ impl Sim {
 
     /// The body that settles the current tick when it is observed.
     #[inline]
-    fn full_run(&self) -> u8 {
+    fn full_run(&self) -> u16 {
         self.full[(self.tick % self.period) as usize]
     }
 
@@ -968,7 +968,7 @@ impl Sim {
         self.tick += ticks;
     }
 
-    fn commit(&mut self, run: u8) {
+    fn commit(&mut self, run: u16) {
         let p = &*self.program;
         let commits = match run {
             0 => &p.commits,
@@ -1099,7 +1099,7 @@ impl Sim {
 
     /// Apply the staged root inputs to their slots, then evaluate `run`
     /// (0: the full program or variant; otherwise a fused-run body).
-    fn settle(&mut self, run: u8) {
+    fn settle(&mut self, run: u16) {
         let p = &*self.program;
         for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
             self.slots[port.slot as usize] = v;
@@ -1108,7 +1108,7 @@ impl Sim {
     }
 
     /// Run the blocks of `run` once, from the input slots as they are.
-    fn evaluate(&mut self, run: u8) {
+    fn evaluate(&mut self, run: u16) {
         self.evaluate_body(run);
         // Guarded blocks that did not run: a guard's conditions are slots
         // no later instruction writes, so they still say what ran.
@@ -1126,7 +1126,7 @@ impl Sim {
         }
     }
 
-    fn evaluate_body(&mut self, run: u8) {
+    fn evaluate_body(&mut self, run: u16) {
         #[cfg(feature = "counters")]
         {
             let c = &mut self.counters;
