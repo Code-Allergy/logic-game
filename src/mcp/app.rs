@@ -582,6 +582,11 @@ fn rate_text(config: &SimulationConfig) -> String {
 }
 
 /// The `transport` tool on the simulation the editor shows.
+/// The fastest paced rate a request may set: far past what any machine
+/// reaches (`"max"` runs unpaced), and small enough for the pacing's
+/// arithmetic.
+const MAX_HZ: f64 = 1e9;
+
 /// The most ticks one `step` runs: far more than any call waits for, and
 /// small enough that the tick a step ends at cannot overflow.
 const MAX_STEP_TICKS: u64 = 1 << 48;
@@ -627,8 +632,14 @@ fn transport(
     let hz = match command.get("hz") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if s == "max" => Some(None),
-        Some(Value::Number(n)) if n.as_f64().is_some_and(|v| v > 0.0) => Some(n.as_f64()),
-        Some(_) => return Err("\"hz\" is a rate above 0, or \"max\"".into()),
+        Some(Value::Number(n)) if n.as_f64().is_some_and(|v| v > 0.0 && v <= MAX_HZ) => {
+            Some(n.as_f64())
+        }
+        Some(_) => {
+            return Err(format!(
+                "\"hz\" is a rate above 0 and at most {MAX_HZ:e}, or \"max\" (as fast as it goes)"
+            ));
+        }
     };
     let inputs: Vec<(String, u64)> = match command.get("inputs") {
         None | Some(Value::Null) => Vec::new(),

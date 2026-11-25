@@ -232,7 +232,7 @@ fn the_visible_simulation_is_driven_and_keeps_its_state_over_an_edit() {
             json!({"inputs": {"En": 2}}),
             "does not fit input \"En\" (1 bits)",
         ),
-        (json!({"hz": 0}), "\"hz\" is a rate above 0, or \"max\""),
+        (json!({"hz": 0}), "\"hz\" is a rate above 0 and at most 1e9"),
         (json!({"speed": 1}), "unknown field \"speed\""),
     ] {
         let e = drive(&mut app, || transport(&mut s, bad.clone())).unwrap_err();
@@ -519,6 +519,8 @@ fn a_refused_transport_request_changes_nothing() {
         json!({"action": "set", "inputs": {"En": 1, "Missing": 0}}),
         json!({"action": "set", "inputs": {"En": 2}}),
         json!({"action": "nonsense", "hz": 5, "inputs": {"En": 1}}),
+        // A rate no pacing arithmetic can hold.
+        json!({"action": "run", "hz": 1e30, "inputs": {"En": 1}}),
         // More ticks than a step may run (its end must not overflow).
         json!({"action": "step", "ticks": u64::MAX, "inputs": {"En": 1}}),
     ] {

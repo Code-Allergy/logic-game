@@ -354,14 +354,36 @@ impl EngineCore {
         // Tiered: native code arrives later (`install_jit`); until then the
         // interpreter runs the layout the native code is compiled from.
         let options = self.sim_run_options();
+        // The inputs the running logic has seen, by port node: an input
+        // set since its last tick is staged, and must still wait for the
+        // next tick after the swap (the import below settles).
+        let settled: Vec<(NodeId, u64)> = self.sim.as_ref().map_or(Vec::new(), |old| {
+            let ports = &old.program().ports.inputs;
+            (0..ports.len())
+                .map(|port| (ports[port].node, old.settled_input(port)))
+                .collect()
+        });
         let mut sim = Sim::with_options(program, options);
-        for (&node, &v) in &self.inputs {
-            if let Some(port) = sim.program().ports.input_by_node(node) {
-                sim.set_input(port, v);
+        let staged = |sim: &mut Sim, inputs: &HashMap<NodeId, u64>| {
+            for (&node, &v) in inputs {
+                if let Some(port) = sim.program().ports.input_by_node(node) {
+                    sim.set_input(port, v);
+                }
             }
-        }
+        };
+        staged(&mut sim, &self.inputs);
         match snapshot {
-            Some(s) => sim.import_state(&s),
+            Some(s) => {
+                // A port the old program had settles with what its logic
+                // saw; a new port with the value it was set to.
+                for &(node, v) in &settled {
+                    if let Some(port) = sim.program().ports.input_by_node(node) {
+                        sim.set_input(port, v);
+                    }
+                }
+                sim.import_state(&s);
+                staged(&mut sim, &self.inputs);
+            }
             // A fresh load still applies inputs at the tick-0 settle.
             None => {
                 let fresh = sim.export_state();
@@ -546,9 +568,11 @@ impl EngineCore {
                 let now = clock();
                 let (t0, done) = *self.anchor.get_or_insert((now, 0));
                 let due = ((now - t0).as_secs_f64() * hz) as u64;
-                let max_debt = (hz * MAX_DEBT_SECS).ceil() as u64 + 1;
+                // Saturating: a rate past what a u64 of ticks can hold
+                // must not overflow the debt (the casts saturate already).
+                let max_debt = ((hz * MAX_DEBT_SECS).ceil() as u64).saturating_add(1);
                 let mut done = done;
-                if due > done + max_debt {
+                if due > done.saturating_add(max_debt) {
                     done = due - max_debt; // cannot keep up: drop the debt
                 }
                 let n = self.run_for(due - done, start, budget, clock);

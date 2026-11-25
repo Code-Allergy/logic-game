@@ -38,8 +38,11 @@ use super::hud::hud_layout;
 pub struct ActiveChallenge {
     /// The challenge's id; `None` when the workspace is not a challenge.
     pub id: Option<String>,
-    /// The workspace the id belongs to (its root circuit).
+    /// The workspace the id belongs to (its root circuit), and the name
+    /// and kind it had when the id was worked out.
     root: Option<Uuid>,
+    name: String,
+    read_only: bool,
     /// The last check, and the workspace revision it checked.
     pub report: Option<(CheckReport, u64)>,
     /// The card is folded to its title and the Check button.
@@ -68,16 +71,24 @@ pub fn challenge_of(name: &str, read_only: bool) -> Option<&'static Challenge> {
 /// Follow the open workspace: tag it with its challenge, and forget the
 /// last check when another workspace opens.
 pub fn track_challenge_system(active: Res<ActiveCircuit>, mut challenge: ResMut<ActiveChallenge>) {
-    if !active.is_changed() {
+    // By what the workspace is, not by the resource's change flag: a Save
+    // As renames the workspace and gives it a new root without setting the
+    // flag, and may turn a challenge into an ordinary workspace or back.
+    if challenge.root == Some(active.uuid)
+        && challenge.name == active.name
+        && challenge.read_only == active.read_only
+    {
         return;
     }
     let id = challenge_of(&active.name, active.read_only).map(|c| c.id.clone());
     if challenge.id != id || challenge.root != Some(active.uuid) {
         challenge.id = id;
-        challenge.root = Some(active.uuid);
         challenge.report = None;
         challenge.confirm_restart = false;
     }
+    challenge.root = Some(active.uuid);
+    challenge.name = active.name.clone();
+    challenge.read_only = active.read_only;
 }
 
 /// What opening a challenge loads: the player's saved workspace for it,

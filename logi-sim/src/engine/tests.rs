@@ -119,6 +119,20 @@ fn paced_rate_drops_debt_it_cannot_pay() {
 }
 
 #[test]
+fn a_rate_past_any_tick_count_does_not_overflow_the_pacing() {
+    let (d, ..) = counter_design(false);
+    let clock = FakeClock::new();
+    let c = || clock.read();
+    let mut e = LocalEngine::new(Options::debug());
+    e.load(&d, 1);
+    e.core.set_rate(Rate::Hz(1e30));
+    e.run_frame(Duration::from_millis(1), &c);
+    clock.advance(Duration::from_millis(10));
+    // No panic, and the simulation runs (the debt is capped, not zero).
+    assert!(e.run_frame(Duration::from_millis(5), &c) > 0);
+}
+
+#[test]
 fn steps_run_while_paused_and_probes_read_back() {
     let (d, en, q, mem) = counter_design(false);
     let clock = FakeClock::new();
@@ -340,6 +354,37 @@ fn unlimited_runs_until_the_budget() {
     let n = e.run_frame(Duration::from_millis(1), &c);
     assert!(n > 0);
     assert_eq!(e.core.wait_hint(&c), Some(Duration::ZERO));
+}
+
+/// An input set while paused waits for the next tick; an edit in between
+/// (a program swap, which settles) must not make the logic see it sooner.
+#[test]
+fn an_input_set_before_an_edit_still_waits_for_the_next_tick() {
+    let (d1, en, q, mem) = counter_design(false);
+    let (d2, ..) = counter_design(true);
+    let clock = FakeClock::new();
+    let c = || clock.read();
+    let run = |edit: bool| {
+        let mut e = LocalEngine::new(Options::debug());
+        e.load(&d1, 1);
+        e.core.set_probes(probes(q, mem));
+        e.core.step(3);
+        e.run_frame(Duration::from_secs(1), &c);
+        e.core.set_input(en, 1);
+        if edit {
+            e.load(&d2, 2);
+        }
+        let mut counts = Vec::new();
+        for _ in 0..3 {
+            e.core.step(1);
+            e.run_frame(Duration::from_secs(1), &c);
+            counts.push(e.frame().values[0]);
+        }
+        counts
+    };
+    // The register sees `en` at the commit after the tick that applies it.
+    assert_eq!(run(false), [0, 1, 2]);
+    assert_eq!(run(true), run(false), "an unrelated edit changes nothing");
 }
 
 #[test]
