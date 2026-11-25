@@ -76,7 +76,19 @@ struct SimSession {
     /// The circuit it simulates, and the workspace change it was built at.
     circuit: uuid::Uuid,
     generation: u64,
+    /// The optimising passes it was compiled without (sorted; none: the
+    /// compiler's defaults).
+    off: Vec<String>,
     state: RunState,
+}
+
+/// How a session was compiled, for messages.
+fn passes_off(off: &[String]) -> String {
+    if off.is_empty() {
+        "every pass on".to_string()
+    } else {
+        format!("{} off", off.join(", "))
+    }
 }
 
 /// One client's state: the store it reads and saves in, the open
@@ -570,6 +582,10 @@ impl Session {
         script.shift_remove("session");
         // "off": compile without these optimising passes (true: all of
         // them), to tell a fault of the design from one of the compiler.
+        // Asked for at all: a kept session is only continued with the
+        // passes it was compiled with, and `"off": false` asks for all of
+        // them on.
+        let off_given = script.contains_key("off");
         let off: Option<Vec<String>> = match script.shift_remove("off") {
             None | Some(Value::Bool(false)) => None,
             Some(Value::Bool(true)) => Some(
@@ -612,37 +628,53 @@ impl Session {
             .ok_or_else(|| format!("no circuit \"{}\"", circuit.clone().unwrap_or_default()))?;
         let circuit_id = batch::circuit_at(ws, place).id;
 
+        let mut off: Vec<String> = off.unwrap_or_default();
+        off.sort();
+        off.dedup();
         let mut note = String::new();
         let kept = session.as_deref().and_then(|name| {
             let i = self.sims.iter().position(|s| s.name == name)?;
             let kept = self.sims.remove(i);
-            if kept.circuit == circuit_id && kept.generation == generation {
-                note = format!(
-                    "session \"{name}\" continues at tick {}\n",
-                    kept.state.rig.tick_count()
-                );
-                Some(kept.state)
-            } else {
+            if kept.circuit != circuit_id || kept.generation != generation {
                 note = format!(
                     "session \"{name}\" was dropped (the workspace or the circuit changed); \
                      starting from power-on\n"
                 );
                 None
+            } else if off_given && kept.off != off {
+                // The same simulation cannot go on as another program.
+                note = format!(
+                    "session \"{name}\" was dropped (it was compiled with {}); starting from \
+                     power-on\n",
+                    passes_off(&kept.off)
+                );
+                None
+            } else {
+                note = format!(
+                    "session \"{name}\" continues at tick {}{}\n",
+                    kept.state.rig.tick_count(),
+                    if kept.off.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", passes_off(&kept.off))
+                    }
+                );
+                // Without "off" in the call it goes on as it was compiled.
+                off = kept.off;
+                Some(kept.state)
             }
         });
         let mut state = match kept {
             Some(state) => state,
-            None => match &off {
-                Some(off) => {
-                    note.push_str(&format!("compiled with {} off\n", off.join(", ")));
-                    RunState::new(Rig::build_with(
-                        ws,
-                        place,
-                        super::compiled::options_without(off),
-                    )?)
-                }
-                None => RunState::new(Rig::build(ws, place)?),
-            },
+            None if off.is_empty() => RunState::new(Rig::build(ws, place)?),
+            None => {
+                note.push_str(&format!("compiled with {} off\n", off.join(", ")));
+                RunState::new(Rig::build_with(
+                    ws,
+                    place,
+                    super::compiled::options_without(&off),
+                )?)
+            }
         };
         let outcome = run::run(&mut state, &script);
         if let Some(name) = session {
@@ -657,6 +689,7 @@ impl Session {
                 name,
                 circuit: circuit_id,
                 generation,
+                off,
                 state,
             });
         }

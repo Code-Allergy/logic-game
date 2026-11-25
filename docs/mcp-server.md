@@ -497,7 +497,9 @@ signal names stay on the server, and the next `run` with the same name
 continues from there; that is how an assistant bisects to a failing
 cycle without running from reset each time. A session is dropped when
 the workspace changes (the next call says so), and at most eight are
-kept.
+kept. A session keeps the passes it was compiled with: a call that
+gives `"off"` with another choice (`false`: every pass on) starts it
+again from power-on, and says so.
 
 **Without the optimiser.** `"off": true` compiles the simulation with
 function matching, word lifting and word cleanup off (or `"off":

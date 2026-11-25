@@ -933,11 +933,22 @@ fn find_pin(entry: &NodeEntry, node: &str, pin: Option<&str>, dir: Dir) -> Resul
             )),
         },
         Some(p) => {
+            // A wire's end holds a pin index of eight bits: a pin past
+            // 255 must not wrap round to another pin.
+            let index = |i: usize| {
+                u8::try_from(i).or_else(|_| {
+                    err(format!(
+                        "\"{node}\" has {} {side} pins; a wire reaches the first 256 only \
+                         (pin \"{p}\" is number {i})",
+                        widths.len()
+                    ))
+                })
+            };
             if let Some(i) = names.iter().position(|n| n == p) {
-                return Ok(i as u8);
+                return index(i);
             }
             match p.parse::<usize>() {
-                Ok(i) if i < widths.len() => Ok(i as u8),
+                Ok(i) if i < widths.len() => index(i),
                 _ => err(format!(
                     "\"{node}\" has no {side} pin \"{p}\" (its {side} pins: {})",
                     names.join(", ")

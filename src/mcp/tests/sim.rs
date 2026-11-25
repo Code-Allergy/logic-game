@@ -967,3 +967,68 @@ fn the_roots_tests_follow_a_save_as() {
     assert_eq!(saved.tests.get(&saved.root.id).map(Vec::len), Some(1));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_kept_session_is_not_continued_as_another_program() {
+    let dir = scratch("session-off");
+    let mut s = Session::new(WorkspaceStore::in_dir(&dir));
+    s.workspace_tool("new", Some("m"), false).unwrap();
+    let request = json!({"ops": [
+        {"add": [{"name": "En", "type": "Input"}, {"name": "one", "type": "Const", "w": 8, "value": 1},
+                 {"name": "zero", "type": "Const", "value": 0}, {"name": "inc", "type": "Add", "w": 8},
+                 {"name": "r", "type": "Register", "w": 8}, {"name": "Q", "type": "Output", "w": 8}]},
+        {"wire": [["r", "inc.a", "Q"], ["one", "inc.b"], ["zero", "inc.cin"], ["inc.sum", "r.d"], ["En", "r.en"]]}
+    ]});
+    s.edit_tool(object(request), None, false).unwrap();
+    let run = |s: &mut Session, script: Value| s.run_tool(None, Some("a"), object(script), None);
+
+    let out = run(&mut s, json!({"steps": [{"set": {"En": 1}}, {"ticks": 5}]})).unwrap();
+    assert!(!out.contains("off"), "{out}");
+    // Other passes asked for: a new simulation, compiled that way.
+    let out = run(&mut s, json!({"off": true, "steps": [{"ticks": 1}]})).unwrap();
+    assert!(
+        out.contains("was dropped (it was compiled with every pass on)")
+            && out.contains("compiled with func_match, lift, words off")
+            && out.contains("now at tick 1"),
+        "{out}"
+    );
+    // Without "off" the session goes on as it was compiled, and says so.
+    let out = run(&mut s, json!({"steps": [{"ticks": 1}]})).unwrap();
+    assert!(
+        out.contains("continues at tick 1 (func_match, lift, words off)"),
+        "{out}"
+    );
+    // `"off": false` asks for every pass again.
+    let out = run(&mut s, json!({"off": false, "steps": [{"ticks": 1}]})).unwrap();
+    assert!(
+        out.contains("was dropped (it was compiled with func_match, lift, words off)")
+            && out.contains("now at tick 1"),
+        "{out}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_pin_past_the_256th_is_refused_not_wrapped() {
+    // A chip with 257 one-bit inputs, `P000` to `P256`.
+    let ports: Vec<Value> = (0..257)
+        .map(|i| json!({"name": format!("P{i:03}"), "type": "Input"}))
+        .collect();
+    let (ws, _) = edit(
+        &empty(),
+        json!({"edits": [
+            {"circuit": "wide", "ops": [{"add": ports}]},
+            {"ops": [{"add": [{"name": "In", "type": "Input"}, {"name": "w", "use": "wide"}]},
+                     {"wire": [["In", "w.P255"]]}]}
+        ]}),
+    );
+    assert_eq!(ws.root.wires.len(), 1);
+    assert_eq!(ws.root.wires[0].to.pin, 255);
+    for pin in ["w.P256", "w.256"] {
+        let e = refused(&ws, json!({"ops": [{"wire": [["In", pin]]}]}));
+        assert!(
+            e.contains("a wire reaches the first 256 only"),
+            "{pin}: {e}"
+        );
+    }
+}
