@@ -27,6 +27,10 @@
 //! guards on and off: what guards skip at run time.
 //! `--unnamed` lists the ops that write no authored net, `--ops <block>`
 //! the ops writing a block's nets (op, width, operands, readers).
+//! `--no-shifts` compiles without the shift rewrites (`Options::shifts`
+//! and `Options::barrels`) everywhere, for A/B runs; `--compare` also
+//! runs the interpreter on a program compiled without them and requires
+//! the same state.
 //! `--blocks` reports where the ops of a tick are: each chip under the
 //! root (and inside large ones) compiled on its own, with its op mix. The
 //! settle is straight-line code that runs every op of its variant each
@@ -41,8 +45,33 @@ use gate_quest::sim::netlist::design_of;
 use logi_sim::compile::{Options, Program, compile};
 use logi_sim::sim::{Sim, SimOptions};
 
+/// `--no-shifts`: compile without the shift rewrites.
+static NO_SHIFTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The compile options of every run: the defaults, without the shift
+/// rewrites under `--no-shifts`.
+fn base_options() -> Options {
+    if NO_SHIFTS.load(std::sync::atomic::Ordering::Relaxed) {
+        without_shifts(Options::default())
+    } else {
+        Options::default()
+    }
+}
+
+fn without_shifts(o: Options) -> Options {
+    Options {
+        shifts: false,
+        barrels: false,
+        ..o
+    }
+}
+
 fn main() -> Result<(), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(k) = args.iter().position(|a| a == "--no-shifts") {
+        args.remove(k);
+        NO_SHIFTS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let compare = args.iter().any(|a| a == "--compare");
     let blocks = args.iter().any(|a| a == "--blocks");
     let executed = args.iter().any(|a| a == "--executed");
@@ -99,8 +128,7 @@ fn main() -> Result<(), String> {
     }
     #[cfg(feature = "counters")]
     if executed {
-        let program =
-            Arc::new(compile(&design, &Options::default()).map_err(|e| format!("{e:?}"))?);
+        let program = Arc::new(compile(&design, &base_options()).map_err(|e| format!("{e:?}"))?);
         for (what, guard, known_bits) in [
             ("guards on", true, true),
             ("guards off", false, true),
@@ -148,8 +176,14 @@ fn main() -> Result<(), String> {
         return compare_designs(&design, &other, ticks, &presses, screen.as_deref());
     }
     for (name, options) in [
-        ("default", Options::default()),
-        ("debug (editor)", Options::debug()),
+        ("default", base_options()),
+        (
+            "debug (editor)",
+            Options {
+                debug: true,
+                ..base_options()
+            },
+        ),
     ] {
         let start = Instant::now();
         let program = Arc::new(compile(&design, &options).map_err(|e| format!("{e:?}"))?);
@@ -340,7 +374,10 @@ fn describe(p: &Program) -> String {
 /// fused batches of 1 to 7 ticks (guards on, interpreter and JIT) against
 /// single ticks with guards off.
 fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), String> {
-    let program = Arc::new(compile(design, &Options::default()).map_err(|e| format!("{e:?}"))?);
+    let program = Arc::new(compile(design, &base_options()).map_err(|e| format!("{e:?}"))?);
+    // The same design without the shift rewrites, interpreted.
+    let unshifted =
+        Arc::new(compile(design, &without_shifts(base_options())).map_err(|e| format!("{e:?}"))?);
     let no_guard = |o: SimOptions| SimOptions { guard: false, ..o };
     let configs = [
         ("interpreter, no guards", no_guard(SimOptions::default())),
@@ -367,10 +404,18 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
                 ..SimOptions::jit()
             },
         ),
+        (
+            "interpreter, shift rewrites off",
+            no_guard(SimOptions::default()),
+        ),
     ];
     let mut sims: Vec<Sim> = configs
         .iter()
-        .map(|(_, o)| Sim::with_options(Arc::clone(&program), o.clone()))
+        .enumerate()
+        .map(|(k, (_, o))| {
+            let p = if k == 5 { &unshifted } else { &program };
+            Sim::with_options(Arc::clone(p), o.clone())
+        })
         .collect();
     if !sims[2].jit_active() {
         return Err("the JIT is not active (build with --features jit)".into());
@@ -541,8 +586,8 @@ fn compare_designs(
     screen: Option<&str>,
 ) -> Result<(), String> {
     const FRAME: u64 = 89_342;
-    let pa = Arc::new(compile(a, &Options::default()).map_err(|e| format!("{e:?}"))?);
-    let pb = Arc::new(compile(b, &Options::default()).map_err(|e| format!("{e:?}"))?);
+    let pa = Arc::new(compile(a, &base_options()).map_err(|e| format!("{e:?}"))?);
+    let pb = Arc::new(compile(b, &base_options()).map_err(|e| format!("{e:?}"))?);
     // The Screen is not a state element; it is the one writable memory of
     // 2^16 8-bit words (256 x 256, Rgb332) in the console.
     let screen_of = |p: &Program| -> Option<u32> {
@@ -670,7 +715,7 @@ fn attribute_ops(
             }
         }
     }
-    let p = compile(&design, &Options::default()).map_err(|e| format!("{e:?}"))?;
+    let p = compile(&design, &base_options()).map_err(|e| format!("{e:?}"))?;
     let dm = &p.debug;
     // Label path of every instance, cut to `depth` levels.
     let label = |inst: u32| -> Vec<String> {
@@ -916,7 +961,10 @@ fn list_ops(
         };
         let (sa, sb, sc) = op.slot_operands();
         let mut args = Vec::new();
-        for (is, slot, lit) in [(sa, i.a, i.a), (sb, i.b, i.b), (sc, i.c, i.c)] {
+        for (k, (is, slot, lit)) in [(sa, i.a, i.a), (sb, i.b, i.b), (sc, i.c, i.c)]
+            .into_iter()
+            .enumerate()
+        {
             if is {
                 args.push(name_or(slot));
             } else if matches!(
@@ -925,6 +973,10 @@ fn list_ops(
             ) && lit != 0
             {
                 args.push(format!("<<{lit}"));
+            } else if op == logi_sim::compile::Op::Shl && lit != 0 {
+                // `((a >> c) << b) & imm`.
+                let dir = if k == 1 { "<<" } else { ">>" };
+                args.push(format!("{dir}{lit}"));
             }
         }
         let used = readers

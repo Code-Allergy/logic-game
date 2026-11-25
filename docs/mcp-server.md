@@ -470,7 +470,8 @@ Each expected row holds values for recorded columns; a column with no
 value (`null`, or absent from the line) is not checked. In a file, values
 are separated by spaces or commas and `#` starts a comment. Which column
 a value belongs to is given by, in order: a `NAME:value` token whose name
-is a recorded signal (`A:1F`, as CPU logs write registers); `columns`, a
+is a recorded signal (`A:1F`, as CPU logs write registers; the value may
+also be the next token, `A: 1F`); `columns`, a
 list of signal names for the leading values with `null` to skip one; a
 first line of signal names; else the order of the `record` step. `radix`
 16 reads bare hex; `skip_lines` skips a header. A value that cannot be

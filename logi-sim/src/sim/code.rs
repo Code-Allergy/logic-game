@@ -65,7 +65,7 @@ fn uses_imm(op: Op) -> bool {
     use Op::*;
     matches!(
         op,
-        Not | Nand | Nor | Xnor | AddSum | AddCarry | ReduceAnd | Shr | Sext
+        Not | Nand | Nor | Xnor | AddSum | AddCarry | ReduceAnd | Shr | Sext | Shl | ShlV
     )
 }
 
@@ -73,7 +73,7 @@ fn uses_imm(op: Op) -> bool {
 /// their operands.
 fn streamable(op: Op) -> bool {
     use Op::*;
-    !matches!(op, Shr | Concat | Sext | Clock | MemRead)
+    !matches!(op, Shr | Concat | Sext | Clock | MemRead | Shl)
 }
 
 /// Number of slot operands of `op`.
@@ -403,7 +403,8 @@ unsafe fn seq(
                     c
                 }
             }),
-            Op::Shr | Op::Concat | Op::Sext | Op::Clock | Op::MemRead => {
+            Op::ShlV => s2(s, d, o, lo, hi, imm, |a, b, m| (a << (b & 63)) & m),
+            Op::Shr | Op::Concat | Op::Sext | Op::Clock | Op::MemRead | Op::Shl => {
                 unreachable!("not streamable")
             }
         }
@@ -442,6 +443,8 @@ unsafe fn plain(env: &Env<'_>, op: Op, s: *mut u64, ins: &[Instr], imms: &[u64])
             Op::ReduceXor => run1(s, ins, imms, |a, _, _| (a.count_ones() & 1) as u64),
             Op::Shr => run1(s, ins, imms, |a, i, m| (a >> i.b) & m),
             Op::Concat => run2(s, ins, imms, |a, b, i, _| a | (b << i.c)),
+            Op::Shl => run1(s, ins, imms, |a, i, m| ((a >> i.c) << i.b) & m),
+            Op::ShlV => run2(s, ins, imms, |a, b, _, m| (a << (b & 63)) & m),
             Op::Sext => run1(s, ins, imms, |a, i, m| {
                 if (a >> (i.b - 1)) & 1 == 1 {
                     (a | !mask(i.b as u8)) & m

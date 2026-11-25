@@ -976,6 +976,16 @@ fn emit_instr(
             let x = ins.ins().ishl_imm_u(bv, i64::from(i.c));
             ins.ins().bor(a, x)
         }
+        Op::Shl => {
+            let x = ins.ins().ushr_imm_u(a, i64::from(i.c));
+            let x = ins.ins().ishl_imm_u(x, i64::from(i.b));
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::ShlV => {
+            // Cranelift takes the amount modulo 64: `b & 63`.
+            let x = ins.ins().ishl(a, bv);
+            ins.ins().band_imm_u(x, m as i64)
+        }
         Op::Sext => {
             // `if (a >> (b - 1)) & 1 == 1 { (a | !mask(b)) & m } else { a }`
             let w = i.b;
