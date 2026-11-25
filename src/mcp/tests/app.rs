@@ -514,6 +514,8 @@ fn a_refused_transport_request_changes_nothing() {
         json!({"action": "set", "inputs": {"En": 1, "Missing": 0}}),
         json!({"action": "set", "inputs": {"En": 2}}),
         json!({"action": "nonsense", "hz": 5, "inputs": {"En": 1}}),
+        // More ticks than a step may run (its end must not overflow).
+        json!({"action": "step", "ticks": u64::MAX, "inputs": {"En": 1}}),
     ] {
         drive(&mut app, || transport(&mut s, command.clone())).unwrap_err();
         app.update();

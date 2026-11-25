@@ -394,21 +394,21 @@ fn serve(world: &mut World, inbox: &mut McpInbox, request: AppRequest) {
             }
         }
         AppRequest::Transport { command, reply } => {
-            let stepping = command.get("action").and_then(Value::as_str) == Some("step");
-            let before = world.get_resource::<SimBridge>().map(SimBridge::tick_count);
-            match (transport(world, &command), before) {
+            match transport(world, &command) {
                 // A step is done by the simulation's own thread: answer
                 // when it has got there.
-                (Ok(_), Some(before)) if stepping => {
-                    let ticks = command.get("ticks").and_then(Value::as_u64).unwrap_or(1);
+                Ok((_, Some(target))) => {
                     inbox.stepping = Some(PendingStep {
                         reply,
-                        target: before + ticks,
+                        target,
                         frames: 600,
                     });
                 }
-                (result, _) => {
-                    let _ = reply.send(result);
+                Ok((text, None)) => {
+                    let _ = reply.send(Ok(text));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
                 }
             }
         }
@@ -569,7 +569,16 @@ fn rate_text(config: &SimulationConfig) -> String {
 }
 
 /// The `transport` tool on the simulation the editor shows.
-fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, String> {
+/// The most ticks one `step` runs: far more than any call waits for, and
+/// small enough that the tick a step ends at cannot overflow.
+const MAX_STEP_TICKS: u64 = 1 << 48;
+
+/// Do a transport request: what to answer and, for a step, the tick it
+/// ends at (the answer waits until the simulation has got there).
+fn transport(
+    world: &mut World,
+    command: &Map<String, Value>,
+) -> Result<(String, Option<u64>), String> {
     let number = |key: &str| -> Result<Option<u64>, String> {
         match command.get(key) {
             None | Some(Value::Null) => Ok(None),
@@ -597,6 +606,11 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
         .unwrap_or("status")
         .to_string();
     let ticks = number("ticks")?.unwrap_or(1);
+    if ticks > MAX_STEP_TICKS {
+        return Err(format!(
+            "\"ticks\" is at most {MAX_STEP_TICKS} (run the simulation for longer waits)"
+        ));
+    }
     let hz = match command.get("hz") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if s == "max" => Some(None),
@@ -626,7 +640,7 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                   mut config: ResMut<SimulationConfig>,
                   gates: Query<(Entity, &GateLabel, &GateType), RootItems>,
                   mut set: MessageWriter<SetInputValue>|
-                  -> Result<String, String> {
+                  -> Result<(String, Option<u64>), String> {
                 // Everything is checked before anything is changed: a
                 // request that is refused leaves the simulation alone.
                 if !matches!(
@@ -665,6 +679,7 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                     // part's own record in step.
                     bridge.set_input(entity, value);
                 }
+                let mut target = None;
                 if let Some(rate) = hz {
                     match rate {
                         Some(hz) => {
@@ -679,13 +694,19 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                     "pause" => bridge.set_running(false),
                     "step" => {
                         bridge.set_running(false);
+                        // A running simulation goes on until its own
+                        // thread has seen the pause: wait for that, so
+                        // that the step is counted from where it stopped
+                        // and not from a tick it has already passed.
+                        bridge.sync();
+                        target = Some(bridge.tick_count().saturating_add(ticks));
                         bridge.step(ticks);
                     }
                     "reset" => bridge.reset(),
                     // Checked above.
                     _ => {}
                 }
-                Ok(format!(
+                let text = format!(
                     "{}, tick {}, rate {}\n",
                     if bridge.is_running() {
                         "running"
@@ -694,7 +715,8 @@ fn transport(world: &mut World, command: &Map<String, Value>) -> Result<String, 
                     },
                     bridge.tick_count(),
                     rate_text(&config)
-                ))
+                );
+                Ok((text, target))
             },
         )
         .map_err(|e| format!("the game could not do it: {e}"))
