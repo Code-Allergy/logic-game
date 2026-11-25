@@ -326,3 +326,11 @@ fn oversized_bodies_stay_interpreted() {
     assert!(code.bodies[0].is_none(), "the full body is interpreted");
     check_jit(&p, 6, 6, &SimOptions::default()).unwrap();
 }
+
+/// The JIT's `Shl` and `ShlV` against their definitions (the interpreter
+/// tests in `sim/tests.rs` run the same cases).
+#[test]
+fn shift_ops_match_their_definitions() {
+    crate::sim::tests::shl_semantics(true);
+    crate::sim::tests::shlv_semantics(true);
+}
