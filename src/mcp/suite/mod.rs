@@ -689,7 +689,12 @@ impl Machine {
             for r in &map.regions {
                 let (i, bits) = memory(&mut rig, &r.part)?;
                 let size = 1u64 << bits;
-                if r.at + (r.to - r.from) >= size {
+                // (Checked: an `at` near the top of `u64` must not wrap
+                // back into the memory.)
+                if r.at
+                    .checked_add(r.to - r.from)
+                    .is_none_or(|end| end >= size)
+                {
                     return Err(format!(
                         "\"memory\": region 0x{:X}..0x{:X} reaches past the {size} words of \"{}\"",
                         r.from, r.to, r.part

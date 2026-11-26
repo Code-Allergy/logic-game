@@ -535,6 +535,14 @@ fn configs_that_do_not_fit_are_refused_with_the_reason() {
     bad["memory"] = json!({"part": "mem", "mask": "0x1FF"});
     let e = run_error(&ws, &dir, bad);
     assert!(e.contains("reaches past the 256 words"), "{e}");
+    // A region whose end does not fit a `u64` is past the memory too (it
+    // must not wrap round to word 0).
+    let mut bad = accumulator_config();
+    bad["memory"] = json!({"regions": [
+        {"from": 0, "to": 1, "part": "mem", "at": "0xFFFFFFFFFFFFFFFF"}
+    ]});
+    let e = run_error(&ws, &dir, bad);
+    assert!(e.contains("reaches past the 256 words"), "{e}");
     // A comment field is allowed.
     let mut commented = accumulator_config();
     commented["_comment"] = json!("the accumulator machine");
