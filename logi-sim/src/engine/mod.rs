@@ -99,6 +99,20 @@ pub enum EngineEvent {
 /// Clock: monotonic time since an arbitrary origin.
 pub type Clock<'a> = &'a dyn Fn() -> Duration;
 
+/// One chunk of a batch (one `Sim::run`) takes between 1/2 and 2 times
+/// 1/`CHUNK_SHARE` of the batch's budget, so a batch overruns its budget
+/// by at most a quarter of it. Each `Sim::run` costs about ten ticks more
+/// than its ticks (its first and last ticks are neither fused nor run as
+/// supersteps): 4% of the 256-tick chunks that a 1/16 share of 1 ms
+/// batches gave the threaded engine on the NES console, 1% of the 1024 of
+/// a 1/8 share of 2 ms.
+const CHUNK_SHARE: u32 = 8;
+
+/// A paced rate runs its ticks in batches of about this much time (see
+/// [`EngineCore::wait_hint`]): ticks run up to this much late, so that a
+/// caught-up worker does not wake for every tick.
+pub const PACE_QUANTUM: Duration = Duration::from_millis(2);
+
 /// Most ticks of debt a paced rate may accumulate before it is dropped
 /// (when the circuit cannot keep up): a quarter second's worth.
 const MAX_DEBT_SECS: f64 = 0.25;
@@ -588,10 +602,10 @@ impl EngineCore {
 
     /// Run up to `max` ticks, stopping once `budget` has elapsed since
     /// `start`. Ticks run in chunks between clock reads; the chunk grows
-    /// until a chunk takes about 1/16 of the budget.
+    /// until a chunk takes about 1/[`CHUNK_SHARE`] of the budget.
     fn run_for(&mut self, max: u64, start: Duration, budget: Duration, clock: Clock<'_>) -> u64 {
         let sim = self.sim.as_mut().expect("checked by caller");
-        let target = budget / 16;
+        let target = budget / CHUNK_SHARE;
         let mut ran = 0;
         while ran < max {
             let n = self.chunk.min(max - ran);
@@ -615,7 +629,14 @@ impl EngineCore {
     }
 
     /// How long the caller may wait before calling [`Self::run`] again:
-    /// `None` = until a command arrives, `Some(ZERO)` = immediately.
+    /// `None` = until a command arrives, `Some(ZERO)` = immediately. A
+    /// paced rate that has caught up waits until [`PACE_QUANTUM`]'s worth
+    /// of ticks (at least one) is due, so that they run as one batch: a
+    /// `Sim::run` of a few ticks costs several times as much per tick as
+    /// a long one (its first and last ticks are not fused): a worker woken
+    /// for every tick due spent a whole core on the NES console at 2 MHz,
+    /// less than half the rate it reaches unlimited (45% of one with
+    /// batches of a quantum).
     pub fn wait_hint(&self, clock: Clock<'_>) -> Option<Duration> {
         self.sim.as_ref()?;
         if self.pending_steps > 0 {
@@ -627,7 +648,8 @@ impl EngineCore {
             Rate::Hz(hz) => match self.anchor {
                 None => Some(Duration::ZERO),
                 Some((t0, done)) => {
-                    let next = t0 + Duration::from_secs_f64((done + 1) as f64 / hz);
+                    let quantum = (hz * PACE_QUANTUM.as_secs_f64()).max(1.0);
+                    let next = t0 + Duration::from_secs_f64((done as f64 + quantum) / hz);
                     Some(next.saturating_sub(clock()))
                 }
             },
@@ -818,8 +840,9 @@ mod threaded {
         o
     }
 
-    /// Time budget per batch: commands are drained between batches.
-    const BATCH: Duration = Duration::from_millis(1);
+    /// Time budget per batch: commands are drained between batches (see
+    /// [`CHUNK_SHARE`] for the chunks a batch runs in).
+    const BATCH: Duration = Duration::from_millis(2);
 
     enum Msg {
         SetInput(NodeId, u64),
