@@ -476,7 +476,7 @@ list of signal names for the leading values with `null` to skip one; a
 first line of signal names; else the order of the `record` step. `radix`
 16 reads bare hex; `skip_lines` skips a header. A value that cannot be
 read in a column that is checked is an error, as are no rows at all. The failure shows the
-differing signals and the `context` rows before:
+differing signals and the `context` rows before (5 unless given; at most 1000):
 
 ```
 first difference at row 4 of tests/nestest.log (tick 31):

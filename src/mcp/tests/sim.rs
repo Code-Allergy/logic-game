@@ -242,6 +242,18 @@ fn recordings_go_to_a_trace_and_compare_with_expected_rows() {
         out.text
     );
 
+    // A context too large to keep is refused before anything runs (the
+    // row limit is `context + 1`: the largest number overflowed it).
+    let e = script_error(
+        &ws,
+        json!({"steps": [
+            {"record": ["Count"]},
+            {"compare": {"rows": [[0]], "context": u64::MAX}},
+            {"ticks": 1}
+        ]}),
+    );
+    assert!(e.contains("\"context\" is at most 1000"), "{e}");
+
     // Inline rows, with nothing expected where null; a log with names.
     let out = script(
         &ws,
