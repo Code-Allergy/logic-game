@@ -710,6 +710,7 @@ fn changes(l: &Loaded, a: &Args, total_frames: u64) -> Result<(), String> {
         .map(|g| g == "ppu_timing" || g == "Screen")
         .collect();
     let wide: Vec<bool> = keys.iter().map(|&k| p.state_keys[k].width >= 4).collect();
+    let phase = p.phases.as_ref().map_or(1, |x| x.period as usize);
     let mut sim = new_sim(&l.program);
     println!("\n### State changes per tick (idea 4b)\n");
     println!(
@@ -823,7 +824,7 @@ fn changes(l: &Loaded, a: &Args, total_frames: u64) -> Result<(), String> {
             cpu_hist.push(cpu_h ^ u64::from(mem_written).wrapping_mul(0x9e37_79b9_7f4a_7c15));
             let i = cpu_hist.len() - 1;
             let mut period = 0;
-            for lag in 1..=96usize {
+            for lag in (phase..=96usize).step_by(phase) {
                 if i >= lag && cpu_hist[i] == cpu_hist[i - lag] {
                     cpu_run[lag] += 1;
                 } else {
@@ -878,7 +879,7 @@ fn changes(l: &Loaded, a: &Args, total_frames: u64) -> Result<(), String> {
         }
     }
     println!(
-        "\nThe CPU side's state (cpu6502, oam_dma_ref, pad logic, bus latch, RAM write count) repeats exactly with a period of at most 96 ticks (counted after one full lap): {:.1}% of ticks; in {:.1}% of ticks that also had the PPU side quiet (nothing or counters only changed in it) -- {:.1}% of ticks have the PPU side quiet in all.",
+        "\nThe CPU side's state (cpu6502, oam_dma_ref, pad logic, bus latch, RAM write count) repeats exactly with a period of at most 96 ticks that is a multiple of the clock-phase period (counted after one full lap): {:.1}% of ticks; in {:.1}% of ticks that also had the PPU side quiet (nothing or counters only changed in it) -- {:.1}% of ticks have the PPU side quiet in all.",
         f(cpu_period[0]),
         f(cpu_and_ppu_quiet),
         f(ppu_quiet_ticks)

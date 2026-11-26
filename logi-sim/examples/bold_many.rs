@@ -42,7 +42,7 @@ use std::time::Instant;
 use logi_sim::compile::guard::{MIN_REGION, guard_with};
 use logi_sim::compile::spec::possible_bits;
 use logi_sim::compile::{Body, Commit, Op, Program, phases};
-use logi_sim::sim::{Sim, SimOptions};
+use logi_sim::sim::Sim;
 
 fn width_of(bits: u64) -> u32 {
     64 - bits.leading_zeros()
@@ -263,7 +263,7 @@ fn rss_kib() -> u64 {
 fn new_sims(p: &Arc<Program>, n: usize) -> Vec<Sim> {
     #[cfg(feature = "jit")]
     {
-        let o = SimOptions::jit().tier_layout();
+        let o = logi_sim::sim::SimOptions::jit().tier_layout();
         let first = Sim::with_options(Arc::clone(p), o.clone());
         let code = first.compile_jit().ok().map(Arc::new);
         let mut v = vec![first];

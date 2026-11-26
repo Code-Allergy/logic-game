@@ -15,10 +15,12 @@
 //!
 //! * the CPU side's state words (cpu6502, DMA, pads, bus latch, clock
 //!   divider, the RAM write count),
-//! * its inputs: the PPU's register read data and NMI, the cartridge's
-//!   data and IRQ, and
-//! * its outputs: the PPU's `cs`, `ra`, `rw`, write data, and the
-//!   cartridge's address, data and `rw`.
+//! * its inputs: the pins of the CPU and of the DMA unit that the bus
+//!   glue drives (`cpu6502/din`, `nmi_n`, `irq_n`, `rdy`,
+//!   `oam_dma_ref/din`), so the PPU register data counts only when the
+//!   glue passes it to the CPU, and
+//! * its outputs: the pins that drive the glue (addresses, data, `rw`,
+//!   `sync`, the DMA's bus request).
 //!
 //! A lap of P <= 96 ticks (a multiple of the clock-phase period, 3) is found when state, inputs and outputs of the
 //! last P ticks equal those of the P before. From then on, at each tick
@@ -171,25 +173,28 @@ fn main() -> Result<(), String> {
     }
     let l: Loaded = bold_common::load(&folder)?;
     let p = &l.program;
-    let cart = if l.slot("cart_mmc3/dout").is_ok() {
-        "cart_mmc3"
-    } else {
-        "cart_nrom"
-    };
+    // The replayed part is the CPU chip, the DMA unit, the pad logic and
+    // the bus latch; the bus glue (the data-bus multiplexer, the address
+    // decoders) stays live. Inputs: the pins of the CPU and the DMA unit
+    // that the glue and the other chips drive; outputs: the pins that
+    // drive the glue.
     let ins = [
-        l.slot("ppu_ref/cpu_rd")?,
-        l.slot("ppu_ref/nmi_n")?,
-        l.slot(&format!("{cart}/dout"))?,
-        l.slot(&format!("{cart}/irq_n"))?,
+        l.slot("cpu6502/din")?,
+        l.slot("cpu6502/nmi_n")?,
+        l.slot("cpu6502/irq_n")?,
+        l.slot("cpu6502/rdy")?,
+        l.slot("oam_dma_ref/din")?,
     ];
     let outs = [
-        l.slot("ppu_ref/cs")?,
-        l.slot("ppu_ref/ra")?,
-        l.slot("ppu_ref/rw")?,
-        l.slot("ppu_ref/cpu_wd")?,
-        l.slot(&format!("{cart}/a"))?,
-        l.slot(&format!("{cart}/d"))?,
-        l.slot(&format!("{cart}/rw"))?,
+        l.slot("cpu6502/addr")?,
+        l.slot("cpu6502/rw")?,
+        l.slot("cpu6502/dout")?,
+        l.slot("cpu6502/sync")?,
+        l.slot("oam_dma_ref/addr")?,
+        l.slot("oam_dma_ref/rw")?,
+        l.slot("oam_dma_ref/own")?,
+        l.slot("oam_dma_ref/dout")?,
+        l.slot("oam_dma_ref/rdy")?,
     ];
     let ce = l.slot("cpu6502/ce")?;
     let line = l.slot("ppu_ref/line")?;

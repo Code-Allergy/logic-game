@@ -595,11 +595,11 @@ fn snapshot_cost(l: &Loaded) {
     for _ in 0..reps {
         let mut at = 0;
         for &s in &slots {
-            buf[at] = sim.read(s);
+            buf[at] = sim.read(std::hint::black_box(s));
             at += 1;
         }
         for &m in &mems {
-            let src = sim.mem(m);
+            let src = std::hint::black_box(sim.mem(m));
             buf[at..at + src.len()].copy_from_slice(src);
             at += src.len();
         }
