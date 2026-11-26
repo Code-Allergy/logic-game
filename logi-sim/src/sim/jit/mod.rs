@@ -45,6 +45,7 @@
 
 use std::sync::Mutex;
 
+mod probe;
 mod superstep;
 #[cfg(test)]
 mod tests;
@@ -52,6 +53,7 @@ mod unit;
 #[cfg(test)]
 mod unit_tests;
 
+pub use probe::{COUNTS, counting as probe_counting, take as probe_take};
 #[cfg(test)]
 pub(crate) use superstep::MUTATION;
 pub use superstep::{JitSuper, Part, SuperFn, SuperInfo, SuperRef};
@@ -287,6 +289,7 @@ impl JitProgram {
             }
         }
         module.finalize_definitions().map_err(|e| err(&e))?;
+        probe::finalized(module);
         let module = &*module;
         // SAFETY: each id was defined with the matching signature, and the
         // code stays alive as long as `owned`, which the result owns.
@@ -384,6 +387,7 @@ fn define_superstep(
         module.define_function(id, ctx).map_err(|e| err(&e))?;
         let size = code_size(ctx);
         super_bytes += size;
+        probe::defined(id, size, "super");
         module.clear_context(ctx);
         fns.push(id);
     }
@@ -583,6 +587,7 @@ fn compile_body(
         *n += 1;
         module.define_function(id, ctx).map_err(|e| err(&e))?;
         *bytes += code_size(ctx);
+        probe::defined(id, code_size(ctx), "settle");
         module.clear_context(ctx);
         settle.push(id);
     }
@@ -611,6 +616,7 @@ fn compile_body(
             *n += 1;
             module.define_function(id, ctx).map_err(|e| err(&e))?;
             *bytes += code_size(ctx);
+            probe::defined(id, code_size(ctx), "commit");
             module.clear_context(ctx);
             out.push(id);
         }
@@ -675,7 +681,7 @@ fn chunks(body: &BodyRef<'_>) -> Vec<Vec<(Item, u32)>> {
             _ => 0,
         };
         for k in b.start..b.start + b.len {
-            if out.last().is_some_and(|c| c.len() >= CHUNK) {
+            if out.last().is_some_and(|c| c.len() >= probe::chunk()) {
                 out.push(Vec::new());
             }
             let item = if b.packed {
@@ -737,6 +743,7 @@ impl Slots {
         }
         let (a, o) = self.addr(b, slot);
         let v = b.ins().load(I64, flags(), a, o);
+        probe::count(b, probe::LOADS);
         self.vals.insert(slot, v);
         v
     }
@@ -745,6 +752,7 @@ impl Slots {
         if store {
             let (a, o) = self.addr(b, slot);
             b.ins().store(flags(), v, a, o);
+            probe::count(b, probe::STORES);
         }
         self.vals.insert(slot, v);
     }
@@ -780,6 +788,7 @@ fn build_settle(
     b.seal_block(entry);
     let params = b.block_params(entry).to_vec();
     let (slots, mems, tick) = (params[0], params[1], params[2]);
+    probe::count(&mut b, probe::SETTLES);
     let mut sl = Slots::new(slots, items.len() * 2);
     // Slots this chunk reads: a result computed in a guarded run is only
     // in the SSA cache until the run ends, so a later read in the chunk
@@ -926,6 +935,7 @@ fn build_commit(
     b.seal_block(entry);
     let params = b.block_params(entry).to_vec();
     let (slots, mems, writes) = (params[0], params[1], params[2]);
+    probe::count(&mut b, probe::COMMITS);
     // Commits are sequential: a copy's load sees every store before it.
     // Values are not cached across a RAM write's control flow, so each
     // commit loads its own operands (the program has few RAM writes).

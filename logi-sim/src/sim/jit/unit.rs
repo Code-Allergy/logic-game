@@ -92,6 +92,7 @@ pub fn compile_unit(p: &Program, body: BodyRef<'_>) -> Result<JitUnit, JitError>
     )?
     .ok_or_else(|| JitError("body not compiled (unused or too large)".into()))?;
     module.finalize_definitions().map_err(|e| err(&e))?;
+    super::probe::finalized(module);
     let module = &*module;
     // SAFETY: each id was defined with the matching signature, and the code
     // stays alive as long as `owned`, which the result owns.
@@ -281,6 +282,7 @@ pub fn compile_superstep(
     let mut n = 0u32;
     let (id, info) = define_superstep(module, &mut ctx, &mut fctx, p, bodies, s, &mut n)?;
     module.finalize_definitions().map_err(|e| err(&e))?;
+    super::probe::finalized(module);
     // SAFETY: `id` was defined with the `SuperFn` signature, and the code
     // stays alive as long as `owned`, which the result owns.
     let entry =

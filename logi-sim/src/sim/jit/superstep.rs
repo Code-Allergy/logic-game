@@ -328,6 +328,7 @@ pub(super) fn build_chunk(
     let params = b.block_params(entry).to_vec();
     let (slots, mems, tick, writes, skips) =
         (params[0], params[1], params[2], params[3], params[4]);
+    super::probe::count(&mut b, super::probe::SUPERS);
     #[cfg(not(feature = "counters"))]
     let _ = (skips, skip_base, continues);
     let mut sl = Slots::new(slots, ch.len() * 2);
