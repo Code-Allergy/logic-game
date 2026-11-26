@@ -61,3 +61,64 @@ pub fn check_list(src: &str, all: &[(&str, fn())]) {
     names.dedup();
     assert_eq!(names.len(), all.len(), "a test listed twice");
 }
+
+/// JIT tiering in [`crate::engine::LocalEngine`] on wasm32, in two halves
+/// with the host's event loop in between (the module is instantiated
+/// asynchronously): [`tiering::start`] loads a program, which starts
+/// interpreted; after the runner yields, [`tiering::check`] finds the wasm
+/// code installed by the next frame, and the state equal to the
+/// interpreter's.
+#[cfg(all(feature = "jit", target_arch = "wasm32"))]
+pub mod tiering {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::compile::{Options, compile};
+    use crate::engine::LocalEngine;
+    use crate::sim::{Sim, SimOptions};
+    use crate::testkit::fixtures;
+
+    thread_local! {
+        static ENGINE: RefCell<Option<LocalEngine>> = const { RefCell::new(None) };
+    }
+
+    const STEPS: [u64; 2] = [300, 2000];
+
+    fn frame(e: &mut LocalEngine, steps: u64) {
+        e.core.step(steps);
+        let t = std::cell::Cell::new(0u64);
+        // A clock that never runs out of budget (each read is 1 ns on).
+        let clock = move || {
+            t.set(t.get() + 1);
+            Duration::from_nanos(t.get())
+        };
+        e.run_frame(Duration::from_secs(3600), &clock);
+    }
+
+    pub fn start() {
+        let mut e = LocalEngine::with_sim_options(Options::default(), SimOptions::interactive());
+        e.load(&fixtures::cpu(&fixtures::LOOP_PROGRAM), 1);
+        assert!(e.jit_pending(), "the code is on its way");
+        frame(&mut e, STEPS[0]);
+        let sim = e.core.sim().expect("loaded");
+        assert!(!sim.jit_active(), "interpreted until the module is ready");
+        ENGINE.set(Some(e));
+    }
+
+    pub fn check() {
+        let mut e = ENGINE.take().expect("started");
+        frame(&mut e, STEPS[1]);
+        assert!(!e.jit_pending());
+        let sim = e.core.sim().expect("loaded");
+        assert!(sim.jit_active(), "the wasm code was installed");
+        let p = Arc::new(
+            compile(&fixtures::cpu(&fixtures::LOOP_PROGRAM), &Options::default()).unwrap(),
+        );
+        let mut want = Sim::new(p);
+        want.run(STEPS[0]);
+        want.run(STEPS[1]);
+        assert_eq!(want.tick_count(), sim.tick_count());
+        assert_eq!(want.export_state(), sim.export_state());
+    }
+}

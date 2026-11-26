@@ -3,7 +3,9 @@
 //! in Node. Build and run it with `logi-sim/scripts/wasm-selftest.sh`
 //! (optionally a filter: test names containing it).
 //!
-//! Exports `tests()` (the names, newline-separated) and `run(name)`. A
+//! Exports `tests()` (the names, newline-separated), `run(name)`, and the
+//! two halves of the asynchronous tiering test (`tiering_start`, then
+//! `tiering_check` after yielding to the event loop). A
 //! failing test panics, which aborts the instance on wasm32 (the message is
 //! logged first): the script starts a fresh instance for each test.
 
@@ -36,6 +38,20 @@ mod runner {
             .find(|(n, _)| n == name)
             .unwrap_or_else(|| panic!("no test {name}"));
         f();
+    }
+
+    /// JIT tiering in `LocalEngine`, first half (see
+    /// `testkit::selftest::tiering`); yield to the event loop, then call
+    /// `tiering_check`.
+    #[wasm_bindgen]
+    pub fn tiering_start() {
+        std::panic::set_hook(Box::new(|info| log(&format!("panicked: {info}"))));
+        logi_sim::testkit::selftest::tiering::start();
+    }
+
+    #[wasm_bindgen]
+    pub fn tiering_check() {
+        logi_sim::testkit::selftest::tiering::check();
     }
 }
 

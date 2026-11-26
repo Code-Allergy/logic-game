@@ -41,7 +41,25 @@ for (const name of names) {
     failed.push(name);
   }
 }
-console.log(`\n${names.length - failed.length} passed, ${failed.length} failed`);
-for (const n of failed) console.log(`  failed: ${n}`);
-process.exit(Math.min(failed.length, 255));
+(async () => {
+  let total = names.length;
+  if ('engine::local_engine_tiering'.includes(filter)) {
+    // Instantiation is asynchronous: yield to the event loop in between.
+    total += 1;
+    const name = 'engine::local_engine_tiering';
+    try {
+      const m = load();
+      m.tiering_start();
+      await new Promise((r) => setTimeout(r, 200));
+      m.tiering_check();
+      console.log(`test ${name} ... ok`);
+    } catch (e) {
+      console.log(`test ${name} ... FAILED (${e})`);
+      failed.push(name);
+    }
+  }
+  console.log(`\n${total - failed.length} passed, ${failed.length} failed`);
+  for (const n of failed) console.log(`  failed: ${n}`);
+  process.exit(Math.min(failed.length, 255));
+})();
 JS
