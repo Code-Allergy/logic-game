@@ -32,6 +32,14 @@
 //! are timed in `--rounds` interleaved rounds, then again from `--later`;
 //! state and memories must agree at the end.
 //!
+//! `--cross-tick N [--trace-len L]` estimates cross-tick constant
+//! propagation (a trace of `L` consecutive fused ticks): on `N` sampled
+//! traces after the profile, each tick after the first is specialized on
+//! its plan key plus the known bits of state the previous ticks' settles
+//! and commits imply (forward known bits through the general fused body
+//! under the same assumptions), against its plan key alone; executed ops
+//! per tick, guarded, on the tick's real state.
+//!
 //! `--period-keys N` reports how the plan's keys of whole clock periods
 //! repeat over `N` ticks after the profile (what supersteps keyed per
 //! period could cover; `docs/adaptive-spec.md`, "P8 as built").
@@ -55,9 +63,10 @@ use std::time::Instant;
 
 use logi_sim::compile::guard::{MIN_REGION, guard_with};
 use logi_sim::compile::spec::{
-    Candidate, KeyClass, KeyField, KeyLayout, PlanOptions, SpecContext, choose_plan, possible_bits,
+    Candidate, KeyClass, KeyField, KeyLayout, Known, PlanOptions, SpecContext, choose_plan,
+    possible_bits, transfer,
 };
-use logi_sim::compile::{Body, Commit, Instr, Op, Options, Program, compile, phases};
+use logi_sim::compile::{Body, Commit, Instr, Op, Options, Program, ZERO_SLOT, compile, phases};
 use logi_sim::sim::{PhasePlan, Sim, SimOptions, SpecOptions, SpecPlan};
 
 struct Args {
@@ -76,6 +85,8 @@ struct Args {
     auto_window: u64,
     auto_samples: usize,
     period_keys: u64,
+    cross_tick: u64,
+    trace_len: u64,
 }
 
 fn args() -> Result<Args, String> {
@@ -96,6 +107,8 @@ fn args() -> Result<Args, String> {
         auto_window: SpecOptions::default().plan_window,
         auto_samples: SpecOptions::default().samples,
         period_keys: 0,
+        cross_tick: 0,
+        trace_len: 3,
     };
     while let Some(x) = it.next() {
         let mut num = |what: &str| -> Result<u64, String> {
@@ -118,6 +131,8 @@ fn args() -> Result<Args, String> {
             "--auto-window" => a.auto_window = num("--auto-window")?,
             "--auto-samples" => a.auto_samples = num("--auto-samples")? as usize,
             "--period-keys" => a.period_keys = num("--period-keys")?,
+            "--cross-tick" => a.cross_tick = num("--cross-tick")?,
+            "--trace-len" => a.trace_len = num("--trace-len")?,
             f if a.folder.is_empty() => a.folder = f.to_string(),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -598,6 +613,9 @@ fn main() -> Result<(), String> {
 
     if a.period_keys > 0 {
         period_keys(&program, &layouts, a.warm + a.sample, a.period_keys);
+    }
+    if a.cross_tick > 0 {
+        cross_tick(&program, &phases_, &layouts, &possible, &a);
     }
     if a.adaptive > 0 {
         return adaptive_bench(&program, &phases_, &layouts, &a);
@@ -1503,4 +1521,215 @@ fn period_keys(program: &Arc<Program>, layouts: &[KeyLayout], from: u64, n: u64)
             changes as f64 / total * 100.0
         );
     }
+}
+
+/// Known bits of every slot after the settle of `body` (straight-line,
+/// unpacked) under `assume`, as `SpecContext::specialize` derives them.
+fn known_after(
+    p: &Program,
+    body: &Body,
+    possible: &[u64],
+    assume: &HashMap<u32, Known>,
+    phase: u64,
+) -> Vec<Known> {
+    let mut kn: Vec<Known> = possible.iter().map(|&m| Known::UNKNOWN.within(m)).collect();
+    for &(s, v) in &p.consts {
+        kn[s as usize] = Known::constant(v);
+    }
+    kn[ZERO_SLOT as usize] = Known::constant(0);
+    for (&s, &k) in assume {
+        kn[s as usize] = kn[s as usize].union(k);
+    }
+    for b in &body.blocks {
+        for idx in b.start..b.start + b.len {
+            let i = &body.instrs[idx as usize];
+            let mut k = transfer(
+                b.op,
+                i,
+                body.imms[idx as usize],
+                &|s| kn[s as usize],
+                &p.mems,
+                Some(phase),
+            )
+            .within(possible[i.dst as usize]);
+            if let Some(a) = assume.get(&i.dst) {
+                k = k.union(*a);
+            }
+            kn[i.dst as usize] = k;
+        }
+    }
+    kn
+}
+
+/// See the module documentation (`--cross-tick`).
+fn cross_tick(
+    program: &Arc<Program>,
+    phases_: &[Phase],
+    layouts: &[KeyLayout],
+    possible: &[u64],
+    a: &Args,
+) {
+    let p = &**program;
+    let period = phases_.len() as u64;
+    let len = a.trace_len.max(2);
+    let n = a.cross_tick;
+    let t0 = Instant::now();
+    let mut sim = Sim::new(Arc::clone(program));
+    sim.run(a.warm + a.sample);
+    // State slots (written by a commit copy of some phase).
+    let mut is_state = vec![false; p.slot_count as usize];
+    for ph in phases_ {
+        for c in &ph.cx.body().commits {
+            if let Commit::Copy { state, .. } = *c {
+                is_state[state as usize] = true;
+            }
+        }
+    }
+    let prefixes: Vec<(Body, Vec<bool>)> = phases_
+        .iter()
+        .zip(layouts)
+        .map(|(ph, l)| {
+            ph.cx
+                .prefix(&l.fields.iter().map(|f| f.slot).collect::<Vec<_>>())
+        })
+        .collect();
+    let mut cache: HashMap<(usize, u64, Vec<(u32, u64, u64)>), Body> = HashMap::new();
+    let mut spec_ex = |k: usize, key: u64, extra: &[(u32, Known)], row: &[u64]| -> usize {
+        let id: Vec<(u32, u64, u64)> = extra.iter().map(|(s, k)| (*s, k.zeros, k.ones)).collect();
+        let b = cache.entry((k, key, id)).or_insert_with(|| {
+            let mut assume = layouts[k].assume(key);
+            assume.extend_from_slice(extra);
+            guarded(p, phases_[k].cx.specialize(p, &assume, &prefixes[k].1))
+        });
+        executed(b, row)
+    };
+    // Per offset in the trace: executed ops (key only, key + carry, carry
+    // alone without the key's prefix), ticks whose key the carry implies,
+    // carried state bits.
+    let l = len as usize;
+    let mut key_only = vec![0f64; l];
+    let mut with_carry = vec![0f64; l];
+    let mut carry_only = vec![0f64; l];
+    let mut implied = vec![0u64; l];
+    let mut carried_bits = vec![0f64; l];
+    let mut general = vec![0f64; l];
+    let mut wrong = 0u64;
+    let stride = 997u64; // co-prime with the period: every start phase
+    for _ in 0..n {
+        sim.run(stride);
+        let mut rows = Vec::with_capacity(l);
+        for _ in 0..l {
+            sim.tick();
+            let k = (sim.tick_count() % period) as usize;
+            rows.push((
+                k,
+                (0..p.slot_count).map(|s| sim.read(s)).collect::<Vec<u64>>(),
+            ));
+        }
+        let mut carry: HashMap<u32, Known> = HashMap::new();
+        for (off, (k, row)) in rows.iter().enumerate() {
+            let k = *k;
+            let layout = &layouts[k];
+            let key = layout.pack(row);
+            let pre_ops = prefixes[k].0.ops() as f64;
+            general[off] += executed(&phases_[k].general, row) as f64;
+            let extra: Vec<(u32, Known)> = {
+                let mut v: Vec<(u32, Known)> = carry
+                    .iter()
+                    .filter(|(s, kn)| kn.mask() & possible[**s as usize] != 0)
+                    .map(|(s, kn)| (*s, *kn))
+                    .collect();
+                v.sort_by_key(|x| x.0);
+                v
+            };
+            for (s, kn) in &extra {
+                if row[*s as usize] & kn.mask() != kn.ones {
+                    wrong += 1;
+                }
+            }
+            carried_bits[off] += extra
+                .iter()
+                .map(|(s, kn)| (kn.mask() & possible[*s as usize]).count_ones() as f64)
+                .sum::<f64>();
+            let pre = if layout.fields.is_empty() {
+                0.0
+            } else {
+                pre_ops
+            };
+            key_only[off] += pre + spec_ex(k, key, &[], row) as f64;
+            with_carry[off] += pre + spec_ex(k, key, &extra, row) as f64;
+            // Does the carry imply the key? Then the trace needs no check
+            // (and no prefix) here.
+            let assume: HashMap<u32, Known> = extra.iter().copied().collect();
+            let implies = layout
+                .fields
+                .iter()
+                .all(|f| assume.get(&f.slot).is_some_and(|kn| kn.knows(f.mask)));
+            if implies {
+                implied[off] += 1;
+            }
+            // Carry alone (a trace that checks only its entry key).
+            carry_only[off] += {
+                let fb = guarded(
+                    p,
+                    phases_[k]
+                        .cx
+                        .specialize(p, &extra, &vec![false; p.slot_count as usize]),
+                );
+                executed(&fb, row) as f64
+            };
+            // The next tick's carry: state after this settle and commit.
+            let mut assume_now: HashMap<u32, Known> = carry.clone();
+            for (s, kn) in layout.assume(key) {
+                let e = assume_now.entry(s).or_insert(Known::UNKNOWN);
+                *e = e.union(kn);
+            }
+            let body = phases_[k].cx.body();
+            let kn = known_after(p, body, possible, &assume_now, k as u64);
+            let mut next: HashMap<u32, Known> = HashMap::new();
+            for (s, &st) in is_state.iter().enumerate() {
+                if st {
+                    next.insert(s as u32, kn[s]);
+                }
+            }
+            for c in &body.commits {
+                if let Commit::Copy { state, next: nx } = *c {
+                    next.insert(state, kn[nx as usize]);
+                }
+            }
+            carry = next;
+        }
+    }
+    let nf = n as f64;
+    println!(
+        "\ncross-tick known bits: {n} traces of {len} fused ticks (starts at every phase), {:.1} s; carried facts the real state contradicts: {wrong}",
+        t0.elapsed().as_secs_f64()
+    );
+    println!(
+        "  {:>6} {:>9} {:>9} {:>11} {:>11} {:>9} {:>12}",
+        "offset", "general", "key only", "key+carry", "carry only", "implied", "carried bits"
+    );
+    let (mut g, mut ko, mut kc) = (0.0, 0.0, 0.0);
+    for off in 0..l {
+        println!(
+            "  {:>6} {:>9.1} {:>9.1} {:>11.1} {:>11.1} {:>8.1}% {:>12.1}",
+            off,
+            general[off] / nf,
+            key_only[off] / nf,
+            with_carry[off] / nf,
+            carry_only[off] / nf,
+            100.0 * implied[off] as f64 / nf,
+            carried_bits[off] / nf
+        );
+        g += general[off];
+        ko += key_only[off];
+        kc += with_carry[off];
+    }
+    println!(
+        "  per tick over the trace: general {:.1}, plan keys {:.1}, keys + cross-tick known bits {:.1} executed ops ({:+.1}% vs keys)",
+        g / nf / len as f64,
+        ko / nf / len as f64,
+        kc / nf / len as f64,
+        100.0 * (kc / ko - 1.0)
+    );
 }
