@@ -122,3 +122,62 @@ pub mod tiering {
         assert_eq!(want.export_state(), sim.export_state());
     }
 }
+
+/// A finished [`PendingJit`](crate::sim::jit::PendingJit) handle kept past
+/// its result must not touch a later instantiation that reuses its
+/// registry slot. Three phases, with the event loop run in between: start
+/// `a`; poll `a` to its result and start `b` (same slot); drop `a`, then
+/// `b` must still deliver.
+#[cfg(all(feature = "jit", target_arch = "wasm32"))]
+pub mod slot_reuse {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    use crate::compile::{Options, compile};
+    use crate::sim::jit::PendingJit;
+    use crate::sim::{Sim, SimOptions};
+    use crate::testkit::fixtures;
+
+    thread_local! {
+        static HANDLES: RefCell<Vec<PendingJit>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn pending() -> PendingJit {
+        let p = Arc::new(
+            compile(&fixtures::cpu(&fixtures::LOOP_PROGRAM), &Options::default()).unwrap(),
+        );
+        let opts = SimOptions {
+            jit: true,
+            ..SimOptions::default()
+        };
+        Sim::with_options(p, opts)
+            .compile_jit_async()
+            .expect("started")
+    }
+
+    /// Phase 0: start `a`.
+    pub fn start() {
+        HANDLES.set(vec![pending()]);
+    }
+
+    /// Phase 1: `a` delivers once; start `b` while `a` is still held.
+    pub fn reuse() {
+        HANDLES.with_borrow_mut(|h| {
+            let a = &mut h[0];
+            assert!(matches!(a.poll(), Some(Ok(_))), "a settled with code");
+            assert!(a.poll().is_none(), "a delivers once");
+            h.push(pending());
+        });
+    }
+
+    /// Phase 2: dropping `a` leaves `b` alone; polling `a` cannot take it.
+    pub fn check() {
+        HANDLES.with_borrow_mut(|h| {
+            assert!(h[0].poll().is_none(), "a finished: it sees nothing of b");
+            drop(h.remove(0));
+            let b = &mut h[0];
+            assert!(matches!(b.poll(), Some(Ok(_))), "b delivers its own code");
+        });
+        HANDLES.set(Vec::new());
+    }
+}

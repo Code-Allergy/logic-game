@@ -53,6 +53,20 @@ mod runner {
     pub fn tiering_check() {
         logi_sim::testkit::selftest::tiering::check();
     }
+
+    /// Registry-slot reuse after a finished instantiation (see
+    /// `testkit::selftest::slot_reuse`): phases 0, 1 and 2, with the event
+    /// loop run in between.
+    #[wasm_bindgen]
+    pub fn slot_reuse_phase(phase: u32) {
+        std::panic::set_hook(Box::new(|info| log(&format!("panicked: {info}"))));
+        use logi_sim::testkit::selftest::slot_reuse;
+        match phase {
+            0 => slot_reuse::start(),
+            1 => slot_reuse::reuse(),
+            _ => slot_reuse::check(),
+        }
+    }
 }
 
 fn main() {

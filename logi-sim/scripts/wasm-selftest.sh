@@ -58,6 +58,21 @@ for (const name of names) {
       failed.push(name);
     }
   }
+  if ('wasm::pending_slot_reuse'.includes(filter)) {
+    total += 1;
+    const name = 'wasm::pending_slot_reuse';
+    try {
+      const m = load();
+      for (const phase of [0, 1, 2]) {
+        m.slot_reuse_phase(phase);
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      console.log(`test ${name} ... ok`);
+    } catch (e) {
+      console.log(`test ${name} ... FAILED (${e})`);
+      failed.push(name);
+    }
+  }
   console.log(`\n${total - failed.length} passed, ${failed.length} failed`);
   for (const n of failed) console.log(`  failed: ${n}`);
   process.exit(Math.min(failed.length, 255));

@@ -135,7 +135,9 @@ struct Slot {
 /// A module being compiled and instantiated asynchronously
 /// ([`super::Builder::finish_async`]). Dropping it abandons the result.
 pub struct PendingModule {
-    id: usize,
+    /// Its slot in `PENDING`; `None` once `poll` took the result, since a
+    /// later instantiation may reuse the slot.
+    id: Option<usize>,
 }
 
 /// Start compiling and instantiating `bytes`.
@@ -179,7 +181,7 @@ pub(super) fn instantiate_async(
             }
         }
     });
-    Ok(PendingModule { id })
+    Ok(PendingModule { id: Some(id) })
 }
 
 impl PendingModule {
@@ -187,8 +189,9 @@ impl PendingModule {
     /// or why it failed; `None` while it is still in flight. Returns
     /// `Some` once.
     pub(in crate::sim::jit) fn poll(&mut self) -> Option<Result<Finished, JitError>> {
+        let id = self.id?;
         let done = PENDING.with_borrow(|p| {
-            p.get(self.id)
+            p.get(id)
                 .and_then(Option::as_ref)
                 .is_none_or(|s| s.outcome.borrow().is_some())
         });
@@ -196,7 +199,9 @@ impl PendingModule {
             return None;
         }
         // Settled: the callbacks have run (and are not running now).
-        let slot = PENDING.with_borrow_mut(|p| p.get_mut(self.id).and_then(Option::take))?;
+        let slot = PENDING.with_borrow_mut(|p| p.get_mut(id).and_then(Option::take));
+        self.id = None;
+        let slot = slot?;
         let outcome = slot.outcome.borrow_mut().take().expect("settled");
         Some(match outcome {
             Ok(v) => Reflect::get(&v, &"instance".into())
@@ -216,8 +221,9 @@ impl Drop for PendingModule {
         // The callbacks must outlive the promise: a settled slot goes now,
         // one in flight when the next instantiation starts after it
         // settled.
+        let Some(id) = self.id else { return };
         PENDING.with_borrow_mut(|p| {
-            if let Some(s) = p.get_mut(self.id) {
+            if let Some(s) = p.get_mut(id) {
                 match s {
                     Some(x) if x.outcome.borrow().is_none() => x.abandoned = true,
                     _ => *s = None,
