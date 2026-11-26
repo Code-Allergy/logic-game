@@ -356,6 +356,47 @@ fn unlimited_runs_until_the_budget() {
     assert_eq!(e.core.wait_hint(&c), Some(Duration::ZERO));
 }
 
+/// A paced rate that has caught up waits for a quantum's worth of ticks
+/// before the next batch, not for the next tick (a worker woken for every
+/// tick spent a whole core on a few ticks per `Sim::run`); a slow rate
+/// still waits for its next tick, and debt still runs at once.
+#[test]
+fn a_caught_up_paced_rate_waits_for_a_quantum_of_ticks() {
+    let (d, ..) = counter_design(false);
+    // Reads far shorter than a quantum (every batch here is bounded by
+    // its due ticks, not by its budget).
+    let clock = FakeClock {
+        now: Cell::new(Duration::ZERO),
+        tick: Duration::from_nanos(100),
+    };
+    let c = || clock.read();
+    let mut e = LocalEngine::new(Options::debug());
+    e.load(&d, 1);
+    e.core.set_rate(Rate::Hz(1e6));
+    e.run_frame(Duration::from_millis(5), &c);
+    clock.advance(Duration::from_millis(3));
+    let n = e.run_frame(Duration::from_secs(1), &c);
+    assert!((3000..=3100).contains(&n), "the debt runs at once: {n}");
+    let wait = e.core.wait_hint(&c).expect("a paced rate wakes by itself");
+    // The clock reads of `wait_hint` itself take a little of it.
+    assert!(
+        wait > PACE_QUANTUM * 3 / 4 && wait <= PACE_QUANTUM,
+        "caught up at 1 MHz: waits {wait:?}, not the 1 us to the next tick"
+    );
+    clock.advance(PACE_QUANTUM);
+    let n = e.run_frame(Duration::from_secs(1), &c);
+    assert!(n >= 1000, "a quantum's worth runs as one batch: {n}");
+
+    // 100 Hz: a tick is longer than the quantum; wait for the next one.
+    e.core.set_rate(Rate::Hz(100.0));
+    e.run_frame(Duration::from_secs(1), &c);
+    let wait = e.core.wait_hint(&c).expect("a paced rate wakes by itself");
+    assert!(
+        wait > Duration::from_millis(9) && wait <= Duration::from_millis(10),
+        "at 100 Hz: waits {wait:?} for the next tick"
+    );
+}
+
 /// An input set while paused waits for the next tick; an edit in between
 /// (a program swap, which settles) must not make the logic see it sooner.
 #[test]
