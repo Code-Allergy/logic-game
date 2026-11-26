@@ -1,5 +1,6 @@
-//! Cranelift JIT backend for the settle and the commit (issues #117, #111;
-//! feature `jit`, native only).
+//! JIT backends for the settle and the commit (issues #117, #111; feature
+//! `jit`): Cranelift on native targets (`clif/`), and on wasm32
+//! WebAssembly modules generated at run time (`wasm/`).
 //!
 //! The unit is the one the interpreter runs: a body (the program's own, a
 //! clock-phase variant, or a fused-run body pruned to its commits' cone,
@@ -42,33 +43,62 @@
 //! index, memory index, shift and width the code uses; memory reads and
 //! writes mask the address to the memory's size (`2^addr_bits` words, the
 //! length of `Sim`'s buffers), exactly as the interpreter does.
+//!
+//! # Backends
+//!
+//! This module and `superstep.rs` hold what does not depend on the
+//! target: the bodies' chunks, the slots each must store, the superstep's
+//! stream and its store plan, and the program and unit types `Sim` uses.
+//! A backend (`backend::Builder`) turns one chunk, commit chunk, superstep
+//! chunk or superstep entry into one function, and makes them callable as
+//! the function pointers [`SettleFn`], [`CommitFn`] and [`SuperFn`]:
+//!
+//! - `clif/` (native): Cranelift IR, compiled to machine code in a
+//!   `JITModule`. A slot read is an SSA value.
+//! - `wasm/` (wasm32): a WebAssembly module encoded by hand (`wasm/enc.rs`),
+//!   that imports the main module's memory, so the code works on the
+//!   `Sim`'s slots in place. A slot read is a local. Its functions are
+//!   put in the main module's function table, where a Rust function
+//!   pointer is a table index: `Sim` calls them as it calls native code,
+//!   wasm to wasm, with no JavaScript in between.
 
 use std::sync::Mutex;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod clif;
 mod superstep;
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "selftest"))]
+pub mod tests;
 mod unit;
-#[cfg(test)]
-mod unit_tests;
+#[cfg(any(test, feature = "selftest"))]
+pub mod unit_tests;
+#[cfg(target_arch = "wasm32")]
+mod wasm;
+/// The wasm backend's own tests (`wasm/tests.rs`), for the selftest runner.
+#[cfg(all(target_arch = "wasm32", feature = "selftest"))]
+pub fn wasm_tests() -> Vec<(&'static str, fn())> {
+    wasm::tests::all()
+}
+// The wasm backend's encoder is plain Rust: its unit tests run natively.
+// (Only some of it is used by them.)
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "wasm/enc.rs"]
+#[allow(dead_code)]
+mod wasm_enc;
 
-#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+use clif as backend;
+#[cfg(target_arch = "wasm32")]
+use wasm as backend;
+
+#[cfg(any(test, feature = "selftest"))]
 pub(crate) use superstep::MUTATION;
 pub use superstep::{JitSuper, Part, SuperFn, SuperInfo, SuperRef};
 pub use unit::{JitUnit, SuperUnit, compile_superstep, compile_unit};
 
-use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::types::I64;
-use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, MemFlagsData, UserFuncName, Value};
-use cranelift_codegen::isa::TargetFrontendConfig;
-use cranelift_codegen::settings::{self, Configurable};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module};
-use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use foldhash::{HashSet, HashSetExt};
 
-use crate::compile::{Block, Commit, Guard, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
-use crate::netlist::mask;
+use crate::compile::{Block, Commit, Guard, Instr, Op, Pack, PackOperand, Program};
 
 /// Instructions (or packed words) per settle chunk at most. Small chunks
 /// compile faster (register allocation is superlinear in function size)
@@ -89,10 +119,6 @@ pub const COMMIT_CHUNK: usize = 256;
 /// (23k instructions) ticks 1.5x faster with the JIT, `gates1_1m` (101k)
 /// 4.9x slower.
 pub const MAX_BODY: usize = 1 << 15;
-
-/// Whether native code probes its stack: where the system needs it (see
-/// `JitProgram::compile_with`).
-const PROBE_STACK: bool = cfg!(windows);
 
 /// A settle chunk: `(slots, mems, tick)`. `mems` points to one pointer per
 /// memory of the program.
@@ -179,7 +205,7 @@ pub struct JitProgram {
     pub(crate) key: Option<RunKey>,
     /// Owns the code (behind a `Mutex` only so that the program is `Sync`;
     /// it is never locked).
-    _module: Mutex<Owned>,
+    _module: Mutex<backend::Owned>,
 }
 
 // A `Sim` with JIT code must stay `Send`, and the code can be compiled on
@@ -201,22 +227,6 @@ pub(crate) struct RunKey {
     pub folded: bool,
     /// The specialized runs (`Sim::spec_layout`).
     pub spec: Vec<u64>,
-}
-
-/// Owns a `JITModule` and frees its code when dropped (a `JITModule` alone
-/// leaks it), including when compiling fails half-way.
-struct Owned(Option<JITModule>);
-
-impl Drop for Owned {
-    fn drop(&mut self) {
-        if let Some(m) = self.0.take() {
-            // SAFETY: the only pointers into this code are the function
-            // pointers of the `JitProgram` that owns this (dropped with
-            // it; `Sim` keeps an `Arc<JitProgram>` while it may call them),
-            // or none at all if compiling failed.
-            unsafe { m.free_memory() };
-        }
-    }
 }
 
 /// Why a program was not compiled.
@@ -258,85 +268,139 @@ impl JitProgram {
         bodies: &[BodyRef<'_>],
         superstep: Option<&SuperRef<'_>>,
     ) -> Result<Self, JitError> {
-        let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
-        let mut owned = new_module()?;
-        let module = owned.0.as_mut().expect("just created");
-        let mut ctx = module.make_context();
-        let mut fctx = FunctionBuilderContext::new();
-        let mut ids: Vec<Option<Ids>> = Vec::with_capacity(bodies.len());
-        let mut count = 0usize;
-        let mut n = 0u32;
-        let mut bytes = 0usize;
-        for body in bodies {
-            ids.push(compile_body(
-                module, &mut ctx, &mut fctx, p, body, &mut n, &mut count, &mut bytes,
-            )?);
-        }
-        // The superstep: only over bodies compiled with a native commit.
-        let mut sup = None;
-        if let Some(s) = superstep {
-            let ok = s.parts.iter().all(|part| {
-                let (Part::Commit { body } | Part::Settle { body, .. }) = *part;
-                matches!(ids.get(body), Some(Some((_, Some(_)))))
-            });
-            if ok {
-                let (id, info) =
-                    define_superstep(module, &mut ctx, &mut fctx, p, bodies, s, &mut n)?;
-                bytes += info.code_bytes;
-                sup = Some((id, info));
-            }
-        }
-        module.finalize_definitions().map_err(|e| err(&e))?;
-        let module = &*module;
-        // SAFETY: each id was defined with the matching signature, and the
-        // code stays alive as long as `owned`, which the result owns.
-        let settle = |id| unsafe {
-            std::mem::transmute::<*const u8, SettleFn>(module.get_finalized_function(id))
-        };
-        let commit = |id| unsafe {
-            std::mem::transmute::<*const u8, CommitFn>(module.get_finalized_function(id))
-        };
-        let bodies = ids
-            .into_iter()
-            .map(|b| {
-                b.map(|(s, c)| JitBody {
-                    settle: s.into_iter().map(settle).collect(),
-                    commit: c.map(|c| c.into_iter().map(commit).collect()),
-                })
-            })
-            .collect();
-        let superstep = sup.map(|(id, info)| JitSuper {
-            // SAFETY: as above.
-            entry: unsafe {
-                std::mem::transmute::<*const u8, SuperFn>(module.get_finalized_function(id))
-            },
-            info,
-        });
-        Ok(JitProgram {
-            bodies,
-            superstep,
-            instrs: count,
-            code_bytes: bytes,
+        let (b, layout) = define_program(p, bodies, superstep)?;
+        Ok(layout.assemble(b.finish()?))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl JitProgram {
+    /// [`JitProgram::compile_with`], instantiated asynchronously (wasm32:
+    /// browsers refuse to compile modules over 4 KB synchronously on their
+    /// main thread). The code is generated now; poll the result between
+    /// frames.
+    pub fn compile_async(
+        p: &Program,
+        bodies: &[BodyRef<'_>],
+        superstep: Option<&SuperRef<'_>>,
+    ) -> Result<PendingJit, JitError> {
+        let (b, layout) = define_program(p, bodies, superstep)?;
+        Ok(PendingJit {
+            module: b.finish_async()?,
+            layout: Some(layout),
             key: None,
-            _module: Mutex::new(owned),
         })
     }
 }
 
-/// Define the chunks and the entry of superstep `s` over `bodies` in
-/// `module` (every body it names checked by the caller: compiled, or
-/// compilable, with a native commit). `n` numbers the functions.
+/// A [`JitProgram`] being instantiated ([`JitProgram::compile_async`],
+/// `Sim::compile_jit_async`).
+#[cfg(target_arch = "wasm32")]
+pub struct PendingJit {
+    module: wasm::PendingModule,
+    layout: Option<Layout>,
+    pub(crate) key: Option<RunKey>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl PendingJit {
+    /// The program once instantiated, or why it failed; `None` while it is
+    /// in flight (and after it was returned once).
+    pub fn poll(&mut self) -> Option<Result<JitProgram, JitError>> {
+        let fin = self.module.poll()?;
+        let layout = self.layout.take()?;
+        Some(fin.map(|f| {
+            let mut code = layout.assemble(f);
+            code.key = self.key.take();
+            code
+        }))
+    }
+}
+
+/// What [`define_program`] defined: per body its settle and commit chunks,
+/// and the superstep.
+struct Layout {
+    bodies: Vec<Option<Ids>>,
+    superstep: Option<(backend::FnId, SuperInfo)>,
+    instrs: usize,
+    code_bytes: usize,
+}
+
+impl Layout {
+    /// The program of the functions defined, now finished.
+    fn assemble(self, fin: backend::Finished) -> JitProgram {
+        let bodies = self
+            .bodies
+            .into_iter()
+            .map(|b| {
+                b.map(|(s, c)| JitBody {
+                    settle: s.into_iter().map(|id| fin.settle_fn(id)).collect(),
+                    commit: c.map(|c| c.into_iter().map(|id| fin.commit_fn(id)).collect()),
+                })
+            })
+            .collect();
+        let superstep = self.superstep.map(|(id, info)| JitSuper {
+            entry: fin.super_fn(id),
+            info,
+        });
+        JitProgram {
+            bodies,
+            superstep,
+            instrs: self.instrs,
+            code_bytes: self.code_bytes,
+            key: None,
+            _module: Mutex::new(fin.into_owned()),
+        }
+    }
+}
+
+/// Define every body of `bodies` (and the superstep) in a new backend
+/// builder, not finished yet.
+fn define_program(
+    p: &Program,
+    bodies: &[BodyRef<'_>],
+    superstep: Option<&SuperRef<'_>>,
+) -> Result<(backend::Builder, Layout), JitError> {
+    let mut b = backend::Builder::new()?;
+    let mut ids: Vec<Option<Ids>> = Vec::with_capacity(bodies.len());
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for body in bodies {
+        ids.push(compile_body(&mut b, p, body, &mut count, &mut bytes)?);
+    }
+    // The superstep: only over bodies compiled with a native commit.
+    let mut sup = None;
+    if let Some(s) = superstep {
+        let ok = s.parts.iter().all(|part| {
+            let (Part::Commit { body } | Part::Settle { body, .. }) = *part;
+            matches!(ids.get(body), Some(Some((_, Some(_)))))
+        });
+        if ok {
+            let (id, info) = define_superstep(&mut b, p, bodies, s)?;
+            bytes += info.code_bytes;
+            sup = Some((id, info));
+        }
+    }
+    Ok((
+        b,
+        Layout {
+            bodies: ids,
+            superstep: sup,
+            instrs: count,
+            code_bytes: bytes,
+        },
+    ))
+}
+
+/// Define the chunks and the entry of superstep `s` over `bodies` in `b`
+/// (every body it names checked by the caller: compiled, or compilable,
+/// with a native commit).
 fn define_superstep(
-    module: &mut JITModule,
-    ctx: &mut cranelift_codegen::Context,
-    fctx: &mut FunctionBuilderContext,
+    b: &mut backend::Builder,
     p: &Program,
     bodies: &[BodyRef<'_>],
     s: &SuperRef<'_>,
-    n: &mut u32,
-) -> Result<(FuncId, SuperInfo), JitError> {
-    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
-    let ptr = module.target_config().pointer_type();
+) -> Result<(backend::FnId, SuperInfo), JitError> {
     let mut super_bytes = 0usize;
     let st = superstep::stream(bodies, s);
     let plan = superstep::plan(p, bodies, &st, s.live_end);
@@ -351,175 +415,46 @@ fn define_superstep(
     let mut continues = 0;
     for ch in &st.chunks {
         items += ch.len();
-        // No callee-saved registers: the chunks are only called
-        // by the entry below, which keeps nothing in registers.
-        ctx.func.signature.call_conv = cranelift_codegen::isa::CallConv::Winch;
-        ctx.func.signature.params.clear();
-        ctx.func.signature.params.extend([
-            AbiParam::new(ptr),
-            AbiParam::new(ptr),
-            AbiParam::new(I64),
-            AbiParam::new(ptr),
-            AbiParam::new(ptr),
-        ]);
-        ctx.func.name = UserFuncName::user(0, *n);
-        dead += superstep::build_chunk(
-            module.target_config(),
-            &mut ctx.func,
-            fctx,
-            p,
-            bodies,
-            &st,
-            ch,
-            &plan,
-            &mut w,
-            &skip_base,
-            continues,
-        );
+        let (id, size, d) =
+            b.super_chunk(p, bodies, &st, ch, &plan, &mut w, &skip_base, continues)?;
+        dead += d;
         continues = ch.last().map_or(0, |&(_, seg)| seg);
-        let id = module
-            .declare_function(&format!("super{}", *n), Linkage::Local, &ctx.func.signature)
-            .map_err(|e| err(&e))?;
-        *n += 1;
-        module.define_function(id, ctx).map_err(|e| err(&e))?;
-        let size = code_size(ctx);
         super_bytes += size;
-        module.clear_context(ctx);
         fns.push(id);
     }
     debug_assert_eq!(w, plan.store.len());
-    {
-        // One entry (`SuperFn`) calling every chunk directly.
-        let params = [
-            AbiParam::new(ptr),
-            AbiParam::new(ptr),
-            AbiParam::new(I64),
-            AbiParam::new(ptr),
-            AbiParam::new(ptr),
-        ];
-        ctx.func.signature.params.extend(params);
-        ctx.func.name = UserFuncName::user(0, *n);
-        let refs: Vec<_> = fns
-            .iter()
-            .map(|&id| module.declare_func_in_func(id, &mut ctx.func))
-            .collect();
-        {
-            let cfg = module.target_config();
-            let mut b = FunctionBuilder::new(&mut ctx.func, fctx);
-            let blk = b.create_block();
-            b.append_block_params_for_function_params(blk);
-            b.switch_to_block(blk);
-            b.seal_block(blk);
-            let args = b.block_params(blk).to_vec();
-            for r in refs {
-                b.ins().call(r, &args);
-            }
-            b.ins().return_(&[]);
-            b.finalize(cfg);
-        }
-        let id = module
-            .declare_function(&format!("super{}", *n), Linkage::Local, &ctx.func.signature)
-            .map_err(|e| err(&e))?;
-        module.define_function(id, ctx).map_err(|e| err(&e))?;
-        let size = code_size(ctx);
-        super_bytes += size;
-        module.clear_context(ctx);
-        Ok((
-            id,
-            SuperInfo {
-                ticks: s.ticks,
-                chunks: fns.len(),
-                skip_base,
-                skip_len,
-                items,
-                dead,
-                writes: plan.store.len(),
-                stores: plan.store.iter().filter(|&&x| x).count(),
-                code_bytes: super_bytes,
-            },
-        ))
-    }
-}
-
-/// A Cranelift module configured for this crate's code (see
-/// `JitProgram::compile_with`), owned so that its code is freed on drop.
-fn new_module() -> Result<Owned, JitError> {
-    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
-    let mut flags = settings::builder();
-    // The IR is already simplified (constant folding, CSE and DCE ran in
-    // the compiler); Cranelift's optimizer gains nothing measurable on
-    // it and costs about a quarter of the compile time.
-    flags.set("opt_level", "none").map_err(|e| err(&e))?;
-    // The IR verifier costs about a tenth of the compile time; the
-    // builder's IR is checked in debug builds (and so in tests).
-    flags
-        .set(
-            "enable_verifier",
-            if cfg!(debug_assertions) {
-                "true"
-            } else {
-                "false"
-            },
-        )
-        .map_err(|e| err(&e))?;
-    flags
-        .set("use_colocated_libcalls", "false")
-        .map_err(|e| err(&e))?;
-    flags
-        .set(
-            "is_pic",
-            if cfg!(target_arch = "x86_64") {
-                "true"
-            } else {
-                "false"
-            },
-        )
-        .map_err(|e| err(&e))?;
-    // Windows commits a thread's stack a page at a time, through one
-    // guard page: a function whose frame is larger than a page must
-    // touch every page on its way down, or its first access below the
-    // guard page is an access violation. Chunks of many items
-    // (`SimOptions::superstep_chunk`) have such frames. The probes are
-    // inline (no call to a `__probestack` symbol), and only functions
-    // with a frame over a page get any.
-    if PROBE_STACK {
-        flags
-            .set("enable_probestack", "true")
-            .map_err(|e| err(&e))?;
-        flags
-            .set("probestack_strategy", "inline")
-            .map_err(|e| err(&e))?;
-    }
-    let isa = cranelift_native::builder()
-        .map_err(|e| err(&e))?
-        .finish(settings::Flags::new(flags))
-        .map_err(|e| err(&e))?;
-    Ok(Owned(Some(JITModule::new(JITBuilder::with_isa(
-        isa,
-        cranelift_module::default_libcall_names(),
-    )))))
+    // One entry (`SuperFn`) calling every chunk directly.
+    let (id, size) = b.super_entry(&fns)?;
+    super_bytes += size;
+    Ok((
+        id,
+        SuperInfo {
+            ticks: s.ticks,
+            chunks: fns.len(),
+            skip_base,
+            skip_len,
+            items,
+            dead,
+            writes: plan.store.len(),
+            stores: plan.store.iter().filter(|&&x| x).count(),
+            code_bytes: super_bytes,
+        },
+    ))
 }
 
 /// The functions of one compiled body: settle chunks, and commit chunks
 /// (`None` when a `MemClear` is committed by the interpreter).
-type Ids = (Vec<FuncId>, Option<Vec<FuncId>>);
+type Ids = (Vec<backend::FnId>, Option<Vec<backend::FnId>>);
 
-/// Compile one body into `module` (`None`: not used, or larger than
-/// [`MAX_BODY`]). `n` numbers the functions, `count` and `bytes` sum
-/// instructions and native bytes.
-#[allow(clippy::too_many_arguments)]
+/// Compile one body into `b` (`None`: not used, or larger than
+/// [`MAX_BODY`]). `count` and `bytes` sum instructions and bytes of code.
 fn compile_body(
-    module: &mut JITModule,
-    ctx: &mut cranelift_codegen::Context,
-    fctx: &mut FunctionBuilderContext,
+    b: &mut backend::Builder,
     p: &Program,
     body: &BodyRef<'_>,
-    n: &mut u32,
     count: &mut usize,
     bytes: &mut usize,
 ) -> Result<Option<Ids>, JitError> {
-    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
-    let ptr = module.target_config().pointer_type();
     let items: usize = body.blocks.iter().map(|b| b.len as usize).sum();
     if !body.used || items > MAX_BODY {
         return Ok(None);
@@ -557,33 +492,8 @@ fn compile_body(
     let mut settle = Vec::with_capacity(chunks.len());
     for (ch, live) in chunks.iter().zip(&lives) {
         *count += ch.len();
-        ctx.func.signature.params.clear();
-        ctx.func.signature.params.extend([
-            AbiParam::new(ptr),
-            AbiParam::new(ptr),
-            AbiParam::new(I64),
-        ]);
-        ctx.func.name = UserFuncName::user(0, *n);
-        build_settle(
-            module.target_config(),
-            &mut ctx.func,
-            fctx,
-            p,
-            body,
-            ch,
-            body.fused_only.then_some(live),
-        );
-        let id = module
-            .declare_function(
-                &format!("settle{}", *n),
-                Linkage::Local,
-                &ctx.func.signature,
-            )
-            .map_err(|e| err(&e))?;
-        *n += 1;
-        module.define_function(id, ctx).map_err(|e| err(&e))?;
-        *bytes += code_size(ctx);
-        module.clear_context(ctx);
+        let (id, size) = b.settle(p, body, ch, body.fused_only.then_some(live))?;
+        *bytes += size;
         settle.push(id);
     }
     let commit = if body
@@ -593,25 +503,8 @@ fn compile_body(
     {
         let mut out = Vec::new();
         for part in body.commits.chunks(COMMIT_CHUNK) {
-            ctx.func.signature.params.clear();
-            ctx.func.signature.params.extend([
-                AbiParam::new(ptr),
-                AbiParam::new(ptr),
-                AbiParam::new(ptr),
-            ]);
-            ctx.func.name = UserFuncName::user(0, *n);
-            build_commit(module.target_config(), &mut ctx.func, fctx, p, part);
-            let id = module
-                .declare_function(
-                    &format!("commit{}", *n),
-                    Linkage::Local,
-                    &ctx.func.signature,
-                )
-                .map_err(|e| err(&e))?;
-            *n += 1;
-            module.define_function(id, ctx).map_err(|e| err(&e))?;
-            *bytes += code_size(ctx);
-            module.clear_context(ctx);
+            let (id, size) = b.commit(p, part)?;
+            *bytes += size;
             out.push(id);
         }
         Some(out)
@@ -619,11 +512,6 @@ fn compile_body(
         None
     };
     Ok(Some((settle, commit)))
-}
-
-/// Bytes of machine code `ctx` holds after `define_function`.
-fn code_size(ctx: &cranelift_codegen::Context) -> usize {
-    ctx.compiled_code().map_or(0, |c| c.code_buffer().len())
 }
 
 /// One unit of a chunk: an instruction or a packed word.
@@ -696,508 +584,4 @@ fn arity(op: Op) -> usize {
 
 fn operands(pk: &Pack) -> [&PackOperand; 3] {
     [&pk.a, &pk.b, &pk.c]
-}
-
-/// Flags for slot and memory accesses: in bounds (checked), aligned.
-fn flags() -> MemFlagsData {
-    MemFlagsData::trusted()
-}
-
-/// Slot loads and stores within one function, through an SSA cache: a
-/// slot is loaded at most once, and a store's value is reused by later
-/// reads. Slots only alias themselves, and memories never alias slots, so
-/// this is exactly the interpreter's sequence of memory states.
-struct Slots {
-    base: Value,
-    vals: HashMap<u32, Value>,
-}
-
-impl Slots {
-    fn new(base: Value, capacity: usize) -> Self {
-        Slots {
-            base,
-            vals: HashMap::with_capacity(capacity),
-        }
-    }
-
-    fn addr(&self, b: &mut FunctionBuilder<'_>, slot: u32) -> (Value, i32) {
-        let off = slot as u64 * 8;
-        match i32::try_from(off) {
-            Ok(o) => (self.base, o),
-            Err(_) => (b.ins().iadd_imm_u(self.base, off as i64), 0),
-        }
-    }
-
-    fn read(&mut self, b: &mut FunctionBuilder<'_>, slot: u32) -> Value {
-        if slot == ZERO_SLOT {
-            return b.ins().iconst(I64, 0);
-        }
-        if let Some(&v) = self.vals.get(&slot) {
-            return v;
-        }
-        let (a, o) = self.addr(b, slot);
-        let v = b.ins().load(I64, flags(), a, o);
-        self.vals.insert(slot, v);
-        v
-    }
-
-    fn write(&mut self, b: &mut FunctionBuilder<'_>, slot: u32, v: Value, store: bool) {
-        if store {
-            let (a, o) = self.addr(b, slot);
-            b.ins().store(flags(), v, a, o);
-        }
-        self.vals.insert(slot, v);
-    }
-}
-
-fn bool64(b: &mut FunctionBuilder<'_>, c: Value) -> Value {
-    b.ins().uextend(I64, c)
-}
-
-/// An open guarded run in a settle chunk: the block after it, and the
-/// slot and memory-pointer caches from before it (values defined inside
-/// do not dominate the code after it).
-type Open = (
-    cranelift_codegen::ir::Block,
-    HashMap<u32, Value>,
-    HashMap<u32, Value>,
-);
-
-/// Build one settle chunk.
-fn build_settle(
-    cfg: TargetFrontendConfig,
-    func: &mut Function,
-    fctx: &mut FunctionBuilderContext,
-    p: &Program,
-    body: &BodyRef<'_>,
-    items: &[(Item, u32)],
-    live: Option<&HashSet<u32>>,
-) {
-    let mut b = FunctionBuilder::new(func, fctx);
-    let entry = b.create_block();
-    b.append_block_params_for_function_params(entry);
-    b.switch_to_block(entry);
-    b.seal_block(entry);
-    let params = b.block_params(entry).to_vec();
-    let (slots, mems, tick) = (params[0], params[1], params[2]);
-    let mut sl = Slots::new(slots, items.len() * 2);
-    // Slots this chunk reads: a result computed in a guarded run is only
-    // in the SSA cache until the run ends, so a later read in the chunk
-    // loads it from its slot.
-    let mut chunk_reads: HashSet<u32> = HashSet::new();
-    if live.is_some() && items.iter().any(|&(_, seg)| seg > 0) {
-        for (item, _) in items {
-            item.reads(p, body, |s| {
-                chunk_reads.insert(s);
-            });
-        }
-    }
-    let mut mem_ptrs: HashMap<u32, Value> = HashMap::new();
-    // The guard of the current run of items (0: none), the block after
-    // it, and the caches from before it.
-    let mut cur = 0u32;
-    let mut open: Option<Open> = None;
-    for &(item, seg) in items {
-        if seg != cur {
-            if let Some((merge, vals, ptrs)) = open.take() {
-                b.ins().jump(merge, &[]);
-                b.switch_to_block(merge);
-                b.seal_block(merge);
-                sl.vals = vals;
-                mem_ptrs = ptrs;
-            }
-            if seg > 0 {
-                let mut test: Option<Value> = None;
-                for c in &body.guards[seg as usize - 1].conds {
-                    let v = sl.read(&mut b, c.slot);
-                    let cc = if c.when {
-                        IntCC::NotEqual
-                    } else {
-                        IntCC::Equal
-                    };
-                    let t = b.ins().icmp_imm_u(cc, v, 0);
-                    test = Some(match test {
-                        Some(x) => b.ins().band(x, t),
-                        None => t,
-                    });
-                }
-                let test = test.expect("a guard has conditions");
-                let then = b.create_block();
-                let merge = b.create_block();
-                b.ins().brif(test, then, &[], merge, &[]);
-                b.switch_to_block(then);
-                b.seal_block(then);
-                open = Some((merge, sl.vals.clone(), mem_ptrs.clone()));
-            }
-            cur = seg;
-        }
-        let store =
-            |s: u32| live.is_none_or(|l| l.contains(&s) || (cur > 0 && chunk_reads.contains(&s)));
-        match item {
-            Item::Instr { op, k } => {
-                let i = body.instrs[k as usize];
-                let m = body.imms[k as usize];
-                let r = emit_instr(&mut b, &mut sl, &mut mem_ptrs, p, (mems, tick, 0), op, i, m);
-                sl.write(&mut b, i.dst, r, store(i.dst));
-            }
-            Item::Pack { op, k } => {
-                let pk = p.packs[k as usize];
-                let r = emit_pack(&mut b, &mut sl, p, op, &pk);
-                sl.write(&mut b, pk.dst, r, store(pk.dst));
-                let s0 = pk.scatter_start as usize;
-                for x in &p.scatters[s0..s0 + pk.scatter_len as usize] {
-                    let lane = b.ins().ushr_imm_u(r, i64::from(x.lane));
-                    let lane = b.ins().band_imm_u(lane, 1);
-                    sl.write(&mut b, x.slot, lane, store(x.slot));
-                }
-            }
-        }
-    }
-    if let Some((merge, _, _)) = open.take() {
-        b.ins().jump(merge, &[]);
-        b.switch_to_block(merge);
-        b.seal_block(merge);
-    }
-    b.ins().return_(&[]);
-    b.finalize(cfg);
-}
-
-/// Carry out of `a + b + c` at bit `w` (0..=64), as the interpreter's
-/// 128-bit sum: `((a + b + c) >> w) & 1`.
-fn add_carry(b: &mut FunctionBuilder<'_>, a: Value, x: Value, c: Value, w: u64) -> Value {
-    let s1 = b.ins().iadd(a, x);
-    let c1 = b.ins().icmp(IntCC::UnsignedLessThan, s1, a);
-    let s2 = b.ins().iadd(s1, c);
-    let c2 = b.ins().icmp(IntCC::UnsignedLessThan, s2, s1);
-    if w >= 64 {
-        // Bit 64 of the sum: the carries (at most one of them can be set
-        // when `c` is 1 bit; the sum of both is the high word).
-        let c1 = bool64(b, c1);
-        let c2 = bool64(b, c2);
-        let hi = b.ins().iadd(c1, c2);
-        b.ins().band_imm_u(hi, 1)
-    } else {
-        let _ = (c1, c2);
-        let x = b.ins().ushr_imm_u(s2, w as i64);
-        b.ins().band_imm_u(x, 1)
-    }
-}
-
-/// Assemble one packed operand word (see [`PackOperand`]).
-fn pack_operand(
-    b: &mut FunctionBuilder<'_>,
-    sl: &mut Slots,
-    p: &Program,
-    o: &PackOperand,
-) -> Value {
-    let base = sl.read(b, o.base);
-    let mut v = b.ins().band_imm_u(base, o.keep as i64);
-    if o.splat_mask != 0 {
-        let s = sl.read(b, o.splat);
-        let s = b.ins().ushr_imm_u(s, i64::from(o.splat_bit));
-        let s = b.ins().band_imm_u(s, 1);
-        let s = b.ins().ineg(s);
-        let s = b.ins().band_imm_u(s, o.splat_mask as i64);
-        v = b.ins().bor(v, s);
-    }
-    let g = o.gather_start as usize;
-    for gt in &p.gathers[g..g + o.gather_len as usize] {
-        let s = sl.read(b, gt.slot);
-        let s = b.ins().ushr_imm_u(s, i64::from(gt.bit));
-        let s = b.ins().band_imm_u(s, 1);
-        let s = b.ins().ishl_imm_u(s, i64::from(gt.lane));
-        v = b.ins().bor(v, s);
-    }
-    v
-}
-
-/// Build the commit function of a body without `MemClear`s.
-fn build_commit(
-    cfg: TargetFrontendConfig,
-    func: &mut Function,
-    fctx: &mut FunctionBuilderContext,
-    p: &Program,
-    commits: &[Commit],
-) {
-    let mut b = FunctionBuilder::new(func, fctx);
-    let entry = b.create_block();
-    b.append_block_params_for_function_params(entry);
-    b.switch_to_block(entry);
-    b.seal_block(entry);
-    let params = b.block_params(entry).to_vec();
-    let (slots, mems, writes) = (params[0], params[1], params[2]);
-    // Commits are sequential: a copy's load sees every store before it.
-    // Values are not cached across a RAM write's control flow, so each
-    // commit loads its own operands (the program has few RAM writes).
-    let mut sl = Slots::new(slots, 0);
-    for c in commits {
-        match *c {
-            Commit::Copy { state, next } => {
-                let v = sl.read(&mut b, next);
-                sl.write(&mut b, state, v, true);
-            }
-            Commit::RamWrite { .. } | Commit::RamWriteMasked { .. } => {
-                emit_ram_write(&mut b, &mut sl, p, c, mems, writes);
-            }
-            Commit::MemClear { .. } => unreachable!("bodies with MemClear commit in Rust"),
-        }
-    }
-    b.ins().return_(&[]);
-    b.finalize(cfg);
-}
-
-/// The value of instruction `i` (opcode `op`, literal `m`) at tick
-/// `tick + tick_off`, reading its operands through the slot cache.
-#[allow(clippy::too_many_arguments)]
-fn emit_instr(
-    b: &mut FunctionBuilder<'_>,
-    sl: &mut Slots,
-    mem_ptrs: &mut HashMap<u32, Value>,
-    p: &Program,
-    (mems, tick, tick_off): (Value, Value, u64),
-    op: Op,
-    i: Instr,
-    m: u64,
-) -> Value {
-    let slots = sl.base;
-    let ptr_ty = b.func.dfg.value_type(mems);
-    let (sa, sb, sc) = op.slot_operands();
-    let a = if sa { Some(sl.read(b, i.a)) } else { None };
-    let bb = if sb { Some(sl.read(b, i.b)) } else { None };
-    let c = if sc { Some(sl.read(b, i.c)) } else { None };
-    let (a, bv, c) = (
-        a.unwrap_or_else(|| b.ins().iconst(I64, 0)),
-        bb.unwrap_or(slots),
-        c.unwrap_or(slots),
-    );
-    let ins = b;
-    match op {
-        Op::Copy => a,
-        Op::Not => {
-            let x = ins.ins().bnot(a);
-            ins.ins().band_imm_u(x, m as i64)
-        }
-        Op::And => ins.ins().band(a, bv),
-        Op::Or => ins.ins().bor(a, bv),
-        Op::Xor => ins.ins().bxor(a, bv),
-        Op::Nand => {
-            let x = ins.ins().band(a, bv);
-            let x = ins.ins().bnot(x);
-            ins.ins().band_imm_u(x, m as i64)
-        }
-        Op::Nor => {
-            let x = ins.ins().bor(a, bv);
-            let x = ins.ins().bnot(x);
-            ins.ins().band_imm_u(x, m as i64)
-        }
-        Op::Xnor => {
-            let x = ins.ins().bxor(a, bv);
-            let x = ins.ins().bnot(x);
-            ins.ins().band_imm_u(x, m as i64)
-        }
-        Op::Mux => ins.ins().select(a, c, bv),
-        Op::Switch => {
-            let z = ins.ins().iconst(I64, 0);
-            ins.ins().select(a, bv, z)
-        }
-        Op::AddSum => {
-            let x = ins.ins().iadd(a, bv);
-            let x = ins.ins().iadd(x, c);
-            ins.ins().band_imm_u(x, m as i64)
-        }
-        Op::AddCarry => add_carry(ins, a, bv, c, m),
-        Op::Eq => {
-            let x = ins.ins().icmp(IntCC::Equal, a, bv);
-            bool64(ins, x)
-        }
-        Op::LtU => {
-            let x = ins.ins().icmp(IntCC::UnsignedLessThan, a, bv);
-            bool64(ins, x)
-        }
-        Op::ReduceOr => {
-            let x = ins.ins().icmp_imm_u(IntCC::NotEqual, a, 0);
-            bool64(ins, x)
-        }
-        Op::ReduceAnd => {
-            let x = ins.ins().icmp_imm_u(IntCC::Equal, a, m as i64);
-            bool64(ins, x)
-        }
-        Op::ReduceXor => {
-            let x = ins.ins().popcnt(a);
-            ins.ins().band_imm_u(x, 1)
-        }
-        Op::Shr => {
-            let x = ins.ins().ushr_imm_u(a, i64::from(i.b));
-            ins.ins().band_imm_u(x, m as i64)
-        }
-        Op::Concat => {
-            let x = ins.ins().ishl_imm_u(bv, i64::from(i.c));
-            ins.ins().bor(a, x)
-        }
-        Op::Shl => {
-            let x = ins.ins().ushr_imm_u(a, i64::from(i.c));
-            let x = ins.ins().ishl_imm_u(x, i64::from(i.b));
-            ins.ins().band_imm_u(x, m as i64)
-        }
-        Op::ShlV => {
-            // Cranelift takes the amount modulo 64: `b & 63`.
-            let x = ins.ins().ishl(a, bv);
-            ins.ins().band_imm_u(x, m as i64)
-        }
-        Op::Sext => {
-            // `if (a >> (b - 1)) & 1 == 1 { (a | !mask(b)) & m } else { a }`
-            let w = i.b;
-            let bit = ins.ins().ushr_imm_u(a, i64::from(w - 1));
-            let bit = ins.ins().band_imm_u(bit, 1);
-            let ext = ins.ins().bor_imm_u(a, !mask(w as u8) as i64);
-            let ext = ins.ins().band_imm_u(ext, m as i64);
-            ins.ins().select(bit, ext, a)
-        }
-        Op::Clock => {
-            // `((tick + c) % a) < b`
-            let t = ins
-                .ins()
-                .iadd_imm_u(tick, (tick_off + u64::from(i.c)) as i64);
-            let r = ins.ins().urem_imm_u(t, i64::from(i.a));
-            let x = ins
-                .ins()
-                .icmp_imm_u(IntCC::UnsignedLessThan, r, i64::from(i.b));
-            bool64(ins, x)
-        }
-        Op::MemRead => {
-            let mp = *mem_ptrs.entry(i.b).or_insert_with(|| {
-                ins.ins().load(
-                    ptr_ty,
-                    flags(),
-                    mems,
-                    (i.b as usize * size_of::<usize>()) as i32,
-                )
-            });
-            let len_mask = (1u64 << p.mems[i.b as usize].addr_bits) - 1;
-            let idx = ins.ins().band_imm_u(a, len_mask as i64);
-            let off = ins.ins().ishl_imm_u(idx, 3);
-            let off = if ptr_ty == I64 {
-                off
-            } else {
-                ins.ins().ireduce(ptr_ty, off)
-            };
-            let addr = ins.ins().iadd(mp, off);
-            ins.ins().load(I64, flags(), addr, 0)
-        }
-        Op::SrNext => {
-            // `if b != 0 { 0 } else if a != 0 { 1 } else { c }`
-            let one = ins.ins().iconst(I64, 1);
-            let z = ins.ins().iconst(I64, 0);
-            let x = ins.ins().select(a, one, c);
-            ins.ins().select(bv, z, x)
-        }
-    }
-}
-
-/// The value of packed word `pk` (opcode `op`).
-fn emit_pack(b: &mut FunctionBuilder<'_>, sl: &mut Slots, p: &Program, op: Op, pk: &Pack) -> Value {
-    let slots = sl.base;
-    let n = arity(op);
-    let mut v = [slots; 3];
-    for (j, o) in operands(pk).into_iter().enumerate().take(n) {
-        v[j] = pack_operand(b, sl, p, o);
-    }
-    let [a, bv, c] = v;
-    let ins = b;
-    match op {
-        Op::Copy => a,
-        Op::Not => ins.ins().bnot(a),
-        Op::And | Op::Switch => ins.ins().band(a, bv),
-        Op::Or => ins.ins().bor(a, bv),
-        Op::Xor => ins.ins().bxor(a, bv),
-        Op::Nand => {
-            let x = ins.ins().band(a, bv);
-            ins.ins().bnot(x)
-        }
-        Op::Nor => {
-            let x = ins.ins().bor(a, bv);
-            ins.ins().bnot(x)
-        }
-        Op::Xnor => {
-            let x = ins.ins().bxor(a, bv);
-            ins.ins().bnot(x)
-        }
-        Op::Mux => {
-            // `(a & c) | (!a & b)`
-            let x = ins.ins().band(a, c);
-            let y = ins.ins().band_not(bv, a);
-            ins.ins().bor(x, y)
-        }
-        _ => unreachable!("checked: not a packable op"),
-    }
-}
-
-/// A RAM write commit (`RamWrite` or `RamWriteMasked`): slots are
-/// unchanged, so the slot cache stays valid.
-fn emit_ram_write(
-    b: &mut FunctionBuilder<'_>,
-    sl: &mut Slots,
-    p: &Program,
-    c: &Commit,
-    mems: Value,
-    writes: Value,
-) {
-    let ptr = b.func.dfg.value_type(mems);
-    let (mem, we, addr, data) = match *c {
-        Commit::RamWrite {
-            mem,
-            we,
-            addr,
-            data,
-        }
-        | Commit::RamWriteMasked {
-            mem,
-            mask: we,
-            addr,
-            data,
-        } => (mem, we, addr, data),
-        _ => unreachable!("a RAM write"),
-    };
-    let masked = matches!(c, Commit::RamWriteMasked { .. });
-    let en = sl.read(b, we);
-    let a = sl.read(b, addr);
-    let d = sl.read(b, data);
-    let then = b.create_block();
-    let done = b.create_block();
-    b.ins().brif(en, then, &[], done, &[]);
-    b.switch_to_block(then);
-    b.seal_block(then);
-    let mp = b.ins().load(
-        ptr,
-        flags(),
-        mems,
-        (mem as usize * size_of::<usize>()) as i32,
-    );
-    let len_mask = (1u64 << p.mems[mem as usize].addr_bits) - 1;
-    let idx = b.ins().band_imm_u(a, len_mask as i64);
-    let off = b.ins().ishl_imm_u(idx, 3);
-    let off = if ptr == I64 {
-        off
-    } else {
-        b.ins().ireduce(ptr, off)
-    };
-    let at = b.ins().iadd(mp, off);
-    let word = if masked {
-        // `(*m & !bits) | (data & bits)`
-        let old = b.ins().load(I64, flags(), at, 0);
-        let keep = b.ins().band_not(old, en);
-        let new = b.ins().band(d, en);
-        b.ins().bor(keep, new)
-    } else {
-        d
-    };
-    b.ins().store(flags(), word, at, 0);
-    let wo = (mem as usize * 8) as i32;
-    let n = b.ins().load(I64, flags(), writes, wo);
-    let n = b.ins().iadd_imm_u(n, 1);
-    b.ins().store(flags(), n, writes, wo);
-    b.ins().jump(done, &[]);
-    b.switch_to_block(done);
-    b.seal_block(done);
-    // Slots are unchanged by a RAM write; the cache stays valid.
 }

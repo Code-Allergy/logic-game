@@ -6,6 +6,8 @@ pub mod diff;
 pub mod fixtures;
 pub mod random;
 pub mod rng;
+#[cfg(any(test, feature = "selftest"))]
+pub mod selftest;
 
 #[cfg(test)]
 mod tests;

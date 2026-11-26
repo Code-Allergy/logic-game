@@ -178,7 +178,7 @@ fn designs() -> Vec<(String, Design)> {
 
 /// Every body of fixtures and random designs, as a unit, equals the
 /// interpreter: guards on and off, with phase variants and fused runs.
-#[test]
+#[cfg_attr(test, test)]
 fn units_match_the_interpreter() {
     let mut full = 0;
     let mut total = 0;
@@ -214,7 +214,7 @@ fn units_match_the_interpreter() {
 }
 
 /// Unsimplified wide designs, and a body longer than one chunk.
-#[test]
+#[cfg_attr(test, test)]
 fn units_of_big_and_wide_bodies_match() {
     for seed in 0..8 {
         let g = generate(&GenConfig {
@@ -241,7 +241,7 @@ fn units_of_big_and_wide_bodies_match() {
 
 /// A unit and the `JitProgram` body it was cut from compute the same
 /// slots, memories and write counts from the same state.
-#[test]
+#[cfg_attr(test, test)]
 fn a_unit_equals_its_body_in_a_program() {
     for (name, d) in designs() {
         let p = program(&d, &Options::default());
@@ -293,7 +293,7 @@ fn a_unit_equals_its_body_in_a_program() {
 }
 
 /// A body that is unused (or too large) is refused, not compiled empty.
-#[test]
+#[cfg_attr(test, test)]
 fn an_unused_body_is_refused() {
     let p = program(&fixtures::counter(8), &Options::default());
     let sim = Sim::with_options(
@@ -309,6 +309,7 @@ fn an_unused_body_is_refused() {
 }
 
 /// Resident memory, in bytes.
+#[cfg(target_os = "linux")]
 fn rss() -> usize {
     let s = std::fs::read_to_string("/proc/self/statm").expect("Linux");
     let pages: usize = s.split_whitespace().nth(1).unwrap().parse().unwrap();
@@ -321,7 +322,7 @@ fn rss() -> usize {
 ///
 /// The process's resident size is only meaningful when no other test runs
 /// beside it, so the parent re-runs this binary on the child test alone.
-#[test]
+#[cfg_attr(test, test)]
 #[cfg(target_os = "linux")]
 fn compile_and_free_cycles_do_not_leak() {
     let out = std::process::Command::new(std::env::current_exe().unwrap())
@@ -342,7 +343,7 @@ fn compile_and_free_cycles_do_not_leak() {
     );
 }
 
-#[test]
+#[cfg_attr(test, test)]
 #[cfg(target_os = "linux")]
 fn leak_child() {
     if std::env::var_os("LOGI_LEAK_CHILD").is_none() {
@@ -377,7 +378,8 @@ fn leak_child() {
 
 /// Numbers for the doc's code budget: native bytes and compile time of
 /// each body of a fixture CPU (printed with `--nocapture`).
-#[test]
+#[cfg_attr(test, test)]
+#[cfg(not(target_arch = "wasm32"))] // (no clock on wasm32-unknown-unknown)
 fn unit_sizes_are_reported() {
     let d = fixtures::cpu(&fixtures::MULTIPLY_PROGRAM);
     let p = program(&d, &Options::default());
@@ -399,7 +401,7 @@ fn unit_sizes_are_reported() {
 }
 
 /// `Sim::compile_unit_of` compiles every used body, and only those.
-#[test]
+#[cfg_attr(test, test)]
 fn compile_unit_of_covers_the_used_bodies() {
     let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
     let p = program(&d, &Options::default());
@@ -419,7 +421,7 @@ fn compile_unit_of_covers_the_used_bodies() {
 /// of range for the program (a write to slot 10^9, a commit past the
 /// slots, a memory that does not exist) is refused, as `Sim` refuses it,
 /// so that the safe `settle`/`commit` never touch memory out of bounds.
-#[test]
+#[cfg_attr(test, test)]
 fn compile_unit_refuses_invalid_bodies() {
     let d = fixtures::cpu(&fixtures::MULTIPLY_PROGRAM);
     let p = program(&d, &Options::default());
@@ -442,4 +444,47 @@ fn compile_unit_refuses_invalid_bodies() {
         };
         assert!(compile_unit(&p, bad).is_err(), "a commit past the slots");
     }
+}
+
+/// The tests of this module, for a runner without `cargo test` (wasm32,
+/// feature `selftest`; see `examples/wasm_selftest.rs`).
+#[cfg(any(test, feature = "selftest"))]
+pub fn all() -> Vec<(&'static str, fn())> {
+    #[allow(unused_mut)]
+    let mut v: Vec<(&'static str, fn())> = vec![
+        ("units_match_the_interpreter", units_match_the_interpreter),
+        (
+            "units_of_big_and_wide_bodies_match",
+            units_of_big_and_wide_bodies_match,
+        ),
+        (
+            "a_unit_equals_its_body_in_a_program",
+            a_unit_equals_its_body_in_a_program,
+        ),
+        ("an_unused_body_is_refused", an_unused_body_is_refused),
+        (
+            "compile_unit_of_covers_the_used_bodies",
+            compile_unit_of_covers_the_used_bodies,
+        ),
+        (
+            "compile_unit_refuses_invalid_bodies",
+            compile_unit_refuses_invalid_bodies,
+        ),
+    ];
+    #[cfg(target_os = "linux")]
+    v.push((
+        "compile_and_free_cycles_do_not_leak",
+        compile_and_free_cycles_do_not_leak,
+    ));
+    #[cfg(target_os = "linux")]
+    v.push(("leak_child", leak_child));
+    #[cfg(not(target_arch = "wasm32"))]
+    v.push(("unit_sizes_are_reported", unit_sizes_are_reported));
+    v
+}
+
+/// Every test of this file is in [`all`].
+#[test]
+fn all_lists_every_test() {
+    crate::testkit::selftest::check_list(include_str!("unit_tests.rs"), &all());
 }

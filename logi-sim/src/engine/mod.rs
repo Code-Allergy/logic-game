@@ -405,7 +405,7 @@ impl EngineCore {
         // revision is stale): the new program may ask for its own.
         self.plan_inflight = false;
         // (Native code only ever arrives with the feature.)
-        self.jit_wait = self.jit_tiered && cfg!(all(feature = "jit", not(target_arch = "wasm32")));
+        self.jit_wait = self.jit_tiered && cfg!(feature = "jit");
         self.resolve_probes();
         self.mem_requested = true;
         self.dirty = true;
@@ -527,7 +527,7 @@ impl EngineCore {
     /// revision's program and these `SimOptions`) into the running
     /// program, if it is still revision `revision`. Results do not change,
     /// only speed. Returns whether it was installed.
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     pub fn install_jit(&mut self, revision: u64, code: Arc<crate::sim::jit::JitProgram>) -> bool {
         match &mut self.sim {
             Some(sim) if self.revision == revision && self.sim_options.jit => {

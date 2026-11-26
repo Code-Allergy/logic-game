@@ -415,7 +415,7 @@ fn automatic_plans_key_the_microcoded_machine() {
             ..fast(None, 8, 256, 2)
         };
         let mut s = Sim::with_options(Arc::clone(&p), with(o.clone(), &spec));
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         if s.jit_active() {
             assert!(s.jit_code().unwrap().superstep().is_none());
         }
@@ -462,7 +462,7 @@ fn automatic_plans_key_the_microcoded_machine() {
 /// compiled for the layout still installs after bodies came and went. An
 /// automatic plan's layout refuses code of a plain one (which may hold a
 /// superstep).
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn installed_bodies_keep_the_programs_native_code() {
     let (p, plan) = counting(0x30, &[]);
@@ -757,7 +757,7 @@ fn a_plan_past_the_run_cap_leaves_no_runs_behind() {
 /// With the JIT, a body larger than the code budget is refused before
 /// anything is evicted for it (the key cycles through 32 values, so cold
 /// bodies are there to evict).
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn a_body_that_cannot_fit_evicts_nothing() {
     let (p, plan) = counting(0xf0, &[]);
@@ -839,7 +839,7 @@ fn a_plan_that_keys_nothing_brings_the_superstep() {
         let st = s.spec_stats();
         assert!(st.keyed_phases == 0 && st.installed == 1, "{st:?}");
         assert!(!s.spec.hooked);
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         if s.jit_active() {
             assert!(s.jit_code().unwrap().superstep().is_none());
             let sup = s.spec.superstep.clone().expect("a superstep");
@@ -904,7 +904,7 @@ fn a_plan_that_keys_nothing_brings_the_superstep() {
 /// `jit::superstep` break: with each, `check_batches` fails on a program
 /// whose only superstep is the plan's (so that superstep runs, and its
 /// bugs are caught).
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn the_plans_superstep_is_checked() {
     struct Reset;
@@ -940,7 +940,7 @@ fn the_plans_superstep_is_checked() {
 /// Work counters (feature `counters`) of the plan's superstep are those of
 /// the program's own: a `Sim` whose plan keys nothing counts what a `Sim`
 /// without specialization counts, batch for batch.
-#[cfg(all(feature = "counters", feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "counters", feature = "jit"))]
 #[test]
 fn the_plans_superstep_counts_like_the_programs() {
     for clocked in [false, true] {

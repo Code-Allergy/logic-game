@@ -17,7 +17,7 @@ fn program(d: &Design, options: &Options) -> Arc<Program> {
 
 use crate::compile::Program;
 
-#[test]
+#[cfg_attr(test, test)]
 fn every_fixture_matches_the_interpreter() {
     use fixtures::*;
     for (i, d) in [
@@ -52,7 +52,7 @@ fn every_fixture_matches_the_interpreter() {
 /// Random designs of every shape the differential sweep uses (wide words
 /// up to 64 bits, state, nested instances, screens with clears), every
 /// combinational primitive.
-#[test]
+#[cfg_attr(test, test)]
 fn random_designs_match_the_interpreter() {
     let mut n = 0;
     for (c, cfg) in standard_configs().into_iter().enumerate() {
@@ -71,7 +71,7 @@ fn random_designs_match_the_interpreter() {
 
 /// Wide random words with lots of state, without simplification: every
 /// instruction the generator draws reaches the JIT, at widths 1..=64.
-#[test]
+#[cfg_attr(test, test)]
 fn unsimplified_wide_designs_match_the_interpreter() {
     for seed in 0..24 {
         let g = generate(&GenConfig {
@@ -90,7 +90,7 @@ fn unsimplified_wide_designs_match_the_interpreter() {
 
 /// Lane-packed programs (`Pack` words with base, splat, gathers and
 /// scatters).
-#[test]
+#[cfg_attr(test, test)]
 fn packed_programs_match_the_interpreter() {
     for seed in 0..10 {
         let d = generate(&GenConfig {
@@ -126,7 +126,7 @@ fn packed_programs_match_the_interpreter() {
 /// A body longer than one chunk runs as several functions, with values
 /// crossing chunk boundaries through the slots (and, in fused-run bodies,
 /// stored because a later chunk reads them).
-#[test]
+#[cfg_attr(test, test)]
 fn bodies_longer_than_a_chunk_match_the_interpreter() {
     let d = generate(&GenConfig::dag(3, 40 * CHUNK, 16)).design;
     let p = program(&d, &Options::unoptimized());
@@ -148,7 +148,7 @@ fn bodies_longer_than_a_chunk_match_the_interpreter() {
 /// Every runtime switch the JIT combines with: streaming off, fusion off,
 /// phase variants off; and threads, where the JIT stays off and the pool
 /// runs.
-#[test]
+#[cfg_attr(test, test)]
 fn runtime_options_match_the_interpreter() {
     let d = fixtures::cpu(&fixtures::MULTIPLY_PROGRAM);
     let p = program(&d, &Options::default());
@@ -187,7 +187,7 @@ fn runtime_options_match_the_interpreter() {
 
 /// The JIT can be compiled off the `Sim` and installed later (tiering):
 /// results are the same before, during and after.
-#[test]
+#[cfg_attr(test, test)]
 fn compiled_code_can_be_installed_and_removed() {
     let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
     let p = program(&d, &Options::default());
@@ -247,7 +247,7 @@ fn compiled_code_can_be_installed_and_removed() {
 
 /// Interpreter and JIT agree on every root output of the fixture CPU
 /// for thousands of ticks, and the CPU computes its result.
-#[test]
+#[cfg_attr(test, test)]
 fn the_fixture_cpu_runs_the_same_for_thousands_of_ticks() {
     let d = fixtures::cpu(&fixtures::LOOP_PROGRAM);
     for options in [Options::default(), Options::debug()] {
@@ -272,7 +272,7 @@ fn the_fixture_cpu_runs_the_same_for_thousands_of_ticks() {
 /// Work counters (feature `counters`) count the same with the JIT: the
 /// same blocks, instructions, commits and memory writes per settle.
 #[cfg(feature = "counters")]
-#[test]
+#[cfg_attr(test, test)]
 fn counters_are_the_same_with_the_jit() {
     for d in [
         fixtures::cpu(&fixtures::MULTIPLY_PROGRAM),
@@ -321,7 +321,7 @@ fn counters_are_the_same_with_the_jit() {
 /// A body over `MAX_BODY` instructions stays interpreted (its native code
 /// would be slower), while the rest of the `Sim` runs native; results are
 /// the same.
-#[test]
+#[cfg_attr(test, test)]
 fn oversized_bodies_stay_interpreted() {
     let d = generate(&GenConfig::gates(6, super::MAX_BODY + 4000, 1)).design;
     let options = Options {
@@ -338,10 +338,10 @@ fn oversized_bodies_stay_interpreted() {
 
 /// The JIT's `Shl` and `ShlV` against their definitions (the interpreter
 /// tests in `sim/tests.rs` run the same cases).
-#[test]
+#[cfg_attr(test, test)]
 fn shift_ops_match_their_definitions() {
-    crate::sim::tests::shl_semantics(true);
-    crate::sim::tests::shlv_semantics(true);
+    crate::sim::shift_cases::shl_semantics(true);
+    crate::sim::shift_cases::shlv_semantics(true);
 }
 
 /// Master/slave registers, a latch and a RAM written on clock high, per
@@ -378,7 +378,7 @@ fn clocked(periods: &[u32]) -> Design {
 /// against single unfused ticks at every batch boundary, and against the
 /// interpreter tick by tick, with chunks of every size and supersteps of
 /// several periods.
-#[test]
+#[cfg_attr(test, test)]
 fn supersteps_match_single_ticks_over_every_common_period() {
     for (periods, l) in [
         (&[][..], 1),
@@ -414,7 +414,7 @@ fn supersteps_match_single_ticks_over_every_common_period() {
 
 /// Deliberate superstep bugs (see `superstep::MUTATION`) are caught by
 /// `check_batches`.
-#[test]
+#[cfg_attr(test, test)]
 fn superstep_mutations_are_caught() {
     struct Reset;
     impl Drop for Reset {
@@ -446,7 +446,7 @@ fn superstep_mutations_are_caught() {
 /// `Shl` and `ShlV` inside supersteps: a barrel shifter and a shifted
 /// register on a period-3 clock (master/slave registers), against single
 /// unfused ticks and the interpreter.
-#[test]
+#[cfg_attr(test, test)]
 fn shift_ops_run_in_supersteps() {
     use crate::compile::Op;
     use crate::netlist::NodeKind;
@@ -504,4 +504,74 @@ fn shift_ops_run_in_supersteps() {
             check_jit(&p, 300, 3 + ticks, &o).unwrap_or_else(|e| panic!("{ticks}/{chunk}: {e}"));
         }
     }
+}
+
+/// The tests of this module, for a runner without `cargo test` (wasm32,
+/// feature `selftest`; see `examples/wasm_selftest.rs`).
+#[cfg(any(test, feature = "selftest"))]
+pub fn all() -> Vec<(&'static str, fn())> {
+    #[allow(unused_mut)]
+    let mut v: Vec<(&'static str, fn())> = vec![
+        (
+            "every_fixture_matches_the_interpreter",
+            every_fixture_matches_the_interpreter,
+        ),
+        (
+            "random_designs_match_the_interpreter",
+            random_designs_match_the_interpreter,
+        ),
+        (
+            "unsimplified_wide_designs_match_the_interpreter",
+            unsimplified_wide_designs_match_the_interpreter,
+        ),
+        (
+            "packed_programs_match_the_interpreter",
+            packed_programs_match_the_interpreter,
+        ),
+        (
+            "bodies_longer_than_a_chunk_match_the_interpreter",
+            bodies_longer_than_a_chunk_match_the_interpreter,
+        ),
+        (
+            "runtime_options_match_the_interpreter",
+            runtime_options_match_the_interpreter,
+        ),
+        (
+            "compiled_code_can_be_installed_and_removed",
+            compiled_code_can_be_installed_and_removed,
+        ),
+        (
+            "the_fixture_cpu_runs_the_same_for_thousands_of_ticks",
+            the_fixture_cpu_runs_the_same_for_thousands_of_ticks,
+        ),
+        (
+            "oversized_bodies_stay_interpreted",
+            oversized_bodies_stay_interpreted,
+        ),
+        (
+            "shift_ops_match_their_definitions",
+            shift_ops_match_their_definitions,
+        ),
+        (
+            "supersteps_match_single_ticks_over_every_common_period",
+            supersteps_match_single_ticks_over_every_common_period,
+        ),
+        (
+            "superstep_mutations_are_caught",
+            superstep_mutations_are_caught,
+        ),
+        ("shift_ops_run_in_supersteps", shift_ops_run_in_supersteps),
+    ];
+    #[cfg(feature = "counters")]
+    v.push((
+        "counters_are_the_same_with_the_jit",
+        counters_are_the_same_with_the_jit,
+    ));
+    v
+}
+
+/// Every test of this file is in [`all`].
+#[test]
+fn all_lists_every_test() {
+    crate::testkit::selftest::check_list(include_str!("tests.rs"), &all());
 }

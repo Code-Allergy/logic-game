@@ -4398,8 +4398,10 @@ dependencies = [
  "cranelift-native",
  "criterion",
  "foldhash 0.2.0",
+ "js-sys",
  "slotmap",
  "smallvec",
+ "wasm-bindgen",
 ]
 
 [[package]]

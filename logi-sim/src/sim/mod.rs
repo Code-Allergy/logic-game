@@ -17,11 +17,14 @@
 //! are identical.
 
 mod code;
-// The Cranelift JIT backend (feature `jit`, native only; issue #117).
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+// The JIT backends (feature `jit`; issue #117): Cranelift natively,
+// generated WebAssembly on wasm32.
+#[cfg(feature = "jit")]
 pub mod jit;
 #[cfg(not(target_arch = "wasm32"))]
 mod pool;
+#[cfg(any(test, feature = "selftest"))]
+pub(crate) mod shift_cases;
 /// No threads on wasm. `Pool` is uninhabited, so a `Sim`'s pool is always
 /// `None`, every settle takes the single-threaded path, and no thread or
 /// synchronization code is compiled in. A threaded `SimOptions` silently
@@ -240,12 +243,13 @@ impl SimOptions {
     /// (3.5 to 14 s into the run: the plan is sampled first, and meanwhile
     /// the runtime runs without supersteps, an MMC3 game 20% slower for
     /// about 10 s; see `docs/adaptive-spec.md`). Without the `jit` feature this is
-    /// [`SimOptions::default`]: the interpreter alone gains little, and
-    /// wasm has no compile thread (`LocalEngine` would stall a `run` for
-    /// the plan's build).
+    /// [`SimOptions::default`]: the interpreter alone gains little. On
+    /// wasm it is the JIT (the wasm backend) without specialization: wasm
+    /// has no compile thread (`LocalEngine` would stall a `run` for the
+    /// plan's build).
     pub fn interactive() -> Self {
         Self {
-            jit: cfg!(all(feature = "jit", not(target_arch = "wasm32"))),
+            jit: cfg!(feature = "jit"),
             spec: cfg!(all(feature = "jit", not(target_arch = "wasm32")))
                 .then(SpecOptions::default),
             ..Self::default()
@@ -389,13 +393,21 @@ struct Layout {
     spec: spec::Spec,
 }
 
+/// What `Sim::compile_jit_with` made.
+#[cfg(feature = "jit")]
+enum Compiled {
+    Now(jit::JitProgram),
+    #[cfg(target_arch = "wasm32")]
+    Pending(jit::PendingJit),
+}
+
 /// What a ROM write sets aside (see [`Sim::rom_changed`]).
 struct Stash {
     runs: Vec<Run>,
     full: Vec<u16>,
     fused: Vec<u16>,
     spec: spec::Spec,
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     jit: Option<Arc<jit::JitProgram>>,
 }
 
@@ -603,20 +615,20 @@ pub struct Sim {
     inputs: Vec<u64>,
     /// Native code for every body (`SimOptions::jit`), indexed like
     /// `full`/`fused` (0 the program's own, `k` `runs[k - 1]`).
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     jit: Option<Arc<jit::JitProgram>>,
     /// One pointer per memory, for the JIT'd code (`usize` keeps `Sim`
     /// `Send`). The buffers never reallocate, but a write through a new
     /// `&mut` (the interpreter's commit, a reset, an import, a poke) would
     /// invalidate pointers taken before it, so those clear
     /// `mem_ptrs_fresh` and the next JIT call takes them again.
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     mem_ptrs: Vec<usize>,
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     mem_ptrs_fresh: bool,
     /// Per guard of every body, how often a superstep skipped it
     /// (feature `counters`; see `jit::JitSuper::skip_base`).
-    #[cfg(all(feature = "counters", feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(all(feature = "counters", feature = "jit"))]
     skips: Vec<u64>,
     #[cfg(feature = "counters")]
     counters: Counters,
@@ -705,20 +717,20 @@ impl Sim {
             tick: 0,
             inputs: vec![0; program.ports.inputs.len()],
             program,
-            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            #[cfg(feature = "jit")]
             jit: None,
-            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            #[cfg(feature = "jit")]
             mem_ptrs: Vec::new(),
-            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            #[cfg(feature = "jit")]
             mem_ptrs_fresh: false,
-            #[cfg(all(feature = "counters", feature = "jit", not(target_arch = "wasm32")))]
+            #[cfg(all(feature = "counters", feature = "jit"))]
             skips: Vec::new(),
             #[cfg(feature = "counters")]
             counters: Counters::default(),
             #[cfg(feature = "counters")]
             per_settle: Counters::default(),
         };
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         if sim.options.jit && sim.pool.is_none() {
             // A program the JIT cannot compile runs interpreted.
             sim.jit = sim.compile_jit().ok().map(Arc::new);
@@ -752,15 +764,15 @@ impl Sim {
 
     /// Whether the bodies run as JIT-compiled native code.
     pub fn jit_active(&self) -> bool {
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         return self.jit.is_some();
-        #[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+        #[cfg(not(feature = "jit"))]
         false
     }
 
     /// The native code installed, if any (diagnostics: code size, chunks,
     /// the superstep).
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     pub fn jit_code(&self) -> Option<&jit::JitProgram> {
         self.jit.as_deref()
     }
@@ -769,8 +781,22 @@ impl Sim {
     /// with the JIT, without installing it. Thread-safe and independent of
     /// the `Sim`'s state, so it can run off the hot path; see
     /// [`Sim::install_jit`].
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     pub fn compile_jit(&self) -> Result<jit::JitProgram, jit::JitError> {
+        match self.compile_jit_with(false)? {
+            Compiled::Now(code) => Ok(code),
+            #[cfg(target_arch = "wasm32")]
+            Compiled::Pending(_) => unreachable!("asked for a program now"),
+        }
+    }
+
+    /// [`Sim::compile_jit`], or (wasm32, `asynchronous`) its asynchronous
+    /// instantiation.
+    #[cfg(feature = "jit")]
+    fn compile_jit_with(
+        &self,
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))] asynchronous: bool,
+    ) -> Result<Compiled, jit::JitError> {
         let p = &*self.program;
         let bodies = self.body_refs();
         // No superstep while a phase is keyed or a plan is awaited:
@@ -787,15 +813,38 @@ impl Sim {
             live_end: &live_end,
             chunk: self.options.superstep_chunk,
         });
+        #[cfg(target_arch = "wasm32")]
+        if asynchronous {
+            let mut pending = jit::JitProgram::compile_async(p, &bodies, sup.as_ref())?;
+            pending.key = Some(self.run_key());
+            return Ok(Compiled::Pending(pending));
+        }
         let mut code = jit::JitProgram::compile_with(p, &bodies, sup.as_ref())?;
-        code.key = Some(jit::RunKey {
+        code.key = Some(self.run_key());
+        Ok(Compiled::Now(code))
+    }
+
+    /// The layout native code compiled from this `Sim` runs in.
+    #[cfg(feature = "jit")]
+    fn run_key(&self) -> jit::RunKey {
+        jit::RunKey {
             program: Arc::downgrade(&self.program),
             full: self.full.clone(),
             fused: self.fused.clone(),
             folded: self.folded,
             spec: self.spec.key.clone(),
-        });
-        Ok(code)
+        }
+    }
+
+    /// [`Sim::compile_jit`] on wasm32, instantiated asynchronously (see
+    /// `jit::JitProgram::compile_async`): poll the result, then give it to
+    /// [`Sim::install_jit`]. The code is generated now.
+    #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+    pub fn compile_jit_async(&self) -> Result<jit::PendingJit, jit::JitError> {
+        match self.compile_jit_with(true)? {
+            Compiled::Pending(p) => Ok(p),
+            Compiled::Now(_) => unreachable!("asked for a pending program"),
+        }
     }
 
     /// The superstep of the layout's fused bodies (`bodies`, as
@@ -803,7 +852,7 @@ impl Sim {
     /// periods of fused ticks, starting at phase 0 (see `Sim::run`), and
     /// the slots read after it. Runs the general fused bodies: the caller
     /// checks that no phase is keyed.
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     fn super_parts(&self, bodies: &[jit::BodyRef<'_>]) -> Option<(Vec<jit::Part>, Vec<u32>)> {
         let o = &self.options;
         if !(o.superstep && o.fuse && self.pool.is_none()) {
@@ -846,7 +895,7 @@ impl Sim {
     /// [`Sim::super_parts`] as a self-contained request (for an automatic
     /// plan that may key nothing): the bodies it names, owned, numbered in
     /// the order the parts first name them.
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     fn super_build(&self) -> Option<spec::SuperBuild> {
         let bodies = self.body_refs();
         let (parts, live_end) = self.super_parts(&bodies)?;
@@ -902,7 +951,7 @@ impl Sim {
     /// returns `false`. Specialized bodies installed at run time
     /// ([`Sim::install_spec`]) are not part of the layout: they bring
     /// their own native code, which runs while native code is installed.
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     pub fn install_jit(&mut self, code: Option<Arc<jit::JitProgram>>) -> bool {
         if let Some(c) = &code {
             let fits = c.key.as_ref().is_some_and(|k| {
@@ -1101,7 +1150,7 @@ impl Sim {
             return;
         }
         let mut left = ticks - 1;
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         if self.options.superstep
             && !self.spec.hooked
             && let Some((entry, n)) = self.super_fn()
@@ -1112,9 +1161,9 @@ impl Sim {
             self.fused_tick();
             left -= 1;
             let period = self.period;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "selftest"))]
             let aligned = |t: u64| jit::MUTATION.get() == 2 || t.is_multiple_of(period);
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "selftest")))]
             let aligned = |t: u64| t.is_multiple_of(period);
             while left > 0 && !aligned(self.tick) {
                 self.fused_tick();
@@ -1242,7 +1291,7 @@ impl Sim {
     /// The superstep `run` uses, and the ticks it advances: the installed
     /// native code's, or the one an automatic plan brought (only while
     /// native code is installed).
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     #[inline]
     fn super_fn(&self) -> Option<(jit::SuperFn, u64)> {
         let j = self.jit.as_ref()?;
@@ -1256,9 +1305,9 @@ impl Sim {
     /// The JIT's superstep, from a settled tick at phase 0: as many
     /// `fused_tick`s as it holds, after the first tick of a `run` (so the
     /// inputs are already in their slots).
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     fn superstep(&mut self, entry: jit::SuperFn, ticks: u64) {
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "selftest")))]
         debug_assert_eq!(self.tick % self.period, 0);
         // The superstep's guards, numbered by its bodies: the program's
         // runs, or (an automatic plan's) those of `SpecSuper::runs`.
@@ -1357,7 +1406,7 @@ impl Sim {
         {
             self.counters.commits += commits.len() as u64;
         }
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         if let Some(fs) = native(&self.jit, &self.spec, run).and_then(|b| b.commit.as_ref()) {
             // Count taken writes from the versions (only bodies with RAM
             // writes can change them: summing every memory's version per
@@ -1396,7 +1445,7 @@ impl Sim {
             return;
         }
         // `mems_touched`, with `commits` borrowed.
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         {
             self.mem_ptrs_fresh = false;
         }
@@ -1463,7 +1512,7 @@ impl Sim {
     /// the JIT'd code holds must be taken again (see `mem_ptrs`).
     #[inline]
     fn mems_touched(&mut self) {
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         {
             self.mem_ptrs_fresh = false;
         }
@@ -1512,7 +1561,7 @@ impl Sim {
             c.instrs += per.instrs;
             c.packed_words += per.packed_words;
         }
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         if let Some(j) = native(&self.jit, &self.spec, run) {
             if !self.mem_ptrs_fresh {
                 self.mem_ptrs.clear();
@@ -1738,14 +1787,14 @@ impl Sim {
             full: std::mem::replace(&mut self.full, off.full),
             fused: std::mem::replace(&mut self.fused, off.fused),
             spec: std::mem::replace(&mut self.spec, off.spec),
-            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            #[cfg(feature = "jit")]
             jit: self.jit.take(),
         }));
         self.folded = false;
         // Between calls the slots are those of a full settle.
         self.last = self.full_run();
         self.spec_new_generation();
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         if self.stash.as_ref().is_some_and(|s| s.jit.is_some()) {
             self.jit = self.compile_jit().ok().map(Arc::new);
         }
@@ -1761,7 +1810,7 @@ impl Sim {
             full,
             fused,
             spec,
-            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            #[cfg(feature = "jit")]
             jit,
         } = *stash;
         self.runs = runs;
@@ -1771,7 +1820,7 @@ impl Sim {
         self.folded = true;
         self.last = self.full_run();
         self.spec_new_generation();
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         {
             // Keep the backend the caller has now: native code (the stashed
             // code, or compiled again) only when it runs native code, so a
@@ -1795,7 +1844,7 @@ impl Sim {
 
 /// The native code of `run`: the installed program's, or (a body
 /// installed at run time) its own unit, while native code is installed.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[inline]
 fn native<'a>(
     jit: &'a Option<Arc<jit::JitProgram>>,
