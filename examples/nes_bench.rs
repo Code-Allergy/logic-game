@@ -43,7 +43,7 @@ use std::time::Instant;
 use gate_quest::mcp::suite;
 use gate_quest::sim::netlist::design_of;
 use logi_sim::compile::{Options, Program, compile};
-use logi_sim::sim::{Sim, SimOptions};
+use logi_sim::sim::{FallbackOptions, Sim, SimOptions, SpecOptions};
 
 /// `--no-shifts`: compile without the shift rewrites.
 static NO_SHIFTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -521,6 +521,30 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
             },
         ),
         Sim::with_options(Arc::clone(&program), SimOptions::jit()),
+        // Specialization with an automatic plan chosen early, and the
+        // fallback to supersteps on windows of a few batches: modes flip
+        // as the wall clock says, at any batch boundary.
+        Sim::with_options(
+            Arc::clone(&program),
+            SimOptions {
+                spec: Some(SpecOptions {
+                    plan_window: 1 << 12,
+                    samples: 64,
+                    fallback: Some(FallbackOptions {
+                        window: 64,
+                        sample: 64,
+                        resample: 2,
+                        margin: 0,
+                        patience: 1,
+                        probe_min: 64,
+                        probe_max: 1024,
+                        min_run: 1,
+                    }),
+                    ..SpecOptions::interactive()
+                }),
+                ..SimOptions::jit()
+            },
+        ),
     ];
     let mut t = 0;
     let mut n = 0u64;
@@ -544,7 +568,13 @@ fn compare_jit(design: &logi_sim::netlist::Design, ticks: u64) -> Result<(), Str
             }
         }
     }
-    println!("{short} ticks in batches of 1 to 41: the same state at every boundary");
+    let st = got[2].spec_stats();
+    println!(
+        "{short} ticks in batches of 1 to 41: the same state at every boundary \
+         (specialized: {} keyed phases, {} hits, {} misses, {} ticks as supersteps, \
+         {} fallbacks, {} probes)",
+        st.keyed_phases, st.hits, st.misses, st.super_ticks, st.fallbacks, st.probes
+    );
     Ok(())
 }
 

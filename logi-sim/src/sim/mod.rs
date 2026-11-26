@@ -57,7 +57,8 @@ mod spec;
 mod tests;
 
 pub use spec::{
-    PhasePlan, SpecBuilt, SpecOptions, SpecPlan, SpecRequest, SpecStats, build_spec, spec_contexts,
+    FallbackOptions, PhasePlan, SpecBuilt, SpecOptions, SpecPlan, SpecRequest, SpecStats,
+    build_spec, spec_contexts,
 };
 
 use std::collections::HashMap;
