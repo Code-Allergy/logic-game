@@ -82,7 +82,7 @@ impl Default for FallbackOptions {
         FallbackOptions {
             window: 1 << 20,
             sample: 1 << 18,
-            resample: 8,
+            resample: 16,
             margin: 5,
             patience: 2,
             probe_min: 1 << 22,

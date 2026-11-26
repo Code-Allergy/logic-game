@@ -13,7 +13,9 @@
 //! the fallback to supersteps (`SpecOptions::default`), spec on with it
 //! (`SpecOptions::interactive`, the game's setting); the numbers are per
 //! 5 s interval. With spec on, the hit rate of keyed ticks and the share
-//! of ticks the fallback ran as supersteps per interval.
+//! of ticks the fallback ran as supersteps per interval. `--per-phase N`
+//! caps the bodies per phase (`SpecOptions::max_per_phase`, and 3N in
+//! all): a small cap makes keys miss often, a case for the fallback.
 
 mod workspace;
 
@@ -25,7 +27,14 @@ use logi_sim::compile::Options;
 use logi_sim::engine::{Engine, EngineEvent, Rate};
 use logi_sim::sim::{SimOptions, SpecOptions};
 
-fn run(design: &logi_sim::netlist::Design, base: &SimOptions, debug: bool, secs: u64, mode: &str) {
+fn run(
+    design: &logi_sim::netlist::Design,
+    base: &SimOptions,
+    debug: bool,
+    secs: u64,
+    mode: &str,
+    per_phase: Option<usize>,
+) {
     let options = if debug {
         Options::debug()
     } else {
@@ -36,7 +45,15 @@ fn run(design: &logi_sim::netlist::Design, base: &SimOptions, debug: bool, secs:
             "on" => Some(SpecOptions::default()),
             "fallback" => Some(SpecOptions::interactive()),
             _ => None,
-        },
+        }
+        .map(|s| match per_phase {
+            Some(n) => SpecOptions {
+                max_per_phase: n,
+                max_bodies: 3 * n,
+                ..s
+            },
+            None => s,
+        }),
         ..base.clone()
     };
     let e = Engine::spawn_with(options, sim_options);
@@ -112,6 +129,7 @@ fn main() -> Result<(), String> {
     let mut folder = None;
     let (mut secs, mut rounds, mut debug, mut jit) = (40, 1, false, true);
     let mut modes = "off,on,fallback".to_string();
+    let mut per_phase = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -120,12 +138,19 @@ fn main() -> Result<(), String> {
             "--debug" => debug = true,
             "--no-jit" => jit = false,
             "--modes" => modes = it.next().ok_or("--modes off,on,fallback")?,
+            "--per-phase" => {
+                per_phase = Some(
+                    it.next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("--per-phase N")?,
+                )
+            }
             f => folder = Some(f.to_string()),
         }
     }
     let folder = folder.ok_or(
         "usage: engine_spec <workspace folder> [--secs N] [--rounds N] [--debug] [--no-jit] \
-         [--modes off,on,fallback]",
+         [--modes off,on,fallback] [--per-phase N]",
     )?;
     let w = workspace::load(Path::new(&folder))?;
     let base = SimOptions {
@@ -139,7 +164,7 @@ fn main() -> Result<(), String> {
     );
     for _ in 0..rounds {
         for mode in modes.split(',') {
-            run(&w.design, &base, debug, secs, mode);
+            run(&w.design, &base, debug, secs, mode, per_phase);
         }
     }
     Ok(())
