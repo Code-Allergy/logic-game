@@ -830,10 +830,12 @@ pub fn editor_ui_system(
             if ui.small_button("Refresh").clicked() {
                 editor_state.saved_workspaces = None;
             }
+            if !CAN_SAVE {
+                ui.label(WEB_SAVE_UNAVAILABLE);
+            }
             match editor_state.saved_workspaces.as_deref() {
-                _ if !CAN_SAVE => {
-                    ui.label(WEB_SAVE_UNAVAILABLE);
-                }
+                // The web build lists only its built-in workspaces.
+                Some([]) | None if !CAN_SAVE => {}
                 Some([]) | None => {
                     ui.label("No saved workspace files yet.");
                 }

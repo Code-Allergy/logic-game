@@ -471,7 +471,7 @@ fn compile_errors_keep_the_old_program() {
 /// JIT tiering in the core: a program starts interpreted, native code
 /// for its revision swaps in (and code for another revision does not),
 /// and the probed values are the same throughout.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn jit_code_swaps_into_the_running_revision_only() {
     let (d, en, q, mem) = counter_design(false);
@@ -515,7 +515,7 @@ fn jit_code_swaps_into_the_running_revision_only() {
 /// JIT tiering keeps the JIT's layout: while a tiered program runs
 /// interpreted it is guarded like the native code that will swap in
 /// (guards otherwise follow `SimOptions::jit`), and that code installs.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn jit_tiering_runs_the_guarded_layout() {
     let d = crate::testkit::fixtures::cpu(&crate::testkit::fixtures::LOOP_PROGRAM);
@@ -787,7 +787,7 @@ fn spec_survives_a_reset_with_builds_in_flight() {
 /// With the JIT, a tiered program's specialization waits for its native
 /// code (so that bodies get units), then `install_jit` and spec installs
 /// coexist and frames stay equal to the plain interpreter.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn spec_waits_for_native_code_then_coexists_with_it() {
     let spec = SimOptions {
@@ -907,7 +907,7 @@ fn a_swap_before_the_plan_returns_frees_the_plan_slot() {
 /// Bodies of a tiered program built after its native code failed to
 /// arrive carry no units (they would never run and would count against
 /// the code budget).
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn spec_without_native_code_builds_no_units() {
     let spec = SimOptions {

@@ -508,11 +508,11 @@ impl PhaseSpec {
 }
 
 /// A body's native code: a `JitUnit` with the JIT, nothing without.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 pub(super) type Unit = super::jit::JitUnit;
-#[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+#[cfg(not(feature = "jit"))]
 pub(super) enum Unit {}
-#[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+#[cfg(not(feature = "jit"))]
 impl Unit {
     fn code_bytes(&self) -> usize {
         match *self {}
@@ -520,31 +520,25 @@ impl Unit {
 }
 
 /// A superstep's native code: a `SuperUnit` with the JIT.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 pub(super) type SuperCode = super::jit::SuperUnit;
-#[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+#[cfg(not(feature = "jit"))]
 pub(super) enum SuperCode {}
 
 /// A superstep compiled after the layout was built (see
 /// [`Spec::superstep`]): its code, and the run each of its bodies is
 /// (its parts name bodies by their index in `runs`).
 pub(super) struct SpecSuper {
-    #[cfg_attr(
-        not(all(feature = "jit", not(target_arch = "wasm32"))),
-        expect(dead_code)
-    )]
+    #[cfg_attr(not(feature = "jit"), expect(dead_code))]
     pub code: SuperCode,
-    #[cfg_attr(
-        not(all(feature = "jit", not(target_arch = "wasm32"), feature = "counters")),
-        expect(dead_code)
-    )]
+    #[cfg_attr(not(all(feature = "jit", feature = "counters")), expect(dead_code))]
     pub runs: Vec<u16>,
     bytes: usize,
 }
 
 /// What a superstep request carries: the bodies (owned, so that the build
 /// needs nothing of the `Sim`), the run of each, and the superstep.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 pub(super) struct SuperBuild {
     pub bodies: Vec<Body>,
     pub runs: Vec<u16>,
@@ -557,10 +551,7 @@ pub(super) struct SuperBuild {
 /// A run installed after the layout was built.
 pub(super) struct Dyn {
     /// Its native code (run only while the `Sim` runs native code).
-    #[cfg_attr(
-        not(any(test, all(feature = "jit", not(target_arch = "wasm32")))),
-        expect(dead_code)
-    )]
+    #[cfg_attr(not(any(test, feature = "jit")), expect(dead_code))]
     pub unit: Option<Unit>,
     /// A prefix or fallback of a plan chosen at run time: never evicted.
     pinned: bool,
@@ -703,7 +694,7 @@ impl Spec {
     }
 
     /// The native code of installed run `run`.
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     #[inline]
     pub fn unit(&self, run: u16) -> Option<&Unit> {
         let i = (run as usize).checked_sub(self.base + 1)?;
@@ -722,7 +713,7 @@ impl Spec {
 
     /// Runs of the layout's tables: the prefix, the fallback and the
     /// specialized bodies of fixed tables (not those installed later).
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     pub fn base_runs(&self) -> Vec<(u16, bool)> {
         let mut out = Vec::new();
         for ps in self.phases.iter().flatten() {
@@ -826,7 +817,7 @@ enum Work {
         rows: Arc<Vec<Vec<Vec<u64>>>>,
         options: PlanOptions,
         /// The layout's superstep, compiled when the plan keys nothing.
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        #[cfg(feature = "jit")]
         superstep: Option<SuperBuild>,
     },
 }
@@ -981,7 +972,7 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
             contexts,
             rows,
             options,
-            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            #[cfg(feature = "jit")]
             superstep,
         } => {
             let cxs: Vec<Option<&SpecContext>> = contexts.iter().map(Option::as_deref).collect();
@@ -1017,13 +1008,13 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
                 })
                 .collect();
             // Keying nothing: the superstep the layout would have had.
-            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            #[cfg(feature = "jit")]
             let sup = superstep
                 .as_ref()
                 .filter(|_| r.jit && phases.iter().all(Option::is_none))
                 .and_then(|sb| build_superstep(p, sb))
                 .map(Box::new);
-            #[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+            #[cfg(not(feature = "jit"))]
             let sup = None;
             Out::Plan(phases, sup)
         }
@@ -1036,7 +1027,7 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
 }
 
 /// Compile the superstep of `sb` (`None` when it cannot be compiled).
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 fn build_superstep(p: &Program, sb: &SuperBuild) -> Option<SpecSuper> {
     use super::jit::{BodyRef, SuperRef, compile_superstep};
     let bodies: Vec<BodyRef<'_>> = sb
@@ -1069,10 +1060,7 @@ fn build_superstep(p: &Program, sb: &SuperBuild) -> Option<SpecSuper> {
 /// Check `body` as `Sim` checks its bodies and compile its unit.
 /// `fused_only`: every body but a prefix (whose results the key and the
 /// body after it read).
-#[cfg_attr(
-    not(all(feature = "jit", not(target_arch = "wasm32"))),
-    expect(unused_variables)
-)]
+#[cfg_attr(not(feature = "jit"), expect(unused_variables))]
 fn finish(p: &Program, body: Body, fused_only: bool, jit: bool) -> Option<Built> {
     #[cfg(test)]
     if MUTATION.get() == 5 {
@@ -1087,7 +1075,7 @@ fn finish(p: &Program, body: Body, fused_only: bool, jit: bool) -> Option<Built>
         &body.guards,
     )
     .ok()?;
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     let unit = {
         let items: usize = body.blocks.iter().map(|b| b.len as usize).sum();
         (jit && items <= super::jit::MAX_BODY)
@@ -1108,7 +1096,7 @@ fn finish(p: &Program, body: Body, fused_only: bool, jit: bool) -> Option<Built>
             })
             .flatten()
     };
-    #[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+    #[cfg(not(feature = "jit"))]
     let unit = None;
     Some(Built { body, unit })
 }
@@ -1187,7 +1175,7 @@ impl Sim {
                     contexts: self.spec.contexts.clone(),
                     rows,
                     options: o.plan_options(),
-                    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+                    #[cfg(feature = "jit")]
                     superstep: if jit { self.super_build() } else { None },
                 },
             });

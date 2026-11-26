@@ -405,7 +405,7 @@ impl EngineCore {
         // revision is stale): the new program may ask for its own.
         self.plan_inflight = false;
         // (Native code only ever arrives with the feature.)
-        self.jit_wait = self.jit_tiered && cfg!(all(feature = "jit", not(target_arch = "wasm32")));
+        self.jit_wait = self.jit_tiered && cfg!(feature = "jit");
         self.resolve_probes();
         self.mem_requested = true;
         self.dirty = true;
@@ -527,7 +527,7 @@ impl EngineCore {
     /// revision's program and these `SimOptions`) into the running
     /// program, if it is still revision `revision`. Results do not change,
     /// only speed. Returns whether it was installed.
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     pub fn install_jit(&mut self, revision: u64, code: Arc<crate::sim::jit::JitProgram>) -> bool {
         match &mut self.sim {
             Some(sim) if self.revision == revision && self.sim_options.jit => {
@@ -684,6 +684,10 @@ pub struct LocalEngine {
     pub core: EngineCore,
     frame: ProbeFrame,
     events: Vec<EngineEvent>,
+    /// JIT tiering on wasm32 (see [`LocalEngine::with_sim_options`]): the
+    /// running revision's code, being instantiated.
+    #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+    jit: Option<(u64, crate::sim::jit::PendingJit)>,
 }
 
 impl LocalEngine {
@@ -692,19 +696,85 @@ impl LocalEngine {
             core: EngineCore::new(options),
             frame: ProbeFrame::default(),
             events: Vec::new(),
+            #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+            jit: None,
         }
+    }
+
+    /// [`LocalEngine::new`] with runtime options for every program. On
+    /// wasm32 with [`SimOptions::jit`] (and the `jit` feature), the JIT is
+    /// tiered: a new program runs interpreted at once (in the layout its
+    /// code is compiled from), its wasm code is generated in `load` and
+    /// instantiated asynchronously (browsers refuse to compile large
+    /// modules synchronously on their main thread), and swapped in by the
+    /// first [`LocalEngine::run_frame`] after it is ready. Elsewhere the
+    /// options apply as they are (a `Sim` with `jit` compiles inline).
+    pub fn with_sim_options(options: Options, sim_options: SimOptions) -> Self {
+        let mut e = Self::new(options);
+        e.core.jit_tiered = sim_options.jit && cfg!(all(feature = "jit", target_arch = "wasm32"));
+        e.core.set_sim_options(sim_options);
+        e
     }
 
     /// Compile and swap in a design revision (inline).
     pub fn load(&mut self, design: &Design, revision: u64) {
         let e = self.core.load(design, revision);
         self.events.push(e);
+        #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+        self.start_jit();
+    }
+
+    /// Start instantiating the running program's code (tiered JIT).
+    #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+    fn start_jit(&mut self) {
+        self.jit = None;
+        if !self.core.jit_tiered {
+            return;
+        }
+        let rev = self.core.revision();
+        let Some(sim) = self.core.sim() else {
+            return;
+        };
+        match sim.compile_jit_async() {
+            Ok(pending) => self.jit = Some((rev, pending)),
+            Err(_) => self.core.jit_given_up(rev),
+        }
+    }
+
+    /// Swap in the running program's code if it is ready (tiered JIT).
+    #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+    fn poll_jit(&mut self) {
+        let Some((rev, pending)) = &mut self.jit else {
+            return;
+        };
+        let rev = *rev;
+        let Some(done) = pending.poll() else {
+            return;
+        };
+        self.jit = None;
+        match done {
+            Ok(code) => {
+                self.core.install_jit(rev, Arc::new(code));
+            }
+            Err(_) => self.core.jit_given_up(rev),
+        }
+    }
+
+    /// Whether the running program's tiered code is still on its way
+    /// (wasm32; always `false` elsewhere).
+    pub fn jit_pending(&self) -> bool {
+        #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+        return self.jit.is_some();
+        #[cfg(not(all(feature = "jit", target_arch = "wasm32")))]
+        false
     }
 
     /// Run for at most `budget` (e.g. a few ms per frame) and refresh the
     /// probe frame. Returns ticks run.
     /// Memories are copied at most once per call, when they changed.
     pub fn run_frame(&mut self, budget: Duration, clock: Clock<'_>) -> u64 {
+        #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+        self.poll_jit();
         let n = self.core.run(budget, clock);
         self.core.request_mems();
         if self.core.dirty() || self.core.mems_stale() {

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Simulator bench</title>
+</head>
+<body>
+<pre id="out">loading…</pre>
+<script type="module">
+// The page of examples/web_sim_bench.rs: `bench` and `check` are driven
+// by run.js (or called from the console).
+import init, * as m from './web_sim_bench.js';
+await init();
+const frame = () => new Promise((r) => setTimeout(r, 0));
+// Load `name` on the interpreter or the JIT and wait until its code is in.
+async function load(name, jit, debug) {
+  const t = performance.now();
+  const info = m.load(name, jit, debug);
+  while (!m.ready()) await frame();
+  return { info, readyMs: performance.now() - t, jit: m.jit_active() };
+}
+// Ticks per second over about `seconds`, in `run(chunk)` calls, after
+// `warm` seconds of warm-up (the engine tiers hot code up).
+window.bench = async (name, jit, debug, seconds, chunk, warm) => {
+  const l = await load(name, jit, debug);
+  let t0 = performance.now();
+  while (performance.now() - t0 < warm * 1000) m.run(chunk);
+  let ticks = 0;
+  t0 = performance.now();
+  let t = t0;
+  while (t - t0 < seconds * 1000) {
+    m.run(chunk);
+    ticks += chunk;
+    t = performance.now();
+  }
+  return { ...l, rate: ticks / ((t - t0) / 1000) };
+};
+// The digest after `ticks` ticks (in `run(chunk)` calls).
+window.check = async (name, jit, debug, ticks, chunk) => {
+  const l = await load(name, jit, debug);
+  for (let done = 0; done < ticks; done += chunk) m.run(Math.min(chunk, ticks - done));
+  return { ...l, digest: m.digest() };
+};
+window.benchReady = true;
+document.getElementById('out').textContent = 'ready';
+</script>
+</body>
+</html>

@@ -461,7 +461,7 @@ pub(super) fn same_batches(want: &mut Sim, got: &mut Sim) {
 /// With the JIT, a keyed program has no superstep (`run` goes tick by
 /// tick through the keys); a plan that keys no phase keeps it, and a ROM
 /// poke (specialization off) brings it back.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn supersteps_only_without_keys() {
     let p = program(&microcoded(true), &Options::default());
@@ -486,7 +486,7 @@ fn supersteps_only_without_keys() {
 
 /// Native code compiled for one plan is not installed into a `Sim` with
 /// another (the run layouts differ), and is for the same plan.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn native_code_follows_the_plan() {
     let p = program(&microcoded(false), &Options::default());
@@ -548,7 +548,7 @@ fn spec_mutations_are_caught() {
 /// Native code compiled for one plan is refused by a `Sim` whose plan has
 /// the same keys over other bits (another mask): its bodies assume other
 /// bits, so the run layouts differ.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 #[test]
 fn native_code_for_other_key_bits_is_refused() {
     let keys: Vec<u64> = (0..16).collect();

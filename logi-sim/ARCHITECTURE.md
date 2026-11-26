@@ -153,8 +153,10 @@ over one opcode. A tick allocates nothing.
   slots keep stale values nothing reads. Regions under
   `SimOptions::guard_min` instructions stay unguarded.
 
-- **JIT** (`sim/jit/`, feature `jit`, native only; `SimOptions::jit`,
-  off by default). Cranelift compiles each body the `Sim` runs (the
+- **JIT** (`sim/jit/`, feature `jit`; `SimOptions::jit`, off by
+  default). Two backends behind one front (chunks, stores, superstep
+  plan): Cranelift natively (`jit/clif/`), and on wasm32 WebAssembly
+  modules generated at run time (`jit/wasm/`, below). Cranelift compiles each body the `Sim` runs (the
   program's own, each clock-phase variant, each fused-run body) into
   native settle chunks of at most `jit::CHUNK` instructions (a guarded
   range becomes a conditional branch around its code), `fn(slots, mems, tick)`, plus commit chunks. Within a
@@ -184,6 +186,25 @@ over one opcode. A tick allocates nothing.
   are counted in native code, so the counts are those of tick-by-tick
   fused runs.
 
+- **wasm backend** (`sim/jit/wasm/`, feature `jit` on wasm32). The same
+  functions (settle and commit chunks, superstep chunks and entry) as a
+  WebAssembly module encoded by hand (`wasm/enc.rs`), with values in
+  locals where Cranelift keeps SSA values and an `if` block per guarded
+  range. The module imports the main module's memory, so it works on the
+  `Sim`'s slots and memories in place, and its functions are put in the
+  main module's function table, where a Rust function pointer is a table
+  index: `Sim` calls them as it calls native code (`call_indirect`, no
+  JavaScript per call; a superstep is a clock period per call). The
+  binary must be linked with `--growable-table` (logi-sim's and the
+  game's build scripts pass it); otherwise compiling fails and the
+  interpreter runs. Browsers refuse to compile modules over 4 KB
+  synchronously on their main thread, so `Sim::compile_jit_async` starts
+  an asynchronous instantiation and `LocalEngine` tiers with it (an edit
+  runs interpreted until its module is ready, a frame or so later). The
+  JIT test suite runs against it in Node: `logi-sim/scripts/wasm-selftest.sh`
+  (feature `selftest`). In headless Chromium it ran the bundled NES 6.4x
+  and `cpu16` 6.9x faster than the interpreter (`examples/web_sim_bench.rs`).
+
 ### `engine`: pacing, probes and edits
 
 - `EngineCore` owns the `Sim`: tick-rate pacing (`Rate`), single steps,
@@ -194,7 +215,8 @@ over one opcode. A tick allocates nothing.
   revisions on another thread, off the tick loop. Frames are published by
   swapping an `Arc`.
 - `LocalEngine` runs a core in the caller's thread; the app's wasm build
-  calls `run_frame` once per frame.
+  calls `run_frame` once per frame. With `LocalEngine::with_sim_options`
+  and `SimOptions::jit` on wasm32 it tiers the wasm JIT (see above).
 - A compile error keeps the previous program running and is reported as
   `EngineEvent::CompileFailed`.
 
@@ -223,6 +245,12 @@ a bit-blaster that rebuilds word-level designs from 1-bit gates
 - `cargo test -p logi-sim --release --lib -- --ignored differential_10k`
   is the acceptance sweep over more than 10,000 designs; `--ignored`
   also runs the other long sweeps.
+- `logi-sim/scripts/wasm-selftest.sh [filter]` runs the JIT suite
+  (`sim/jit/tests.rs`, `unit_tests.rs`, `wasm/tests.rs`) against the wasm
+  backend in Node, each test in a fresh instance (wasm32 aborts on a
+  panic), plus the engine's asynchronous tiering. It needs the wasm32
+  target, Node and the wasm-bindgen CLI of the locked version (Trunk's
+  cache is found).
 
 ## Benchmarks
 
