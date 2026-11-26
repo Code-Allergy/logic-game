@@ -3497,6 +3497,7 @@ dependencies = [
  "bevy_egui",
  "blake3",
  "embed-resource",
+ "js-sys",
  "logi-sim",
  "rmcp",
  "serde",
@@ -3504,6 +3505,7 @@ dependencies = [
  "smallvec",
  "tokio",
  "uuid",
+ "wasm-bindgen",
 ]
 
 [[package]]
