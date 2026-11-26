@@ -99,6 +99,15 @@ pub enum EngineEvent {
 /// Clock: monotonic time since an arbitrary origin.
 pub type Clock<'a> = &'a dyn Fn() -> Duration;
 
+/// One chunk of a batch (one `Sim::run`) takes between 1/2 and 2 times
+/// 1/`CHUNK_SHARE` of the batch's budget, so a batch overruns its budget
+/// by at most a quarter of it. Each `Sim::run` costs about ten ticks more
+/// than its ticks (its first and last ticks are neither fused nor run as
+/// supersteps): 4% of the 256-tick chunks that a 1/16 share of 1 ms
+/// batches gave the threaded engine on the NES console, 1% of the 1024 of
+/// a 1/8 share of 2 ms.
+const CHUNK_SHARE: u32 = 8;
+
 /// A paced rate runs its ticks in batches of about this much time (see
 /// [`EngineCore::wait_hint`]): ticks run up to this much late, so that a
 /// caught-up worker does not wake for every tick.
@@ -593,10 +602,10 @@ impl EngineCore {
 
     /// Run up to `max` ticks, stopping once `budget` has elapsed since
     /// `start`. Ticks run in chunks between clock reads; the chunk grows
-    /// until a chunk takes about 1/16 of the budget.
+    /// until a chunk takes about 1/[`CHUNK_SHARE`] of the budget.
     fn run_for(&mut self, max: u64, start: Duration, budget: Duration, clock: Clock<'_>) -> u64 {
         let sim = self.sim.as_mut().expect("checked by caller");
-        let target = budget / 16;
+        let target = budget / CHUNK_SHARE;
         let mut ran = 0;
         while ran < max {
             let n = self.chunk.min(max - ran);
@@ -831,8 +840,9 @@ mod threaded {
         o
     }
 
-    /// Time budget per batch: commands are drained between batches.
-    const BATCH: Duration = Duration::from_millis(1);
+    /// Time budget per batch: commands are drained between batches (see
+    /// [`CHUNK_SHARE`] for the chunks a batch runs in).
+    const BATCH: Duration = Duration::from_millis(2);
 
     enum Msg {
         SetInput(NodeId, u64),
