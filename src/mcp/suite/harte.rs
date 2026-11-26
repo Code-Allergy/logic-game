@@ -410,6 +410,11 @@ impl Worker {
     pub fn has_bus(&self) -> bool {
         self.bus.is_some()
     }
+
+    /// The width of the bus's `rw` signal, if it has one.
+    fn rw_width(&self) -> Option<u8> {
+        self.bus.as_ref()?.rw.as_ref().map(|s| s.width)
+    }
 }
 
 fn cycle_text(c: &Cycle) -> String {
@@ -541,6 +546,7 @@ pub(super) fn run(
     let first = Worker::new(ws, place, config, compile.clone())?;
     let widths = first.widths();
     let bus = first.has_bus();
+    let rw_width = first.rw_width();
     let queue = Mutex::new(Queue {
         totals: vec![None; files.len()],
         files: files.clone(),
@@ -690,7 +696,7 @@ pub(super) fn run(
     let repro = results
         .iter()
         .find_map(|r| r.story.as_ref())
-        .map(|s| repro(config, s, options.unoptimized));
+        .map(|s| repro(config, s, rw_width, options.unoptimized));
     Ok((
         Body::Harte {
             registers: names,
@@ -711,11 +717,26 @@ fn report_limit() -> usize {
     10
 }
 
+/// What a repro script expects of the bus's `rw` signal (`width` bits) in
+/// a read or a write cycle, if one value says it. The suite takes
+/// `read_value` as a read and every other value as a write
+/// (`Worker::cycle`), and a script can only expect one value: a write has
+/// one only when the signal is 1 bit (the other bit). A wider signal's
+/// write cycles are left unchecked, since expecting one of its write
+/// values would fail a cycle the suite accepts.
+fn rw_expected(read: bool, read_value: u64, width: Option<u8>) -> Option<u64> {
+    if read {
+        Some(read_value)
+    } else {
+        (width == Some(1) && read_value <= 1).then(|| 1 - read_value)
+    }
+}
+
 /// A `run` script that replays one case on a fresh simulation, compiled
 /// as the suite compiled it (`unoptimized`: without the passes
 /// `options_of` turns off), so that a failure of only the unoptimized
 /// program is still there when the script is run.
-fn repro(config: &Config, story: &Story, unoptimized: bool) -> Value {
+fn repro(config: &Config, story: &Story, rw_width: Option<u8>, unoptimized: bool) -> Value {
     let case = &story.case;
     let mut signals = serde_json::Map::new();
     for (n, p) in config.signals.iter().chain(&config.registers) {
@@ -786,12 +807,9 @@ fn repro(config: &Config, story: &Story, unoptimized: bool) -> Value {
                     (None, false) => b.write_data.as_ref().unwrap_or(&b.addr),
                 };
                 expect.insert(data.clone(), Value::from(c.data));
-                if let Some(rw) = &b.rw {
-                    let v = if c.read {
-                        b.read_value
-                    } else {
-                        u64::from(b.read_value == 0)
-                    };
+                if let Some(rw) = &b.rw
+                    && let Some(v) = rw_expected(c.read, b.read_value, rw_width)
+                {
                     expect.insert(rw.clone(), Value::from(v));
                 }
                 steps.push(serde_json::json!({ "expect": expect }));
@@ -833,4 +851,25 @@ fn repro(config: &Config, story: &Story, unoptimized: bool) -> Value {
     script.insert("signals".into(), Value::Object(signals));
     script.insert("steps".into(), Value::Array(steps));
     Value::Object(script)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rw_expected;
+
+    /// The suite takes every value but `read_value` as a write, so a repro
+    /// script may expect a write value only where there is one.
+    #[test]
+    fn a_repro_expects_a_write_value_only_of_a_one_bit_rw() {
+        assert_eq!(rw_expected(true, 0, Some(1)), Some(0));
+        assert_eq!(rw_expected(false, 0, Some(1)), Some(1));
+        assert_eq!(rw_expected(false, 1, Some(1)), Some(0));
+        // A 2-bit `rw` that writes with 2 (or 1, or 3): reads are exact,
+        // writes are not checked.
+        assert_eq!(rw_expected(true, 0, Some(2)), Some(0));
+        assert_eq!(rw_expected(false, 0, Some(2)), None);
+        assert_eq!(rw_expected(false, 3, Some(2)), None);
+        // A read value a 1-bit signal never has: every cycle is a write.
+        assert_eq!(rw_expected(false, 2, Some(1)), None);
+    }
 }
