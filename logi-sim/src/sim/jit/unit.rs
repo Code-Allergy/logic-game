@@ -1,5 +1,6 @@
 //! One body compiled on its own (issue #117, adaptive specialization):
-//! a [`JitUnit`] owns a `JITModule` holding just that body's settle and
+//! a [`JitUnit`] owns the code (a `JITModule`, or a wasm module's table
+//! entries) of just that body's settle and
 //! commit functions, and frees its code when dropped. A [`JitProgram`]
 //! keeps every body in one module that lives and dies as a whole; a unit
 //! can come and go while the others keep running (specialized bodies are
@@ -22,13 +23,11 @@
 
 use std::sync::Mutex;
 
-use cranelift_frontend::FunctionBuilderContext;
-use cranelift_module::Module;
 use smallvec::SmallVec;
 
 use super::{
-    BodyRef, CommitFn, JitBody, JitError, JitSuper, MAX_BODY, Owned, Part, SettleFn, SuperFn,
-    SuperInfo, SuperRef, compile_body, define_superstep, new_module,
+    BodyRef, JitBody, JitError, JitSuper, MAX_BODY, Part, SuperInfo, SuperRef, backend,
+    compile_body, define_superstep,
 };
 use crate::compile::Commit;
 use crate::compile::Program;
@@ -46,7 +45,7 @@ pub struct JitUnit {
     mem_lens: Vec<usize>,
     /// Owns the code (behind a `Mutex` only so that the unit is `Sync`; it
     /// is never locked). Declared last: dropped after nothing else needs it.
-    _module: Mutex<Owned>,
+    _module: Mutex<backend::Owned>,
 }
 
 // Units are built on a compile thread and installed on the `Sim`'s, like
@@ -61,7 +60,6 @@ const _: fn() = || {
 /// body that is not `used` or is larger than [`super::MAX_BODY`] (the
 /// interpreter runs those), and when Cranelift fails.
 pub fn compile_unit(p: &Program, body: BodyRef<'_>) -> Result<JitUnit, JitError> {
-    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
     // The checks `Sim` makes before it runs a body: every slot, memory and
     // guard index in range. The safe entry points rely on them (they only
     // check the buffers' sizes against the program's).
@@ -75,36 +73,14 @@ pub fn compile_unit(p: &Program, body: BodyRef<'_>) -> Result<JitUnit, JitError>
         body.guards,
     )
     .map_err(|e| JitError(format!("bad body: {}", e.0)))?;
-    let mut owned = new_module()?;
-    let module = owned.0.as_mut().expect("just created");
-    let mut ctx = module.make_context();
-    let mut fctx = FunctionBuilderContext::new();
-    let (mut n, mut instrs, mut bytes) = (0u32, 0usize, 0usize);
-    let ids = compile_body(
-        module,
-        &mut ctx,
-        &mut fctx,
-        p,
-        &body,
-        &mut n,
-        &mut instrs,
-        &mut bytes,
-    )?
-    .ok_or_else(|| JitError("body not compiled (unused or too large)".into()))?;
-    module.finalize_definitions().map_err(|e| err(&e))?;
-    let module = &*module;
-    // SAFETY: each id was defined with the matching signature, and the code
-    // stays alive as long as `owned`, which the result owns.
-    let settle = |id| unsafe {
-        std::mem::transmute::<*const u8, SettleFn>(module.get_finalized_function(id))
-    };
-    let commit = |id| unsafe {
-        std::mem::transmute::<*const u8, CommitFn>(module.get_finalized_function(id))
-    };
-    let (s, c) = ids;
+    let mut b = backend::Builder::new()?;
+    let (mut instrs, mut bytes) = (0usize, 0usize);
+    let (s, c) = compile_body(&mut b, p, &body, &mut instrs, &mut bytes)?
+        .ok_or_else(|| JitError("body not compiled (unused or too large)".into()))?;
+    let fin = b.finish()?;
     let body = JitBody {
-        settle: s.into_iter().map(settle).collect(),
-        commit: c.map(|c| c.into_iter().map(commit).collect()),
+        settle: s.into_iter().map(|id| fin.settle_fn(id)).collect(),
+        commit: c.map(|c| c.into_iter().map(|id| fin.commit_fn(id)).collect()),
     };
     Ok(JitUnit {
         body,
@@ -112,7 +88,7 @@ pub fn compile_unit(p: &Program, body: BodyRef<'_>) -> Result<JitUnit, JitError>
         code_bytes: bytes,
         slot_count: p.slot_count as usize,
         mem_lens: p.mems.iter().map(|m| 1usize << m.addr_bits).collect(),
-        _module: Mutex::new(owned),
+        _module: Mutex::new(fin.into_owned()),
     })
 }
 
@@ -235,7 +211,7 @@ impl JitUnit {
 pub struct SuperUnit {
     sup: JitSuper,
     /// Owns the code; declared last.
-    _module: Mutex<Owned>,
+    _module: Mutex<backend::Owned>,
 }
 
 const _: fn() = || {
@@ -252,7 +228,6 @@ pub fn compile_superstep(
     bodies: &[BodyRef<'_>],
     s: &SuperRef<'_>,
 ) -> Result<SuperUnit, JitError> {
-    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
     crate::sim::check(p).map_err(|e| JitError(format!("bad program: {}", e.0)))?;
     for part in s.parts {
         let (Part::Commit { body } | Part::Settle { body, .. }) = *part;
@@ -274,20 +249,15 @@ pub fn compile_superstep(
     if s.live_end.iter().any(|&x| x >= p.slot_count) {
         return Err(JitError("bad live slot".into()));
     }
-    let mut owned = new_module()?;
-    let module = owned.0.as_mut().expect("just created");
-    let mut ctx = module.make_context();
-    let mut fctx = FunctionBuilderContext::new();
-    let mut n = 0u32;
-    let (id, info) = define_superstep(module, &mut ctx, &mut fctx, p, bodies, s, &mut n)?;
-    module.finalize_definitions().map_err(|e| err(&e))?;
-    // SAFETY: `id` was defined with the `SuperFn` signature, and the code
-    // stays alive as long as `owned`, which the result owns.
-    let entry =
-        unsafe { std::mem::transmute::<*const u8, SuperFn>(module.get_finalized_function(id)) };
+    let mut b = backend::Builder::new()?;
+    let (id, info) = define_superstep(&mut b, p, bodies, s)?;
+    let fin = b.finish()?;
     Ok(SuperUnit {
-        sup: JitSuper { entry, info },
-        _module: Mutex::new(owned),
+        sup: JitSuper {
+            entry: fin.super_fn(id),
+            info,
+        },
+        _module: Mutex::new(fin.into_owned()),
     })
 }
 

@@ -41,6 +41,9 @@ pub const MAX_ROWS: u64 = 5_000_000;
 pub const MAX_READ_WORDS: usize = 256;
 /// Recorded rows shown from each end of a recording.
 const EXCERPT: usize = 5;
+/// The most rows before a difference a `compare` may ask for
+/// (`"context"`): they are kept while it runs and all go in the report.
+pub const MAX_CONTEXT: u64 = 1_000;
 
 /// A simulation that outlives a call: the rig, its named snapshots and
 /// signal names.
@@ -421,7 +424,14 @@ pub(crate) fn expected(spec: &Value, columns: &[Signal]) -> Result<Expected, Str
     };
     let mut map = spec.clone();
     let context = match map.shift_remove("context") {
-        Some(v) => number(&v)? as usize,
+        Some(v) => match number(&v)? {
+            n if n <= MAX_CONTEXT => n as usize,
+            n => {
+                return Err(format!(
+                    "\"context\" is at most {MAX_CONTEXT} rows before the difference, not {n}"
+                ));
+            }
+        },
         None => 5,
     };
     let radix16 = match map.shift_remove("radix") {

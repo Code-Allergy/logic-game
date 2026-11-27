@@ -228,10 +228,17 @@ impl SimBridge {
                 logi_sim::sim::SimOptions::interactive(),
             )),
             #[cfg(target_arch = "wasm32")]
-            SimRuntime::Threaded => Runtime::Local {
-                engine: Box::new(LocalEngine::new(Options::debug())),
+            SimRuntime::Threaded | SimRuntime::Threadless => Runtime::Local {
+                // The wasm JIT (logi-sim feature `jit`, on for the web
+                // build), tiered: each edit runs interpreted at once and
+                // switches to generated wasm code when it is instantiated.
+                engine: Box::new(LocalEngine::with_sim_options(
+                    Options::debug(),
+                    logi_sim::sim::SimOptions::interactive(),
+                )),
                 origin: Instant::now(),
             },
+            #[cfg(not(target_arch = "wasm32"))]
             SimRuntime::Threadless => Runtime::Local {
                 engine: Box::new(LocalEngine::new(Options::debug())),
                 origin: Instant::now(),

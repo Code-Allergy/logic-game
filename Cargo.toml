@@ -96,6 +96,18 @@ axum = { version = "0.8", optional = true, default-features = false, features = 
 embed-resource = "3"
 
 
+# The web build runs the simulator's wasm JIT (logi-sim feature `jit` on
+# wasm32: generated WebAssembly, tiered by the engine; see
+# logi-sim/src/sim/jit/wasm/). Natively the JIT stays behind the `jit`
+# feature above.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+logi-sim = { path = "logi-sim", features = ["jit"] }
+
+# The browser benchmark (`examples/web_sim_bench.rs`).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+
 # Blake3 pure on windows, for cross compilation
 [target.'cfg(all(target_os = "windows", target_env = "gnu"))'.dependencies]
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }

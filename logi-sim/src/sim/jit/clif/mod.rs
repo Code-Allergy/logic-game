@@ -1,0 +1,815 @@
+//! Cranelift backend (native targets): the settle chunks, commits and
+//! supersteps of `super::compile_body` and `super::define_superstep` as
+//! native code. See the parent module for what each function computes.
+
+mod superstep;
+
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::types::I64;
+use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, MemFlagsData, UserFuncName, Value};
+use cranelift_codegen::isa::TargetFrontendConfig;
+use cranelift_codegen::settings::{self, Configurable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::{FuncId, Linkage, Module};
+use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
+
+use super::superstep::{Plan, SItem, Stream};
+use super::{BodyRef, CommitFn, Item, JitError, SettleFn, SuperFn, arity, operands};
+use crate::compile::{Commit, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
+use crate::netlist::mask;
+
+/// Whether native code probes its stack: where the system needs it (see
+/// `new_module`).
+const PROBE_STACK: bool = cfg!(windows);
+
+/// A function defined in a [`Builder`].
+pub(super) type FnId = FuncId;
+
+/// Defines functions into one `JITModule`; [`Builder::finish`] makes their
+/// code executable.
+pub(super) struct Builder {
+    owned: Owned,
+    ctx: cranelift_codegen::Context,
+    fctx: FunctionBuilderContext,
+    /// Numbers the functions.
+    n: u32,
+}
+
+/// The finished code of a [`Builder`]: function pointers by id, and the
+/// module that owns their code.
+pub(super) struct Finished {
+    owned: Owned,
+}
+
+impl Finished {
+    fn get(&self, id: FnId) -> *const u8 {
+        self.owned
+            .0
+            .as_ref()
+            .expect("a module")
+            .get_finalized_function(id)
+    }
+
+    pub fn settle_fn(&self, id: FnId) -> SettleFn {
+        // SAFETY: settle chunks are defined with the `SettleFn` signature;
+        // the code lives as long as `owned`, which the caller keeps with
+        // the pointer.
+        unsafe { std::mem::transmute::<*const u8, SettleFn>(self.get(id)) }
+    }
+
+    pub fn commit_fn(&self, id: FnId) -> CommitFn {
+        // SAFETY: as in `settle_fn`, for commits.
+        unsafe { std::mem::transmute::<*const u8, CommitFn>(self.get(id)) }
+    }
+
+    pub fn super_fn(&self, id: FnId) -> SuperFn {
+        // SAFETY: as in `settle_fn`, for a superstep entry.
+        unsafe { std::mem::transmute::<*const u8, SuperFn>(self.get(id)) }
+    }
+
+    /// What owns the code.
+    pub fn into_owned(self) -> Owned {
+        self.owned
+    }
+}
+
+impl Builder {
+    pub fn new() -> Result<Self, JitError> {
+        let owned = new_module()?;
+        let ctx = owned.0.as_ref().expect("just created").make_context();
+        Ok(Builder {
+            owned,
+            ctx,
+            fctx: FunctionBuilderContext::new(),
+            n: 0,
+        })
+    }
+
+    /// Declare and define the function in `ctx` under `prefix`; its id
+    /// and bytes of code.
+    fn define(&mut self, prefix: &str) -> Result<(FnId, usize), JitError> {
+        let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
+        let module = self.owned.0.as_mut().expect("a module");
+        let id = module
+            .declare_function(
+                &format!("{prefix}{}", self.n),
+                Linkage::Local,
+                &self.ctx.func.signature,
+            )
+            .map_err(|e| err(&e))?;
+        self.n += 1;
+        module
+            .define_function(id, &mut self.ctx)
+            .map_err(|e| err(&e))?;
+        let size = code_size(&self.ctx);
+        module.clear_context(&mut self.ctx);
+        Ok((id, size))
+    }
+
+    fn start(&mut self, params: &[Ty]) -> TargetFrontendConfig {
+        let cfg = self.owned.0.as_ref().expect("a module").target_config();
+        let ptr = cfg.pointer_type();
+        self.ctx.func.signature.params.clear();
+        self.ctx
+            .func
+            .signature
+            .params
+            .extend(params.iter().map(|t| match t {
+                Ty::Ptr => AbiParam::new(ptr),
+                Ty::U64 => AbiParam::new(I64),
+            }));
+        self.ctx.func.name = UserFuncName::user(0, self.n);
+        cfg
+    }
+
+    /// A settle chunk ([`SettleFn`]) over `items` of `body`; `live`: the
+    /// slots to store in a fused-only body (`None`: every slot).
+    pub fn settle(
+        &mut self,
+        p: &Program,
+        body: &BodyRef<'_>,
+        items: &[(Item, u32)],
+        live: Option<&HashSet<u32>>,
+    ) -> Result<(FnId, usize), JitError> {
+        let cfg = self.start(&[Ty::Ptr, Ty::Ptr, Ty::U64]);
+        build_settle(
+            cfg,
+            &mut self.ctx.func,
+            &mut self.fctx,
+            p,
+            body,
+            items,
+            live,
+        );
+        self.define("settle")
+    }
+
+    /// A commit chunk ([`CommitFn`]) of `commits` (no `MemClear`).
+    pub fn commit(&mut self, p: &Program, commits: &[Commit]) -> Result<(FnId, usize), JitError> {
+        let cfg = self.start(&[Ty::Ptr, Ty::Ptr, Ty::Ptr]);
+        build_commit(cfg, &mut self.ctx.func, &mut self.fctx, p, commits);
+        self.define("commit")
+    }
+
+    /// Chunk `ch` of superstep stream `st` (see `superstep::build_chunk`):
+    /// its id, bytes and the items left out as dead.
+    #[allow(clippy::too_many_arguments)]
+    pub fn super_chunk(
+        &mut self,
+        p: &Program,
+        bodies: &[BodyRef<'_>],
+        st: &Stream,
+        ch: &[(SItem, u32)],
+        plan: &Plan,
+        w: &mut usize,
+        skip_base: &[usize],
+        continues: u32,
+    ) -> Result<(FnId, usize, usize), JitError> {
+        // No callee-saved registers: the chunks are only called by the
+        // entry, which keeps nothing in registers.
+        let cfg = self.start(&[Ty::Ptr, Ty::Ptr, Ty::U64, Ty::Ptr, Ty::Ptr]);
+        self.ctx.func.signature.call_conv = cranelift_codegen::isa::CallConv::Winch;
+        let dead = superstep::build_chunk(
+            cfg,
+            &mut self.ctx.func,
+            &mut self.fctx,
+            p,
+            bodies,
+            st,
+            ch,
+            plan,
+            w,
+            skip_base,
+            continues,
+        );
+        let (id, size) = self.define("super")?;
+        Ok((id, size, dead))
+    }
+
+    /// The superstep entry ([`SuperFn`]): calls `chunks` in order.
+    pub fn super_entry(&mut self, chunks: &[FnId]) -> Result<(FnId, usize), JitError> {
+        let cfg = self.start(&[Ty::Ptr, Ty::Ptr, Ty::U64, Ty::Ptr, Ty::Ptr]);
+        let module = self.owned.0.as_mut().expect("a module");
+        let refs: Vec<_> = chunks
+            .iter()
+            .map(|&id| module.declare_func_in_func(id, &mut self.ctx.func))
+            .collect();
+        {
+            let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
+            let blk = b.create_block();
+            b.append_block_params_for_function_params(blk);
+            b.switch_to_block(blk);
+            b.seal_block(blk);
+            let args = b.block_params(blk).to_vec();
+            for r in refs {
+                b.ins().call(r, &args);
+            }
+            b.ins().return_(&[]);
+            b.finalize(cfg);
+        }
+        self.define("super")
+    }
+
+    /// Make the code executable.
+    pub fn finish(mut self) -> Result<Finished, JitError> {
+        self.owned
+            .0
+            .as_mut()
+            .expect("a module")
+            .finalize_definitions()
+            .map_err(|e| JitError(e.to_string()))?;
+        Ok(Finished { owned: self.owned })
+    }
+}
+
+/// A parameter type of a generated function.
+#[derive(Clone, Copy)]
+enum Ty {
+    Ptr,
+    U64,
+}
+
+/// Owns a `JITModule` and frees its code when dropped (a `JITModule` alone
+/// leaks it), including when compiling fails half-way.
+pub(super) struct Owned(Option<JITModule>);
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if let Some(m) = self.0.take() {
+            // SAFETY: the only pointers into this code are the function
+            // pointers of the `JitProgram` that owns this (dropped with
+            // it; `Sim` keeps an `Arc<JitProgram>` while it may call them),
+            // or none at all if compiling failed.
+            unsafe { m.free_memory() };
+        }
+    }
+}
+
+/// A Cranelift module configured for this crate's code (see
+/// `Builder`), owned so that its code is freed on drop.
+fn new_module() -> Result<Owned, JitError> {
+    let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
+    let mut flags = settings::builder();
+    // The IR is already simplified (constant folding, CSE and DCE ran in
+    // the compiler); Cranelift's optimizer gains nothing measurable on
+    // it and costs about a quarter of the compile time.
+    flags.set("opt_level", "none").map_err(|e| err(&e))?;
+    // The IR verifier costs about a tenth of the compile time; the
+    // builder's IR is checked in debug builds (and so in tests).
+    flags
+        .set(
+            "enable_verifier",
+            if cfg!(debug_assertions) {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .map_err(|e| err(&e))?;
+    flags
+        .set("use_colocated_libcalls", "false")
+        .map_err(|e| err(&e))?;
+    flags
+        .set(
+            "is_pic",
+            if cfg!(target_arch = "x86_64") {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .map_err(|e| err(&e))?;
+    // Windows commits a thread's stack a page at a time, through one
+    // guard page: a function whose frame is larger than a page must
+    // touch every page on its way down, or its first access below the
+    // guard page is an access violation. Chunks of many items
+    // (`SimOptions::superstep_chunk`) have such frames. The probes are
+    // inline (no call to a `__probestack` symbol), and only functions
+    // with a frame over a page get any.
+    if PROBE_STACK {
+        flags
+            .set("enable_probestack", "true")
+            .map_err(|e| err(&e))?;
+        flags
+            .set("probestack_strategy", "inline")
+            .map_err(|e| err(&e))?;
+    }
+    let isa = cranelift_native::builder()
+        .map_err(|e| err(&e))?
+        .finish(settings::Flags::new(flags))
+        .map_err(|e| err(&e))?;
+    Ok(Owned(Some(JITModule::new(JITBuilder::with_isa(
+        isa,
+        cranelift_module::default_libcall_names(),
+    )))))
+}
+
+/// Bytes of machine code `ctx` holds after `define_function`.
+fn code_size(ctx: &cranelift_codegen::Context) -> usize {
+    ctx.compiled_code().map_or(0, |c| c.code_buffer().len())
+}
+
+/// Flags for slot and memory accesses: in bounds (checked), aligned.
+fn flags() -> MemFlagsData {
+    MemFlagsData::trusted()
+}
+
+/// Slot loads and stores within one function, through an SSA cache: a
+/// slot is loaded at most once, and a store's value is reused by later
+/// reads. Slots only alias themselves, and memories never alias slots, so
+/// this is exactly the interpreter's sequence of memory states.
+struct Slots {
+    base: Value,
+    vals: HashMap<u32, Value>,
+}
+
+impl Slots {
+    fn new(base: Value, capacity: usize) -> Self {
+        Slots {
+            base,
+            vals: HashMap::with_capacity(capacity),
+        }
+    }
+
+    fn addr(&self, b: &mut FunctionBuilder<'_>, slot: u32) -> (Value, i32) {
+        let off = slot as u64 * 8;
+        match i32::try_from(off) {
+            Ok(o) => (self.base, o),
+            Err(_) => (b.ins().iadd_imm_u(self.base, off as i64), 0),
+        }
+    }
+
+    fn read(&mut self, b: &mut FunctionBuilder<'_>, slot: u32) -> Value {
+        if slot == ZERO_SLOT {
+            return b.ins().iconst(I64, 0);
+        }
+        if let Some(&v) = self.vals.get(&slot) {
+            return v;
+        }
+        let (a, o) = self.addr(b, slot);
+        let v = b.ins().load(I64, flags(), a, o);
+        self.vals.insert(slot, v);
+        v
+    }
+
+    fn write(&mut self, b: &mut FunctionBuilder<'_>, slot: u32, v: Value, store: bool) {
+        if store {
+            let (a, o) = self.addr(b, slot);
+            b.ins().store(flags(), v, a, o);
+        }
+        self.vals.insert(slot, v);
+    }
+}
+
+fn bool64(b: &mut FunctionBuilder<'_>, c: Value) -> Value {
+    b.ins().uextend(I64, c)
+}
+
+/// An open guarded run in a settle chunk: the block after it, and the
+/// slot and memory-pointer caches from before it (values defined inside
+/// do not dominate the code after it).
+type Open = (
+    cranelift_codegen::ir::Block,
+    HashMap<u32, Value>,
+    HashMap<u32, Value>,
+);
+
+/// Build one settle chunk.
+fn build_settle(
+    cfg: TargetFrontendConfig,
+    func: &mut Function,
+    fctx: &mut FunctionBuilderContext,
+    p: &Program,
+    body: &BodyRef<'_>,
+    items: &[(Item, u32)],
+    live: Option<&HashSet<u32>>,
+) {
+    let mut b = FunctionBuilder::new(func, fctx);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let params = b.block_params(entry).to_vec();
+    let (slots, mems, tick) = (params[0], params[1], params[2]);
+    let mut sl = Slots::new(slots, items.len() * 2);
+    // Slots this chunk reads: a result computed in a guarded run is only
+    // in the SSA cache until the run ends, so a later read in the chunk
+    // loads it from its slot.
+    let mut chunk_reads: HashSet<u32> = HashSet::new();
+    if live.is_some() && items.iter().any(|&(_, seg)| seg > 0) {
+        for (item, _) in items {
+            item.reads(p, body, |s| {
+                chunk_reads.insert(s);
+            });
+        }
+    }
+    let mut mem_ptrs: HashMap<u32, Value> = HashMap::new();
+    // The guard of the current run of items (0: none), the block after
+    // it, and the caches from before it.
+    let mut cur = 0u32;
+    let mut open: Option<Open> = None;
+    for &(item, seg) in items {
+        if seg != cur {
+            if let Some((merge, vals, ptrs)) = open.take() {
+                b.ins().jump(merge, &[]);
+                b.switch_to_block(merge);
+                b.seal_block(merge);
+                sl.vals = vals;
+                mem_ptrs = ptrs;
+            }
+            if seg > 0 {
+                let mut test: Option<Value> = None;
+                for c in &body.guards[seg as usize - 1].conds {
+                    let v = sl.read(&mut b, c.slot);
+                    let cc = if c.when {
+                        IntCC::NotEqual
+                    } else {
+                        IntCC::Equal
+                    };
+                    let t = b.ins().icmp_imm_u(cc, v, 0);
+                    test = Some(match test {
+                        Some(x) => b.ins().band(x, t),
+                        None => t,
+                    });
+                }
+                let test = test.expect("a guard has conditions");
+                let then = b.create_block();
+                let merge = b.create_block();
+                b.ins().brif(test, then, &[], merge, &[]);
+                b.switch_to_block(then);
+                b.seal_block(then);
+                open = Some((merge, sl.vals.clone(), mem_ptrs.clone()));
+            }
+            cur = seg;
+        }
+        let store =
+            |s: u32| live.is_none_or(|l| l.contains(&s) || (cur > 0 && chunk_reads.contains(&s)));
+        match item {
+            Item::Instr { op, k } => {
+                let i = body.instrs[k as usize];
+                let m = body.imms[k as usize];
+                let r = emit_instr(&mut b, &mut sl, &mut mem_ptrs, p, (mems, tick, 0), op, i, m);
+                sl.write(&mut b, i.dst, r, store(i.dst));
+            }
+            Item::Pack { op, k } => {
+                let pk = p.packs[k as usize];
+                let r = emit_pack(&mut b, &mut sl, p, op, &pk);
+                sl.write(&mut b, pk.dst, r, store(pk.dst));
+                let s0 = pk.scatter_start as usize;
+                for x in &p.scatters[s0..s0 + pk.scatter_len as usize] {
+                    let lane = b.ins().ushr_imm_u(r, i64::from(x.lane));
+                    let lane = b.ins().band_imm_u(lane, 1);
+                    sl.write(&mut b, x.slot, lane, store(x.slot));
+                }
+            }
+        }
+    }
+    if let Some((merge, _, _)) = open.take() {
+        b.ins().jump(merge, &[]);
+        b.switch_to_block(merge);
+        b.seal_block(merge);
+    }
+    b.ins().return_(&[]);
+    b.finalize(cfg);
+}
+
+/// Carry out of `a + b + c` at bit `w` (0..=64), as the interpreter's
+/// 128-bit sum: `((a + b + c) >> w) & 1`.
+fn add_carry(b: &mut FunctionBuilder<'_>, a: Value, x: Value, c: Value, w: u64) -> Value {
+    let s1 = b.ins().iadd(a, x);
+    let c1 = b.ins().icmp(IntCC::UnsignedLessThan, s1, a);
+    let s2 = b.ins().iadd(s1, c);
+    let c2 = b.ins().icmp(IntCC::UnsignedLessThan, s2, s1);
+    if w >= 64 {
+        // Bit 64 of the sum: the carries (at most one of them can be set
+        // when `c` is 1 bit; the sum of both is the high word).
+        let c1 = bool64(b, c1);
+        let c2 = bool64(b, c2);
+        let hi = b.ins().iadd(c1, c2);
+        b.ins().band_imm_u(hi, 1)
+    } else {
+        let _ = (c1, c2);
+        let x = b.ins().ushr_imm_u(s2, w as i64);
+        b.ins().band_imm_u(x, 1)
+    }
+}
+
+/// Assemble one packed operand word (see [`PackOperand`]).
+fn pack_operand(
+    b: &mut FunctionBuilder<'_>,
+    sl: &mut Slots,
+    p: &Program,
+    o: &PackOperand,
+) -> Value {
+    let base = sl.read(b, o.base);
+    let mut v = b.ins().band_imm_u(base, o.keep as i64);
+    if o.splat_mask != 0 {
+        let s = sl.read(b, o.splat);
+        let s = b.ins().ushr_imm_u(s, i64::from(o.splat_bit));
+        let s = b.ins().band_imm_u(s, 1);
+        let s = b.ins().ineg(s);
+        let s = b.ins().band_imm_u(s, o.splat_mask as i64);
+        v = b.ins().bor(v, s);
+    }
+    let g = o.gather_start as usize;
+    for gt in &p.gathers[g..g + o.gather_len as usize] {
+        let s = sl.read(b, gt.slot);
+        let s = b.ins().ushr_imm_u(s, i64::from(gt.bit));
+        let s = b.ins().band_imm_u(s, 1);
+        let s = b.ins().ishl_imm_u(s, i64::from(gt.lane));
+        v = b.ins().bor(v, s);
+    }
+    v
+}
+
+/// Build the commit function of a body without `MemClear`s.
+fn build_commit(
+    cfg: TargetFrontendConfig,
+    func: &mut Function,
+    fctx: &mut FunctionBuilderContext,
+    p: &Program,
+    commits: &[Commit],
+) {
+    let mut b = FunctionBuilder::new(func, fctx);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let params = b.block_params(entry).to_vec();
+    let (slots, mems, writes) = (params[0], params[1], params[2]);
+    // Commits are sequential: a copy's load sees every store before it.
+    // Values are not cached across a RAM write's control flow, so each
+    // commit loads its own operands (the program has few RAM writes).
+    let mut sl = Slots::new(slots, 0);
+    for c in commits {
+        match *c {
+            Commit::Copy { state, next } => {
+                let v = sl.read(&mut b, next);
+                sl.write(&mut b, state, v, true);
+            }
+            Commit::RamWrite { .. } | Commit::RamWriteMasked { .. } => {
+                emit_ram_write(&mut b, &mut sl, p, c, mems, writes);
+            }
+            Commit::MemClear { .. } => unreachable!("bodies with MemClear commit in Rust"),
+        }
+    }
+    b.ins().return_(&[]);
+    b.finalize(cfg);
+}
+
+/// The value of instruction `i` (opcode `op`, literal `m`) at tick
+/// `tick + tick_off`, reading its operands through the slot cache.
+#[allow(clippy::too_many_arguments)]
+fn emit_instr(
+    b: &mut FunctionBuilder<'_>,
+    sl: &mut Slots,
+    mem_ptrs: &mut HashMap<u32, Value>,
+    p: &Program,
+    (mems, tick, tick_off): (Value, Value, u64),
+    op: Op,
+    i: Instr,
+    m: u64,
+) -> Value {
+    let slots = sl.base;
+    let ptr_ty = b.func.dfg.value_type(mems);
+    let (sa, sb, sc) = op.slot_operands();
+    let a = if sa { Some(sl.read(b, i.a)) } else { None };
+    let bb = if sb { Some(sl.read(b, i.b)) } else { None };
+    let c = if sc { Some(sl.read(b, i.c)) } else { None };
+    let (a, bv, c) = (
+        a.unwrap_or_else(|| b.ins().iconst(I64, 0)),
+        bb.unwrap_or(slots),
+        c.unwrap_or(slots),
+    );
+    let ins = b;
+    match op {
+        Op::Copy => a,
+        Op::Not => {
+            let x = ins.ins().bnot(a);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::And => ins.ins().band(a, bv),
+        Op::Or => ins.ins().bor(a, bv),
+        Op::Xor => ins.ins().bxor(a, bv),
+        Op::Nand => {
+            let x = ins.ins().band(a, bv);
+            let x = ins.ins().bnot(x);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::Nor => {
+            let x = ins.ins().bor(a, bv);
+            let x = ins.ins().bnot(x);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::Xnor => {
+            let x = ins.ins().bxor(a, bv);
+            let x = ins.ins().bnot(x);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::Mux => ins.ins().select(a, c, bv),
+        Op::Switch => {
+            let z = ins.ins().iconst(I64, 0);
+            ins.ins().select(a, bv, z)
+        }
+        Op::AddSum => {
+            let x = ins.ins().iadd(a, bv);
+            let x = ins.ins().iadd(x, c);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::AddCarry => add_carry(ins, a, bv, c, m),
+        Op::Eq => {
+            let x = ins.ins().icmp(IntCC::Equal, a, bv);
+            bool64(ins, x)
+        }
+        Op::LtU => {
+            let x = ins.ins().icmp(IntCC::UnsignedLessThan, a, bv);
+            bool64(ins, x)
+        }
+        Op::ReduceOr => {
+            let x = ins.ins().icmp_imm_u(IntCC::NotEqual, a, 0);
+            bool64(ins, x)
+        }
+        Op::ReduceAnd => {
+            let x = ins.ins().icmp_imm_u(IntCC::Equal, a, m as i64);
+            bool64(ins, x)
+        }
+        Op::ReduceXor => {
+            let x = ins.ins().popcnt(a);
+            ins.ins().band_imm_u(x, 1)
+        }
+        Op::Shr => {
+            let x = ins.ins().ushr_imm_u(a, i64::from(i.b));
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::Concat => {
+            let x = ins.ins().ishl_imm_u(bv, i64::from(i.c));
+            ins.ins().bor(a, x)
+        }
+        Op::Shl => {
+            let x = ins.ins().ushr_imm_u(a, i64::from(i.c));
+            let x = ins.ins().ishl_imm_u(x, i64::from(i.b));
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::ShlV => {
+            // Cranelift takes the amount modulo 64: `b & 63`.
+            let x = ins.ins().ishl(a, bv);
+            ins.ins().band_imm_u(x, m as i64)
+        }
+        Op::Sext => {
+            // `if (a >> (b - 1)) & 1 == 1 { (a | !mask(b)) & m } else { a }`
+            let w = i.b;
+            let bit = ins.ins().ushr_imm_u(a, i64::from(w - 1));
+            let bit = ins.ins().band_imm_u(bit, 1);
+            let ext = ins.ins().bor_imm_u(a, !mask(w as u8) as i64);
+            let ext = ins.ins().band_imm_u(ext, m as i64);
+            ins.ins().select(bit, ext, a)
+        }
+        Op::Clock => {
+            // `((tick + c) % a) < b`
+            let t = ins
+                .ins()
+                .iadd_imm_u(tick, (tick_off + u64::from(i.c)) as i64);
+            let r = ins.ins().urem_imm_u(t, i64::from(i.a));
+            let x = ins
+                .ins()
+                .icmp_imm_u(IntCC::UnsignedLessThan, r, i64::from(i.b));
+            bool64(ins, x)
+        }
+        Op::MemRead => {
+            let mp = *mem_ptrs.entry(i.b).or_insert_with(|| {
+                ins.ins().load(
+                    ptr_ty,
+                    flags(),
+                    mems,
+                    (i.b as usize * size_of::<usize>()) as i32,
+                )
+            });
+            let len_mask = (1u64 << p.mems[i.b as usize].addr_bits) - 1;
+            let idx = ins.ins().band_imm_u(a, len_mask as i64);
+            let off = ins.ins().ishl_imm_u(idx, 3);
+            let off = if ptr_ty == I64 {
+                off
+            } else {
+                ins.ins().ireduce(ptr_ty, off)
+            };
+            let addr = ins.ins().iadd(mp, off);
+            ins.ins().load(I64, flags(), addr, 0)
+        }
+        Op::SrNext => {
+            // `if b != 0 { 0 } else if a != 0 { 1 } else { c }`
+            let one = ins.ins().iconst(I64, 1);
+            let z = ins.ins().iconst(I64, 0);
+            let x = ins.ins().select(a, one, c);
+            ins.ins().select(bv, z, x)
+        }
+    }
+}
+
+/// The value of packed word `pk` (opcode `op`).
+fn emit_pack(b: &mut FunctionBuilder<'_>, sl: &mut Slots, p: &Program, op: Op, pk: &Pack) -> Value {
+    let slots = sl.base;
+    let n = arity(op);
+    let mut v = [slots; 3];
+    for (j, o) in operands(pk).into_iter().enumerate().take(n) {
+        v[j] = pack_operand(b, sl, p, o);
+    }
+    let [a, bv, c] = v;
+    let ins = b;
+    match op {
+        Op::Copy => a,
+        Op::Not => ins.ins().bnot(a),
+        Op::And | Op::Switch => ins.ins().band(a, bv),
+        Op::Or => ins.ins().bor(a, bv),
+        Op::Xor => ins.ins().bxor(a, bv),
+        Op::Nand => {
+            let x = ins.ins().band(a, bv);
+            ins.ins().bnot(x)
+        }
+        Op::Nor => {
+            let x = ins.ins().bor(a, bv);
+            ins.ins().bnot(x)
+        }
+        Op::Xnor => {
+            let x = ins.ins().bxor(a, bv);
+            ins.ins().bnot(x)
+        }
+        Op::Mux => {
+            // `(a & c) | (!a & b)`
+            let x = ins.ins().band(a, c);
+            let y = ins.ins().band_not(bv, a);
+            ins.ins().bor(x, y)
+        }
+        _ => unreachable!("checked: not a packable op"),
+    }
+}
+
+/// A RAM write commit (`RamWrite` or `RamWriteMasked`): slots are
+/// unchanged, so the slot cache stays valid.
+fn emit_ram_write(
+    b: &mut FunctionBuilder<'_>,
+    sl: &mut Slots,
+    p: &Program,
+    c: &Commit,
+    mems: Value,
+    writes: Value,
+) {
+    let ptr = b.func.dfg.value_type(mems);
+    let (mem, we, addr, data) = match *c {
+        Commit::RamWrite {
+            mem,
+            we,
+            addr,
+            data,
+        }
+        | Commit::RamWriteMasked {
+            mem,
+            mask: we,
+            addr,
+            data,
+        } => (mem, we, addr, data),
+        _ => unreachable!("a RAM write"),
+    };
+    let masked = matches!(c, Commit::RamWriteMasked { .. });
+    let en = sl.read(b, we);
+    let a = sl.read(b, addr);
+    let d = sl.read(b, data);
+    let then = b.create_block();
+    let done = b.create_block();
+    b.ins().brif(en, then, &[], done, &[]);
+    b.switch_to_block(then);
+    b.seal_block(then);
+    let mp = b.ins().load(
+        ptr,
+        flags(),
+        mems,
+        (mem as usize * size_of::<usize>()) as i32,
+    );
+    let len_mask = (1u64 << p.mems[mem as usize].addr_bits) - 1;
+    let idx = b.ins().band_imm_u(a, len_mask as i64);
+    let off = b.ins().ishl_imm_u(idx, 3);
+    let off = if ptr == I64 {
+        off
+    } else {
+        b.ins().ireduce(ptr, off)
+    };
+    let at = b.ins().iadd(mp, off);
+    let word = if masked {
+        // `(*m & !bits) | (data & bits)`
+        let old = b.ins().load(I64, flags(), at, 0);
+        let keep = b.ins().band_not(old, en);
+        let new = b.ins().band(d, en);
+        b.ins().bor(keep, new)
+    } else {
+        d
+    };
+    b.ins().store(flags(), word, at, 0);
+    let wo = (mem as usize * 8) as i32;
+    let n = b.ins().load(I64, flags(), writes, wo);
+    let n = b.ins().iadd_imm_u(n, 1);
+    b.ins().store(flags(), n, writes, wo);
+    b.ins().jump(done, &[]);
+    b.switch_to_block(done);
+    b.seal_block(done);
+    // Slots are unchanged by a RAM write; the cache stays valid.
+}

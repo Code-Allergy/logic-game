@@ -36,9 +36,12 @@
 //! requested before carry an older generation and are refused.
 //!
 //! Supersteps (`jit::superstep`) run the general fused bodies, so `run`
-//! uses none while a phase is keyed. An automatic plan is chosen after the
-//! layout's native code was compiled (without a superstep, since keys
-//! were to come); a plan that keys no phase therefore brings the layout's
+//! uses none while a phase is keyed, unless [`SpecOptions::fallback`]
+//! asks for one: then each `run` is either keyed or supersteps, whichever
+//! the fallback's measurements say is cheaper ([`FallbackOptions`]). An
+//! automatic plan is chosen after the layout's native code was compiled
+//! (without a superstep, since keys were to come); a plan that keys no
+//! phase (or any plan, with the fallback) therefore brings the layout's
 //! superstep, compiled with the plan ([`Spec::superstep`]). Supersteps
 //! *keyed* per period were measured and not built: on the NES console the
 //! keys of whole periods hardly repeat (`docs/adaptive-spec.md`, "P8 as
@@ -53,6 +56,14 @@ use crate::compile::{Body, FastMap, Program, phases};
 use crate::netlist::mask;
 
 use super::{Run, Sim, SimOptions};
+
+mod fallback;
+pub(super) use fallback::Fallback;
+pub use fallback::FallbackOptions;
+#[cfg(feature = "jit")]
+pub(super) use fallback::Mode;
+#[cfg(test)]
+pub(crate) use fallback::{FORCE, VIRTUAL};
 
 /// State-keyed specialization ([`SimOptions::spec`]). Changes speed only,
 /// never results.
@@ -107,6 +118,12 @@ pub struct SpecOptions {
     /// thread). Off: the caller drains [`super::Sim::spec_requests`],
     /// builds ([`build_spec`]) and installs.
     pub inline_build: bool,
+    /// Run supersteps instead of keyed ticks while specialization does not
+    /// pay, measured by the wall clock ([`FallbackOptions`]; with the JIT,
+    /// while native code is installed; not on wasm32). The layout's native
+    /// code (or an automatic plan) then carries the superstep along with
+    /// the keys. `None` (the default): keyed `Sim`s never run supersteps.
+    pub fallback: Option<FallbackOptions>,
 }
 
 impl Default for SpecOptions {
@@ -124,6 +141,7 @@ impl Default for SpecOptions {
             max_key_bits: 32,
             min_loss: 4,
             inline_build: true,
+            fallback: None,
         }
     }
 }
@@ -135,6 +153,16 @@ impl SpecOptions {
         SpecOptions {
             plan: Some(Arc::new(plan)),
             adaptive: false,
+            ..SpecOptions::default()
+        }
+    }
+
+    /// The defaults with the fallback to supersteps
+    /// ([`SpecOptions::fallback`]): what an interactive runtime wants
+    /// ([`SimOptions::interactive`]).
+    pub fn interactive() -> Self {
+        SpecOptions {
+            fallback: Some(FallbackOptions::default()),
             ..SpecOptions::default()
         }
     }
@@ -508,11 +536,11 @@ impl PhaseSpec {
 }
 
 /// A body's native code: a `JitUnit` with the JIT, nothing without.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 pub(super) type Unit = super::jit::JitUnit;
-#[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+#[cfg(not(feature = "jit"))]
 pub(super) enum Unit {}
-#[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+#[cfg(not(feature = "jit"))]
 impl Unit {
     fn code_bytes(&self) -> usize {
         match *self {}
@@ -520,31 +548,25 @@ impl Unit {
 }
 
 /// A superstep's native code: a `SuperUnit` with the JIT.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 pub(super) type SuperCode = super::jit::SuperUnit;
-#[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+#[cfg(not(feature = "jit"))]
 pub(super) enum SuperCode {}
 
 /// A superstep compiled after the layout was built (see
 /// [`Spec::superstep`]): its code, and the run each of its bodies is
 /// (its parts name bodies by their index in `runs`).
 pub(super) struct SpecSuper {
-    #[cfg_attr(
-        not(all(feature = "jit", not(target_arch = "wasm32"))),
-        expect(dead_code)
-    )]
+    #[cfg_attr(not(feature = "jit"), expect(dead_code))]
     pub code: SuperCode,
-    #[cfg_attr(
-        not(all(feature = "jit", not(target_arch = "wasm32"), feature = "counters")),
-        expect(dead_code)
-    )]
+    #[cfg_attr(not(all(feature = "jit", feature = "counters")), expect(dead_code))]
     pub runs: Vec<u16>,
     bytes: usize,
 }
 
 /// What a superstep request carries: the bodies (owned, so that the build
 /// needs nothing of the `Sim`), the run of each, and the superstep.
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 pub(super) struct SuperBuild {
     pub bodies: Vec<Body>,
     pub runs: Vec<u16>,
@@ -557,10 +579,7 @@ pub(super) struct SuperBuild {
 /// A run installed after the layout was built.
 pub(super) struct Dyn {
     /// Its native code (run only while the `Sim` runs native code).
-    #[cfg_attr(
-        not(any(test, all(feature = "jit", not(target_arch = "wasm32")))),
-        expect(dead_code)
-    )]
+    #[cfg_attr(not(any(test, feature = "jit")), expect(dead_code))]
     pub unit: Option<Unit>,
     /// A prefix or fallback of a plan chosen at run time: never evicted.
     pinned: bool,
@@ -639,7 +658,8 @@ pub(super) struct Spec {
     /// pinned runs (and the superstep).
     body_bytes: usize,
     pinned_bytes: usize,
-    /// The superstep of an automatic plan that keys no phase (the layout's
+    /// The superstep of an automatic plan that keys no phase, or of any
+    /// automatic plan with the fallback to supersteps (the layout's
     /// native code was compiled without one while the plan was awaited):
     /// run by `Sim::run` while native code is installed.
     pub superstep: Option<Arc<SpecSuper>>,
@@ -703,7 +723,7 @@ impl Spec {
     }
 
     /// The native code of installed run `run`.
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     #[inline]
     pub fn unit(&self, run: u16) -> Option<&Unit> {
         let i = (run as usize).checked_sub(self.base + 1)?;
@@ -722,7 +742,7 @@ impl Spec {
 
     /// Runs of the layout's tables: the prefix, the fallback and the
     /// specialized bodies of fixed tables (not those installed later).
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     pub fn base_runs(&self) -> Vec<(u16, bool)> {
         let mut out = Vec::new();
         for ps in self.phases.iter().flatten() {
@@ -798,6 +818,14 @@ pub struct SpecStats {
     pub code_bytes: usize,
     /// An automatic plan is still being sampled or built.
     pub awaiting_plan: bool,
+    /// The fallback to supersteps ([`SpecOptions::fallback`]): ticks run
+    /// as supersteps by it (baseline samples included), times it fell
+    /// back (a probe that lost included), probes, and whether it is
+    /// fallen back now.
+    pub super_ticks: u64,
+    pub fallbacks: u64,
+    pub probes: u64,
+    pub fallen: bool,
 }
 
 /// A build the `Sim` asks for ([`super::Sim::spec_requests`]): a body for a
@@ -825,9 +853,12 @@ enum Work {
         contexts: Vec<Option<Arc<SpecContext>>>,
         rows: Arc<Vec<Vec<Vec<u64>>>>,
         options: PlanOptions,
-        /// The layout's superstep, compiled when the plan keys nothing.
-        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        /// The layout's superstep, compiled when the plan keys nothing
+        /// or `keyed_superstep` (the fallback to supersteps is on).
+        #[cfg(feature = "jit")]
         superstep: Option<SuperBuild>,
+        #[cfg(feature = "jit")]
+        keyed_superstep: bool,
     },
 }
 
@@ -981,8 +1012,10 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
             contexts,
             rows,
             options,
-            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            #[cfg(feature = "jit")]
             superstep,
+            #[cfg(feature = "jit")]
+            keyed_superstep,
         } => {
             let cxs: Vec<Option<&SpecContext>> = contexts.iter().map(Option::as_deref).collect();
             let samples: Vec<&[Vec<u64>]> = rows.iter().map(Vec::as_slice).collect();
@@ -1016,14 +1049,15 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
                     })
                 })
                 .collect();
-            // Keying nothing: the superstep the layout would have had.
-            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            // Keying nothing (or the fallback on): the superstep the
+            // layout would have had.
+            #[cfg(feature = "jit")]
             let sup = superstep
                 .as_ref()
-                .filter(|_| r.jit && phases.iter().all(Option::is_none))
+                .filter(|_| r.jit && (*keyed_superstep || phases.iter().all(Option::is_none)))
                 .and_then(|sb| build_superstep(p, sb))
                 .map(Box::new);
-            #[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+            #[cfg(not(feature = "jit"))]
             let sup = None;
             Out::Plan(phases, sup)
         }
@@ -1036,7 +1070,7 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
 }
 
 /// Compile the superstep of `sb` (`None` when it cannot be compiled).
-#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+#[cfg(feature = "jit")]
 fn build_superstep(p: &Program, sb: &SuperBuild) -> Option<SpecSuper> {
     use super::jit::{BodyRef, SuperRef, compile_superstep};
     let bodies: Vec<BodyRef<'_>> = sb
@@ -1069,10 +1103,7 @@ fn build_superstep(p: &Program, sb: &SuperBuild) -> Option<SpecSuper> {
 /// Check `body` as `Sim` checks its bodies and compile its unit.
 /// `fused_only`: every body but a prefix (whose results the key and the
 /// body after it read).
-#[cfg_attr(
-    not(all(feature = "jit", not(target_arch = "wasm32"))),
-    expect(unused_variables)
-)]
+#[cfg_attr(not(feature = "jit"), expect(unused_variables))]
 fn finish(p: &Program, body: Body, fused_only: bool, jit: bool) -> Option<Built> {
     #[cfg(test)]
     if MUTATION.get() == 5 {
@@ -1087,7 +1118,7 @@ fn finish(p: &Program, body: Body, fused_only: bool, jit: bool) -> Option<Built>
         &body.guards,
     )
     .ok()?;
-    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[cfg(feature = "jit")]
     let unit = {
         let items: usize = body.blocks.iter().map(|b| b.len as usize).sum();
         (jit && items <= super::jit::MAX_BODY)
@@ -1108,7 +1139,7 @@ fn finish(p: &Program, body: Body, fused_only: bool, jit: bool) -> Option<Built>
             })
             .flatten()
     };
-    #[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+    #[cfg(not(feature = "jit"))]
     let unit = None;
     Some(Built { body, unit })
 }
@@ -1187,8 +1218,10 @@ impl Sim {
                     contexts: self.spec.contexts.clone(),
                     rows,
                     options: o.plan_options(),
-                    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+                    #[cfg(feature = "jit")]
                     superstep: if jit { self.super_build() } else { None },
+                    #[cfg(feature = "jit")]
+                    keyed_superstep: o.fallback.is_some(),
                 },
             });
         }
@@ -1334,11 +1367,11 @@ impl Sim {
             table.resize(self.fused.len(), None);
         } else {
             table.clear();
-            // Nothing keyed: the layout's superstep.
-            if let Some(sup) = sup {
-                self.spec.pinned_bytes += sup.bytes;
-                self.spec.superstep = Some(Arc::from(sup));
-            }
+        }
+        // Nothing keyed (or the fallback on): the layout's superstep.
+        if let Some(sup) = sup {
+            self.spec.pinned_bytes += sup.bytes;
+            self.spec.superstep = Some(Arc::from(sup));
         }
         self.spec.phases = table;
         self.spec.contexts.clear();
@@ -1540,6 +1573,12 @@ impl Sim {
             s.keyed_phases += 1;
             s.bodies += ps.bodies();
         }
+        if let Some(f) = &self.spec_fallback {
+            s.super_ticks = f.super_ticks;
+            s.fallbacks = f.fallbacks;
+            s.probes = f.probes;
+            s.fallen = f.fallen();
+        }
         // Set aside by a ROM write, the tables keep their counts.
         let stashed = self.stash.as_ref().map(|st| &st.spec);
         for sp in std::iter::once(&self.spec).chain(stashed) {
@@ -1602,5 +1641,7 @@ pub fn spec_contexts(p: &Program, options: &SimOptions) -> Vec<Option<SpecContex
 
 #[cfg(test)]
 mod adaptive_tests;
+#[cfg(test)]
+mod fallback_tests;
 #[cfg(test)]
 mod tests;

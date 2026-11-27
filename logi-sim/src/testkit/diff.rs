@@ -250,9 +250,9 @@ pub fn standard_configs() -> Vec<GenConfig> {
 // ── Batches (tick fusion, clock-phase variants) ──────────────────────────
 
 /// The JIT backend (`SimOptions::jit`) is compiled in: logi-sim feature
-/// `jit` on a native target. Without it, the JIT checks below compare the
+/// `jit` (Cranelift natively, the wasm backend on wasm32). Without it, the JIT checks below compare the
 /// interpreter with itself.
-pub const JIT: bool = cfg!(all(feature = "jit", not(target_arch = "wasm32")));
+pub const JIT: bool = cfg!(feature = "jit");
 
 /// Tick, outputs, state, every net, memories and memory versions.
 pub(crate) type Observed = (
