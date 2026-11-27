@@ -664,10 +664,19 @@ fn mask_to(b: &mut FunctionBuilder<'_>, x: Value, bound: u64, m: u64) -> Value {
     }
 }
 
-/// `!x & m`.
-fn not_masked(b: &mut FunctionBuilder<'_>, x: Value, m: u64) -> Value {
-    let y = b.ins().bnot(x);
-    b.ins().band_imm_u(y, m as i64)
+/// `!x & m` for `x` with bits within `bound`. In 32 bits: `x ^ m` when
+/// `x` has no bits outside `m` (as when `m` is the width of `x`), else
+/// `(x ^ m) & m`, with `m` an immediate. (`!x & m` becomes
+/// an `andn` with `m` loaded from the constant pool: 9 bytes, against 3
+/// for `xor r32, imm8`.)
+fn not_masked(b: &mut FunctionBuilder<'_>, x: Value, bound: u64, m: u64) -> Value {
+    if b.func.dfg.value_type(x) == I32 {
+        let y = b.ins().bxor_imm_u(x, m as i64);
+        mask_to(b, y, bound | m, m)
+    } else {
+        let y = b.ins().bnot(x);
+        b.ins().band_imm_u(y, m as i64)
+    }
 }
 
 /// An open guarded run in a settle chunk: the block after it, and the
@@ -953,8 +962,10 @@ fn emit_instr(
     let bound = possible_of(op, &i, m, sl.bits.as_slice(), &p.mems);
     let t = ty_of(bound);
     let how = match op {
-        // Stored as loaded.
-        Op::Copy => Load::Zext,
+        // Stored as loaded; or to an operation with an immediate (which
+        // Cranelift would otherwise materialize in a register to fold the
+        // load into the operation instead).
+        Op::Copy | Op::Not => Load::Zext,
         _ => Load::Narrow,
     };
     let (sa, sb, sc) = op.slot_operands();
@@ -974,7 +985,7 @@ fn emit_instr(
         Op::Copy => a,
         Op::Not => {
             let x = sl.to(ins, a, ba, t);
-            not_masked(ins, x, m)
+            not_masked(ins, x, ba, m)
         }
         Op::And | Op::Or | Op::Xor => {
             let x = sl.to(ins, a, ba, t);
@@ -988,12 +999,12 @@ fn emit_instr(
         Op::Nand | Op::Nor | Op::Xnor => {
             let x = sl.to(ins, a, ba, t);
             let y = sl.to(ins, bv, bb, t);
-            let z = match op {
-                Op::Nand => ins.ins().band(x, y),
-                Op::Nor => ins.ins().bor(x, y),
-                _ => ins.ins().bxor(x, y),
+            let (z, bz) = match op {
+                Op::Nand => (ins.ins().band(x, y), ba & bb),
+                Op::Nor => (ins.ins().bor(x, y), ba | bb),
+                _ => (ins.ins().bxor(x, y), ba | bb),
             };
-            not_masked(ins, z, m)
+            not_masked(ins, z, bz, m)
         }
         Op::Mux => {
             let x = sl.to(ins, c, bc, t);
