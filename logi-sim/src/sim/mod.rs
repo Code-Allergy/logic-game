@@ -224,8 +224,22 @@ impl Default for SimOptions {
 
 /// Default [`SimOptions::superstep_ticks`].
 pub const DEFAULT_SUPERSTEP_TICKS: u64 = 1;
-/// Default [`SimOptions::superstep_chunk`].
-pub const DEFAULT_SUPERSTEP_CHUNK: usize = 64;
+/// Default [`SimOptions::superstep_chunk`]: 128 items on native targets,
+/// 64 on wasm32 (not measured there).
+///
+/// Chunks of 128 ran 2-4 % faster than chunks of 64 on the NES workspaces
+/// (spec off), the same on dense generated designs, and cost 5-10 % more
+/// compile time. Chunks of 256 ran no faster on the NES, 4-11 % slower on
+/// dense designs (`gates1_30k` and `dag32_10k` with state: Cranelift
+/// spills 3-4 times as many values, long live ranges of values forwarded
+/// within a chunk), and compiled 10-25 % slower. (An earlier sweep on
+/// another machine favored 256-512 with chunks laid out a page each, see
+/// `jit::ARENA`.)
+pub const DEFAULT_SUPERSTEP_CHUNK: usize = if cfg!(target_arch = "wasm32") {
+    64
+} else {
+    128
+};
 
 impl SimOptions {
     /// Everything off: the M3 runtime.

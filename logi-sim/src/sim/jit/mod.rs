@@ -107,8 +107,14 @@ use crate::compile::{Block, Commit, Guard, Instr, Op, Pack, PackOperand, Program
 /// in an SSA value, and in long functions those long live ranges spill.
 /// Measured on `gates1_100k` (23k instructions): chunks of 64 compile in
 /// 150 ms and tick in 11.9 µs; 4096, 840 ms and 17.5 µs. On `cpu16`, 64
-/// is as fast as 4096 in batches and faster tick by tick.
-pub const CHUNK: usize = 64;
+/// is as fast as 4096 in batches and faster tick by tick. Measured again
+/// with the settle entry and contiguous code (`SETTLE_ENTRY`, `ARENA`):
+/// `gates1_100k` ticks in 13-14 µs with chunks of 16 to 64, 15 µs with
+/// 128 and 18 µs with 256 (Cranelift spills 361 values at 64, 9934 at
+/// 128, 22883 at 256), and compiles in 85-100, 110-140 and 160-200 ms;
+/// the NES workspaces with spec on (settle chunks are most of a tick)
+/// run no faster with 128 or 256 (within ±2 %), and their bodies compile
+/// 25 % and 55 % slower.
 
 /// Commits per commit chunk at most.
 pub const COMMIT_CHUNK: usize = 256;
