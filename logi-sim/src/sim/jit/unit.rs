@@ -75,13 +75,10 @@ pub fn compile_unit(p: &Program, body: BodyRef<'_>) -> Result<JitUnit, JitError>
     .map_err(|e| JitError(format!("bad body: {}", e.0)))?;
     let mut b = backend::Builder::new(super::code_hint(std::slice::from_ref(&body)))?;
     let (mut instrs, mut bytes) = (0usize, 0usize);
-    let (s, c) = compile_body(&mut b, p, &body, &mut instrs, &mut bytes)?
+    let ids = compile_body(&mut b, p, &body, &mut instrs, &mut bytes)?
         .ok_or_else(|| JitError("body not compiled (unused or too large)".into()))?;
     let fin = b.finish()?;
-    let body = JitBody {
-        settle: s.into_iter().map(|id| fin.settle_fn(id)).collect(),
-        commit: c.map(|c| c.into_iter().map(|id| fin.commit_fn(id)).collect()),
-    };
+    let body = ids.body(&fin);
     Ok(JitUnit {
         body,
         instrs,

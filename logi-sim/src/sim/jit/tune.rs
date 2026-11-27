@@ -10,6 +10,9 @@
 //! - `LOGI_JIT_ARENA`: `0` puts native code where `cranelift-jit` puts it
 //!   by default (a page-rounded mapping per function that does not fit
 //!   the last one), `1` in contiguous arenas (see `clif::CodeMemory`).
+//! - `LOGI_JIT_ENTRY`: `1` gives a body of several settle chunks an entry
+//!   function that calls each directly (the caller then makes one call per
+//!   settle), `0` has the caller call each chunk ([`super::SETTLE_ENTRY`]).
 //!
 //! The superstep's chunk is a `SimOptions` field
 //! (`SimOptions::superstep_chunk`); the benches read it from
@@ -26,6 +29,7 @@ pub struct Tune {
     pub align: u64,
     #[cfg_attr(target_arch = "wasm32", expect(dead_code))]
     pub arena: bool,
+    pub settle_entry: bool,
 }
 
 fn env<T: std::str::FromStr>(name: &str) -> Option<T> {
@@ -46,5 +50,6 @@ pub fn get() -> &'static Tune {
             .filter(|&n: &u64| n.is_power_of_two() && n <= 4096)
             .unwrap_or(super::FN_ALIGN),
         arena: env::<u8>("LOGI_JIT_ARENA").map_or(super::ARENA, |v| v != 0),
+        settle_entry: env::<u8>("LOGI_JIT_ENTRY").map_or(super::SETTLE_ENTRY, |v| v != 0),
     })
 }

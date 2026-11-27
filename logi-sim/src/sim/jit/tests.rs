@@ -226,7 +226,8 @@ fn compiled_code_can_be_installed_and_removed() {
     );
     assert!(!s.jit_active());
     // Compiling bodies directly: one chunk per `CHUNK` instructions (or
-    // as many as `LOGI_JIT_CHUNK` says).
+    // as many as `LOGI_JIT_CHUNK` says), called through an entry when
+    // there are several and `SETTLE_ENTRY` says so.
     let body = BodyRef {
         blocks: &p.blocks,
         instrs: &p.instrs,
@@ -240,10 +241,15 @@ fn compiled_code_can_be_installed_and_removed() {
     assert_eq!(j.bodies.len(), 1);
     let b = j.bodies[0].as_ref().unwrap();
     let t = super::tune::get();
-    assert_eq!(
-        b.settle.len(),
-        p.instrs.len().div_ceil(t.settle_chunk).max(1)
-    );
+    let chunks = p.instrs.len().div_ceil(t.settle_chunk).max(1);
+    assert_eq!(b.settle_chunks(), chunks);
+    let calls = if t.settle_entry && chunks > 1 {
+        1
+    } else {
+        chunks
+    };
+    assert_eq!(b.settle_calls(), calls);
+    assert_eq!(b.settle.len(), calls);
     assert_eq!(
         b.commit.as_ref().unwrap().len(),
         p.commits.len().div_ceil(t.commit_chunk)

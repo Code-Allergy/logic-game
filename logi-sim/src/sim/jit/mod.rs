@@ -121,6 +121,17 @@ pub const FN_ALIGN: u64 = 1;
 /// `clif::CodeMemory`) rather than where `cranelift-jit` puts it.
 pub const ARENA: bool = true;
 
+/// Whether a body of several settle chunks gets an entry function that
+/// calls each chunk directly, so that a settle is one call from `Sim`.
+/// Otherwise `Sim` calls the chunks one by one from a single call site:
+/// an indirect call with as many targets as chunks, which the branch
+/// predictor follows for some dozens of targets but not for hundreds:
+/// `gates1_100k` tick by tick with chunks of 16 items (1440 per settle)
+/// took 30 µs per tick that way and 12.6 µs with the entry (chunks of 64:
+/// 12-14 µs either way). The chunks called by an entry save no
+/// callee-saved registers. Off on wasm32 (not measured there).
+pub const SETTLE_ENTRY: bool = cfg!(not(target_arch = "wasm32"));
+
 /// Bodies with more instructions (or packed words) than this run
 /// interpreted. Native code is about 20 bytes per instruction, so beyond
 /// this it no longer fits the instruction caches and runs slower than the
@@ -162,13 +173,22 @@ pub struct BodyRef<'a> {
 /// safe code outside it can neither read them nor move a body to another
 /// program (which could outlive the code it points into).
 pub struct JitBody {
+    /// What a settle calls in order: the chunks, or the body's entry,
+    /// which calls them (see [`SETTLE_ENTRY`]).
     pub(crate) settle: Vec<SettleFn>,
     pub(crate) commit: Option<Vec<CommitFn>>,
+    chunks: usize,
 }
 
 impl JitBody {
     /// Settle chunks.
     pub fn settle_chunks(&self) -> usize {
+        self.chunks
+    }
+
+    /// Settle functions called from outside the code per settle: the
+    /// chunks, or 1 with an entry.
+    pub fn settle_calls(&self) -> usize {
         self.settle.len()
     }
 
@@ -341,12 +361,7 @@ impl Layout {
         let bodies = self
             .bodies
             .into_iter()
-            .map(|b| {
-                b.map(|(s, c)| JitBody {
-                    settle: s.into_iter().map(|id| fin.settle_fn(id)).collect(),
-                    commit: c.map(|c| c.into_iter().map(|id| fin.commit_fn(id)).collect()),
-                })
-            })
+            .map(|b| b.map(|ids| ids.body(&fin)))
             .collect();
         let superstep = self.superstep.map(|(id, info)| JitSuper {
             entry: fin.super_fn(id),
@@ -382,7 +397,13 @@ fn define_program(
     if let Some(s) = superstep {
         let ok = s.parts.iter().all(|part| {
             let (Part::Commit { body } | Part::Settle { body, .. }) = *part;
-            matches!(ids.get(body), Some(Some((_, Some(_)))))
+            matches!(
+                ids.get(body),
+                Some(Some(Ids {
+                    commit: Some(_),
+                    ..
+                }))
+            )
         });
         if ok {
             let (id, info) = define_superstep(&mut b, p, bodies, s)?;
@@ -464,7 +485,29 @@ fn define_superstep(
 
 /// The functions of one compiled body: settle chunks, and commit chunks
 /// (`None` when a `MemClear` is committed by the interpreter).
-type Ids = (Vec<backend::FnId>, Option<Vec<backend::FnId>>);
+struct Ids {
+    /// What a settle calls (see [`JitBody`]).
+    settle: Vec<backend::FnId>,
+    commit: Option<Vec<backend::FnId>>,
+    chunks: usize,
+}
+
+impl Ids {
+    /// The body, with the functions of `fin`.
+    fn body(self, fin: &backend::Finished) -> JitBody {
+        JitBody {
+            settle: self
+                .settle
+                .into_iter()
+                .map(|id| fin.settle_fn(id))
+                .collect(),
+            commit: self
+                .commit
+                .map(|c| c.into_iter().map(|id| fin.commit_fn(id)).collect()),
+            chunks: self.chunks,
+        }
+    }
+}
 
 /// Compile one body into `b` (`None`: not used, or larger than
 /// [`MAX_BODY`]). `count` and `bytes` sum instructions and bytes of code.
@@ -510,11 +553,17 @@ fn compile_body(
         }
     }
     let mut settle = Vec::with_capacity(chunks.len());
+    let entry = tune::get().settle_entry && chunks.len() > 1;
     for (ch, live) in chunks.iter().zip(&lives) {
         *count += ch.len();
-        let (id, size) = b.settle(p, body, ch, body.fused_only.then_some(live))?;
+        let (id, size) = b.settle(p, body, ch, body.fused_only.then_some(live), entry)?;
         *bytes += size;
         settle.push(id);
+    }
+    if entry {
+        let (id, size) = b.settle_entry(&settle)?;
+        *bytes += size;
+        settle = vec![id];
     }
     let commit = if body
         .commits
@@ -531,7 +580,11 @@ fn compile_body(
     } else {
         None
     };
-    Ok(Some((settle, commit)))
+    Ok(Some(Ids {
+        settle,
+        commit,
+        chunks: chunks.len(),
+    }))
 }
 
 /// One unit of a chunk: an instruction or a packed word.

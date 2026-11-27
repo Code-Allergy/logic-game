@@ -135,8 +135,14 @@ impl Builder {
         body: &BodyRef<'_>,
         items: &[(Item, u32)],
         live: Option<&HashSet<u32>>,
+        inner: bool,
     ) -> Result<(FnId, usize), JitError> {
         let cfg = self.start(&[Ty::Ptr, Ty::Ptr, Ty::U64]);
+        if inner {
+            // Only called by the body's entry, which keeps nothing in
+            // registers across calls: no callee-saved registers.
+            self.ctx.func.signature.call_conv = cranelift_codegen::isa::CallConv::Winch;
+        }
         build_settle(
             cfg,
             &mut self.ctx.func,
@@ -193,7 +199,28 @@ impl Builder {
 
     /// The superstep entry ([`SuperFn`]): calls `chunks` in order.
     pub fn super_entry(&mut self, chunks: &[FnId]) -> Result<(FnId, usize), JitError> {
-        let cfg = self.start(&[Ty::Ptr, Ty::Ptr, Ty::U64, Ty::Ptr, Ty::Ptr]);
+        self.entry(
+            &[Ty::Ptr, Ty::Ptr, Ty::U64, Ty::Ptr, Ty::Ptr],
+            chunks,
+            "super",
+        )
+    }
+
+    /// A body's settle entry ([`SettleFn`]): calls its `chunks` (settle
+    /// chunks defined `inner`) in order.
+    pub fn settle_entry(&mut self, chunks: &[FnId]) -> Result<(FnId, usize), JitError> {
+        self.entry(&[Ty::Ptr, Ty::Ptr, Ty::U64], chunks, "settle")
+    }
+
+    /// A function of `params` that calls `chunks` in order with its own
+    /// arguments.
+    fn entry(
+        &mut self,
+        params: &[Ty],
+        chunks: &[FnId],
+        prefix: &str,
+    ) -> Result<(FnId, usize), JitError> {
+        let cfg = self.start(params);
         let module = self.owned.0.as_mut().expect("a module");
         let refs: Vec<_> = chunks
             .iter()
@@ -212,7 +239,7 @@ impl Builder {
             b.ins().return_(&[]);
             b.finalize(cfg);
         }
-        self.define("super")
+        self.define(prefix)
     }
 
     /// Make the code executable.
