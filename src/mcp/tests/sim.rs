@@ -242,6 +242,34 @@ fn recordings_go_to_a_trace_and_compare_with_expected_rows() {
         out.text
     );
 
+    // Names are case-sensitive: with `c` and `C` both recorded, each
+    // column is its own (both used to mean the first, leaving `C`
+    // unchecked). Another case still finds a signal where it says one.
+    let both = |rows: Value, columns: Value| {
+        script(
+            &ws,
+            json!({"signals": {"c": "Count", "C": "Data"}, "steps": [
+                {"set": {"Go": 1}}, {"record": ["c", "C"]},
+                {"compare": {"columns": columns, "rows": rows}},
+                {"ticks": 2}
+            ]}),
+        )
+    };
+    let out = both(json!([[5, 0], [5, 1]]), json!(["C", "c"]));
+    assert!(out.failed, "{}", out.text);
+    assert!(out.text.contains("C: expected"), "{}", out.text);
+    let out = both(json!([[0, 0], [0, 1]]), json!(["C", "c"]));
+    assert!(!out.failed, "{}", out.text);
+    let out = script(
+        &ws,
+        json!({"steps": [
+            {"set": {"Go": 1}}, {"record": ["Count"]},
+            {"compare": {"columns": ["COUNT"], "rows": [[0], [1]]}},
+            {"ticks": 2}
+        ]}),
+    );
+    assert!(!out.failed, "{}", out.text);
+
     // A context too large to keep is refused before anything runs (the
     // row limit is `context + 1`: the largest number overflowed it).
     let e = script_error(

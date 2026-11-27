@@ -446,10 +446,18 @@ pub(crate) fn expected(spec: &Value, columns: &[Signal]) -> Result<Expected, Str
         Some(v) => number(&v)? as usize,
         None => 0,
     };
+    // A recorded signal by name: exactly, or, for the names of CPU logs
+    // (`A:`, `SP:`), whatever the case where that says one signal. Names
+    // are case-sensitive, so `A` and `a` may both be recorded.
     let column = |name: &str| {
-        columns
-            .iter()
-            .position(|c| c.text.eq_ignore_ascii_case(name))
+        columns.iter().position(|c| c.text == name).or_else(|| {
+            let mut alike = columns
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.text.eq_ignore_ascii_case(name));
+            let first = alike.next()?;
+            alike.next().is_none().then_some(first.0)
+        })
     };
     // Which recorded column each position of a row holds.
     let positions: Option<Vec<Option<usize>>> = match map.shift_remove("columns") {
