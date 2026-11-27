@@ -62,7 +62,7 @@
 //! The pass runs when a `Sim` builds its bodies, like tick fusion's
 //! pruning; the compiled `Program` is unchanged.
 
-use super::{Block, Body, Cond, FastMap, FastSet, Guard, Op, Program};
+use super::{Block, Body, Cond, FastMap, Guard, Op, Program};
 
 /// Fewest instructions (with nested regions) a region needs to be guarded.
 /// A guard costs a test and a branch, splits blocks (interpreter) and
@@ -144,7 +144,10 @@ pub fn guard_with(
     // split into their arms and the tree is built again. The last round
     // merges and groups nothing (each arm its own region, which always
     // lays out).
-    let mut undo = Undo::default();
+    let mut undo = Undo {
+        ungroup: vec![false; 3 * m],
+        split: vec![false; 3 * m],
+    };
     let mut groups: Option<Grouping> = None;
     let none = Grouping::default();
     for round in 0..=MERGE_ROUNDS {
@@ -153,7 +156,7 @@ pub fn guard_with(
         let tree = Tree::build(&cx, merge, g);
         if merge.is_some() && groups.is_none() {
             let g = tree.groups(&cx);
-            let again = !g.0.is_empty();
+            let again = !g.group.is_empty();
             groups = Some(g);
             if again {
                 continue;
@@ -166,8 +169,16 @@ pub fn guard_with(
         }
         match result {
             Ok(b) => return b,
-            Err((arms, true)) => undo.ungroup.extend(arms),
-            Err((arms, false)) => undo.split.extend(arms),
+            Err((arms, group)) => {
+                let set = if group {
+                    &mut undo.ungroup
+                } else {
+                    &mut undo.split
+                };
+                for (k, port) in arms {
+                    set[arm(k, port)] = true;
+                }
+            }
         }
     }
     None
@@ -184,16 +195,25 @@ thread_local! {
 /// whether they are groups (else merged regions).
 type Undone = (Vec<(u32, u8)>, bool);
 
-/// Arms not to group, and arms not to merge either (each its own region).
-#[derive(Default)]
-struct Undo {
-    ungroup: FastSet<(u32, u8)>,
-    split: FastSet<(u32, u8)>,
+/// Index of operand `port` of instruction `k` in the per-arm tables.
+fn arm(k: u32, port: u8) -> usize {
+    k as usize * 3 + port as usize
 }
 
-/// Arms grouped (with their group's number) and arms without a region
-/// (see [`Tree::groups`]).
-type Grouping = (FastMap<(u32, u8), u32>, FastSet<(u32, u8)>);
+/// Per arm ([`arm`]): not to group, and not to merge either (each its
+/// own region).
+struct Undo {
+    ungroup: Vec<bool>,
+    split: Vec<bool>,
+}
+
+/// Per arm ([`arm`]): its group's number (`NONE` for none), and whether
+/// it gets no region (see [`Tree::groups`]). Empty: nothing grouped.
+#[derive(Default)]
+struct Grouping {
+    group: Vec<u32>,
+    flat: Vec<bool>,
+}
 
 /// What every round of [`Tree::build`] reads.
 struct Cx<'a> {
@@ -250,7 +270,7 @@ impl Tree {
     /// per parent, which runs when any of their conditions holds, and the
     /// other arms in `flat` (too small to guard) get no region. Without
     /// `merge`, every arm gets a region of its own.
-    fn build(cx: &Cx<'_>, merge: Option<&Undo>, (groups, flat): &Grouping) -> Tree {
+    fn build(cx: &Cx<'_>, merge: Option<&Undo>, grouping: &Grouping) -> Tree {
         let body = cx.body;
         let m = body.instrs.len();
         let slot_count = cx.writer.len();
@@ -265,8 +285,7 @@ impl Tree {
             any: Vec::new(),
             merged: false,
         }];
-        // Region of each arm, and of each (parent, condition) when merged.
-        let mut child: FastMap<(u32, u8), u32> = FastMap::default();
+        // Region of each (parent, condition) when merged.
         let mut shared: FastMap<(u32, u32, bool), u32> = FastMap::default();
         let mut arms: Vec<(u32, u8, u32)> = Vec::new();
         // Per slot: the deepest region containing every use seen so far.
@@ -325,18 +344,20 @@ impl Tree {
                         }),
                         _ => None,
                     };
-                    let arm = (k, port);
+                    let a = arm(k, port);
                     // A small arm of the tree before grouping runs in its
                     // parent anyway: without a region, its muxes (and the
                     // arms below) sit in the parent a group belongs to.
                     let group = merge
-                        .filter(|u| !u.split.contains(&arm) && !u.ungroup.contains(&arm))
-                        .and_then(|_| groups.get(&arm));
-                    let flatten = merge.is_some() && flat.contains(&arm) && group.is_none();
+                        .filter(|u| !u.split[a] && !u.ungroup[a])
+                        .and_then(|_| grouping.group.get(a).copied())
+                        .filter(|&g| g != NONE);
+                    let flatten =
+                        merge.is_some() && grouping.flat.get(a) == Some(&true) && group.is_none();
                     let r = match cond {
                         None => h,
                         Some(_) if flatten => h,
-                        Some(cond) => *child.entry(arm).or_insert_with(|| {
+                        Some(cond) => {
                             let new = |regions: &mut Vec<Region>| {
                                 regions.push(Region {
                                     parent: h,
@@ -348,9 +369,9 @@ impl Tree {
                                 regions.len() as u32 - 1
                             };
                             let r = match merge {
-                                Some(u) if !u.split.contains(&arm) => {
+                                Some(u) if !u.split[a] => {
                                     let key = match group {
-                                        Some(&g) => (h, GROUP | g, false),
+                                        Some(g) => (h, GROUP | g, false),
                                         None => (h, cond.slot, cond.when),
                                     };
                                     let r = match shared.get(&key) {
@@ -374,7 +395,7 @@ impl Tree {
                             };
                             arms.push((k, port, r));
                             r
-                        }),
+                        }
                     };
                     acc[s as usize] = lca(&regions, acc[s as usize], r);
                 }
@@ -494,14 +515,14 @@ impl Tree {
         if nc < 2 {
             return Grouping::default();
         }
-        let arm_region: FastMap<(u32, u8), u32> =
-            self.arms.iter().map(|&(k, p, r)| ((k, p), r)).collect();
+        let mut arm_region = vec![NONE; 3 * m];
+        for &(k, p, r) in &self.arms {
+            arm_region[arm(k, p)] = r;
+        }
         // Region of a read: an arm's, or the reader's.
-        let read_region = |k: u32, port: u8| {
-            arm_region
-                .get(&(k, port))
-                .copied()
-                .unwrap_or(self.home0[k as usize])
+        let read_region = |k: u32, port: u8| match arm_region[arm(k, port)] {
+            NONE => self.home0[k as usize],
+            r => r,
         };
         let of = |k: u32| cand[self.home0[k as usize] as usize];
         // Which candidates' muxes each value depends on, and which each
@@ -510,46 +531,46 @@ impl Tree {
         let words = nc.div_ceil(64);
         let mut dep = vec![0u64; m * words];
         let mut inputs = vec![0u64; nc * words];
+        // Instructions come after the instructions they read (the body is
+        // in rank order), so a row is complete before it is read.
+        let row = |x: u32| x as usize * words..(x as usize + 1) * words;
         let or_into = |dst: &mut [u64], src: &[u64]| {
             for (d, s) in dst.iter_mut().zip(src) {
                 *d |= s;
             }
         };
+        let mut d = vec![0u64; words];
         for b in &body.blocks {
             let (sa, sb, sc) = b.op.slot_operands();
             for k in b.start..b.start + b.len {
                 let i = body.instrs[k as usize];
-                let mut d = vec![0u64; words];
+                d.fill(0);
                 for (port, is, s) in [(0u8, sa, i.a), (1, sb, i.b), (2, sc, i.c)] {
                     let w = cx.operand_writer(is, s);
-                    if !is || w == NONE {
+                    if w == NONE {
                         continue;
                     }
-                    let wd = &dep[w as usize * words..(w as usize + 1) * words];
-                    or_into(&mut d, wd);
+                    or_into(&mut d, &dep[row(w)]);
                     // Into a candidate from outside it (its arm reads
                     // included; a select is read by its mux, outside).
                     let c = cand[read_region(k, port) as usize];
                     if c != NONE && of(w) != c {
-                        let ci = index[c as usize] as usize;
-                        let wd = dep[w as usize * words..(w as usize + 1) * words].to_vec();
-                        or_into(&mut inputs[ci * words..(ci + 1) * words], &wd);
+                        let ci = index[c as usize];
+                        or_into(&mut inputs[row(ci)], &dep[row(w)]);
                     }
                     // A candidate's mux.
-                    if let Some(&r) = arm_region.get(&(k, port))
-                        && index[r as usize] != NONE
-                    {
-                        let ci = index[r as usize] as usize;
-                        d[ci / 64] |= 1 << (ci % 64);
+                    let r = arm_region[arm(k, port)];
+                    if r != NONE && index[r as usize] != NONE {
+                        let ci = index[r as usize];
+                        d[ci as usize / 64] |= 1 << (ci % 64);
                         // Its condition is read where the group begins.
                         let cw = cx.writer[i.a as usize];
                         if cw != NONE {
-                            let wd = dep[cw as usize * words..(cw as usize + 1) * words].to_vec();
-                            or_into(&mut inputs[ci * words..(ci + 1) * words], &wd);
+                            or_into(&mut inputs[row(ci)], &dep[row(cw)]);
                         }
                     }
                 }
-                dep[k as usize * words..(k as usize + 1) * words].copy_from_slice(&d);
+                dep[row(k)].copy_from_slice(&d);
             }
         }
         // A set of candidates: its members' bits, its inputs' dependences,
@@ -576,29 +597,31 @@ impl Tree {
                 members: vec![r],
             }
         };
-        let joins = |a: &Set, b: &Set| -> Option<Set> {
+        // `b` joined into `a`, if they can share a group.
+        let join = |a: &mut Set, b: &Set| -> bool {
             let clash = |x: &[u64], y: &[u64]| x.iter().zip(y).any(|(p, q)| p & q != 0);
-            if a.parent != b.parent || clash(&a.ins, &b.bits) || clash(&b.ins, &a.bits) {
-                return None;
+            let new = b.conds.iter().filter(|c| !a.conds.contains(c)).count();
+            if a.parent != b.parent
+                || a.conds.len() + new > MAX_ANY
+                || clash(&a.ins, &b.bits)
+                || clash(&b.ins, &a.bits)
+            {
+                return false;
             }
-            let mut conds = a.conds.clone();
             for c in &b.conds {
-                if !conds.contains(c) {
-                    conds.push(*c);
+                if !a.conds.contains(c) {
+                    a.conds.push(*c);
                 }
             }
-            if conds.len() > MAX_ANY {
-                return None;
+            for (x, y) in a.bits.iter_mut().zip(&b.bits) {
+                *x |= y;
             }
-            let or = |x: &[u64], y: &[u64]| x.iter().zip(y).map(|(p, q)| p | q).collect();
-            Some(Set {
-                bits: or(&a.bits, &b.bits),
-                ins: or(&a.ins, &b.ins),
-                conds,
-                n: a.n + b.n,
-                parent: a.parent,
-                members: [a.members.clone(), b.members.clone()].concat(),
-            })
+            for (x, y) in a.ins.iter_mut().zip(&b.ins) {
+                *x |= y;
+            }
+            a.n += b.n;
+            a.members.extend_from_slice(&b.members);
+            true
         };
         // Values read only by candidates (more than one): theirs join.
         let mut sets: Vec<Option<Set>> = (0..nc).map(|i| Some(set_of(i))).collect();
@@ -641,26 +664,30 @@ impl Tree {
             if outside[run[0].0 as usize] || run.len() < 2 {
                 continue;
             }
-            let mut lead = set_of_cand[run[0].1 as usize];
+            let lead = set_of_cand[run[0].1 as usize];
+            let mut joined = false;
             for x in &run[1..] {
                 let other = set_of_cand[x.1 as usize];
                 if other == lead {
                     continue;
                 }
-                let (Some(a), Some(b)) = (&sets[lead], &sets[other]) else {
+                let Some(b) = sets[other].take() else {
                     continue;
                 };
-                if let Some(mut j) = joins(a, b) {
-                    j.n += 1;
-                    for &r in &j.members {
+                let a = sets[lead].as_mut().expect("a lead set");
+                if join(a, &b) {
+                    joined = true;
+                    for &r in &b.members {
                         set_of_cand[index[r] as usize] = lead;
                     }
-                    sets[lead] = Some(j);
-                    sets[other] = None;
+                } else {
+                    sets[other] = Some(b);
                 }
             }
-            lead = set_of_cand[run[0].1 as usize];
-            let _ = lead;
+            if joined {
+                // The value joins the group too.
+                sets[lead].as_mut().expect("a lead set").n += 1;
+            }
         }
         // Then, per kept region, the largest set left with the next
         // largest that join it, until it is big enough.
@@ -681,8 +708,7 @@ impl Tree {
                 if used[j] {
                     continue;
                 }
-                if let Some(x) = joins(&cur, &left[j]) {
-                    cur = x;
+                if join(&mut cur, &left[j]) {
                     took.push(j);
                 }
             }
@@ -701,19 +727,20 @@ impl Tree {
         }
         // The arms of a grouped candidate get the group (the arms inside it
         // keep their regions, inside the group).
-        let grouped = self
-            .arms
-            .iter()
-            .filter(|a| group_of[a.2 as usize] != NONE)
-            .map(|&(k, port, r)| ((k, port), group_of[r as usize]))
-            .collect();
-        let flat = self
-            .arms
-            .iter()
-            .filter(|a| !kept(a.2 as usize))
-            .map(|&(k, port, _)| (k, port))
-            .collect();
-        (grouped, flat)
+        let mut out = Grouping {
+            group: vec![NONE; 3 * m],
+            flat: vec![false; 3 * m],
+        };
+        let mut any = false;
+        for &(k, port, r) in &self.arms {
+            out.group[arm(k, port)] = group_of[r as usize];
+            out.flat[arm(k, port)] = !kept(r as usize);
+            any |= group_of[r as usize] != NONE;
+        }
+        if !any {
+            out.group.clear();
+        }
+        out
     }
 
     /// The guarded body (`Ok(None)` when no region is kept), or `Err`
@@ -787,15 +814,13 @@ impl Tree {
         // operands, and the conditions of a region's guard (read where the
         // region begins).
         let n_items = m + nr;
-        let mut succ: Vec<Vec<u32>> = vec![Vec::new(); n_items];
-        let mut preds = vec![0u32; n_items];
+        let mut edges: Vec<(u32, u32)> = Vec::with_capacity(2 * m);
         let mut edge = |w: u32, x: u32, rx: u32| {
             let rw = home[w as usize];
             let l = lca(rw, rx);
             let (a, b) = (item(w, l, rw), item(x, l, rx));
             if a != b {
-                succ[a as usize].push(b);
-                preds[b as usize] += 1;
+                edges.push((a, b));
             }
         };
         for b in &body.blocks {
@@ -839,8 +864,7 @@ impl Tree {
                         let a = item(w, l, rw);
                         let b = m as u32 + below(r as u32, l);
                         if a != b {
-                            succ[a as usize].push(b);
-                            preds[b as usize] += 1;
+                            edges.push((a, b));
                         }
                     }
                 }
@@ -859,6 +883,22 @@ impl Tree {
                 (ready[x as usize - m], 0, 0, x)
             }
         };
+        // The reads as adjacency lists (by source), and in-degrees.
+        let mut start = vec![0u32; n_items + 1];
+        let mut preds = vec![0u32; n_items];
+        for &(a, b) in &edges {
+            start[a as usize + 1] += 1;
+            preds[b as usize] += 1;
+        }
+        for x in 0..n_items {
+            start[x + 1] += start[x];
+        }
+        let mut succ = vec![0u32; edges.len()];
+        let mut fill = start.clone();
+        for &(a, b) in &edges {
+            succ[fill[a as usize] as usize] = b;
+            fill[a as usize] += 1;
+        }
         let mut sorted: Vec<Vec<u32>> = vec![Vec::new(); nr];
         let mut stuck: Vec<u32> = Vec::new();
         let mut heap = std::collections::BinaryHeap::new();
@@ -874,7 +914,7 @@ impl Tree {
             let out = &mut sorted[r];
             while let Some(std::cmp::Reverse((_, _, _, x))) = heap.pop() {
                 out.push(x);
-                for &y in &succ[x as usize] {
+                for &y in &succ[start[x as usize] as usize..start[x as usize + 1] as usize] {
                     preds[y as usize] -= 1;
                     if preds[y as usize] == 0 {
                         heap.push(std::cmp::Reverse(key(y)));
