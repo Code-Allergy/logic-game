@@ -51,7 +51,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use crate::compile::guard::guard_with;
-use crate::compile::spec::{KeyLayout, PlanOptions, SpecContext, choose_plan, pext};
+use crate::compile::spec::{KeyLayout, PlanOptions, SpecContext, choose_plan};
 use crate::compile::{Body, FastMap, Program, phases};
 use crate::netlist::mask;
 
@@ -214,43 +214,140 @@ pub struct PhasePlan {
     pub keys: Vec<u64>,
 }
 
-/// One key field, ready to pack.
-#[derive(Debug, Clone, Copy)]
-struct Field {
+/// A run of contiguous key bits from one slot, ready to pack: the key
+/// takes `(slots[slot] & mask).rotate_right(rot)`. A field mask with gaps
+/// is split into its runs (so packing needs no `pext` and no branch), and
+/// runs of one slot that move by the same amount are merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Seg {
     slot: u32,
     mask: u64,
-    /// Where the field's bits start in the key.
-    at: u32,
-    /// The mask's lowest bit when its bits are contiguous (a shift packs
-    /// them); `None`: a `pext`.
-    shift: Option<u32>,
+    rot: u32,
 }
 
-/// The key is packed with a shift per contiguous field mask and `pext`
-/// otherwise.
-fn fields_of(layout: &KeyLayout) -> Vec<Field> {
-    let mut fields = Vec::new();
-    let mut at = 0;
-    for f in layout.fields.iter().filter(|f| f.mask != 0) {
-        let lo = f.mask.trailing_zeros();
-        let contiguous = (f.mask >> lo).wrapping_add(1) & (f.mask >> lo) == 0;
-        fields.push(Field {
-            slot: f.slot,
-            mask: f.mask,
-            at,
-            shift: contiguous.then_some(lo),
-        });
-        at += f.mask.count_ones();
+/// The segments packing `layout`'s key ([`KeyLayout::pack`]): each field's
+/// set bits, in order from bit 0 of the key.
+fn segs_of(layout: &KeyLayout) -> Vec<Seg> {
+    debug_assert!(layout.fits());
+    let mut segs: Vec<Seg> = Vec::new();
+    let mut at = 0u32;
+    for f in &layout.fields {
+        let mut m = f.mask;
+        while m != 0 {
+            let lo = m.trailing_zeros();
+            let len = (m >> lo).trailing_ones();
+            let run = if len == 64 {
+                m
+            } else {
+                ((1u64 << len) - 1) << lo
+            };
+            m &= !run;
+            // The run's bits go from `lo` to `at`: a rotation that does
+            // not wrap (both ranges are within the word).
+            let rot = lo.wrapping_sub(at) & 63;
+            match segs.iter_mut().find(|g| g.slot == f.slot && g.rot == rot) {
+                Some(g) => g.mask |= run,
+                None => segs.push(Seg {
+                    slot: f.slot,
+                    mask: run,
+                    rot,
+                }),
+            }
+            at += len;
+        }
     }
-    fields
+    segs
 }
 
-/// A body in a table: its run and when it was last hit (the phase's
-/// clock, `hits + misses`).
+/// A body in a table: its key, its run and when it was last hit (the
+/// phase's clock, `hits + misses`).
 #[derive(Debug, Clone, Copy)]
 struct Entry {
+    key: u64,
     run: u16,
     last: u64,
+}
+
+/// A phase's bodies by key: the entries in a vector, indexed by a map, and
+/// the entry (or miss) of the key looked up last. Consecutive fused ticks
+/// of a phase mostly have the key of the tick before (on the NES console,
+/// 98 % of the ticks of two of its three phases), which then costs a
+/// compare instead of a hash lookup.
+#[derive(Debug, Clone, Default)]
+struct Table {
+    index: FastMap<u64, u32>,
+    entries: Vec<Entry>,
+    /// The key looked up last, and its entry's index (`MISS`: none).
+    memo_key: u64,
+    memo: u32,
+}
+
+/// [`Table::memo`] of a key without a body.
+const MISS: u32 = u32::MAX;
+
+impl Table {
+    fn new() -> Self {
+        Table {
+            memo: MISS,
+            ..Table::default()
+        }
+    }
+
+    /// The index of `key`'s entry, or `MISS`.
+    #[inline]
+    fn find(&mut self, key: u64) -> u32 {
+        if key != self.memo_key {
+            self.memo_key = key;
+            self.memo = self.index.get(&key).copied().unwrap_or(MISS);
+        }
+        self.memo
+    }
+
+    fn get(&self, key: u64) -> Option<&Entry> {
+        let &i = self.index.get(&key)?;
+        Some(&self.entries[i as usize])
+    }
+
+    fn contains_key(&self, key: u64) -> bool {
+        self.index.contains_key(&key)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, Entry> {
+        self.entries.iter()
+    }
+
+    /// Add `key`, or replace its entry (only a test's mutation installs
+    /// a key twice).
+    fn insert(&mut self, key: u64, run: u16, last: u64) {
+        let e = Entry { key, run, last };
+        match self.index.get(&key) {
+            Some(&i) => self.entries[i as usize] = e,
+            None => {
+                self.index.insert(key, self.entries.len() as u32);
+                self.entries.push(e);
+            }
+        }
+        self.unmemo();
+    }
+
+    fn remove(&mut self, key: u64) -> Option<Entry> {
+        let i = self.index.remove(&key)? as usize;
+        let e = self.entries.swap_remove(i);
+        if let Some(moved) = self.entries.get(i) {
+            self.index.insert(moved.key, i as u32);
+        }
+        self.unmemo();
+        Some(e)
+    }
+
+    /// The memo after a change of the table.
+    fn unmemo(&mut self) {
+        self.memo = self.index.get(&self.memo_key).copied().unwrap_or(MISS);
+    }
 }
 
 /// Miss counters per phase: direct-mapped by key hash, a majority vote per
@@ -340,14 +437,16 @@ impl Adapt {
 /// A keyed phase: its prefix, its fallback and its table.
 #[derive(Debug, Clone)]
 pub(super) struct PhaseSpec {
-    fields: Vec<Field>,
+    segs: Vec<Seg>,
+    /// The key's fields as words (see [`PhaseSpec::field_words`]).
+    words: Vec<u64>,
     /// The run computing the key slots the body computes (`None`: every
     /// key slot is state, an input or a constant).
     pub prefix: Option<u16>,
     /// The run a miss settles with.
     pub fallback: u16,
     /// Key -> body.
-    table: FastMap<u64, Entry>,
+    table: Table,
     /// Fused ticks that found a body, and that did not.
     pub hits: u64,
     pub misses: u64,
@@ -369,16 +468,31 @@ thread_local! {
 }
 
 impl PhaseSpec {
-    /// The key of the slots now.
+    /// A phase keyed by `layout`, its table empty.
+    fn new(layout: &KeyLayout, prefix: Option<u16>, fallback: u16) -> Self {
+        PhaseSpec {
+            segs: segs_of(layout),
+            words: layout
+                .fields
+                .iter()
+                .filter(|f| f.mask != 0)
+                .flat_map(|f| [u64::from(f.slot), f.mask])
+                .collect(),
+            prefix,
+            fallback,
+            table: Table::new(),
+            hits: 0,
+            misses: 0,
+            adapt: None,
+        }
+    }
+
+    /// The key of the slots now ([`KeyLayout::pack`]).
     #[inline]
     pub fn key(&self, slots: &[u64]) -> u64 {
         let mut key = 0;
-        for f in &self.fields {
-            let v = slots[f.slot as usize] & f.mask;
-            key |= match f.shift {
-                Some(lo) => v >> lo,
-                None => pext(v, f.mask),
-            } << f.at;
+        for g in &self.segs {
+            key |= (slots[g.slot as usize] & g.mask).rotate_right(g.rot);
         }
         key
     }
@@ -387,7 +501,7 @@ impl PhaseSpec {
     #[cfg_attr(not(test), expect(dead_code))]
     #[inline]
     pub fn lookup(&self, key: u64) -> u16 {
-        self.table.get(&key).map_or(self.fallback, |e| e.run)
+        self.table.get(key).map_or(self.fallback, |e| e.run)
     }
 
     /// The run for `key` in a fused tick: [`PhaseSpec::lookup`], counting
@@ -395,7 +509,8 @@ impl PhaseSpec {
     #[inline]
     pub fn dispatch(&mut self, key: u64) -> u16 {
         let clock = self.hits + self.misses;
-        if let Some(e) = self.table.get_mut(&key) {
+        let i = self.table.find(key);
+        if let Some(e) = self.table.entries.get_mut(i as usize) {
             e.last = clock;
             self.hits += 1;
             return e.run;
@@ -410,11 +525,8 @@ impl PhaseSpec {
     /// The key's fields as words (slot, mask per field), for telling run
     /// layouts apart: bodies for the same keys but other fields assume
     /// other bits.
-    fn field_words(&self) -> Vec<u64> {
-        self.fields
-            .iter()
-            .flat_map(|f| [u64::from(f.slot), f.mask])
-            .collect()
+    fn field_words(&self) -> &[u64] {
+        &self.words
     }
 
     /// Specialized bodies.
@@ -424,7 +536,7 @@ impl PhaseSpec {
 
     /// Key values with a body, and their runs (sorted by key).
     pub fn entries(&self) -> Vec<(u64, u16)> {
-        let mut v: Vec<(u64, u16)> = self.table.iter().map(|(&k, e)| (k, e.run)).collect();
+        let mut v: Vec<(u64, u16)> = self.table.iter().map(|e| (e.key, e.run)).collect();
         v.sort_unstable();
         v
     }
@@ -443,7 +555,7 @@ impl PhaseSpec {
         let clock = self.hits + self.misses;
         self.table
             .iter()
-            .map(|(&k, e)| (clock - e.last.min(clock), k, e.run))
+            .map(|e| (clock - e.last.min(clock), e.key, e.run))
             .filter(|&(age, _, _)| age >= a.window)
             .collect()
     }
@@ -455,7 +567,7 @@ impl PhaseSpec {
         };
         let clock = self.hits + self.misses;
         self.table
-            .values()
+            .iter()
             .any(|e| clock - e.last.min(clock) >= a.window)
     }
 
@@ -496,15 +608,7 @@ impl PhaseSpec {
             .iter()
             .copied()
             .filter(move |&k| k & !mask(width as u8) == 0);
-        let mut ps = PhaseSpec {
-            fields: fields_of(layout),
-            prefix,
-            fallback,
-            table: FastMap::default(),
-            hits: 0,
-            misses: 0,
-            adapt: None,
-        };
+        let mut ps = PhaseSpec::new(layout, prefix, fallback);
         if let Some(o) = adaptive {
             let mut a = Adapt::new(Arc::clone(cx), pre.into(), layout.clone(), o);
             for key in keys {
@@ -514,7 +618,7 @@ impl PhaseSpec {
             return Some(ps);
         }
         for key in keys {
-            if ps.table.contains_key(&key) {
+            if ps.table.contains_key(key) {
                 continue;
             }
             #[cfg(test)]
@@ -529,7 +633,7 @@ impl PhaseSpec {
             let Some(run) = add(guard(body)) else {
                 break;
             };
-            ps.table.insert(key, Entry { run, last: 0 });
+            ps.table.insert(key, run, 0);
         }
         Some(ps)
     }
@@ -750,7 +854,7 @@ impl Spec {
                 out.push((r, true));
             }
             out.push((ps.fallback, false));
-            out.extend(ps.table.values().map(|e| (e.run, false)));
+            out.extend(ps.table.iter().map(|e| (e.run, false)));
         }
         out.retain(|&(r, _)| r as usize <= self.base);
         out
@@ -1237,7 +1341,7 @@ impl Sim {
             for key in std::mem::take(&mut a.wanted) {
                 let phase_room = bodies + asked_here < o.max_per_phase || cold;
                 let room = live + asked < o.max_bodies || any_cold;
-                if ps.table.contains_key(&key) || !(phase_room && room) {
+                if ps.table.contains_key(key) || !(phase_room && room) {
                     a.pending.remove(&key);
                     self.spec_life.dropped += 1;
                     continue;
@@ -1353,15 +1457,9 @@ impl Sim {
                 _ => (None, self.fused[k]),
             };
             table.resize(k + 1, None);
-            table[k] = Some(PhaseSpec {
-                fields: fields_of(&ph.layout),
-                prefix,
-                fallback,
-                table: FastMap::default(),
-                hits: 0,
-                misses: 0,
-                adapt: Some(Box::new(Adapt::new(ph.cx, ph.pre, ph.layout, &o))),
-            });
+            let mut ps = PhaseSpec::new(&ph.layout, prefix, fallback);
+            ps.adapt = Some(Box::new(Adapt::new(ph.cx, ph.pre, ph.layout, &o)));
+            table[k] = Some(ps);
         }
         if table.iter().any(Option::is_some) {
             table.resize(self.fused.len(), None);
@@ -1437,18 +1535,12 @@ impl Sim {
     /// Evict the body of `key` in phase `k`.
     fn evict(&mut self, k: usize, key: u64) {
         let ps = self.spec.phases[k].as_mut().expect("a keyed phase");
-        let e = ps.table.remove(&key).expect("a body");
+        let e = ps.table.remove(key).expect("a body");
         #[cfg(test)]
         if MUTATION.get() == 4 {
             // Mutation: the entry stays (as if just hit), its run is freed.
             let clock = ps.hits + ps.misses;
-            ps.table.insert(
-                key,
-                Entry {
-                    run: e.run,
-                    last: clock,
-                },
-            );
+            ps.table.insert(key, e.run, clock);
         }
         self.free_run(e.run);
         self.spec_life.evicted += 1;
@@ -1465,7 +1557,7 @@ impl Sim {
             return false;
         };
         a.pending.remove(&key);
-        if key & !mask(a.layout.width() as u8) != 0 || ps.table.contains_key(&key) {
+        if key & !mask(a.layout.width() as u8) != 0 || ps.table.contains_key(key) {
             return false;
         }
         let bytes = b.unit.as_ref().map_or(0, Unit::code_bytes);
@@ -1518,7 +1610,7 @@ impl Sim {
         let key = if MUTATION.get() == 3 { key ^ 1 } else { key };
         let ps = self.spec.phases[k].as_mut().expect("keyed");
         let last = ps.hits + ps.misses;
-        ps.table.insert(key, Entry { run, last });
+        ps.table.insert(key, run, last);
         true
     }
 
