@@ -26,7 +26,19 @@
 //! the interpreter actually executes per tick in `run(n)` batches, with
 //! guards on and off: what guards skip at run time.
 //! `--unnamed` lists the ops that write no authored net, `--ops <block>`
-//! the ops writing a block's nets (op, width, operands, readers).
+//! the ops writing a block's nets (op, width, operands, readers) in the
+//! fused body of phase 0 (`OPS_PHASE=k`: of phase k).
+//! `--dead [ticks]` (default 200000) runs the console tick by tick and,
+//! on every 7th tick, finds the instructions of that tick's fused body
+//! (unguarded, without known bits) that are dead: computed though nothing
+//! reads them (every reader dead, or a `Mux`/`Switch` whose select picks
+//! the other arm; "mux+and" also counts an `And` operand read while the
+//! other is 0). It reports instructions per fused tick, those the guards
+//! (`guard_with`, `GUARD_MIN` instructions) skip, those executed and
+//! dead, per block (`--attribute` depth), with `DEAD_LIST=1` the
+//! instructions executed and dead on at least `DEAD_THR` (0.99) of their
+//! ticks with their readers, and with `GUARD_STATS=1` the guards by size
+//! and by how often they run.
 //! `--live <frames> [--skip <frames>] [--press ...] [--every <k>]
 //! [--dead-ops <prefix>] [--attribute <depth>]` measures the running
 //! console instead of the static bodies: the interpreter plays the presses
@@ -104,6 +116,11 @@ fn main() -> Result<(), String> {
         let block = args.get(k + 1).cloned().unwrap_or_default();
         args.drain(k..(k + 2).min(args.len()));
         block
+    });
+    let dead = args.iter().position(|a| a == "--dead").map(|k| {
+        let n = args.get(k + 1).and_then(|d| d.parse::<u64>().ok());
+        args.drain(k..(k + 1 + usize::from(n.is_some())).min(args.len()));
+        n.unwrap_or(200_000)
     });
     let attribute = args.iter().position(|a| a == "--attribute").map(|k| {
         let depth = args.get(k + 1).and_then(|d| d.parse::<usize>().ok());
@@ -215,14 +232,17 @@ fn main() -> Result<(), String> {
         }
         return Ok(());
     }
+    if let Some(ticks) = dead {
+        return attribute_ops(&ws, attribute.unwrap_or(2), None, Some(ticks), None);
+    }
     if let Some(depth) = attribute {
-        return attribute_ops(&ws, depth, None, live.as_ref());
+        return attribute_ops(&ws, depth, None, None, live.as_ref());
     }
     if unnamed {
-        return attribute_ops(&ws, 2, Some(String::new()), None);
+        return attribute_ops(&ws, 2, Some(String::new()), None, None);
     }
     if let Some(block) = ops_of {
-        return attribute_ops(&ws, 2, Some(block), None);
+        return attribute_ops(&ws, 2, Some(block), None, None);
     }
     if let Some(other) = against {
         let other = design_of(&suite::read_workspace(Path::new(&other))?)?;
@@ -835,6 +855,8 @@ fn attribute_ops(
     // Some(""): list the ops that write no authored net; Some(block): the
     // ops writing that block's nets (a path prefix).
     list: Option<String>,
+    // `--dead`: the dead-instruction study over that many ticks.
+    dead: Option<u64>,
     live: Option<&Live>,
 ) -> Result<(), String> {
     use std::collections::BTreeMap;
@@ -966,39 +988,58 @@ fn attribute_ops(
                 p.slot_count as usize,
                 &pruned,
                 None,
-                logi_sim::compile::guard::MIN_REGION,
+                std::env::var("GUARD_MIN")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(logi_sim::compile::guard::MIN_REGION),
             )
             .unwrap_or(pruned)
         })
         .collect();
-    if let Some(block) = list {
-        // A real slot no net names may hold named nets as views (bits of a
-        // lifted or merged word): name it by them, low bits first.
-        let mut parts: std::collections::HashMap<u32, Vec<(u8, String)>> =
-            std::collections::HashMap::new();
-        for &named in owner.keys() {
-            if let Some((real, shift, mask)) = p.resolve(named)
-                && real != named
-                && !owner.contains_key(&real)
-            {
-                let w = mask.count_ones();
-                let n = slot_name(named).unwrap_or_else(|| format!("#{named}"));
-                parts
-                    .entry(real)
-                    .or_default()
-                    .push((shift, format!("{n}[{shift}+{w}]")));
-            }
+    let pruned_bodies: Vec<logi_sim::compile::Body> = phases
+        .variants
+        .iter()
+        .map(|v| logi_sim::compile::phases::prune(&p, v).unwrap_or_else(|| v.clone()))
+        .collect();
+    // A real slot no net names may hold named nets as views (bits of a
+    // lifted or merged word): name it by them, low bits first.
+    let mut parts: std::collections::HashMap<u32, Vec<(u8, String)>> =
+        std::collections::HashMap::new();
+    for &named in owner.keys() {
+        if let Some((real, shift, mask)) = p.resolve(named)
+            && real != named
+            && !owner.contains_key(&real)
+        {
+            let w = mask.count_ones();
+            let n = slot_name(named).unwrap_or_else(|| format!("#{named}"));
+            parts
+                .entry(real)
+                .or_default()
+                .push((shift, format!("{n}[{shift}+{w}]")));
         }
-        let word_name = |slot: u32| -> Option<String> {
-            let mut v = parts.get(&slot)?.clone();
-            v.sort();
-            v.dedup_by(|a, b| a.0 == b.0);
-            Some(format!(
-                "{{{}}}",
-                v.into_iter().map(|(_, n)| n).collect::<Vec<_>>().join(", ")
-            ))
-        };
-        let full_name = |slot: u32| slot_name(slot).or_else(|| word_name(slot));
+    }
+    let word_name = |slot: u32| -> Option<String> {
+        let mut v = parts.get(&slot)?.clone();
+        v.sort();
+        v.dedup_by(|a, b| a.0 == b.0);
+        Some(format!(
+            "{{{}}}",
+            v.into_iter().map(|(_, n)| n).collect::<Vec<_>>().join(", ")
+        ))
+    };
+    let full_name = |slot: u32| slot_name(slot).or_else(|| word_name(slot));
+    if let Some(ticks) = dead {
+        let name = |s: u32| full_name(s).unwrap_or_else(|| format!("#{s}"));
+        return dead_study(
+            Arc::new(p.clone()),
+            &pruned_bodies,
+            &fused_bodies,
+            &key_of,
+            &name,
+            ticks,
+        );
+    }
+    if let Some(block) = list {
         let wanted = |dst: u32| -> bool {
             match owner.get(&dst) {
                 None => block.is_empty(),
@@ -1007,7 +1048,11 @@ fn attribute_ops(
                 }
             }
         };
-        return list_ops(&fused_bodies[0], &wanted, &full_name);
+        let phase: usize = std::env::var("OPS_PHASE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        return list_ops(&fused_bodies[phase], &wanted, &full_name);
     }
     // `--live`: run the console to `skip` frames, then tick by tick,
     // evaluating each fused body's guards on the live slots (executed ops
@@ -1650,6 +1695,272 @@ fn list_ops(
     println!();
     for l in lines {
         println!("{l}");
+    }
+    Ok(())
+}
+
+/// `--dead [ticks]`: per tick, which instructions of the fused bodies are
+/// dead (nothing reads their result that tick: every reader is dead, or a
+/// `Mux`/`Switch` whose select does not pick it), how many of those the
+/// guards skip, and the instructions dead on nearly every sampled tick
+/// that no guard covers, by block, with what reads them. `And` gating (an
+/// operand read only while the other is nonzero) is counted apart.
+fn dead_study(
+    p: Arc<Program>,
+    pruned: &[logi_sim::compile::Body],
+    guarded: &[logi_sim::compile::Body],
+    key_of: &dyn Fn(u32) -> String,
+    name: &dyn Fn(u32) -> String,
+    ticks: u64,
+) -> Result<(), String> {
+    use logi_sim::compile::Op;
+    use std::collections::{BTreeMap, HashMap};
+    let period = pruned.len() as u64;
+    let n = p.slot_count as usize;
+    let mut sim = Sim::with_options(
+        Arc::clone(&p),
+        SimOptions {
+            fuse: false,
+            guard: false,
+            superstep: false,
+            known_bits: false,
+            ..SimOptions::default()
+        },
+    );
+    // Per dst: (ticks executed, ticks dead (mux), ticks dead (mux+and)).
+    let mut stats: HashMap<u32, (u64, u64, u64)> = HashMap::new();
+    let (mut exec, mut dead_m, mut dead_a, mut skipped, mut total) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut sampled = 0u64;
+    let mut gstats: Vec<Vec<u64>> = Vec::new();
+    let mut phase_n = vec![0u64; pruned.len()];
+    let mut slots = vec![0u64; n];
+    let mut live_m = vec![false; n];
+    let mut live_a = vec![false; n];
+    // Guarded dsts and their guard per phase.
+    let in_guard: Vec<HashMap<u32, usize>> = guarded
+        .iter()
+        .map(|g| {
+            let mut m = HashMap::new();
+            for (gi, gd) in g.guards.iter().enumerate() {
+                for blk in &g.blocks[gd.start as usize..gd.end as usize] {
+                    for k in blk.start..blk.start + blk.len {
+                        m.insert(g.instrs[k as usize].dst, gi);
+                    }
+                }
+            }
+            m
+        })
+        .collect();
+    for t in 0..ticks {
+        sim.tick();
+        if t % 7 != 0 {
+            continue;
+        }
+        sampled += 1;
+        let k = (sim.tick_count() % period) as usize;
+        for (s, v) in slots.iter_mut().enumerate() {
+            *v = sim.read(s as u32);
+        }
+        let body = &pruned[k];
+        live_m.iter_mut().for_each(|x| *x = false);
+        live_a.iter_mut().for_each(|x| *x = false);
+        for c in &body.commits {
+            for s in c.reads() {
+                live_m[s as usize] = true;
+                live_a[s as usize] = true;
+            }
+        }
+        for blk in body.blocks.iter().rev() {
+            let (sa, sb, sc) = blk.op.slot_operands();
+            for kk in (blk.start..blk.start + blk.len).rev() {
+                let i = body.instrs[kk as usize];
+                let d = i.dst as usize;
+                for (live, and) in [(&mut live_m, false), (&mut live_a, true)] {
+                    if !live[d] {
+                        continue;
+                    }
+                    match blk.op {
+                        Op::Mux => {
+                            live[i.a as usize] = true;
+                            if slots[i.a as usize] != 0 {
+                                live[i.c as usize] = true;
+                            } else {
+                                live[i.b as usize] = true;
+                            }
+                        }
+                        Op::Switch => {
+                            live[i.a as usize] = true;
+                            if slots[i.a as usize] != 0 {
+                                live[i.b as usize] = true;
+                            }
+                        }
+                        Op::And if and => {
+                            let (x, y) = (slots[i.a as usize], slots[i.b as usize]);
+                            if x == 0 {
+                                live[i.a as usize] = true;
+                            } else if y == 0 {
+                                live[i.b as usize] = true;
+                            } else {
+                                live[i.a as usize] = true;
+                                live[i.b as usize] = true;
+                            }
+                        }
+                        _ => {
+                            for (is, s) in [(sa, i.a), (sb, i.b), (sc, i.c)] {
+                                if is {
+                                    live[s as usize] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let g = &guarded[k];
+        let holds: Vec<bool> = g.guards.iter().map(|gd| gd.holds(&slots)).collect();
+        if gstats.len() < guarded.len() {
+            gstats = guarded.iter().map(|b| vec![0u64; b.guards.len()]).collect();
+        }
+        for (gi, &h) in holds.iter().enumerate() {
+            gstats[k][gi] += u64::from(h);
+        }
+        phase_n[k] += 1;
+        for blk in &body.blocks {
+            for kk in blk.start..blk.start + blk.len {
+                let d = body.instrs[kk as usize].dst;
+                total += 1;
+                let runs = in_guard[k].get(&d).is_none_or(|&gi| holds[gi]);
+                if !runs {
+                    skipped += 1;
+                    continue;
+                }
+                exec += 1;
+                let e = stats.entry(d).or_default();
+                e.0 += 1;
+                if !live_m[d as usize] {
+                    dead_m += 1;
+                    e.1 += 1;
+                }
+                if !live_a[d as usize] {
+                    dead_a += 1;
+                    e.2 += 1;
+                }
+            }
+        }
+    }
+    if std::env::var("GUARD_STATS").is_ok() {
+        // Per guard of each phase: instructions, depth, how often it runs.
+        let mut hist: BTreeMap<(usize, u32), (u64, f64, f64)> = BTreeMap::new();
+        for (k, g) in guarded.iter().enumerate() {
+            for (gi, gd) in g.guards.iter().enumerate() {
+                let len: u32 = g.blocks[gd.start as usize..gd.end as usize]
+                    .iter()
+                    .map(|b| b.len)
+                    .sum();
+                let f = gstats.get(k).map_or(0, |v| v[gi]) as f64 / phase_n[k].max(1) as f64;
+                let bucket = match len {
+                    0..=3 => 3,
+                    4..=7 => 7,
+                    8..=11 => 11,
+                    12..=23 => 23,
+                    _ => 999,
+                };
+                let fb = (f * 10.0).floor().min(9.0) as u32;
+                let when = gd.conds.last().is_some_and(|c| c.when);
+                let e = hist.entry((bucket, fb * 2 + u32::from(when))).or_default();
+                e.0 += 1;
+                e.1 += f64::from(len) / period as f64;
+                e.2 += f64::from(len) * (1.0 - f) / period as f64;
+            }
+        }
+        println!(
+            "guards by size (<=) and run frequency decile: count, instrs per tick, skipped per tick"
+        );
+        for ((b, fb), (c, i, sk)) in hist {
+            println!(
+                "  <={b:4} {:3}-{:3}% when {}: {c:5} {i:7.1} {sk:7.1}",
+                fb / 2 * 10,
+                fb / 2 * 10 + 10,
+                fb % 2
+            );
+        }
+    }
+    let per = |x: u64| x as f64 / sampled as f64;
+    println!(
+        "{sampled} sampled ticks: {:.1} instrs per fused tick, {:.1} skipped by guards, {:.1} executed, of them {:.1} dead (mux), {:.1} dead (mux+and)",
+        per(total),
+        per(skipped),
+        per(exec),
+        per(dead_m),
+        per(dead_a)
+    );
+    // Readers of each slot, and its op, in the first phase computing it.
+    let mut readers: HashMap<u32, Vec<String>> = HashMap::new();
+    let mut ops: HashMap<u32, (Op, usize)> = HashMap::new();
+    for (ph, body) in pruned.iter().enumerate() {
+        for blk in &body.blocks {
+            for kk in blk.start..blk.start + blk.len {
+                ops.entry(body.instrs[kk as usize].dst)
+                    .or_insert((blk.op, ph));
+            }
+        }
+    }
+    for (ph, body) in pruned.iter().enumerate() {
+        for blk in &body.blocks {
+            let (sa, sb, sc) = blk.op.slot_operands();
+            for kk in blk.start..blk.start + blk.len {
+                let i = body.instrs[kk as usize];
+                for (port, is, s) in [(0, sa, i.a), (1, sb, i.b), (2, sc, i.c)] {
+                    if is && ops.get(&s).is_some_and(|o| o.1 == ph) {
+                        readers
+                            .entry(s)
+                            .or_default()
+                            .push(format!("{:?}.{port}->#{}", blk.op, i.dst));
+                    }
+                }
+            }
+        }
+        for c in &body.commits {
+            for s in c.reads() {
+                if ops.get(&s).is_some_and(|o| o.1 == ph) {
+                    readers.entry(s).or_default().push("commit".into());
+                }
+            }
+        }
+    }
+    let thr: f64 = std::env::var("DEAD_THR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.99);
+    let mut by_block: BTreeMap<String, (f64, f64, Vec<String>)> = BTreeMap::new();
+    for (&d, &(e, dm, da)) in &stats {
+        let key = key_of(d);
+        let entry = by_block.entry(key).or_default();
+        entry.0 += dm as f64 / sampled as f64;
+        entry.1 += da as f64 / sampled as f64;
+        if e > 0 && dm as f64 >= thr * e as f64 && e as f64 >= 0.5 * sampled as f64 / period as f64
+        {
+            entry.2.push(format!(
+                "#{d} {:?} {} dead {:.3} read by [{}]",
+                ops.get(&d).map_or(Op::Copy, |o| o.0),
+                name(d),
+                dm as f64 / e as f64,
+                readers.get(&d).map(|r| r.join(", ")).unwrap_or_default()
+            ));
+        }
+    }
+    let mut keys: Vec<_> = by_block.into_iter().collect();
+    keys.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));
+    for (k, (dm, da, list)) in keys {
+        println!(
+            "{k:40} dead (mux) {dm:6.1}  (mux+and) {da:6.1}  dead >= {thr}: {}",
+            list.len()
+        );
+        if std::env::var("DEAD_LIST").is_ok() {
+            for l in list {
+                println!("    {l}");
+            }
+        }
     }
     Ok(())
 }

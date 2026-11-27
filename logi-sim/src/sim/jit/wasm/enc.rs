@@ -21,6 +21,7 @@ pub mod op {
     pub const I64_LT_U: u8 = 0x54;
     pub const I32_ADD: u8 = 0x6A;
     pub const I32_AND: u8 = 0x71;
+    pub const I32_OR: u8 = 0x72;
     pub const I32_SHL: u8 = 0x74;
     pub const I64_POPCNT: u8 = 0x7B;
     pub const I64_ADD: u8 = 0x7C;

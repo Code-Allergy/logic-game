@@ -1214,9 +1214,9 @@ fn demanded(p: &Program, body: &Body, op_rank: &[(Op, u32)]) -> (Vec<u64>, Vec<u
         }
     }
     for g in &body.guards {
-        for c in &g.conds {
-            dm[c.slot as usize] = ALL;
-            dd[c.slot as usize] = ALL;
+        for s in g.slots() {
+            dm[s as usize] = ALL;
+            dd[s as usize] = ALL;
         }
     }
     let mut cst: FastMap<u32, u64> = FastMap::default();

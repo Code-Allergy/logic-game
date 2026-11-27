@@ -72,11 +72,7 @@ pub(super) fn build_chunk(
             close(&mut f, &mut sl, &mut mem_ptrs, &mut open);
             if seg > 0 {
                 let (body, g) = st.regions[seg as usize - 1];
-                guard_test(
-                    &mut f,
-                    &mut sl,
-                    &bodies[body as usize].guards[g as usize].conds,
-                );
+                guard_test(&mut f, &mut sl, &bodies[body as usize].guards[g as usize]);
                 f.if_();
                 // A range the previous chunk began was counted there.
                 #[cfg(feature = "counters")]
