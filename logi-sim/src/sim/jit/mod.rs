@@ -211,6 +211,26 @@ impl JitBody {
     pub fn commit_chunks(&self) -> Option<usize> {
         self.commit.as_ref().map(Vec::len)
     }
+
+    /// The settle as one function, when it is one call.
+    #[inline]
+    #[cfg_attr(feature = "counters", expect(dead_code))]
+    pub(crate) fn settle_fn(&self) -> Option<SettleFn> {
+        match self.settle[..] {
+            [f] => Some(f),
+            _ => None,
+        }
+    }
+
+    /// The commit as one function, when it is one call.
+    #[inline]
+    #[cfg_attr(feature = "counters", expect(dead_code))]
+    pub(crate) fn commit_fn(&self) -> Option<CommitFn> {
+        match self.commit.as_deref()? {
+            &[f] => Some(f),
+            _ => None,
+        }
+    }
 }
 
 /// Every body of one `Sim`, indexed as `Sim`'s run numbers; `None` for a
