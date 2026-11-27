@@ -1056,9 +1056,10 @@ fn attribute_ops(
         let dot_i = (0..cands.len())
             .find(|&i| {
                 let h = &hist[i];
+                // (339 → 0 is the odd frame's short pre-render line)
                 h.iter().max() == Some(&340)
                     && h.windows(2)
-                        .all(|w| w[1] == w[0] + 1 || (w[0] == 340 && w[1] == 0))
+                        .all(|w| w[1] == w[0] + 1 || (w[0] >= 339 && w[1] == 0))
             })
             .ok_or("no dot counter")?;
         let wraps: Vec<usize> = (1..1400).filter(|&k| hist[dot_i][k] == 0).collect();
@@ -1124,13 +1125,20 @@ fn attribute_ops(
                     v.push((k, n, g));
                 }
             }
-            // commits count as ops of the block owning the state slot
+            // Commits count as ops (as `Body::ops` does): a copy of the
+            // block owning the state slot, a memory write or clear of the
+            // block owning its enable (or bit mask).
             for c in &body.commits {
-                if let logi_sim::compile::Commit::Copy { state, .. } = *c {
-                    let n = key_ix.len();
-                    let k = *key_ix.entry(key_of(state)).or_insert(n);
-                    v.push((k, 1, None));
-                }
+                use logi_sim::compile::Commit;
+                let at = match *c {
+                    Commit::Copy { state, .. } => state,
+                    Commit::RamWrite { we, .. } => we,
+                    Commit::RamWriteMasked { mask, .. } => mask,
+                    Commit::MemClear { en, .. } => en,
+                };
+                let n = key_ix.len();
+                let k = *key_ix.entry(key_of(at)).or_insert(n);
+                v.push((k, 1, None));
             }
             plan.push(v);
         }
@@ -1194,6 +1202,18 @@ fn attribute_ops(
         let mut timing_frontier = 0u32;
         {
             let body = &fused_bodies[0];
+            // A read of a memory something writes depends on its contents,
+            // not only its address: never timing-only.
+            let written: std::collections::HashSet<u32> = fused_bodies
+                .iter()
+                .flat_map(|b| &b.commits)
+                .filter_map(|c| match *c {
+                    logi_sim::compile::Commit::RamWrite { mem, .. }
+                    | logi_sim::compile::Commit::RamWriteMasked { mem, .. }
+                    | logi_sim::compile::Commit::MemClear { mem, .. } => Some(mem),
+                    logi_sim::compile::Commit::Copy { .. } => None,
+                })
+                .collect();
             let mut t: std::collections::HashSet<u32> = std::collections::HashSet::new();
             let mut readers: std::collections::HashMap<u32, Vec<bool>> = Default::default();
             for block in &body.blocks {
@@ -1209,6 +1229,7 @@ fn attribute_ops(
                         .map(|(_, s)| real(*s))
                         .collect();
                     let only = !ops.is_empty()
+                        && !(block.op == logi_sim::compile::Op::MemRead && written.contains(&i.b))
                         && ops.iter().all(|s| {
                             timing_roots.contains(s) || consts.contains(s) || t.contains(s)
                         });
