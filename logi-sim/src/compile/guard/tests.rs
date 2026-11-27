@@ -684,6 +684,79 @@ fn literal_operands_are_not_slots() {
     on_off("wide fields", &d, 100);
 }
 
+/// A body of `n` registers, each with an enable of its own and a data
+/// chain of `len` instructions: `n` candidate arms for groups.
+fn many_arms(n: u32, len: u32) -> (usize, Body) {
+    use crate::compile::{Commit, Instr};
+    let (x, sel, q) = (1u32, 2u32, 2 + n);
+    let mut next = 2 + 2 * n;
+    let mut body = Body::default();
+    let mut last: Vec<u32> = (0..n).map(|k| q + k).collect();
+    for j in 0..=len {
+        let op = if j < len { Op::Xor } else { Op::Mux };
+        let start = body.instrs.len() as u32;
+        for k in 0..n {
+            let dst = next;
+            next += 1;
+            body.instrs.push(match op {
+                Op::Mux => Instr {
+                    dst,
+                    a: sel + k,
+                    b: q + k,
+                    c: last[k as usize],
+                },
+                _ => Instr {
+                    dst,
+                    a: last[k as usize],
+                    b: x,
+                    c: 0,
+                },
+            });
+            body.imms.push(0xFF);
+            last[k as usize] = dst;
+        }
+        body.blocks.push(Block {
+            op,
+            rank: j,
+            start,
+            len: n,
+            packed: false,
+        });
+    }
+    for k in 0..n {
+        body.commits.push(Commit::Copy {
+            state: q + k,
+            next: last[k as usize],
+        });
+    }
+    (next as usize, body)
+}
+
+/// Grouping stays bounded on bodies with tens of thousands of arms: its
+/// dependence table holds at most `MAX_CANDIDATES` candidates per
+/// instruction, and none for arms that cannot make a group.
+#[test]
+fn grouping_is_bounded_on_many_arms() {
+    for (n, len, groups) in [(40_000, 1, false), (10_000, 11, true)] {
+        let (slots, body) = many_arms(n, len);
+        GROUP_TABLES.with(|t| t.set(0));
+        let g = guard_with(slots, &body, None, MIN_REGION);
+        let words = GROUP_TABLES.with(|t| t.get());
+        let m = body.instrs.len();
+        assert!(
+            words <= m * MAX_CANDIDATES.div_ceil(64),
+            "{words} words for {m}"
+        );
+        if groups {
+            let g = g.expect("grouped");
+            assert!(g.guards.iter().any(|x| !x.any.is_empty()));
+        } else {
+            assert_eq!(words, 0, "no candidate can make a group");
+            assert!(g.is_none());
+        }
+    }
+}
+
 #[test]
 fn fixtures_are_exact_with_guards() {
     let cpu = fixtures::cpu(&fixtures::LOOP_PROGRAM);

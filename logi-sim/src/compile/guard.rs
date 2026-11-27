@@ -62,7 +62,7 @@
 //! The pass runs when a `Sim` builds its bodies, like tick fusion's
 //! pruning; the compiled `Program` is unchanged.
 
-use super::{Block, Body, Cond, FastMap, Guard, Op, Program};
+use super::{Block, Body, Cond, FastMap, FastSet, Guard, Op, Program};
 
 /// Fewest instructions (with nested regions) a region needs to be guarded.
 /// A guard costs a test and a branch, splits blocks (interpreter) and
@@ -96,6 +96,17 @@ const MERGE_ROUNDS: usize = 8;
 /// Most conditions of one group of small arms ([`Tree::groups`]): the
 /// more conditions, the more often one of them holds.
 pub const MAX_ANY: usize = 4;
+
+/// Most candidate arms [`Tree::groups`] considers (the largest): its
+/// tables grow with the candidates times the body.
+const MAX_CANDIDATES: usize = 256;
+
+#[cfg(test)]
+thread_local! {
+    /// Largest dependence table [`Tree::groups`] made on this thread, in
+    /// words.
+    static GROUP_TABLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Region key of the arms of group `g` under one parent.
 const GROUP: u32 = 1 << 31;
@@ -496,25 +507,6 @@ impl Tree {
         let m = body.instrs.len();
         let nr = self.regions.len();
         let kept = |r: usize| self.kmap[r] == r as u32;
-        // The candidate each region belongs to (`NONE`: none), and the
-        // candidates (index `i` of `list[i]`).
-        let mut cand = vec![NONE; nr];
-        let mut list: Vec<usize> = Vec::new();
-        let mut index = vec![NONE; nr];
-        for r in 1..nr {
-            let g = &self.regions[r];
-            let parent = g.parent as usize;
-            cand[r] = cand[parent];
-            if !kept(r) && cand[r] == NONE && g.cond.when && g.any.is_empty() {
-                cand[r] = r as u32;
-                index[r] = list.len() as u32;
-                list.push(r);
-            }
-        }
-        let nc = list.len();
-        if nc < 2 {
-            return Grouping::default();
-        }
         let mut arm_region = vec![NONE; 3 * m];
         for &(k, p, r) in &self.arms {
             arm_region[arm(k, p)] = r;
@@ -524,6 +516,108 @@ impl Tree {
             NONE => self.home0[k as usize],
             r => r,
         };
+        // Instructions read by a commit or exposed.
+        let mut observed = vec![false; m];
+        for c in &body.commits {
+            for s in c.reads() {
+                if let Some(&w) = cx.writer.get(s as usize).filter(|&&w| w != NONE) {
+                    observed[w as usize] = true;
+                }
+            }
+        }
+        if let Some(e) = cx.exposed {
+            for (s, &x) in e.iter().enumerate() {
+                if x && cx.writer[s] != NONE {
+                    observed[cx.writer[s] as usize] = true;
+                }
+            }
+        }
+        // The candidate each region belongs to (`NONE`: none), given which
+        // regions may be candidates.
+        let candidates = |may: &dyn Fn(usize) -> bool| {
+            let mut cand = vec![NONE; nr];
+            for r in 1..nr {
+                let g = &self.regions[r];
+                cand[r] = cand[g.parent as usize];
+                if !kept(r) && cand[r] == NONE && g.cond.when && g.any.is_empty() && may(r) {
+                    cand[r] = r as u32;
+                }
+            }
+            cand
+        };
+        // Values outside every candidate read only by candidates (`(value,
+        // candidate)`, sorted, and whether a value is read elsewhere).
+        let shared = |cand: &[u32]| {
+            let of = |k: u32| cand[self.home0[k as usize] as usize];
+            let mut readers: Vec<(u32, u32)> = Vec::new();
+            let mut outside = observed.clone();
+            for b in &body.blocks {
+                let (sa, sb, sc) = b.op.slot_operands();
+                for k in b.start..b.start + b.len {
+                    let i = body.instrs[k as usize];
+                    for (port, is, s) in [(0u8, sa, i.a), (1, sb, i.b), (2, sc, i.c)] {
+                        let w = cx.operand_writer(is, s);
+                        if w == NONE || of(w) != NONE {
+                            continue;
+                        }
+                        match cand[read_region(k, port) as usize] {
+                            NONE => outside[w as usize] = true,
+                            c => readers.push((w, c)),
+                        }
+                    }
+                }
+            }
+            readers.sort_unstable();
+            readers.dedup();
+            readers.retain(|x| !outside[x.0 as usize]);
+            readers
+        };
+        // Keep only the candidates that could make a group: in a kept
+        // region whose largest MAX_ANY conditions' arms, with the values
+        // read only by its candidates, reach the smallest region size; and
+        // at most MAX_CANDIDATES of them, largest first. The tables below
+        // grow with the candidates times the body.
+        let all = candidates(&|_| true);
+        let parent_of = |r: usize| self.kmap[self.regions[r].parent as usize];
+        let mut per_parent: FastMap<u32, (FastMap<Cond, usize>, usize)> = FastMap::default();
+        for r in 1..nr {
+            if all[r] == r as u32 {
+                let e = per_parent.entry(parent_of(r)).or_default();
+                *e.0.entry(self.regions[r].cond).or_default() += self.size[r];
+            }
+        }
+        for run in shared(&all).chunk_by(|a, b| a.0 == b.0) {
+            let p = parent_of(run[0].1 as usize);
+            if run.len() > 1 && run.iter().all(|x| parent_of(x.1 as usize) == p) {
+                per_parent.entry(p).or_default().1 += 1;
+            }
+        }
+        let viable: FastSet<u32> = per_parent
+            .into_iter()
+            .filter(|(_, (by_cond, sh))| {
+                let mut sizes: Vec<usize> = by_cond.values().copied().collect();
+                sizes.sort_unstable_by(|a, b| b.cmp(a));
+                sizes.iter().take(MAX_ANY).sum::<usize>() + sh >= cx.min_region
+            })
+            .map(|(p, _)| p)
+            .collect();
+        let mut list: Vec<usize> = (1..nr)
+            .filter(|&r| all[r] == r as u32 && viable.contains(&parent_of(r)))
+            .collect();
+        list.sort_by_key(|&r| (std::cmp::Reverse(self.size[r]), r));
+        list.truncate(MAX_CANDIDATES);
+        list.sort_unstable();
+        let nc = list.len();
+        if nc < 2 {
+            return Grouping::default();
+        }
+        let mut index = vec![NONE; nr];
+        for (i, &r) in list.iter().enumerate() {
+            index[r] = i as u32;
+        }
+        let cand = candidates(&|r| index[r] != NONE);
+        #[cfg(test)]
+        GROUP_TABLES.with(|t| t.set(t.get().max(m * nc.div_ceil(64))));
         let of = |k: u32| cand[self.home0[k as usize] as usize];
         // Which candidates' muxes each value depends on, and which each
         // candidate's inputs (and conditions) depend on: a group whose
@@ -626,42 +720,12 @@ impl Tree {
         // Values read only by candidates (more than one): theirs join.
         let mut sets: Vec<Option<Set>> = (0..nc).map(|i| Some(set_of(i))).collect();
         let mut set_of_cand: Vec<usize> = (0..nc).collect();
-        let mut readers: Vec<(u32, u32)> = Vec::new();
-        let mut outside = vec![false; m];
-        for c in &body.commits {
-            for s in c.reads() {
-                if let Some(&w) = cx.writer.get(s as usize).filter(|&&w| w != NONE) {
-                    outside[w as usize] = true;
-                }
-            }
-        }
-        if let Some(e) = cx.exposed {
-            for (s, &x) in e.iter().enumerate() {
-                if x && cx.writer[s] != NONE {
-                    outside[cx.writer[s] as usize] = true;
-                }
-            }
-        }
-        for b in &body.blocks {
-            let (sa, sb, sc) = b.op.slot_operands();
-            for k in b.start..b.start + b.len {
-                let i = body.instrs[k as usize];
-                for (port, is, s) in [(0u8, sa, i.a), (1, sb, i.b), (2, sc, i.c)] {
-                    let w = cx.operand_writer(is, s);
-                    if !is || w == NONE || of(w) != NONE {
-                        continue;
-                    }
-                    match cand[read_region(k, port) as usize] {
-                        NONE => outside[w as usize] = true,
-                        c => readers.push((w, index[c as usize])),
-                    }
-                }
-            }
-        }
-        readers.sort_unstable();
-        readers.dedup();
+        let readers: Vec<(u32, u32)> = shared(&cand)
+            .into_iter()
+            .map(|(w, c)| (w, index[c as usize]))
+            .collect();
         for run in readers.chunk_by(|a, b| a.0 == b.0) {
-            if outside[run[0].0 as usize] || run.len() < 2 {
+            if run.len() < 2 {
                 continue;
             }
             let lead = set_of_cand[run[0].1 as usize];
