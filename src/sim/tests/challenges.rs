@@ -519,7 +519,7 @@ fn formula_cases_are_exhaustive_or_seeded() {
             w: 1,
         },
     ];
-    let all = formula_cases(&ports, None, 0);
+    let all: Vec<Vec<u64>> = formula_cases(&ports, None, 0).collect();
     assert_eq!(all.len(), 8);
     assert_eq!(all[0], [0, 0]);
     assert_eq!(all[1], [1, 0]);
@@ -535,12 +535,17 @@ fn formula_cases_are_exhaustive_or_seeded() {
             w: 8,
         },
     ];
-    let a = formula_cases(&wide, Some(50), 95);
+    let cases = |n: u32, seed: u64| formula_cases(&wide, Some(n), seed).collect::<Vec<_>>();
+    let a = cases(50, 95);
     assert_eq!(a.len(), 52, "all-zero, all-ones and the samples");
     assert_eq!(a[0], [0, 0]);
     assert_eq!(a[1], [255, 255]);
-    assert_eq!(a, formula_cases(&wide, Some(50), 95), "the same every time");
-    assert_ne!(a, formula_cases(&wide, Some(50), 96));
+    assert_eq!(a, cases(50, 95), "the same every time");
+    assert_ne!(a, cases(50, 96));
+    // Cases are made as they are asked for: the most samples a test can
+    // name cost nothing until they run (a list of them all would not fit).
+    let first: Vec<Vec<u64>> = formula_cases(&wide, Some(u32::MAX), 95).take(52).collect();
+    assert_eq!(first, a, "and the first cases do not depend on the count");
     assert!(a.iter().flatten().all(|&v| v <= 255));
     // The 8-bit adder's test samples instead of trying 2^17 cases.
     assert!(matches!(

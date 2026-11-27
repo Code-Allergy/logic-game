@@ -646,13 +646,18 @@ fn mask(w: u8) -> u64 {
 
 /// The input values a formula test runs: every combination (inputs in
 /// order, the first one counting fastest), or all-zero, all-ones and
-/// `samples` random ones from `seed`.
-pub fn formula_cases(inputs: &[Port], samples: Option<u32>, seed: u64) -> Vec<Vec<u64>> {
+/// `samples` random ones from `seed`. Made one case at a time: a test of
+/// many samples holds one of them, and stops at the first that fails.
+pub fn formula_cases<'a>(
+    inputs: &'a [Port],
+    samples: Option<u32>,
+    seed: u64,
+) -> Box<dyn Iterator<Item = Vec<u64>> + 'a> {
     match samples {
         None => {
             let bits: u32 = inputs.iter().map(|p| u32::from(p.w)).sum();
-            (0..1u64 << bits.min(MAX_EXHAUSTIVE_BITS))
-                .map(|mut n| {
+            Box::new(
+                (0..1u64 << bits.min(MAX_EXHAUSTIVE_BITS)).map(move |mut n| {
                     inputs
                         .iter()
                         .map(|p| {
@@ -661,12 +666,12 @@ pub fn formula_cases(inputs: &[Port], samples: Option<u32>, seed: u64) -> Vec<Ve
                             v
                         })
                         .collect()
-                })
-                .collect()
+                }),
+            )
         }
         Some(count) => {
             let mut state = seed;
-            let mut next = || {
+            let mut next = move || {
                 // SplitMix64: a fixed, dependency-free sequence.
                 state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
                 let mut z = state;
@@ -674,14 +679,13 @@ pub fn formula_cases(inputs: &[Port], samples: Option<u32>, seed: u64) -> Vec<Ve
                 z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
                 z ^ (z >> 31)
             };
-            let mut cases = vec![
+            let ends = [
                 vec![0; inputs.len()],
                 inputs.iter().map(|p| mask(p.w)).collect(),
             ];
-            for _ in 0..count {
-                cases.push(inputs.iter().map(|p| next() & mask(p.w)).collect());
-            }
-            cases
+            Box::new(ends.into_iter().chain(
+                (0..count).map(move |_| inputs.iter().map(|p| next() & mask(p.w)).collect()),
+            ))
         }
     }
 }
