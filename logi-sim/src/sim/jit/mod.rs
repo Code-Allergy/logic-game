@@ -115,6 +115,7 @@ use crate::compile::{Block, Commit, Guard, Instr, Op, Pack, PackOperand, Program
 /// the NES workspaces with spec on (settle chunks are most of a tick)
 /// run no faster with 128 or 256 (within ±2 %), and their bodies compile
 /// 25 % and 55 % slower.
+pub const CHUNK: usize = 64;
 
 /// Commits per commit chunk at most.
 pub const COMMIT_CHUNK: usize = 256;
