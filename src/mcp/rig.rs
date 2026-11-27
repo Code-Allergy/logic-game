@@ -560,7 +560,10 @@ impl Rig {
                     .or_else(|| p.parse().ok().filter(|i| *i < ins.len()))
                     .ok_or_else(|| format!("\"{whole}\" has no pin \"{p}\""))?,
             };
-            (definition.input_net(node, pin as u8), ins[pin])
+            let index = u8::try_from(pin).map_err(|_| {
+                format!("\"{whole}\": a pin past the 256th cannot be wired, so it has no signal")
+            })?;
+            (definition.input_net(node, index), ins[pin])
         } else {
             let pin = out_pin.expect("found above");
             (definition.output_net(node, pin), outs[usize::from(pin)])

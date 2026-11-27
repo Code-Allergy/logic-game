@@ -638,7 +638,7 @@ impl SimBridge {
                     .iter()
                     .enumerate()
                     .filter(|(_, net)| net.is_some())
-                    .map(move |(pin, _)| (node, pin as u8))
+                    .filter_map(move |(pin, _)| Some((node, u8::try_from(pin).ok()?)))
             })
             .collect();
         for pin in pins {
@@ -675,7 +675,7 @@ impl SimBridge {
         let Some(n) = self.design.root_def().nodes.get(node) else {
             return;
         };
-        let mut sinks: Vec<PinRef> = (0..n.inputs.len()).map(|pin| (node, pin as u8)).collect();
+        let mut sinks: Vec<PinRef> = pin_indices(n.inputs.len()).map(|pin| (node, pin)).collect();
         for &net in &n.outputs {
             sinks.extend(self.design.root_def().sinks(net));
         }
@@ -901,9 +901,8 @@ impl SimBridge {
                     continue;
                 };
                 screen(&mut self.mem_probe_index, &[], node, &n.kind);
-                for (pin, &net) in n.outputs.iter().enumerate() {
-                    self.probe_index
-                        .insert((node, pin as u8), probes.len() as u32);
+                for (pin, &net) in pin_indices(n.outputs.len()).zip(&n.outputs) {
+                    self.probe_index.insert((node, pin), probes.len() as u32);
                     probes.push(Probe {
                         path: Vec::new(),
                         net,
@@ -928,9 +927,9 @@ impl SimBridge {
                     node,
                     &d.nodes[node].kind,
                 );
-                for (pin, &net) in d.nodes[node].outputs.iter().enumerate() {
-                    self.probe_index
-                        .insert((node, pin as u8), probes.len() as u32);
+                let outputs = &d.nodes[node].outputs;
+                for (pin, &net) in pin_indices(outputs.len()).zip(outputs) {
+                    self.probe_index.insert((node, pin), probes.len() as u32);
                     probes.push(Probe {
                         path: resolved.0.clone(),
                         net,
@@ -996,7 +995,10 @@ impl SimBridge {
             })
             .collect();
         let outputs = (0..n.outputs.len())
-            .map(|pin| self.probe_index.get(&(node, pin as u8)).copied())
+            .map(|pin| {
+                let pin = u8::try_from(pin).ok()?;
+                self.probe_index.get(&(node, pin)).copied()
+            })
             .collect();
         GateProbes {
             inputs,
@@ -1218,14 +1220,14 @@ impl ViewBindings<'_, '_> {
             kinds.insert(id.uuid, ty.kind.clone());
             let (ins, outs) = library.pins(&ty.kind).unwrap_or_default();
             let bound = GateProbes {
-                inputs: (0..ins.len() as u8)
+                inputs: pin_indices(ins.len())
                     .map(|pin| {
                         sources
                             .get(&(id.uuid, pin))
                             .and_then(|&(g, p)| bridge.view_probe(g, p))
                     })
                     .collect(),
-                outputs: (0..outs.len() as u8)
+                outputs: pin_indices(outs.len())
                     .map(|pin| bridge.view_probe(id.uuid, pin))
                     .collect(),
                 memory: bridge.view_mem_probe(id.uuid),
@@ -1594,4 +1596,28 @@ pub fn update_tickrate_system(sim_config: Res<SimulationConfig>, mut bridge: Res
         Some(sim_config.tick_rate)
     };
     bridge.set_tick_rate(rate);
+}
+
+/// The pin indices of a side with `count` pins that a wire or a probe can
+/// name (a pin index is a `u8`: the first 256). `0..count as u8` would be
+/// empty for 256 pins, and a cast per pin would name pin 0 again for the
+/// 257th.
+fn pin_indices(count: usize) -> impl Iterator<Item = u8> {
+    (0..=u8::MAX).take(count)
+}
+
+#[cfg(test)]
+mod pin_index_tests {
+    use super::pin_indices;
+
+    /// A side of exactly 256 pins has all of them (the count cast to `u8`
+    /// was 0: none), and a longer one stops at the 256th.
+    #[test]
+    fn pin_indices_are_the_pins_a_u8_can_name() {
+        assert_eq!(pin_indices(3).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(pin_indices(0).count(), 0);
+        assert_eq!(pin_indices(256).count(), 256);
+        assert_eq!(pin_indices(256).last(), Some(255));
+        assert_eq!(pin_indices(300).count(), 256);
+    }
 }

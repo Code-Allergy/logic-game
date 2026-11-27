@@ -384,6 +384,11 @@ fn build_tile(
         (true, &spec.outputs, &layout.outputs),
     ] {
         for (i, (&width, pos)) in widths.iter().zip(positions).enumerate() {
+            // A pin index is a `u8`: a pin past the 256th cannot be wired
+            // and has no dot (its index would be another pin's).
+            let Ok(index) = u8::try_from(i) else {
+                break;
+            };
             let piece = art.piece(
                 meshes,
                 dot,
@@ -394,7 +399,7 @@ fn build_tile(
                 piece,
                 PinDot {
                     output,
-                    index: i as u8,
+                    index,
                     width,
                 },
                 TileArt,
