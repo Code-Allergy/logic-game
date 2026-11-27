@@ -39,6 +39,29 @@
 //! instructions executed and dead on at least `DEAD_THR` (0.99) of their
 //! ticks with their readers, and with `GUARD_STATS=1` the guards by size
 //! and by how often they run.
+//! `--live <frames> [--skip <frames>] [--press ...] [--every <k>]
+//! [--dead-ops <prefix>] [--attribute <depth>]` measures the running
+//! console instead of the static bodies: the interpreter plays the presses
+//! to frame `--skip`, then ticks `<frames>` frames one by one. Per tick it
+//! evaluates the guards of that phase's fused body on the live slots, so
+//! each block's executed ops per tick count what the guards really skip;
+//! ticks are split by place in the frame (dot and scanline ranges, vblank,
+//! found from the PPU's dot and line counters) and rendering off (PPU mask
+//! bits 3 and 4). Every `--every` ticks (default 5) a backward liveness
+//! pass from the roots (commits, a RAM write's address and data only when
+//! it writes, guard conditions, outputs) follows only the operands the
+//! current values select (a `Mux` or `Switch` its taken input, an `And`
+//! with a 0 operand that operand): an executed op nothing live reads is
+//! dead that tick. It also counts the ops that depend on the dot and line
+//! counters alone (foldable by a decode table or keys on them).
+//! `--dead-ops <prefix>` lists the most often dead ops of the blocks under
+//! it, by region. E.g., SMB3 in World 1-1:
+//!
+//! ```sh
+//! nes_bench .gatequest/workspaces/nes --live 20 --skip 1905 \
+//!     --press 451:p1_start:6,657:p1_start:6,1063:p1_right:12,1175:p1_a:6,1481:p1_up:12,1593:p1_a:6,1899:p1_right:200
+//! ```
+//!
 //! `--no-shifts` compiles without the shift rewrites (`Options::shifts`
 //! and `Options::barrels`) everywhere, for A/B runs; `--compare` also
 //! runs the interpreter on a program compiled without them and requires
@@ -124,6 +147,26 @@ fn main() -> Result<(), String> {
     };
     let presses = parse_presses(&value_of("--press").unwrap_or_default())?;
     let screen = value_of("--screen");
+    let live = match value_of("--live") {
+        Some(frames) => {
+            let num = |v: Option<String>, d: u64, flag: &str| -> Result<u64, String> {
+                v.map_or(Ok(d), |v| v.parse().map_err(|_| format!("{flag} <number>")))
+            };
+            let frames = num(Some(frames), 0, "--live")?;
+            let skip = num(value_of("--skip"), 0, "--skip")?;
+            let every = num(value_of("--every"), 5, "--every")?.max(1);
+            Some(Live {
+                frames,
+                skip,
+                every,
+                presses: presses.clone(),
+                dead_ops: value_of("--dead-ops"),
+            })
+        }
+        None => None,
+    };
+    // `--live` reports through the attribution (depth 2 unless given).
+    let attribute = attribute.or(live.as_ref().map(|_| 2));
     args.retain(|a| {
         a != "--compare"
             && a != "--units"
@@ -190,16 +233,16 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     if let Some(ticks) = dead {
-        return attribute_ops(&ws, attribute.unwrap_or(2), None, Some(ticks));
+        return attribute_ops(&ws, attribute.unwrap_or(2), None, Some(ticks), None);
     }
     if let Some(depth) = attribute {
-        return attribute_ops(&ws, depth, None, None);
+        return attribute_ops(&ws, depth, None, None, live.as_ref());
     }
     if unnamed {
-        return attribute_ops(&ws, 2, Some(String::new()), None);
+        return attribute_ops(&ws, 2, Some(String::new()), None, None);
     }
     if let Some(block) = ops_of {
-        return attribute_ops(&ws, 2, Some(block), None);
+        return attribute_ops(&ws, 2, Some(block), None, None);
     }
     if let Some(other) = against {
         let other = design_of(&suite::read_workspace(Path::new(&other))?)?;
@@ -795,6 +838,16 @@ fn parse_presses(text: &str) -> Result<Vec<(u64, String, u64)>, String> {
         .collect()
 }
 
+/// `--live`: what to run and sample (see the header).
+struct Live {
+    frames: u64,
+    skip: u64,
+    every: u64,
+    presses: Vec<(u64, String, u64)>,
+    /// `--dead-ops <prefix>`: list the dead ops of blocks under it.
+    dead_ops: Option<String>,
+}
+
 /// Ops of the compiled design attributed to instance paths (see `--attribute`).
 fn attribute_ops(
     ws: &gate_quest::sim::WorkspaceDocument,
@@ -804,6 +857,7 @@ fn attribute_ops(
     list: Option<String>,
     // `--dead`: the dead-instruction study over that many ticks.
     dead: Option<u64>,
+    live: Option<&Live>,
 ) -> Result<(), String> {
     use std::collections::BTreeMap;
     let (design, map) = gate_quest::sim::netlist::design_map_of(ws)?;
@@ -999,6 +1053,520 @@ fn attribute_ops(
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
         return list_ops(&fused_bodies[phase], &wanted, &full_name);
+    }
+    // `--live`: run the console to `skip` frames, then tick by tick,
+    // evaluating each fused body's guards on the live slots (executed ops
+    // per block and frame region) and, every `every` ticks, which executed
+    // ops compute a value no live op reads.
+    if let Some(live) = live {
+        let Live {
+            frames,
+            skip,
+            every,
+            ref presses,
+            ref dead_ops,
+        } = *live;
+        const FRAME: u64 = 89_342;
+        let mut sim = Sim::with_options(Arc::new(p.clone()), SimOptions::default());
+        // An input is held while any of its presses is on.
+        let press_at = |sim: &mut Sim, f: u64| {
+            let mut held: BTreeMap<&str, bool> = BTreeMap::new();
+            for (from, name, len) in presses {
+                *held.entry(name.as_str()).or_default() |= (*from..from + len).contains(&f);
+            }
+            for (name, on) in held {
+                sim.set(name, u64::from(on));
+            }
+        };
+        for f in 1..=skip {
+            press_at(&mut sim, f);
+            sim.run(FRAME);
+        }
+        // The dot counter: a named slot stepping by 1 per tick, wrapping
+        // after 340; the line counter: one that steps when it wraps.
+        // Candidates in a fixed order, the timing block's first (other
+        // slots can step in lockstep, e.g. the line plus one).
+        // Found on the running console, then put back: measurement starts
+        // at frame `skip + 1`, with that frame's presses.
+        let at_skip = sim.export_state();
+        let mut cands: Vec<u32> = owner.keys().copied().collect();
+        cands.sort_by_key(|&s| (!slot_name(s).is_some_and(|n| n.starts_with("timing/")), s));
+        let mut hist: Vec<Vec<u64>> = vec![Vec::new(); cands.len()];
+        for _ in 0..1400 {
+            sim.tick();
+            for (i, &s) in cands.iter().enumerate() {
+                hist[i].push(sim.read(s));
+            }
+        }
+        let dot_i = (0..cands.len())
+            .find(|&i| {
+                let h = &hist[i];
+                // (339 → 0 is the odd frame's short pre-render line)
+                h.iter().max() == Some(&340)
+                    && h.windows(2)
+                        .all(|w| w[1] == w[0] + 1 || (w[0] >= 339 && w[1] == 0))
+            })
+            .ok_or("no dot counter")?;
+        let wraps: Vec<usize> = (1..1400).filter(|&k| hist[dot_i][k] == 0).collect();
+        let line_cands: Vec<usize> = (0..cands.len())
+            .filter(|&i| {
+                let h = &hist[i];
+                *h.iter().max().unwrap_or(&999) < 262
+                    && wraps.iter().all(|&k| h[k] == (h[k - 1] + 1) % 262)
+                    && (1..1400).all(|k| wraps.contains(&k) || h[k] == h[k - 1])
+            })
+            .collect();
+        let mut seen: Vec<std::collections::BTreeSet<u64>> =
+            vec![Default::default(); line_cands.len()];
+        for _ in 0..FRAME {
+            sim.tick();
+            for (j, &i) in line_cands.iter().enumerate() {
+                seen[j].insert(sim.read(cands[i]));
+            }
+        }
+        let line_i = line_cands
+            .iter()
+            .zip(&seen)
+            .find(|(_, s)| s.len() == 262)
+            .map(|(&i, _)| i)
+            .ok_or("no line counter")?;
+        let (dot, line) = (cands[dot_i], cands[line_i]);
+        sim.import_state(&at_skip);
+        eprintln!(
+            "dot {dot} ({:?}), line {line} ({:?})",
+            slot_name(dot),
+            slot_name(line)
+        );
+        // The PPU's mask register (rendering is off when bits 3 and 4 are).
+        let mask = cands
+            .iter()
+            .copied()
+            .find(|&s| slot_name(s).is_some_and(|n| n.ends_with("regs/mask_reg/dffe")));
+        // Per variant: for each block, (key index, ops, guard index).
+        let mut key_ix: BTreeMap<String, usize> = BTreeMap::new();
+        let mut plan: Vec<Vec<(usize, u32, Option<usize>)>> = Vec::new();
+        for body in &fused_bodies {
+            let mut v = Vec::new();
+            for (bi, block) in body.blocks.iter().enumerate() {
+                let g = body
+                    .guards
+                    .iter()
+                    .position(|g| (g.start..g.end).contains(&(bi as u32)));
+                let dsts: Vec<u32> = if block.packed {
+                    vec![u32::MAX; block.len as usize]
+                } else {
+                    body.instrs[block.start as usize..(block.start + block.len) as usize]
+                        .iter()
+                        .map(|i| i.dst)
+                        .collect()
+                };
+                let mut per: BTreeMap<usize, u32> = BTreeMap::new();
+                for d in dsts {
+                    let n = key_ix.len();
+                    let k = *key_ix.entry(key_of(d)).or_insert(n);
+                    *per.entry(k).or_default() += 1;
+                }
+                for (k, n) in per {
+                    v.push((k, n, g));
+                }
+            }
+            // Commits count as ops (as `Body::ops` does): a copy of the
+            // block owning the state slot, a memory write or clear of the
+            // block owning its enable (or bit mask).
+            for c in &body.commits {
+                use logi_sim::compile::Commit;
+                let at = match *c {
+                    Commit::Copy { state, .. } => state,
+                    Commit::RamWrite { we, .. } => we,
+                    Commit::RamWriteMasked { mask, .. } => mask,
+                    Commit::MemClear { en, .. } => en,
+                };
+                let n = key_ix.len();
+                let k = *key_ix.entry(key_of(at)).or_insert(n);
+                v.push((k, 1, None));
+            }
+            plan.push(v);
+        }
+        let names: Vec<String> = {
+            let mut v = vec![String::new(); key_ix.len()];
+            for (k, &i) in &key_ix {
+                v[i] = k.clone();
+            }
+            v
+        };
+        const REGIONS: [&str; 7] = [
+            "visible dot 0",
+            "visible 1-64",
+            "visible 65-256",
+            "visible 257-320",
+            "visible 321-340",
+            "line 240 / pre-render 261",
+            "vblank 241-260",
+        ];
+        let region = |l: u64, d: u64| -> usize {
+            if l < 240 {
+                match d {
+                    0 => 0,
+                    1..=64 => 1,
+                    65..=256 => 2,
+                    257..=320 => 3,
+                    _ => 4,
+                }
+            } else if l == 240 || l == 261 {
+                5
+            } else {
+                6
+            }
+        };
+        let nk = names.len();
+        let mut exec = vec![[0u64; 7]; nk];
+        let mut static_ops = vec![0u64; nk];
+        let mut guarded = vec![0u64; nk];
+        let mut reg_ticks = [0u64; 7];
+        let mut off_ticks = 0u64;
+        let mut off_exec = vec![0u64; nk];
+        let period = phases.variants.len() as u64;
+        // Dynamic liveness (every `every`-th tick): from the roots (commits,
+        // guard conditions, outputs), back through the body, following only
+        // the operands the current values select.
+        let n_slots = p.slot_count as usize;
+        let real = |s: u32| -> u32 {
+            if (s as usize) < n_slots {
+                s
+            } else {
+                p.resolve(s).map_or(s, |(r, _, _)| r)
+            }
+        };
+        // Timing-only ops (statically): every slot operand is a constant,
+        // the dot or line word, or another timing-only result.
+        let timing_roots: std::collections::HashSet<u32> =
+            [real(dot), real(line)].into_iter().collect();
+        let consts: std::collections::HashSet<u32> =
+            p.consts.iter().map(|&(s, _)| s).chain([0]).collect();
+        let mut timing_only = vec![0u64; names.len()];
+        let mut timing_frontier = 0u32;
+        {
+            let body = &fused_bodies[0];
+            // A read of a memory something writes depends on its contents,
+            // not only its address: never timing-only.
+            let written: std::collections::HashSet<u32> = fused_bodies
+                .iter()
+                .flat_map(|b| &b.commits)
+                .filter_map(|c| match *c {
+                    logi_sim::compile::Commit::RamWrite { mem, .. }
+                    | logi_sim::compile::Commit::RamWriteMasked { mem, .. }
+                    | logi_sim::compile::Commit::MemClear { mem, .. } => Some(mem),
+                    logi_sim::compile::Commit::Copy { .. } => None,
+                })
+                .collect();
+            let mut t: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            let mut readers: std::collections::HashMap<u32, Vec<bool>> = Default::default();
+            for block in &body.blocks {
+                if block.packed {
+                    continue;
+                }
+                let (ua, ub, uc) = block.op.slot_operands();
+                for k in block.start..block.start + block.len {
+                    let i = body.instrs[k as usize];
+                    let ops: Vec<u32> = [(ua, i.a), (ub, i.b), (uc, i.c)]
+                        .iter()
+                        .filter(|(u, _)| *u)
+                        .map(|(_, s)| real(*s))
+                        .collect();
+                    let only = !ops.is_empty()
+                        && !(block.op == logi_sim::compile::Op::MemRead && written.contains(&i.b))
+                        && ops.iter().all(|s| {
+                            timing_roots.contains(s) || consts.contains(s) || t.contains(s)
+                        });
+                    for s in &ops {
+                        readers.entry(*s).or_default().push(only);
+                    }
+                    if only {
+                        t.insert(i.dst);
+                        timing_only[key_ix[&key_of(i.dst)]] += 1;
+                    }
+                }
+            }
+            // Frontier: timing-only results read by an op that is not.
+            for s in &t {
+                if readers.get(s).is_some_and(|r| r.iter().any(|x| !x)) {
+                    timing_frontier += 1;
+                }
+            }
+        }
+        let mut dead = vec![[0u64; 7]; names.len()];
+        let mut dead_off = vec![0u64; names.len()];
+        let mut dead_op: std::collections::HashMap<(u32, String), [u64; 7]> = Default::default();
+        let mut samples = [0u64; 7];
+        let mut samples_off = 0u64;
+        let total = frames * FRAME;
+        for t in 0..total {
+            if t % FRAME == 0 {
+                press_at(&mut sim, skip + 1 + t / FRAME);
+            }
+            sim.tick();
+            let v = (sim.tick_count() % period) as usize;
+            let body = &fused_bodies[v];
+            let holds: Vec<bool> = body
+                .guards
+                .iter()
+                .map(|g| g.conds.iter().all(|c| (sim.read(c.slot) != 0) == c.when))
+                .collect();
+            let r = region(sim.read(line), sim.read(dot));
+            reg_ticks[r] += 1;
+            let off = mask.is_some_and(|m| sim.read(m) & 0x18 == 0);
+            off_ticks += u64::from(off);
+            if t % every == 0 {
+                samples[r] += 1;
+                samples_off += u64::from(off);
+                let mut need = vec![false; n_slots + 1];
+                let mark = |s: u32, need: &mut Vec<bool>| {
+                    let r = real(s) as usize;
+                    if r < need.len() {
+                        need[r] = true;
+                    }
+                };
+                for c in &body.commits {
+                    match *c {
+                        logi_sim::compile::Commit::RamWrite { we, addr, data, .. } => {
+                            mark(we, &mut need);
+                            if sim.read(we) != 0 {
+                                mark(addr, &mut need);
+                                mark(data, &mut need);
+                            }
+                        }
+                        logi_sim::compile::Commit::RamWriteMasked {
+                            mask, addr, data, ..
+                        } => {
+                            mark(mask, &mut need);
+                            if sim.read(mask) != 0 {
+                                mark(addr, &mut need);
+                                mark(data, &mut need);
+                            }
+                        }
+                        _ => {
+                            for s in c.reads() {
+                                mark(s, &mut need);
+                            }
+                        }
+                    }
+                }
+                // A guard's tests stop at the first that fails.
+                for g in &body.guards {
+                    for c in &g.conds {
+                        mark(c.slot, &mut need);
+                        if (sim.read(c.slot) != 0) != c.when {
+                            break;
+                        }
+                    }
+                }
+                for o in &p.ports.outputs {
+                    mark(o.slot, &mut need);
+                }
+                let gholds: Vec<bool> = body
+                    .guards
+                    .iter()
+                    .map(|g| g.conds.iter().all(|c| (sim.read(c.slot) != 0) == c.when))
+                    .collect();
+                for (bi, block) in body.blocks.iter().enumerate().rev() {
+                    let runs = body
+                        .guards
+                        .iter()
+                        .position(|g| (g.start..g.end).contains(&(bi as u32)))
+                        .is_none_or(|gi| gholds[gi]);
+                    if block.packed {
+                        for k in block.start..block.start + block.len {
+                            let pk = &p.packs[k as usize];
+                            for op in [pk.a, pk.b, pk.c] {
+                                mark(op.base, &mut need);
+                                mark(op.splat, &mut need);
+                                for gth in
+                                    &p.gathers[op.gather_start as usize..][..op.gather_len as usize]
+                                {
+                                    mark(gth.slot, &mut need);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    let (ua, ub, uc) = block.op.slot_operands();
+                    for k in (block.start..block.start + block.len).rev() {
+                        let i = body.instrs[k as usize];
+                        // A skipped op neither counts nor makes its
+                        // operands needed: its slot keeps an older value.
+                        if !runs {
+                            continue;
+                        }
+                        if !need[i.dst as usize] {
+                            let key = key_ix[&key_of(i.dst)];
+                            dead[key][r] += 1;
+                            let e = dead_op
+                                .entry((i.dst, format!("{:?}", block.op)))
+                                .or_insert([0u64; 7]);
+                            e[r] += 1;
+                            if off {
+                                dead_off[key] += 1;
+                            }
+                            continue;
+                        }
+                        match block.op {
+                            logi_sim::compile::Op::Mux => {
+                                mark(i.a, &mut need);
+                                mark(if sim.read(i.a) != 0 { i.c } else { i.b }, &mut need);
+                            }
+                            logi_sim::compile::Op::Switch => {
+                                mark(i.a, &mut need);
+                                if sim.read(i.a) != 0 {
+                                    mark(i.b, &mut need);
+                                }
+                            }
+                            logi_sim::compile::Op::And if sim.read(i.a) == 0 => {
+                                mark(i.a, &mut need)
+                            }
+                            logi_sim::compile::Op::And if sim.read(i.b) == 0 => {
+                                mark(i.b, &mut need)
+                            }
+                            _ => {
+                                if ua {
+                                    mark(i.a, &mut need);
+                                }
+                                if ub {
+                                    mark(i.b, &mut need);
+                                }
+                                if uc {
+                                    mark(i.c, &mut need);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for &(k, n, g) in &plan[v] {
+                static_ops[k] += u64::from(n);
+                if g.is_some() {
+                    guarded[k] += u64::from(n);
+                }
+                if g.is_none_or(|g| holds[g]) {
+                    exec[k][r] += u64::from(n);
+                    if off {
+                        off_exec[k] += u64::from(n);
+                    }
+                }
+            }
+        }
+        let s_all: u64 = samples.iter().sum();
+        let dead_all: u64 = dead.iter().map(|d| d.iter().sum::<u64>()).sum();
+        println!(
+            "LIVENESS ({s_all} sampled ticks): {:.1} ops per tick compute a value no live op reads (executed instructions only: guard-skipped ones excluded); timing-only ops (fold with dot/line keys): {}, frontier values {timing_frontier}",
+            dead_all as f64 / s_all as f64,
+            timing_only.iter().sum::<u64>()
+        );
+        let mut dorder: Vec<usize> = (0..nk).collect();
+        dorder.sort_by_key(|&k| std::cmp::Reverse(dead[k].iter().sum::<u64>()));
+        println!(
+            "| block | dead ops/tick | {} | rendering off | timing-only ops |",
+            REGIONS.join(" | ")
+        );
+        for &k in &dorder {
+            let d: u64 = dead[k].iter().sum();
+            if d == 0 && timing_only[k] == 0 {
+                continue;
+            }
+            let per: Vec<String> = (0..7)
+                .map(|r| format!("{:.1}", dead[k][r] as f64 / samples[r].max(1) as f64))
+                .collect();
+            println!(
+                "| {} | {:.1} | {} | {} | {} |",
+                names[k],
+                d as f64 / s_all as f64,
+                per.join(" | "),
+                if samples_off > 0 {
+                    format!("{:.1}", dead_off[k] as f64 / samples_off as f64)
+                } else {
+                    "-".into()
+                },
+                timing_only[k]
+            );
+        }
+        if let Some(prefix) = dead_ops {
+            let mut v: Vec<(&(u32, String), &[u64; 7])> = dead_op
+                .iter()
+                .filter(|((d, _), _)| {
+                    key_of(*d).starts_with(prefix.as_str())
+                        || slot_name(*d).is_some_and(|n| n.starts_with(prefix.as_str()))
+                })
+                .collect();
+            v.sort_by_key(|(_, c)| std::cmp::Reverse(c.iter().sum::<u64>()));
+            println!(
+                "| op | writes | dead share of sampled ticks | {} |",
+                REGIONS.join(" | ")
+            );
+            for ((d, op), c) in v.iter().take(120) {
+                let per: Vec<String> = (0..7)
+                    .map(|r| format!("{:.0}%", 100.0 * c[r] as f64 / samples[r].max(1) as f64))
+                    .collect();
+                println!(
+                    "| {op} | {} | {:.0}% | {} |",
+                    slot_name(*d).unwrap_or_else(|| format!("#{d}")),
+                    100.0 * c.iter().sum::<u64>() as f64 / s_all as f64,
+                    per.join(" | ")
+                );
+            }
+        }
+        let mut order: Vec<usize> = (0..nk).collect();
+        let tot = |k: usize| exec[k].iter().sum::<u64>();
+        order.sort_by_key(|&k| std::cmp::Reverse(tot(k)));
+        let all: u64 = (0..nk).map(tot).sum();
+        println!(
+            "{frames} frames from frame {skip}, {total} ticks: {:.1} ops executed per tick (fused bodies, guards on live slots), {:.1} in the fused bodies; rendering off {:.1}% of ticks",
+            all as f64 / total as f64,
+            static_ops.iter().sum::<u64>() as f64 / total as f64,
+            100.0 * off_ticks as f64 / total as f64
+        );
+        println!(
+            "region share of ticks: {}",
+            REGIONS
+                .iter()
+                .zip(reg_ticks)
+                .map(|(n, c)| format!("{n} {:.1}%", 100.0 * c as f64 / total as f64))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "| block | executed/tick | share | in fused body/tick | guarded/tick | guarded skipped | {} | rendering off |",
+            REGIONS.join(" | ")
+        );
+        for &k in &order {
+            let e = tot(k);
+            if e == 0 && static_ops[k] == 0 {
+                continue;
+            }
+            let g = guarded[k];
+            let skipped = static_ops[k] - e;
+            let per_region: Vec<String> = (0..7)
+                .map(|r| format!("{:.1}", exec[k][r] as f64 / reg_ticks[r].max(1) as f64))
+                .collect();
+            println!(
+                "| {} | {:.1} | {:.1}% | {:.1} | {:.1} | {} | {} | {} |",
+                names[k],
+                e as f64 / total as f64,
+                100.0 * e as f64 / all as f64,
+                static_ops[k] as f64 / total as f64,
+                g as f64 / total as f64,
+                if g > 0 {
+                    format!("{:.0}%", 100.0 * skipped as f64 / g as f64)
+                } else {
+                    "-".into()
+                },
+                per_region.join(" | "),
+                if off_ticks > 0 {
+                    format!("{:.1}", off_exec[k] as f64 / off_ticks as f64)
+                } else {
+                    "-".into()
+                }
+            );
+        }
+        return Ok(());
     }
     let fused: Vec<_> = fused_bodies.iter().map(count).collect();
     let mut keys: Vec<String> = full
