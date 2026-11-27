@@ -371,10 +371,13 @@ fn main() -> Result<(), String> {
                 if !sim.jit_active() {
                     return Err("no JIT (build with --features jit)".into());
                 }
+                #[cfg(feature = "jit")]
+                let code = sim.jit_code().map_or(0, |c| c.code_bytes);
+                #[cfg(not(feature = "jit"))]
+                let code = 0;
                 eprintln!(
-                    "  {m}: built in {:.0} ms ({} bytes of code)",
+                    "  {m}: built in {:.0} ms ({code} bytes of code)",
                     t.elapsed().as_secs_f64() * 1e3,
-                    sim.jit_code().map_or(0, |c| c.code_bytes)
                 );
                 if let Some(i) = input {
                     let p = sim.program().ports.input_by_node(i).expect("a port");
