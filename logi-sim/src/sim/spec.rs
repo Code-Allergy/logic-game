@@ -51,7 +51,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use crate::compile::guard::guard_with;
-use crate::compile::spec::{KeyLayout, PlanOptions, SpecContext, choose_plan};
+use crate::compile::spec::{KeyLayout, KeySeg, PlanOptions, SpecContext, choose_plan};
 use crate::compile::{Body, FastMap, Program, phases};
 use crate::netlist::mask;
 
@@ -212,51 +212,6 @@ pub struct PhasePlan {
     /// for. Values with bits past the layout's width never occur and are
     /// ignored, as are repeats.
     pub keys: Vec<u64>,
-}
-
-/// A run of contiguous key bits from one slot, ready to pack: the key
-/// takes `(slots[slot] & mask).rotate_right(rot)`. A field mask with gaps
-/// is split into its runs (so packing needs no `pext` and no branch), and
-/// runs of one slot that move by the same amount are merged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Seg {
-    slot: u32,
-    mask: u64,
-    rot: u32,
-}
-
-/// The segments packing `layout`'s key ([`KeyLayout::pack`]): each field's
-/// set bits, in order from bit 0 of the key.
-fn segs_of(layout: &KeyLayout) -> Vec<Seg> {
-    debug_assert!(layout.fits());
-    let mut segs: Vec<Seg> = Vec::new();
-    let mut at = 0u32;
-    for f in &layout.fields {
-        let mut m = f.mask;
-        while m != 0 {
-            let lo = m.trailing_zeros();
-            let len = (m >> lo).trailing_ones();
-            let run = if len == 64 {
-                m
-            } else {
-                ((1u64 << len) - 1) << lo
-            };
-            m &= !run;
-            // The run's bits go from `lo` to `at`: a rotation that does
-            // not wrap (both ranges are within the word).
-            let rot = lo.wrapping_sub(at) & 63;
-            match segs.iter_mut().find(|g| g.slot == f.slot && g.rot == rot) {
-                Some(g) => g.mask |= run,
-                None => segs.push(Seg {
-                    slot: f.slot,
-                    mask: run,
-                    rot,
-                }),
-            }
-            at += len;
-        }
-    }
-    segs
 }
 
 /// A body in a table: its key, its run and when it was last hit (the
@@ -437,7 +392,8 @@ impl Adapt {
 /// A keyed phase: its prefix, its fallback and its table.
 #[derive(Debug, Clone)]
 pub(super) struct PhaseSpec {
-    segs: Vec<Seg>,
+    /// The key's segments ([`KeyLayout::segments`]).
+    pub segs: Vec<KeySeg>,
     /// The key's fields as words (see [`PhaseSpec::field_words`]).
     words: Vec<u64>,
     /// The run computing the key slots the body computes (`None`: every
@@ -471,7 +427,7 @@ impl PhaseSpec {
     /// A phase keyed by `layout`, its table empty.
     fn new(layout: &KeyLayout, prefix: Option<u16>, fallback: u16) -> Self {
         PhaseSpec {
-            segs: segs_of(layout),
+            segs: layout.segments(),
             words: layout
                 .fields
                 .iter()
@@ -490,11 +446,7 @@ impl PhaseSpec {
     /// The key of the slots now ([`KeyLayout::pack`]).
     #[inline]
     pub fn key(&self, slots: &[u64]) -> u64 {
-        let mut key = 0;
-        for g in &self.segs {
-            key |= (slots[g.slot as usize] & g.mask).rotate_right(g.rot);
-        }
-        key
+        KeySeg::pack(&self.segs, slots)
     }
 
     /// The run for `key`: its specialized body, or the fallback.
@@ -844,6 +796,16 @@ impl Spec {
         self.phases.iter().flatten().map(PhaseSpec::bodies).sum()
     }
 
+    /// The key run `run` packs as a phase's prefix (empty: none).
+    #[cfg(feature = "jit")]
+    pub fn prefix_key(&self, run: u16) -> &[KeySeg] {
+        self.phases
+            .iter()
+            .flatten()
+            .find(|ps| ps.prefix == Some(run))
+            .map_or(&[], |ps| &ps.segs)
+    }
+
     /// Runs of the layout's tables: the prefix, the fallback and the
     /// specialized bodies of fixed tables (not those installed later).
     #[cfg(feature = "jit")]
@@ -1109,7 +1071,7 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
             Out::Body {
                 phase: *phase,
                 key: *key,
-                body: finish(p, body, true, r.jit).map(Box::new),
+                body: finish(p, body, true, r.jit, &[]).map(Box::new),
             }
         }
         Work::Plan {
@@ -1140,8 +1102,8 @@ pub fn build_spec(p: &Program, r: &SpecRequest) -> SpecBuilt {
                     } else {
                         let fallback = guard(cx.fallback(p, &pre));
                         (
-                            Some(finish(p, prefix, false, r.jit)?),
-                            Some(finish(p, fallback, true, r.jit)?),
+                            Some(finish(p, prefix, false, r.jit, &layout.segments())?),
+                            Some(finish(p, fallback, true, r.jit, &[])?),
                         )
                     };
                     Some(BuiltPhase {
@@ -1188,6 +1150,7 @@ fn build_superstep(p: &Program, sb: &SuperBuild) -> Option<SpecSuper> {
             guards: &b.guards,
             used: true,
             fused_only: true,
+            key: &[],
         })
         .collect();
     let s = SuperRef {
@@ -1206,9 +1169,10 @@ fn build_superstep(p: &Program, sb: &SuperBuild) -> Option<SpecSuper> {
 
 /// Check `body` as `Sim` checks its bodies and compile its unit.
 /// `fused_only`: every body but a prefix (whose results the key and the
-/// body after it read).
+/// body after it read); `key`: a prefix's key, which its native code
+/// packs (`jit::BodyRef::key`).
 #[cfg_attr(not(feature = "jit"), expect(unused_variables))]
-fn finish(p: &Program, body: Body, fused_only: bool, jit: bool) -> Option<Built> {
+fn finish(p: &Program, body: Body, fused_only: bool, jit: bool, key: &[KeySeg]) -> Option<Built> {
     #[cfg(test)]
     if MUTATION.get() == 5 {
         return None;
@@ -1237,6 +1201,7 @@ fn finish(p: &Program, body: Body, fused_only: bool, jit: bool) -> Option<Built>
                         guards: &body.guards,
                         used: true,
                         fused_only,
+                        key,
                     },
                 )
                 .ok()

@@ -292,6 +292,71 @@ fn a_unit_equals_its_body_in_a_program() {
     }
 }
 
+/// A body compiled with a key ([`super::BodyRef::key`], as a prefix is)
+/// gets a key entry with [`super::KEY_ENTRY`]: it settles as the body does
+/// and returns the key `KeyLayout::pack` packs from the settled slots, on
+/// random layouts (gaps, merged segments, the zero slot). A key slot past
+/// the slots is refused.
+#[cfg_attr(test, test)]
+fn a_key_entry_settles_and_packs_the_key() {
+    use crate::compile::spec::{KeyField, KeyLayout};
+    let mut rng = Rng::new(0x6b6579);
+    for (name, d) in designs().into_iter().step_by(3) {
+        let p = program(&d, &Options::default());
+        let mut sim = Sim::new(Arc::clone(&p));
+        for _ in 0..4 {
+            let fields: Vec<KeyField> = (0..1 + rng.below(5))
+                .map(|_| KeyField {
+                    slot: rng.below(p.slot_count as usize) as u32,
+                    mask: rng.next_u64() & rng.next_u64() & mask(1 + rng.below(16) as u8),
+                })
+                .collect();
+            let Some(layout) = KeyLayout::try_new(fields) else {
+                continue;
+            };
+            let segs = layout.segments();
+            if segs.is_empty() {
+                continue;
+            }
+            let body = super::BodyRef {
+                key: &segs,
+                used: true,
+                ..sim.body_refs().remove(0)
+            };
+            let u = compile_unit(&p, body).unwrap_or_else(|e| panic!("{name}: {}", e.0));
+            assert_eq!(u.body().key.is_some(), super::KEY_ENTRY, "{name}");
+            let Some(f) = u.body().key else {
+                continue;
+            };
+            for (port, q) in p.ports.inputs.iter().enumerate() {
+                sim.set_input(port, rng.next_u64() & mask(q.width));
+            }
+            sim.run(1 + rng.below(4) as u64);
+            let (mut a, mut b) = (Mirror::of(&sim), Mirror::of(&sim));
+            u.settle(&mut a.slots, &mut a.mems, a.tick);
+            let ptrs: Vec<*mut u64> = b.mems.iter_mut().map(|m| m.as_mut_ptr()).collect();
+            // SAFETY: the buffers are `sim`'s sizes, the body passed `check`.
+            let key = unsafe { f(b.slots.as_mut_ptr(), ptrs.as_ptr(), b.tick) };
+            assert_eq!(a.slots, b.slots, "{name}: the key entry's settle");
+            assert_eq!(key, layout.pack(&b.slots), "{name}: {layout:?}");
+        }
+        let bad = [crate::compile::spec::KeySeg {
+            slot: p.slot_count,
+            mask: 1,
+            rot: 0,
+        }];
+        let body = super::BodyRef {
+            key: &bad,
+            used: true,
+            ..sim.body_refs().remove(0)
+        };
+        assert!(
+            compile_unit(&p, body).is_err(),
+            "{name}: a key slot past the slots"
+        );
+    }
+}
+
 /// A body that is unused (or too large) is refused, not compiled empty.
 #[cfg_attr(test, test)]
 fn an_unused_body_is_refused() {
@@ -462,6 +527,10 @@ pub fn all() -> Vec<(&'static str, fn())> {
             a_unit_equals_its_body_in_a_program,
         ),
         ("an_unused_body_is_refused", an_unused_body_is_refused),
+        (
+            "a_key_entry_settles_and_packs_the_key",
+            a_key_entry_settles_and_packs_the_key,
+        ),
         (
             "compile_unit_of_covers_the_used_bodies",
             compile_unit_of_covers_the_used_bodies,

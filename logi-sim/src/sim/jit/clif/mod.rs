@@ -22,8 +22,8 @@ use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
 use super::bits::SlotBits;
 use super::superstep::{Plan, SItem, Stream};
-use super::{BodyRef, CommitFn, Item, JitError, SettleFn, SuperFn, arity, operands};
-use crate::compile::spec::possible_of;
+use super::{BodyRef, CommitFn, Item, JitError, KeyFn, SettleFn, SuperFn, arity, operands};
+use crate::compile::spec::{KeySeg, possible_of};
 use crate::compile::{Commit, Cond, Guard, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
 use crate::netlist::mask;
 
@@ -71,6 +71,11 @@ impl Finished {
     pub fn commit_fn(&self, id: FnId) -> CommitFn {
         // SAFETY: as in `settle_fn`, for commits.
         unsafe { std::mem::transmute::<*const u8, CommitFn>(self.get(id)) }
+    }
+
+    pub fn key_fn(&self, id: FnId) -> KeyFn {
+        // SAFETY: as in `settle_fn`, for a key entry.
+        unsafe { std::mem::transmute::<*const u8, KeyFn>(self.get(id)) }
     }
 
     pub fn super_fn(&self, id: FnId) -> SuperFn {
@@ -228,6 +233,54 @@ impl Builder {
     /// chunks defined `inner`) in order.
     pub fn settle_entry(&mut self, chunks: &[FnId]) -> Result<(FnId, usize), JitError> {
         self.entry(&[Ty::Ptr, Ty::Ptr, Ty::U64], chunks, "settle")
+    }
+
+    /// A key prefix's key entry ([`KeyFn`]): calls its settle `chunks`
+    /// in order, then packs the key of `segs` from the slots and returns
+    /// it.
+    pub fn key_entry(
+        &mut self,
+        chunks: &[FnId],
+        segs: &[KeySeg],
+    ) -> Result<(FnId, usize), JitError> {
+        let cfg = self.start(&[Ty::Ptr, Ty::Ptr, Ty::U64]);
+        self.ctx.func.signature.returns.clear();
+        self.ctx.func.signature.returns.push(AbiParam::new(I64));
+        let module = self.owned.0.as_mut().expect("a module");
+        let refs: Vec<_> = chunks
+            .iter()
+            .map(|&id| module.declare_func_in_func(id, &mut self.ctx.func))
+            .collect();
+        {
+            let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
+            let blk = b.create_block();
+            b.append_block_params_for_function_params(blk);
+            b.switch_to_block(blk);
+            b.seal_block(blk);
+            let args = b.block_params(blk).to_vec();
+            for r in refs {
+                b.ins().call(r, &args);
+            }
+            // Slots hold whole words (every store is 64 bits wide).
+            let mut key = b.ins().iconst(I64, 0);
+            for g in segs {
+                let (a, o) = match i32::try_from(u64::from(g.slot) * 8) {
+                    Ok(o) => (args[0], o),
+                    Err(_) => (b.ins().iadd_imm_u(args[0], i64::from(g.slot) * 8), 0),
+                };
+                let v = b.ins().load(I64, flags(), a, o);
+                let v = b.ins().band_imm_u(v, g.mask as i64);
+                let v = if g.rot == 0 {
+                    v
+                } else {
+                    b.ins().rotr_imm_u(v, i64::from(g.rot))
+                };
+                key = b.ins().bor(key, v);
+            }
+            b.ins().return_(&[key]);
+            b.finalize(cfg);
+        }
+        self.define("key")
     }
 
     /// A function of `params` that calls `chunks` in order with its own

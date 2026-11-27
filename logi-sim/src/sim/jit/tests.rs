@@ -236,6 +236,7 @@ fn compiled_code_can_be_installed_and_removed() {
         guards: &[],
         used: true,
         fused_only: false,
+        key: &[],
     };
     let j = JitProgram::compile(&p, &[body]).unwrap();
     assert_eq!(j.bodies.len(), 1);

@@ -1447,7 +1447,16 @@ impl Sim {
                 k = 0;
             }
             let run = if self.spec.phases.get(k).is_some_and(Option::is_some) {
-                self.spec_run(k, |s, pre| s.settle_with(pre, of(s, &fns, pre).settle))
+                self.spec_run(k, |s, pre| {
+                    let f = of(s, &fns, pre);
+                    match f.key {
+                        Some(key) => Some(s.settle_key(key)),
+                        None => {
+                            s.settle_with(pre, f.settle);
+                            None
+                        }
+                    }
+                })
             } else {
                 self.fused[k]
             };
@@ -1470,15 +1479,19 @@ impl Sim {
     /// The key's prefix, then the body built for the key or the fallback
     /// (see `sim/spec.rs`), on inputs already in their slots.
     fn spec_keyed(&mut self, k: usize) {
-        let run = self.spec_run(k, |s, pre| s.evaluate_body(pre));
+        let run = self.spec_run(k, |s, pre| {
+            s.evaluate_body(pre);
+            None
+        });
         self.evaluate(run);
     }
 
-    /// The key's prefix (settled by `prefix`), then the run for the key
-    /// (its body or the fallback), counted as a hit or a miss: what
-    /// settles keyed phase `k`.
+    /// The key's prefix (settled by `prefix`, which may return the key
+    /// its native code packed), then the run for the key (its body or the
+    /// fallback), counted as a hit or a miss: what settles keyed phase
+    /// `k`.
     #[inline]
-    fn spec_run(&mut self, k: usize, prefix: impl FnOnce(&mut Self, u16)) -> u16 {
+    fn spec_run(&mut self, k: usize, prefix: impl FnOnce(&mut Self, u16) -> Option<u64>) -> u16 {
         let ps = self.spec.phases[k].as_ref().expect("a keyed phase");
         let pre = ps.prefix;
         #[cfg(test)]
@@ -1492,16 +1505,18 @@ impl Sim {
                 run
             };
         }
+        let mut key = None;
         if let Some(pre) = pre {
             // The prefix is part of this settle, not one of its own.
-            prefix(self, pre);
+            key = prefix(self, pre);
             #[cfg(feature = "counters")]
             {
                 self.counters.settles -= 1;
             }
         }
         let ps = self.spec.phases[k].as_mut().expect("a keyed phase");
-        ps.dispatch(ps.key(&self.slots))
+        debug_assert!(key.is_none_or(|key| key == ps.key(&self.slots)));
+        ps.dispatch(key.unwrap_or_else(|| ps.key(&self.slots)))
     }
 
     /// The native code of body `run`.
@@ -1524,6 +1539,17 @@ impl Sim {
         // code the installed native code (or `run`'s unit) owns.
         unsafe { f(self.slots.as_mut_ptr(), m, self.tick) };
         debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+    }
+
+    /// A key prefix's settle by its native key function `f`: the key.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn settle_key(&mut self, f: jit::KeyFn) -> u64 {
+        let m = self.mem_ptrs();
+        // SAFETY: as in `settle_with`.
+        let key = unsafe { f(self.slots.as_mut_ptr(), m, self.tick) };
+        debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+        key
     }
 
     /// [`Sim::commit`] of `run`, by its native commit function `f` when it
@@ -2111,6 +2137,7 @@ impl Sim {
 struct NativeFns {
     settle: Option<jit::SettleFn>,
     commit: Option<jit::CommitFn>,
+    key: Option<jit::KeyFn>,
 }
 
 #[cfg(all(feature = "jit", not(feature = "counters")))]
@@ -2120,6 +2147,7 @@ impl NativeFns {
         NativeFns {
             settle: b.and_then(jit::JitBody::settle_fn),
             commit: b.and_then(jit::JitBody::commit_fn),
+            key: b.and_then(jit::JitBody::key_fn),
         }
     }
 }

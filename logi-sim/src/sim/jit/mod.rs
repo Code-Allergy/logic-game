@@ -101,6 +101,7 @@ pub use unit::{JitUnit, SuperUnit, compile_superstep, compile_unit};
 
 use foldhash::{HashSet, HashSetExt};
 
+use crate::compile::spec::KeySeg;
 use crate::compile::{Block, Commit, Guard, Instr, Op, Pack, PackOperand, Program};
 
 /// Instructions (or packed words) per settle chunk at most. Small chunks
@@ -161,6 +162,13 @@ pub type SettleFn = unsafe extern "C" fn(*mut u64, *const *mut u64, u64);
 /// A commit: `(slots, mems, mem_writes)`; `mem_writes` has one counter per
 /// memory, incremented for every write or clear taken.
 pub type CommitFn = unsafe extern "C" fn(*mut u64, *const *mut u64, *mut u64);
+/// A key prefix's settle that also returns the key it computed
+/// ([`BodyRef::key`]): `(slots, mems, tick) -> key`.
+pub type KeyFn = unsafe extern "C" fn(*mut u64, *const *mut u64, u64) -> u64;
+
+/// Whether a key prefix gets a [`KeyFn`] (native code packs the key, not
+/// `Sim`). Off on wasm32 (its backend has none: `Sim` packs).
+pub const KEY_ENTRY: bool = cfg!(not(target_arch = "wasm32"));
 
 /// One body to compile (see the module documentation).
 pub struct BodyRef<'a> {
@@ -177,6 +185,10 @@ pub struct BodyRef<'a> {
     /// the last (a fused-run body): slots that neither its commits nor a
     /// later chunk read need not be stored.
     pub fused_only: bool,
+    /// A key prefix's key (empty: none): with [`KEY_ENTRY`], the body
+    /// also gets a [`KeyFn`] that settles it, then packs and returns the
+    /// key from the slots.
+    pub key: &'a [KeySeg],
 }
 
 /// One compiled body: its settle chunks in order, and its commit chunks
@@ -192,6 +204,9 @@ pub struct JitBody {
     /// which calls them (see [`SETTLE_ENTRY`]).
     pub(crate) settle: Vec<SettleFn>,
     pub(crate) commit: Option<Vec<CommitFn>>,
+    /// The settle and the key's packing, for a key prefix
+    /// ([`BodyRef::key`]).
+    pub(crate) key: Option<KeyFn>,
     chunks: usize,
 }
 
@@ -220,6 +235,13 @@ impl JitBody {
             [f] => Some(f),
             _ => None,
         }
+    }
+
+    /// The settle that also returns the key, for a key prefix.
+    #[inline]
+    #[cfg_attr(feature = "counters", expect(dead_code))]
+    pub(crate) fn key_fn(&self) -> Option<KeyFn> {
+        self.key
     }
 
     /// The commit as one function, when it is one call.
@@ -548,6 +570,7 @@ struct Ids {
     /// What a settle calls (see [`JitBody`]).
     settle: Vec<backend::FnId>,
     commit: Option<Vec<backend::FnId>>,
+    key: Option<backend::FnId>,
     chunks: usize,
 }
 
@@ -563,6 +586,10 @@ impl Ids {
             commit: self
                 .commit
                 .map(|c| c.into_iter().map(|id| fin.commit_fn(id)).collect()),
+            #[cfg(not(target_arch = "wasm32"))]
+            key: self.key.map(|id| fin.key_fn(id)),
+            #[cfg(target_arch = "wasm32")]
+            key: None,
             chunks: self.chunks,
         }
     }
@@ -580,6 +607,9 @@ fn compile_body(
     let items: usize = body.blocks.iter().map(|b| b.len as usize).sum();
     if !body.used || items > MAX_BODY {
         return Ok(None);
+    }
+    if body.key.iter().any(|g| g.slot >= p.slot_count) {
+        return Err(JitError("a key slot past the slots".into()));
     }
     let chunks = chunks(body);
     // Slots read by commits and by later chunks: live out of a chunk.
@@ -617,6 +647,17 @@ fn compile_body(
         *bytes += size;
         settle.push(id);
     }
+    // A key prefix's key entry calls the chunks, then packs the key.
+    #[cfg(not(target_arch = "wasm32"))]
+    let key = if KEY_ENTRY && !body.key.is_empty() {
+        let (id, size) = b.key_entry(&settle, body.key)?;
+        *bytes += size;
+        Some(id)
+    } else {
+        None
+    };
+    #[cfg(target_arch = "wasm32")]
+    let key = None;
     if entry {
         let (id, size) = b.settle_entry(&settle)?;
         *bytes += size;
@@ -640,6 +681,7 @@ fn compile_body(
     Ok(Some(Ids {
         settle,
         commit,
+        key,
         chunks: chunks.len(),
     }))
 }

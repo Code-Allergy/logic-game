@@ -505,6 +505,40 @@ fn native_code_follows_the_plan() {
     same_batches(&mut want, &mut c);
 }
 
+/// Whether every keyed phase's prefix packs its key in native code
+/// (`jit::KeyFn`); `None` without native code.
+#[cfg(feature = "jit")]
+pub(super) fn prefixes_pack_keys(s: &Sim) -> Option<bool> {
+    s.jit_active().then(|| {
+        s.spec.phases.iter().flatten().all(|ps| {
+            ps.prefix.is_none_or(|pre| {
+                crate::sim::native(&s.jit, &s.spec, pre).is_some_and(|b| b.key.is_some())
+            })
+        })
+    })
+}
+
+/// With the JIT, a plan's prefixes (built with the layout) pack their keys
+/// in native code, and keyed batches still equal single ticks.
+#[cfg(feature = "jit")]
+#[test]
+fn native_prefixes_pack_their_keys() {
+    for keys in [&[][..], &[0, 1, 2, 3][..]] {
+        let (p, plan) = counting(0xf, keys);
+        let mut s = Sim::with_options(Arc::clone(&p), with_spec(SimOptions::jit(), &plan));
+        assert!(s.spec.phases.iter().flatten().any(|ps| ps.prefix.is_some()));
+        assert_eq!(prefixes_pack_keys(&s), Some(crate::sim::jit::KEY_ENTRY));
+        let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+        for x in [0, 3, 0xfff0] {
+            want.set_input(0, x);
+            s.set_input(0, x);
+            same_batches(&mut want, &mut s);
+        }
+        assert!(s.spec_stats().hits > 0 || keys.is_empty());
+        assert!(s.spec_stats().misses > 0);
+    }
+}
+
 /// More than 255 runs: a body for each of 300 values of a counter key,
 /// interpreted and JIT-compiled.
 #[test]
@@ -617,7 +651,7 @@ fn a_plan_past_the_run_index_cap_leaves_room_for_other_phases() {
     same_batches(&mut want, &mut s);
 }
 
-/// The key packed by segments (`segs_of`) is `KeyLayout::pack`'s, on
+/// The key packed by segments (`KeyLayout::segments`) is `KeyLayout::pack`'s, on
 /// random layouts: masks with gaps, fields of one slot (merged segments),
 /// the full word, empty masks.
 #[test]
