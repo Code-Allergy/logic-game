@@ -552,6 +552,58 @@ fn formula_cases_are_exhaustive_or_seeded() {
     ));
 }
 
+/// A formula's expected value is cut to the width of the output it names,
+/// also when an input has the same label and another width (the editor
+/// allows an input and an output of one label).
+#[test]
+fn a_formula_expectation_has_the_width_of_the_output_not_of_an_input_of_its_name() {
+    use crate::sim::challenges::{Port, PortTest, load_test};
+    let mut d = CircuitDocument::new("c");
+    let at = Vec2::new;
+    d.add(DocNode::labeled(
+        GateKind::Input { w: 1 },
+        at(-100.0, 60.0),
+        "A",
+    ));
+    let k = d.add(DocNode::new(
+        GateKind::Const { w: 8, value: 255 },
+        at(-100.0, 0.0),
+    ));
+    let out = d.add(DocNode::labeled(
+        GateKind::Output { w: 8 },
+        at(100.0, 0.0),
+        "A",
+    ));
+    d.connect(k, 0, out, 0);
+    let ws = WorkspaceDocument::new(d);
+    let design = crate::sim::netlist::design_of(&ws).expect("design");
+    let program = logi_sim::compile::compile(&design, &logi_sim::compile::Options::default())
+        .expect("compiles");
+    let (inputs, outputs) = (
+        [Port {
+            name: "A".into(),
+            w: 1,
+        }],
+        [Port {
+            name: "A".into(),
+            w: 8,
+        }],
+    );
+    let test = load_test(
+        serde_json::json!({"formula": {"expect": {"A": "255"}}}),
+        &inputs,
+        &outputs,
+    )
+    .expect("a test");
+    let report = PortTest {
+        inputs: &inputs,
+        outputs: &outputs,
+        test: &test,
+    }
+    .run(logi_sim::sim::Sim::new(std::sync::Arc::new(program)));
+    assert!(report.failure.is_none(), "{:?}", report.failure);
+}
+
 #[test]
 fn primitive_type_names_cover_every_part() {
     for (_, kinds) in GateKind::palette(1) {

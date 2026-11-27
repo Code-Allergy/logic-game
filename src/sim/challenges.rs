@@ -390,19 +390,19 @@ pub struct PortTest<'a> {
 }
 
 impl PortTest<'_> {
-    fn width(&self, name: &str) -> u8 {
-        self.inputs
-            .iter()
-            .chain(self.outputs)
-            .find(|p| p.name == name)
-            .map_or(64, |p| p.w)
+    /// The width of the port `name` among `ports` (the inputs or the
+    /// outputs: an input and an output may share a label, with different
+    /// widths).
+    fn width(ports: &[Port], name: &str) -> u8 {
+        ports.iter().find(|p| p.name == name).map_or(64, |p| p.w)
     }
 
-    fn signals(&self, values: impl IntoIterator<Item = (String, u64)>) -> Vec<Signal> {
+    /// `values` of `ports` (the inputs or the outputs) as signals.
+    fn signals(ports: &[Port], values: impl IntoIterator<Item = (String, u64)>) -> Vec<Signal> {
         values
             .into_iter()
             .map(|(name, value)| Signal {
-                w: self.width(&name),
+                w: Self::width(ports, &name),
                 name,
                 value,
             })
@@ -430,9 +430,9 @@ impl PortTest<'_> {
                 Failure::Case(Box::new(FailedCase {
                     case: n,
                     tick: None,
-                    inputs: self.signals(inputs),
-                    expected: self.signals(expected),
-                    got: self.signals(got),
+                    inputs: Self::signals(self.inputs, inputs),
+                    expected: Self::signals(self.outputs, expected),
+                    got: Self::signals(self.outputs, got),
                 }))
             })
         };
@@ -469,7 +469,12 @@ impl PortTest<'_> {
                     let var = |n: &str| ins.iter().find(|(k, _)| k == n).map_or(0, |(_, v)| *v);
                     let exp = expect
                         .iter()
-                        .map(|(name, e)| (name.clone(), e.eval(&var) & mask(self.width(name))))
+                        .map(|(name, e)| {
+                            (
+                                name.clone(),
+                                e.eval(&var) & mask(Self::width(self.outputs, name)),
+                            )
+                        })
                         .collect();
                     if let Some(f) = case(&mut sim, cases, ins, exp) {
                         return CheckReport::failed(cases, f);
@@ -485,7 +490,7 @@ impl PortTest<'_> {
                     for (name, v) in &step.set {
                         sim.set(name, *v);
                         if let Some(h) = held.iter_mut().find(|(n, _)| n == name) {
-                            h.1 = *v & mask(self.width(name));
+                            h.1 = *v & mask(Self::width(self.inputs, name));
                         }
                     }
                     sim.run(u64::from(step.ticks));
@@ -500,9 +505,9 @@ impl PortTest<'_> {
                             Failure::Case(Box::new(FailedCase {
                                 case: cases,
                                 tick: Some(sim.tick_count()),
-                                inputs: self.signals(held.clone()),
-                                expected: self.signals(step.expect.clone()),
-                                got: self.signals(got),
+                                inputs: Self::signals(self.inputs, held.clone()),
+                                expected: Self::signals(self.outputs, step.expect.clone()),
+                                got: Self::signals(self.outputs, got),
                             })),
                         );
                     }

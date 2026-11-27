@@ -473,6 +473,35 @@ fn snapshots_rewind_and_sessions_continue() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An edit that moves a wired port past the 256th drops its wire and says
+/// so: the wire used to be rebound to the wrapped pin (pin 0).
+#[test]
+fn a_port_moved_past_the_256th_drops_its_wire_instead_of_wrapping() {
+    let ports: Vec<Value> = (0..256)
+        .map(|i| json!({"name": format!("P{i:03}"), "type": "Input"}))
+        .collect();
+    let (ws, _) = edit(
+        &empty(),
+        json!({"edits": [
+            {"circuit": "wide", "ops": [{"add": ports}]},
+            {"ops": [{"add": [{"name": "In", "type": "Input"}, {"name": "w", "use": "wide"}]},
+                     {"wire": [["In", "w.P255"], ["In", "w.P000"]]}]}
+        ]}),
+    );
+    assert_eq!(ws.root.wires.len(), 2);
+    // `A` sorts first: every port moves up by one, `P255` to pin 256.
+    let (ws, report) = edit(
+        &ws,
+        json!({"edits": [{"circuit": "wide", "ops": [{"add": [{"name": "A", "type": "Input"}]}]}]}),
+    );
+    let pins: Vec<u8> = ws.root.wires.iter().map(|w| w.to.pin).collect();
+    assert_eq!(pins, [1], "P000 follows its port; P255's wire is gone");
+    assert!(
+        report.to_string().contains("past the 256 a wire can reach"),
+        "{report}"
+    );
+}
+
 #[test]
 fn stored_tests_run_as_a_suite_and_report_the_first_failing_case() {
     let ws = adder8();

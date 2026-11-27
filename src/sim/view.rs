@@ -253,7 +253,14 @@ impl PinRemap {
         let map = |o: &[&DocNode], n: &[&DocNode]| -> Vec<Option<u8>> {
             let mut out: Vec<Option<u8>> = o
                 .iter()
-                .map(|x| n.iter().position(|y| y.id == x.id).map(|p| p as u8))
+                .map(|x| {
+                    // (A port past the 256th cannot be named by a wire:
+                    // its wires are dropped and reported, as a removed
+                    // port's.)
+                    n.iter()
+                        .position(|y| y.id == x.id)
+                        .and_then(|p| u8::try_from(p).ok())
+                })
                 .collect();
             let mut taken: Vec<bool> = vec![false; n.len()];
             for p in out.iter().flatten() {
@@ -271,9 +278,11 @@ impl PinRemap {
                         && y.label.as_deref() == Some(label)
                         && y.kind.width() == x.kind.width()
                 });
-                if let Some(j) = found {
+                if let Some(j) = found
+                    && let Ok(pin) = u8::try_from(j)
+                {
                     taken[j] = true;
-                    out[i] = Some(j as u8);
+                    out[i] = Some(pin);
                 }
             }
             out
@@ -285,7 +294,11 @@ impl PinRemap {
             input_names: oi.iter().map(name).collect(),
             output_names: oo.iter().map(name).collect(),
         };
-        let identity = |v: &[Option<u8>]| v.iter().enumerate().all(|(i, p)| *p == Some(i as u8));
+        let identity = |v: &[Option<u8>]| {
+            v.iter()
+                .enumerate()
+                .all(|(i, p)| *p == u8::try_from(i).ok())
+        };
         (!identity(&remap.inputs) || !identity(&remap.outputs)).then_some(remap)
     }
 

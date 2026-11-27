@@ -506,8 +506,8 @@ pub fn compress_refs(mut refs: Vec<String>) -> Vec<String> {
 /// make the wires on its placements, everywhere in `ws`, follow their
 /// ports. Pins are numbered in label order, so a port that was added,
 /// removed or renamed moves the others; each wire stays on the port of
-/// the label it was on. A wire whose port is gone or changed width is
-/// removed and returned as text.
+/// the label it was on. A wire whose port is gone, changed width, or is
+/// now past the 256 pins a wire can name is removed and returned as text.
 pub fn rebind_instances(
     ws: &mut WorkspaceDocument,
     old: &CircuitDocument,
@@ -546,7 +546,13 @@ pub fn rebind_instances_except(
     // Old pin -> new pin, where the port is still there with its width.
     let map = |old: &[(String, u8)], new: &[(String, u8)]| -> Vec<Option<u8>> {
         old.iter()
-            .map(|port| new.iter().position(|p| p == port).map(|i| i as u8))
+            .map(|port| {
+                // A port moved past the 256th cannot be named by a wire:
+                // its wires go, and are reported, like a removed port's.
+                new.iter()
+                    .position(|p| p == port)
+                    .and_then(|i| u8::try_from(i).ok())
+            })
             .collect()
     };
     let (in_map, out_map) = (
@@ -595,7 +601,8 @@ pub fn rebind_instances_except(
         });
         for (from, to) in gone {
             dropped.push(format!(
-                "{} -> {} in \"{}\" (the port of \"{}\" is gone or changed width)",
+                "{} -> {} in \"{}\" (the port of \"{}\" is gone, changed width, or is now past \
+                 the 256 a wire can reach)",
                 label(from),
                 label(to),
                 doc.name,
@@ -1783,7 +1790,8 @@ impl Group<'_> {
         };
         let repin = |old: &[Uuid], new: &[Uuid], pin: u8| -> u8 {
             let port = remap[&old[usize::from(pin)]];
-            new.iter().position(|id| *id == port).expect("a port") as u8
+            let i = new.iter().position(|id| *id == port).expect("a port");
+            u8::try_from(i).expect("checked by plan_chip: at most MAX_CHIP_PINS ports")
         };
         let old_instance = plan.instance.id;
         let mut instance = plan.instance.clone();
