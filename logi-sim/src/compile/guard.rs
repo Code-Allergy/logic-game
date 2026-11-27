@@ -207,6 +207,12 @@ struct Cx<'a> {
 }
 
 impl Cx<'_> {
+    /// The instruction writing an operand (`NONE` for none, or for an
+    /// operand that is a literal, not a slot: `is` false).
+    fn operand_writer(&self, is: bool, s: u32) -> u32 {
+        if is { self.writer[s as usize] } else { NONE }
+    }
+
     /// Rank + 1 of the value in a slot (0 for slots no instruction writes).
     fn ready_of(&self, s: u32) -> u32 {
         match self.writer[s as usize] {
@@ -416,7 +422,7 @@ impl Tree {
                 }
                 let i = body.instrs[k as usize];
                 for (is, s) in [(sa, i.a), (sb, i.b), (sc, i.c)] {
-                    let w = cx.writer[s as usize];
+                    let w = cx.operand_writer(is, s);
                     let inside = w != NONE && {
                         let hw = home[w as usize];
                         hw == h || (hw != 0 && regions[hw as usize].parent == h)
@@ -515,7 +521,7 @@ impl Tree {
                 let i = body.instrs[k as usize];
                 let mut d = vec![0u64; words];
                 for (port, is, s) in [(0u8, sa, i.a), (1, sb, i.b), (2, sc, i.c)] {
-                    let w = cx.writer[s as usize];
+                    let w = cx.operand_writer(is, s);
                     if !is || w == NONE {
                         continue;
                     }
@@ -618,7 +624,7 @@ impl Tree {
             for k in b.start..b.start + b.len {
                 let i = body.instrs[k as usize];
                 for (port, is, s) in [(0u8, sa, i.a), (1, sb, i.b), (2, sc, i.c)] {
-                    let w = cx.writer[s as usize];
+                    let w = cx.operand_writer(is, s);
                     if !is || w == NONE || of(w) != NONE {
                         continue;
                     }
@@ -797,7 +803,7 @@ impl Tree {
             for k in b.start..b.start + b.len {
                 let i = body.instrs[k as usize];
                 for (is, s) in [(sa, i.a), (sb, i.b), (sc, i.c)] {
-                    let w = cx.writer[s as usize];
+                    let w = cx.operand_writer(is, s);
                     if is && w != NONE {
                         edge(w, k, home[k as usize]);
                     }

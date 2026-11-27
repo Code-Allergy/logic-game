@@ -661,6 +661,29 @@ fn random_enabled_registers_are_exact() {
     assert!(undone & 0xFFFF > 0 && undone >> 16 > 0, "both undo paths");
 }
 
+/// Literal operands (shift amounts, field offsets) larger than the
+/// design's slot count are not slots: a small design with wide fields.
+#[test]
+fn literal_operands_are_not_slots() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 64);
+    let en = b.input("en", 1);
+    let hi = b.split(x, 60, 4);
+    let lo = b.split(x, 40, 4);
+    let t = b.xor(hi, lo);
+    let (t, _) = b.add(t, lo, None);
+    let q = b.register(en, t);
+    b.output("q", q);
+    let p = compile(&d, &Options::default()).unwrap();
+    assert!(p.slot_count < 40, "{} slots", p.slot_count);
+    for min in [1, MIN_REGION] {
+        let _ = fused(&p, min);
+    }
+    on_off("wide fields", &d, 100);
+}
+
 #[test]
 fn fixtures_are_exact_with_guards() {
     let cpu = fixtures::cpu(&fixtures::LOOP_PROGRAM);
