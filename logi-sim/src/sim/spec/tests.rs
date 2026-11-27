@@ -688,8 +688,9 @@ fn keys_pack_as_the_layout_does() {
     assert!(checked > 1000);
 }
 
-/// The table's memo follows inserts and removes (a removal moves the last
-/// entry into the hole).
+/// The table's memo and cache follow inserts and removes (a removal
+/// moves the last entry into the hole), and agree with the map on many
+/// keys (colliding in the cache).
 #[test]
 fn the_table_memo_follows_changes() {
     let mut t = Table::new();
@@ -717,4 +718,24 @@ fn the_table_memo_follows_changes() {
     t.insert(5, 14, 3);
     assert_eq!((t.len(), t.find(5)), (2, 1));
     assert_eq!(t.get(5).map(|e| (e.run, e.last)), Some((14, 3)));
+    // Many keys, some with entries, looked up in a random order while
+    // entries come and go: `find` is the map's answer.
+    let mut rng = Rng::new(0x7ab1e);
+    let mut t = Table::new();
+    for round in 0..4000 {
+        let key = rng.below(300) as u64;
+        match rng.below(8) {
+            0 if t.get(key).is_none() => t.insert(key, round as u16, 0),
+            1 => {
+                t.remove(key);
+            }
+            _ => {
+                let want = t.index.get(&key).copied().unwrap_or(MISS);
+                assert_eq!(t.find(key), want, "key {key}, round {round}");
+                if want != MISS {
+                    assert_eq!(t.entries[want as usize].key, key);
+                }
+            }
+        }
+    }
 }

@@ -223,38 +223,61 @@ struct Entry {
     last: u64,
 }
 
-/// A phase's bodies by key: the entries in a vector, indexed by a map, and
-/// the entry (or miss) of the key looked up last. Consecutive fused ticks
-/// of a phase mostly have the key of the tick before (on the NES console,
-/// 98 % of the ticks of two of its three phases), which then costs a
-/// compare instead of a hash lookup.
-#[derive(Debug, Clone, Default)]
+/// A phase's bodies by key: the entries in a vector, indexed by a map, in
+/// front of which the entry (or miss) of the key looked up last and a
+/// small direct-mapped cache of keys looked up. Consecutive fused ticks of
+/// a phase mostly have the key of the tick before (on the NES console, 98 %
+/// of the ticks of two of its three phases), which then costs a compare;
+/// the other keys mostly come back soon, and cost a multiply and a compare
+/// instead of a hash lookup.
+#[derive(Debug, Clone)]
 struct Table {
     index: FastMap<u64, u32>,
     entries: Vec<Entry>,
     /// The key looked up last, and its entry's index (`MISS`: none).
     memo_key: u64,
     memo: u32,
+    /// Keys looked up, each with its entry's index (`MISS`: none), by key
+    /// hash ([`CACHE`] of them). Every pair is right, wherever it sits.
+    cache: Box<[(u64, u32)]>,
 }
 
 /// [`Table::memo`] of a key without a body.
 const MISS: u32 = u32::MAX;
+/// Keys in a table's cache (a power of 2).
+const CACHE: usize = 64;
 
 impl Table {
     fn new() -> Self {
+        // Key 0 has no entry yet.
         Table {
+            index: FastMap::default(),
+            entries: Vec::new(),
+            memo_key: 0,
             memo: MISS,
-            ..Table::default()
+            cache: vec![(0, MISS); CACHE].into_boxed_slice(),
         }
     }
 
     /// The index of `key`'s entry, or `MISS`.
-    #[inline]
+    #[inline(always)]
     fn find(&mut self, key: u64) -> u32 {
-        if key != self.memo_key {
-            self.memo_key = key;
-            self.memo = self.index.get(&key).copied().unwrap_or(MISS);
+        if key == self.memo_key {
+            return self.memo;
         }
+        self.find_other(key)
+    }
+
+    /// [`Table::find`] of a key other than the last.
+    #[inline(never)]
+    fn find_other(&mut self, key: u64) -> u32 {
+        self.memo_key = key;
+        let h = (key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58) as usize & (CACHE - 1);
+        let c = &mut self.cache[h];
+        if c.0 != key {
+            *c = (key, self.index.get(&key).copied().unwrap_or(MISS));
+        }
+        self.memo = c.1;
         self.memo
     }
 
@@ -286,7 +309,7 @@ impl Table {
                 self.entries.push(e);
             }
         }
-        self.unmemo();
+        self.refresh();
     }
 
     fn remove(&mut self, key: u64) -> Option<Entry> {
@@ -295,13 +318,17 @@ impl Table {
         if let Some(moved) = self.entries.get(i) {
             self.index.insert(moved.key, i as u32);
         }
-        self.unmemo();
+        self.refresh();
         Some(e)
     }
 
-    /// The memo after a change of the table.
-    fn unmemo(&mut self) {
-        self.memo = self.index.get(&self.memo_key).copied().unwrap_or(MISS);
+    /// The memo and the cache after a change of the table.
+    fn refresh(&mut self) {
+        let of = |k: &u64| self.index.get(k).copied().unwrap_or(MISS);
+        self.memo = of(&self.memo_key);
+        for c in self.cache.iter_mut() {
+            c.1 = of(&c.0);
+        }
     }
 }
 
@@ -458,7 +485,7 @@ impl PhaseSpec {
 
     /// The run for `key` in a fused tick: [`PhaseSpec::lookup`], counting
     /// the hit (and when) or the miss (and, adaptive, the key's heat).
-    #[inline]
+    #[inline(always)]
     pub fn dispatch(&mut self, key: u64) -> u16 {
         let clock = self.hits + self.misses;
         let i = self.table.find(key);
@@ -467,6 +494,12 @@ impl PhaseSpec {
             self.hits += 1;
             return e.run;
         }
+        self.miss(key, clock)
+    }
+
+    /// [`PhaseSpec::dispatch`] of a key without a body.
+    #[inline(never)]
+    fn miss(&mut self, key: u64, clock: u64) -> u16 {
         self.misses += 1;
         if let Some(a) = &mut self.adapt {
             a.miss(key, clock);
