@@ -65,6 +65,8 @@
 use std::sync::Mutex;
 
 #[cfg(not(target_arch = "wasm32"))]
+mod bits;
+#[cfg(not(target_arch = "wasm32"))]
 mod clif;
 mod superstep;
 #[cfg(any(test, feature = "selftest"))]
@@ -116,6 +118,12 @@ use crate::compile::{Block, Commit, Guard, Instr, Op, Pack, PackOperand, Program
 /// run no faster with 128 or 256 (within ±2 %), and their bodies compile
 /// 25 % and 55 % slower.
 pub const CHUNK: usize = 64;
+
+/// Native code loads a slot's value again from memory once it went unused
+/// for more than this many items of a function (0: never), instead of
+/// keeping it in a register, or in a spill slot: a load from the slot
+/// costs no more than the reload of a spill, and saves the spill.
+pub const REMAT: u32 = 16;
 
 /// Commits per commit chunk at most.
 pub const COMMIT_CHUNK: usize = 256;
@@ -392,7 +400,10 @@ fn define_program(
     bodies: &[BodyRef<'_>],
     superstep: Option<&SuperRef<'_>>,
 ) -> Result<(backend::Builder, Layout), JitError> {
-    let mut b = backend::Builder::new(code_hint(bodies) * if superstep.is_some() { 2 } else { 1 })?;
+    let mut b = new_builder(
+        p,
+        code_hint(bodies) * if superstep.is_some() { 2 } else { 1 },
+    )?;
     let mut ids: Vec<Option<Ids>> = Vec::with_capacity(bodies.len());
     let mut count = 0usize;
     let mut bytes = 0usize;
@@ -427,6 +438,27 @@ fn define_program(
             code_bytes: bytes,
         },
     ))
+}
+
+/// A backend builder for code over the slots of `p`, about `hint` bytes
+/// of it (see `code_hint`). Native code learns the bits each slot can
+/// hold (`bits.rs`), to compute narrow values in 32-bit operations
+/// (`tune`: `LOGI_JIT_NARROW`).
+fn new_builder(p: &Program, hint: usize) -> Result<backend::Builder, JitError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let bits = if tune::get().narrow {
+            bits::SlotBits::of(p)
+        } else {
+            bits::SlotBits::wide(p)
+        };
+        backend::Builder::new(hint, bits)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = p;
+        backend::Builder::new(hint)
+    }
 }
 
 /// About how many bytes of native code `bodies` compile to (for the size

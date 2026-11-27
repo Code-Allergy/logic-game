@@ -517,6 +517,98 @@ fn shift_ops_run_in_supersteps() {
     }
 }
 
+/// One instruction of every op over narrow inputs (the native code
+/// computes values that fit 32 bits in 32-bit operations), with literal
+/// fields and immediates around the 32-bit boundary: native code and the
+/// interpreter agree on the result for random inputs of the inputs'
+/// widths.
+#[cfg_attr(test, test)]
+fn narrow_ops_match_the_interpreter() {
+    use crate::compile::Op;
+    use crate::netlist::mask;
+    use crate::testkit::rng::Rng;
+    // `y = a & b` over 64-bit inputs `a`, `b`, `c`; the instruction is
+    // then replaced, and the inputs' widths narrowed.
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut bb = d.builder(r);
+    let x = bb.input("a", 64);
+    let y = bb.input("b", 64);
+    let _ = bb.input("c", 64);
+    let z = bb.and(x, y);
+    bb.output("y", z);
+    let base = compile(&d, &Options::default()).unwrap();
+    assert_eq!(base.instrs.len(), 1);
+    let ports: Vec<u32> = base.ports.inputs.iter().map(|q| q.slot).collect();
+    let dst = base.instrs[0].dst;
+    let mut rng = Rng::new(32);
+    let widths = [1u8, 2, 5, 8, 16, 31, 32, 33, 40, 64];
+    let shifts = [0u32, 1, 3, 7, 8, 24, 30, 31, 32, 33, 40, 63];
+    use Op::*;
+    let ops = [
+        Copy, Not, And, Or, Xor, Nand, Nor, Xnor, Mux, Switch, AddSum, AddCarry, Eq, LtU, ReduceOr,
+        ReduceAnd, ReduceXor, Shr, Concat, Sext, SrNext, Shl, ShlV,
+    ];
+    for &op in &ops {
+        for _ in 0..40 {
+            let w = [0, 1, 2].map(|_| widths[rng.below(widths.len())]);
+            let mut p = base.clone();
+            for (q, &w) in p.ports.inputs.iter_mut().zip(&w) {
+                q.width = w;
+            }
+            p.blocks[0].op = op;
+            let i = &mut p.instrs[0];
+            (i.a, i.b, i.c) = (ports[0], ports[1], ports[2]);
+            let mut sh = || shifts[rng.below(shifts.len())];
+            let (sb, sc) = (sh(), sh());
+            let wo = widths[rng.below(widths.len())];
+            let imm = match rng.below(4) {
+                0 => mask(wo),
+                1 => mask(wo) << sb.min(63),
+                2 => u64::MAX,
+                _ => rng.next_u64(),
+            };
+            match op {
+                Shr => i.b = sb,
+                Concat => i.c = sc,
+                Shl => (i.b, i.c) = (sb, sc),
+                Sext => i.b = 1 + rng.below(usize::from(w[0])) as u32,
+                _ => {}
+            }
+            p.imms[0] = match op {
+                AddCarry => u64::from(wo),
+                _ => imm,
+            };
+            let p = Arc::new(p);
+            let mut sims = [
+                Sim::with_options(Arc::clone(&p), SimOptions::default()),
+                Sim::with_options(Arc::clone(&p), SimOptions::jit()),
+            ];
+            assert!(sims[1].jit_active(), "the JIT compiled {op:?}");
+            let what = format!("{op:?} widths {w:?} {:?} imm {:#x}", p.instrs[0], p.imms[0]);
+            for k in 0..64 {
+                let v = [0, 1, 2].map(|j| match k {
+                    0 => 0,
+                    1 => mask(w[j]),
+                    2 => 1 << (w[j] - 1),
+                    _ => rng.next_u64() & mask(w[j]),
+                });
+                let out: Vec<u64> = sims
+                    .iter_mut()
+                    .map(|s| {
+                        for (j, &v) in v.iter().enumerate() {
+                            s.set_input(j, v);
+                        }
+                        s.tick();
+                        s.read(dst)
+                    })
+                    .collect();
+                assert_eq!(out[1], out[0], "{what}: inputs {v:#x?}");
+            }
+        }
+    }
+}
+
 /// The tests of this module, for a runner without `cargo test` (wasm32,
 /// feature `selftest`; see `examples/wasm_selftest.rs`).
 #[cfg(any(test, feature = "selftest"))]
@@ -572,6 +664,10 @@ pub fn all() -> Vec<(&'static str, fn())> {
             superstep_mutations_are_caught,
         ),
         ("shift_ops_run_in_supersteps", shift_ops_run_in_supersteps),
+        (
+            "narrow_ops_match_the_interpreter",
+            narrow_ops_match_the_interpreter,
+        ),
     ];
     #[cfg(feature = "counters")]
     v.push((
