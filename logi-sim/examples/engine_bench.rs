@@ -5,7 +5,7 @@
 //! ```sh
 //! cargo run -p logi-sim --release --features jit --example engine_bench -- \
 //!     nes/workspace [--secs 2] [--rounds 5] [--warm 4] [--spec] \
-//!     [--debug] [--modes raw,chunk:4096,local,engine]
+//!     [--debug] [--modes raw,chunk:4096,local,engine] [--press F]
 //! ```
 //!
 //! Modes:
@@ -22,6 +22,14 @@
 //!
 //! `--spec` turns on adaptive specialization (`SpecOptions::default`) in
 //! every mode; the raw modes then install their builds between runs.
+//!
+//! `--press F` (SMB3, or any console with root inputs `p1_start`,
+//! `p1_right`, `p1_a` and `p1_up`): before the warm-up, every mode plays
+//! the press script of `engine_spec_press` on pad 1 from power-on to frame
+//! F (1905: World 1-1, holding Right), the engines polling (they stop a
+//! little past it), and the input pokes are off, so each mode measures
+//! gameplay rather than the title. Each mode takes about a minute to get
+//! there.
 
 mod workspace;
 
@@ -174,6 +182,83 @@ impl Mode {
     }
 }
 
+/// `--press F` (SMB3): the press script of `engine_spec_press` on pad 1,
+/// played from power-on to frame F (1905: World 1-1, holding right).
+const FRAME: u64 = 89_342;
+const PRESSES: &[(u64, &str, u64)] = &[
+    (451, "p1_start", 6),
+    (657, "p1_start", 6),
+    (1063, "p1_right", 12),
+    (1175, "p1_a", 6),
+    (1481, "p1_up", 12),
+    (1593, "p1_a", 6),
+    (1899, "p1_right", 200),
+];
+const BUTTONS: &[&str] = &["p1_start", "p1_right", "p1_a", "p1_up"];
+
+/// Buttons held at tick `n`.
+fn held_at(n: u64) -> Vec<(&'static str, u64)> {
+    let f = n / FRAME + 1;
+    BUTTONS
+        .iter()
+        .map(|b| {
+            let on = PRESSES
+                .iter()
+                .any(|(from, i, c)| i == b && (*from..from + c).contains(&f));
+            (*b, u64::from(on))
+        })
+        .collect()
+}
+
+impl Mode {
+    /// Play the press script to tick `at` (the engines poll, so they stop
+    /// a little past it).
+    fn press(&mut self, at: u64, node: &dyn Fn(&str) -> NodeId) {
+        let t0 = Instant::now();
+        match &mut self.r {
+            Runner::Raw { sim, .. } => {
+                while sim.tick_count() < at {
+                    for (b, v) in held_at(sim.tick_count()) {
+                        sim.set(b, v);
+                    }
+                    let k = (FRAME - sim.tick_count() % FRAME).min(at - sim.tick_count());
+                    sim.run(k);
+                    for q in sim.spec_requests() {
+                        let p = Arc::clone(sim.program());
+                        sim.install_spec(build_spec(&p, &q));
+                    }
+                }
+            }
+            Runner::Local { e, .. } => {
+                let origin = Instant::now();
+                let clock = move || origin.elapsed();
+                while e.core.tick_count() < at {
+                    for (b, v) in held_at(e.core.tick_count()) {
+                        e.core.set_input(node(b), v);
+                    }
+                    e.run_frame(Duration::from_millis(2), &clock);
+                }
+            }
+            Runner::Threaded { e, .. } => {
+                e.set_rate(Rate::Unlimited);
+                while e.tick_count() < at {
+                    for (b, v) in held_at(e.tick_count()) {
+                        e.set_input(node(b), v);
+                    }
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+                e.set_rate(Rate::Paused);
+                e.sync();
+            }
+        }
+        eprintln!(
+            "  {}: pressed to tick {at} in {:.1} s",
+            self.name,
+            t0.elapsed().as_secs_f64()
+        );
+    }
+}
+
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let folder = args
@@ -231,7 +316,8 @@ fn main() -> Result<(), String> {
     if std::env::var_os("NO_INPUT").is_some() {
         println!("(no input pokes)");
     }
-    let input = input.filter(|_| std::env::var_os("NO_INPUT").is_none());
+    let input = input
+        .filter(|_| std::env::var_os("NO_INPUT").is_none() && !args.iter().any(|a| a == "--press"));
     println!(
         "{folder}: spec {}, {:?} compile options, {} screens, input {:?}",
         if spec { "on" } else { "off" },
@@ -306,6 +392,25 @@ fn main() -> Result<(), String> {
             wall: Vec::new(),
             cpu: Vec::new(),
         });
+    }
+    if let Some(f) = args
+        .iter()
+        .position(|a| a == "--press")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        let node = |name: &str| {
+            program
+                .ports
+                .inputs
+                .iter()
+                .find(|p| p.name.as_deref() == Some(name))
+                .map(|p| p.node)
+                .unwrap_or_else(|| panic!("no input {name}"))
+        };
+        for m in &mut list {
+            m.press(f * FRAME, &node);
+        }
     }
     for m in &mut list {
         let (n, w, _) = m.round(warm);
