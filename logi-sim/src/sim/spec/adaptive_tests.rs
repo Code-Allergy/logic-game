@@ -441,6 +441,11 @@ fn automatic_plans_key_the_microcoded_machine() {
         }
         let st = s.spec_stats();
         assert!(st.keyed_phases > 0 && st.hits > 0, "{st:?}");
+        // The plan's prefixes (built with it) pack their keys natively.
+        #[cfg(feature = "jit")]
+        assert!(
+            super::tests::prefixes_pack_keys(&s).is_none_or(|k| k == crate::sim::jit::KEY_ENTRY)
+        );
 
         // A ROM write while sampling.
         let mut s = Sim::with_options(Arc::clone(&p), with(o.clone(), &spec));

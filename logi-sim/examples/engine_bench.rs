@@ -20,9 +20,10 @@
 //!   screen, reading the frame and poking an input 60 times a second; it is
 //!   paused while the other modes run. Its CPU time is the worker thread's.
 //!
-//! `--spec` turns on adaptive specialization (`SpecOptions::default`) in
-//! every mode; the raw modes build bodies inside `Sim::run`, or with
-//! `--timed-builds` between runs, timing each build and install.
+//! `--spec` turns on adaptive specialization (`SpecOptions::default`, or
+//! with `--interactive` `SpecOptions::interactive`) in every mode; the raw
+//! modes build bodies inside `Sim::run`, or with `--timed-builds` between
+//! runs, timing each build and install.
 //!
 //! `--press F` (SMB3, or any console with root inputs `p1_start`,
 //! `p1_right`, `p1_a` and `p1_up`): before the warm-up, every mode plays
@@ -309,9 +310,15 @@ fn main() -> Result<(), String> {
         jit: true,
         // `--timed-builds`: spec bodies are built by the raw modes between
         // runs (not inside `Sim::run`), and timed.
+        // `--interactive`: with the fallback to supersteps
+        // (`SpecOptions::interactive`, what the game runs).
         spec: spec.then(|| SpecOptions {
             inline_build: !args.iter().any(|a| a == "--timed-builds"),
-            ..SpecOptions::default()
+            ..if args.iter().any(|a| a == "--interactive") {
+                SpecOptions::interactive()
+            } else {
+                SpecOptions::default()
+            }
         }),
         // `SUPERSTEP_CHUNK`: items per superstep chunk function.
         superstep_chunk: std::env::var("SUPERSTEP_CHUNK")

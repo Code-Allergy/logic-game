@@ -670,6 +670,10 @@ pub struct Sim {
     mem_ptrs: Vec<usize>,
     #[cfg(feature = "jit")]
     mem_ptrs_fresh: bool,
+    /// Scratch of `keyed_ticks_native`: per run, its native functions
+    /// (valid during one call only).
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    native_fns: Vec<NativeFns>,
     /// Per guard of every body, how often a superstep skipped it
     /// (feature `counters`; see `jit::JitSuper::skip_base`).
     #[cfg(all(feature = "counters", feature = "jit"))]
@@ -772,6 +776,8 @@ impl Sim {
             mem_ptrs: Vec::new(),
             #[cfg(feature = "jit")]
             mem_ptrs_fresh: false,
+            #[cfg(all(feature = "jit", not(feature = "counters")))]
+            native_fns: Vec::new(),
             #[cfg(all(feature = "counters", feature = "jit"))]
             skips: Vec::new(),
             #[cfg(feature = "counters")]
@@ -1384,6 +1390,11 @@ impl Sim {
     /// divided out. Keyed supersteps were measured and not built (see
     /// `sim/spec.rs`); this is the part of their gain that needs none.
     fn keyed_ticks(&mut self, n: u64) {
+        #[cfg(all(feature = "jit", not(feature = "counters")))]
+        if self.jit.is_some() {
+            self.keyed_ticks_native(n);
+            return;
+        }
         let period = self.period as usize;
         let mut k = (self.tick % self.period) as usize;
         for _ in 0..n {
@@ -1405,6 +1416,57 @@ impl Sim {
         }
     }
 
+    /// [`Sim::keyed_ticks`] while native code is installed: the same
+    /// calls, each body's native function called from here through a
+    /// table of them by run taken for this call (the interpreter's paths
+    /// for a body without one). A prefix with a key entry settles and
+    /// returns the key in one call.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    fn keyed_ticks_native(&mut self, n: u64) {
+        // Past this many runs (tests of the run index cap) the table would
+        // cost more than it saves: bodies are looked up per call.
+        const TABLE_MAX: usize = 1 << 12;
+        let mut fns = std::mem::take(&mut self.native_fns);
+        fns.clear();
+        if self.runs.len() < TABLE_MAX {
+            fns.extend((0..=self.runs.len() as u16).map(|r| NativeFns::of(self.native_body(r))));
+        }
+        // Nothing installs, evicts or frees a body within the loop, so the
+        // functions stay valid.
+        let of = |s: &Self, fns: &[NativeFns], run: u16| match fns.get(run as usize) {
+            Some(&f) => f,
+            None => NativeFns::of(s.native_body(run)),
+        };
+        let period = self.period as usize;
+        let mut k = (self.tick % self.period) as usize;
+        for _ in 0..n {
+            let last = self.last;
+            self.commit_with(last, of(self, &fns, last).commit);
+            self.tick += 1;
+            k += 1;
+            if k == period {
+                k = 0;
+            }
+            let run = if self.spec.phases.get(k).is_some_and(Option::is_some) {
+                self.spec_run(k, |s, pre| {
+                    let f = of(s, &fns, pre);
+                    match f.key {
+                        Some(key) => Some(s.settle_key(key)),
+                        None => {
+                            s.settle_with(pre, f.settle);
+                            None
+                        }
+                    }
+                })
+            } else {
+                self.fused[k]
+            };
+            self.last = run;
+            self.settle_with(run, of(self, &fns, run).settle);
+        }
+        self.native_fns = fns;
+    }
+
     /// The settle of a fused tick of keyed phase `k`: the inputs, then
     /// [`Sim::spec_keyed`]. The commit after it is the settled body's.
     fn spec_settle(&mut self, k: usize) {
@@ -1418,34 +1480,104 @@ impl Sim {
     /// The key's prefix, then the body built for the key or the fallback
     /// (see `sim/spec.rs`), on inputs already in their slots.
     fn spec_keyed(&mut self, k: usize) {
+        let run = self.spec_run(k, |s, pre| {
+            s.evaluate_body(pre);
+            None
+        });
+        self.evaluate(run);
+    }
+
+    /// The key's prefix (settled by `prefix`, which may return the key
+    /// its native code packed), then the run for the key (its body or the
+    /// fallback), counted as a hit or a miss: what settles keyed phase
+    /// `k`.
+    #[inline]
+    fn spec_run(&mut self, k: usize, prefix: impl FnOnce(&mut Self, u16) -> Option<u64>) -> u16 {
         let ps = self.spec.phases[k].as_ref().expect("a keyed phase");
-        let prefix = ps.prefix;
+        let pre = ps.prefix;
         #[cfg(test)]
         if spec::MUTATION.get() == 2 {
             // Mutation: no prefix (a stale key, and a body missing the
             // prefix's values).
-            let ps = self.spec.phases[k].as_ref().expect("a keyed phase");
-            let key = ps.key(&self.slots);
-            let run = ps.lookup(key);
-            let run = if run == ps.fallback {
+            let run = ps.lookup(ps.key(&self.slots));
+            return if run == ps.fallback {
                 self.fused[k]
             } else {
                 run
             };
-            self.evaluate(run);
-            return;
         }
-        if let Some(pre) = prefix {
+        let mut key = None;
+        if let Some(pre) = pre {
             // The prefix is part of this settle, not one of its own.
-            self.evaluate_body(pre);
+            key = prefix(self, pre);
             #[cfg(feature = "counters")]
             {
                 self.counters.settles -= 1;
             }
         }
         let ps = self.spec.phases[k].as_mut().expect("a keyed phase");
-        let run = ps.dispatch(ps.key(&self.slots));
-        self.evaluate(run);
+        debug_assert!(key.is_none_or(|key| key == ps.key(&self.slots)));
+        ps.dispatch(key.unwrap_or_else(|| ps.key(&self.slots)))
+    }
+
+    /// The native code of body `run`.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn native_body(&self, run: u16) -> Option<&jit::JitBody> {
+        native(&self.jit, &self.spec, run)
+    }
+
+    /// [`Sim::evaluate_body`] of `run`, by its native settle function `f`
+    /// when it has one.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn settle_with(&mut self, run: u16, f: Option<jit::SettleFn>) {
+        let Some(f) = f else {
+            return self.evaluate_body(run);
+        };
+        let m = self.mem_ptrs();
+        // SAFETY: as in `evaluate_body`: `f` is the settle of `run`, whose
+        // code the installed native code (or `run`'s unit) owns.
+        unsafe { f(self.slots.as_mut_ptr(), m, self.tick) };
+        debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+    }
+
+    /// A key prefix's settle by its native key function `f`: the key.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn settle_key(&mut self, f: jit::KeyFn) -> u64 {
+        let m = self.mem_ptrs();
+        // SAFETY: as in `settle_with`.
+        let key = unsafe { f(self.slots.as_mut_ptr(), m, self.tick) };
+        debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+        key
+    }
+
+    /// [`Sim::commit`] of `run`, by its native commit function `f` when it
+    /// has one.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn commit_with(&mut self, run: u16, f: Option<jit::CommitFn>) {
+        let Some(f) = f else {
+            return self.commit(run);
+        };
+        let m = self.mem_ptrs();
+        // SAFETY: as in `commit`.
+        unsafe { f(self.slots.as_mut_ptr(), m, self.mem_writes.as_mut_ptr()) };
+    }
+
+    /// The memory pointers native code takes (`mem_ptrs`), taken again
+    /// when stale.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn mem_ptrs(&mut self) -> *const *mut u64 {
+        if !self.mem_ptrs_fresh {
+            self.mem_ptrs.clear();
+            self.mem_ptrs
+                .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+            self.mem_ptrs_fresh = true;
+        }
+        self.mem_ptrs.as_ptr() as *const *mut u64
     }
 
     /// The superstep `run` uses, and the ticks it advances: the installed
@@ -1997,6 +2129,28 @@ impl Sim {
     /// as they would have without this call.
     pub fn resettle(&mut self) {
         self.evaluate(self.full_run());
+    }
+}
+
+/// A body's native functions: its settle and its commit, each when it is
+/// one function, and a key prefix's key entry.
+#[cfg(all(feature = "jit", not(feature = "counters")))]
+#[derive(Clone, Copy)]
+struct NativeFns {
+    settle: Option<jit::SettleFn>,
+    commit: Option<jit::CommitFn>,
+    key: Option<jit::KeyFn>,
+}
+
+#[cfg(all(feature = "jit", not(feature = "counters")))]
+impl NativeFns {
+    #[inline]
+    fn of(b: Option<&jit::JitBody>) -> Self {
+        NativeFns {
+            settle: b.and_then(jit::JitBody::settle_fn),
+            commit: b.and_then(jit::JitBody::commit_fn),
+            key: b.and_then(jit::JitBody::key_fn),
+        }
     }
 }
 

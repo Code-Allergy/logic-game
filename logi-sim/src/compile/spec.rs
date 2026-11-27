@@ -1322,6 +1322,29 @@ pub struct KeyField {
     pub mask: u64,
 }
 
+/// A run of key bits from one slot: the key takes
+/// `(slots[slot] & mask).rotate_right(rot)` ([`KeyLayout::segments`]).
+/// Packing by segments needs no `pext` and no branch, so the runtime and
+/// native code pack keys this way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeySeg {
+    pub slot: u32,
+    pub mask: u64,
+    pub rot: u32,
+}
+
+impl KeySeg {
+    /// The key `segs` pack from `slots` ([`KeyLayout::pack`]).
+    #[inline]
+    pub fn pack(segs: &[KeySeg], slots: &[u64]) -> u64 {
+        let mut key = 0;
+        for g in segs {
+            key |= (slots[g.slot as usize] & g.mask).rotate_right(g.rot);
+        }
+        key
+    }
+}
+
 /// How key fields pack into one key word: field 0's masked bits in the
 /// low bits (compressed, in bit order), then field 1's, and so on.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -1362,6 +1385,38 @@ impl KeyLayout {
     /// Whether every masked bit fits in one key word.
     pub fn fits(&self) -> bool {
         self.width() <= 64
+    }
+
+    /// The segments that pack the key ([`KeySeg`]; a layout that
+    /// [`Self::fits`]): each field's set bits, in order from bit 0 of the
+    /// key, one segment per run of contiguous mask bits, merged per slot
+    /// and rotation.
+    pub fn segments(&self) -> Vec<KeySeg> {
+        debug_assert!(self.fits());
+        let mut segs: Vec<KeySeg> = Vec::new();
+        let mut at = 0u32;
+        for f in &self.fields {
+            let mut m = f.mask;
+            while m != 0 {
+                let lo = m.trailing_zeros();
+                let len = (m >> lo).trailing_ones();
+                let run = if len == 64 { m } else { mask(len as u8) << lo };
+                m &= !run;
+                // The run's bits go from `lo` to `at`: a rotation that
+                // does not wrap (both ranges are within the word).
+                let rot = lo.wrapping_sub(at) & 63;
+                match segs.iter_mut().find(|g| g.slot == f.slot && g.rot == rot) {
+                    Some(g) => g.mask |= run,
+                    None => segs.push(KeySeg {
+                        slot: f.slot,
+                        mask: run,
+                        rot,
+                    }),
+                }
+                at += len;
+            }
+        }
+        segs
     }
 
     /// The assumption a key value makes: each field's masked bits. Bits

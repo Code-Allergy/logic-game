@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use super::{MUTATION, PhasePlan, SpecOptions, SpecPlan};
+use super::{MISS, MUTATION, PhasePlan, PhaseSpec, SpecOptions, SpecPlan, Table};
 use crate::compile::spec::{KeyField, KeyLayout};
 use crate::compile::{Options, Program, compile};
 use crate::netlist::{Design, NodeKind};
@@ -13,7 +13,7 @@ use crate::sim::{Sim, SimOptions};
 use crate::testkit::diff::{
     self, JIT, check_batches_with, check_pair, observe, spec_options, spec_plan, standard_configs,
 };
-use crate::testkit::{GenConfig, generate};
+use crate::testkit::{GenConfig, Rng, generate};
 
 pub(super) fn program(d: &Design, options: &Options) -> Arc<Program> {
     Arc::new(compile(d, options).unwrap_or_else(|e| panic!("{e:?}")))
@@ -505,6 +505,40 @@ fn native_code_follows_the_plan() {
     same_batches(&mut want, &mut c);
 }
 
+/// Whether every keyed phase's prefix packs its key in native code
+/// (`jit::KeyFn`); `None` without native code.
+#[cfg(feature = "jit")]
+pub(super) fn prefixes_pack_keys(s: &Sim) -> Option<bool> {
+    s.jit_active().then(|| {
+        s.spec.phases.iter().flatten().all(|ps| {
+            ps.prefix.is_none_or(|pre| {
+                crate::sim::native(&s.jit, &s.spec, pre).is_some_and(|b| b.key.is_some())
+            })
+        })
+    })
+}
+
+/// With the JIT, a plan's prefixes (built with the layout) pack their keys
+/// in native code, and keyed batches still equal single ticks.
+#[cfg(feature = "jit")]
+#[test]
+fn native_prefixes_pack_their_keys() {
+    for keys in [&[][..], &[0, 1, 2, 3][..]] {
+        let (p, plan) = counting(0xf, keys);
+        let mut s = Sim::with_options(Arc::clone(&p), with_spec(SimOptions::jit(), &plan));
+        assert!(s.spec.phases.iter().flatten().any(|ps| ps.prefix.is_some()));
+        assert_eq!(prefixes_pack_keys(&s), Some(crate::sim::jit::KEY_ENTRY));
+        let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
+        for x in [0, 3, 0xfff0] {
+            want.set_input(0, x);
+            s.set_input(0, x);
+            same_batches(&mut want, &mut s);
+        }
+        assert!(s.spec_stats().hits > 0 || keys.is_empty());
+        assert!(s.spec_stats().misses > 0);
+    }
+}
+
 /// More than 255 runs: a body for each of 300 values of a counter key,
 /// interpreted and JIT-compiled.
 #[test]
@@ -615,4 +649,93 @@ fn a_plan_past_the_run_index_cap_leaves_room_for_other_phases() {
     assert!(s.runs.len() <= usize::from(u16::MAX));
     let mut want = Sim::with_options(Arc::clone(&p), SimOptions::baseline());
     same_batches(&mut want, &mut s);
+}
+
+/// The key packed by segments (`KeyLayout::segments`) is `KeyLayout::pack`'s, on
+/// random layouts: masks with gaps, fields of one slot (merged segments),
+/// the full word, empty masks.
+#[test]
+fn keys_pack_as_the_layout_does() {
+    let mut rng = Rng::new(0x6b65);
+    let masks = |rng: &mut Rng| match rng.next_u64() % 6 {
+        0 => 0,
+        1 => u64::MAX,
+        2 => rng.next_u64() & rng.next_u64() & rng.next_u64(),
+        3 => (1 << (rng.next_u64() % 8)) - 1,
+        4 => 0b1010_0110 << (rng.next_u64() % 40),
+        _ => rng.next_u64() & 0xff,
+    };
+    let mut checked = 0;
+    for _ in 0..4000 {
+        let n = 1 + rng.next_u64() as usize % 6;
+        let fields: Vec<KeyField> = (0..n)
+            .map(|_| KeyField {
+                slot: (rng.next_u64() % 4) as u32,
+                mask: masks(&mut rng),
+            })
+            .collect();
+        let layout = KeyLayout::new(fields);
+        if !layout.fits() {
+            continue;
+        }
+        let ps = PhaseSpec::new(&layout, None, 0);
+        for _ in 0..8 {
+            let slots: Vec<u64> = (0..4).map(|_| rng.next_u64()).collect();
+            assert_eq!(ps.key(&slots), layout.pack(&slots), "{layout:?}");
+        }
+        checked += 1;
+    }
+    assert!(checked > 1000);
+}
+
+/// The table's memo and cache follow inserts and removes (a removal
+/// moves the last entry into the hole), and agree with the map on many
+/// keys (colliding in the cache).
+#[test]
+fn the_table_memo_follows_changes() {
+    let mut t = Table::new();
+    assert_eq!(t.find(0), MISS);
+    t.insert(0, 10, 0);
+    assert_eq!(t.find(0), 0);
+    t.insert(5, 11, 0);
+    t.insert(7, 12, 0);
+    assert_eq!(t.find(7), 2);
+    assert_eq!(t.remove(0).map(|e| e.run), Some(10));
+    // 7 moved into slot 0, the memo with it.
+    assert_eq!(t.memo, 0);
+    assert_eq!(t.find(7), 0);
+    assert_eq!(t.entries[0].run, 12);
+    assert_eq!(t.find(5), 1);
+    assert_eq!(t.remove(5).map(|e| e.run), Some(11));
+    assert_eq!(t.memo, MISS);
+    assert_eq!(t.find(5), MISS);
+    t.insert(5, 13, 0);
+    assert_eq!(t.memo, 1);
+    assert_eq!(t.get(5).map(|e| e.run), Some(13));
+    assert!(t.remove(9).is_none());
+    assert_eq!(t.len(), 2);
+    // A key installed again replaces its entry.
+    t.insert(5, 14, 3);
+    assert_eq!((t.len(), t.find(5)), (2, 1));
+    assert_eq!(t.get(5).map(|e| (e.run, e.last)), Some((14, 3)));
+    // Many keys, some with entries, looked up in a random order while
+    // entries come and go: `find` is the map's answer.
+    let mut rng = Rng::new(0x7ab1e);
+    let mut t = Table::new();
+    for round in 0..4000 {
+        let key = rng.below(300) as u64;
+        match rng.below(8) {
+            0 if t.get(key).is_none() => t.insert(key, round as u16, 0),
+            1 => {
+                t.remove(key);
+            }
+            _ => {
+                let want = t.index.get(&key).copied().unwrap_or(MISS);
+                assert_eq!(t.find(key), want, "key {key}, round {round}");
+                if want != MISS {
+                    assert_eq!(t.entries[want as usize].key, key);
+                }
+            }
+        }
+    }
 }

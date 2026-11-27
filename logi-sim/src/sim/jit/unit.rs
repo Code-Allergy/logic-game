@@ -298,6 +298,7 @@ impl Sim {
             guards: &[],
             used: used(0),
             fused_only: false,
+            key: &[],
         }];
         for (k, r) in self.runs[..base].iter().enumerate() {
             let (blocks, instrs, imms) = parts(p, r.body.as_ref());
@@ -309,6 +310,11 @@ impl Sim {
                 guards: r.body.as_ref().map_or(&[][..], |b| &b.guards[..]),
                 used: used(k + 1),
                 fused_only: !in_full(k + 1) && !is_prefix[k + 1],
+                key: if is_prefix[k + 1] {
+                    self.spec.prefix_key(k as u16 + 1)
+                } else {
+                    &[]
+                },
             });
         }
         out

@@ -729,8 +729,8 @@ each `run` of a keyed `Sim` take either path, by measured cost.
 commit(last); tick += 1; k = tick % period
 if let Some(ps) = spec[k]:
     apply inputs to their slots; evaluate(ps.prefix)      // key cone, unguarded
-    key = ps.layout.pack(&slots)
-    run = ps.table.get(key) -> hit: last_hit[run] = tick
+    key = ps.layout.pack(&slots)          // native: the prefix's key entry returns it
+    run = ps.table.find(key) -> hit: last_hit[run] = tick
                              -> miss: bump hot[hash(key)]; maybe request; run = ps.fallback
     evaluate(run); last = run       // the commit after belongs to the body that settled
 else: evaluate(fused[k]); last = fused[k]
@@ -740,6 +740,62 @@ The last tick of `run(n)` and every `tick()` stay full settles of the
 general variant; `last` makes the first commit of the next call use the
 commits of the body that settled (a specialized body drops only commits
 that would change nothing, so the state is the same either way).
+
+### Keyed dispatch (as built)
+
+What `Sim` does per keyed tick besides calling native code: commit,
+prefix, key, lookup, body. On the NES console (spec on, a Zen 5 machine)
+that Rust part was about 8.5% of the run time (`evaluate_body` 4%,
+`spec_keyed` 2.7%, the commit 1.2%); on the 4-core Xeon of the
+measurements below, 22% of the samples of a `raw` run (the build's own
+work included). It is now:
+
+- **Keys by segments.** `KeyLayout::segments` splits each field mask
+  into its runs of contiguous bits: the key is the `or` of
+  `(slots[slot] & mask).rotate_right(rot)`, merged per slot and
+  rotation. No bit-by-bit `pext` loop with a branch per bit (the NES
+  plans' masks have gaps, e.g. `0b1111_1011`).
+- **Native keys.** With the JIT a prefix has a key entry (`jit::KeyFn`,
+  `BodyRef::key`): it calls the prefix's settle chunks, then packs the
+  key from the slots in unrolled code and returns it; `keyed_ticks`
+  calls it instead of the prefix's settle and the Rust loop (which
+  stays for the interpreter, wasm32 and phases without a prefix). The
+  layout's prefixes get it from `body_refs`, an automatic plan's in
+  `build_spec`.
+- **Lookup.** `Table` keeps the entries in a vector, indexed by a map,
+  behind the key looked up last (on the NES 98% of the ticks of two of
+  the three phases repeat their key) and a 64-pair direct-mapped cache
+  of keys and their entries (misses too; refreshed whenever the table
+  changes). The dispatch is inlined; its slow paths are not.
+- **Calls.** With native code (and without counters) `keyed_ticks`
+  takes each body's settle, commit and key functions from a table by
+  run built once per call (bodies cannot change within a `run`) and
+  calls them from its loop; a body without them takes the interpreter's
+  paths as before.
+- **Not built: a step entry** (a fused body's settle and commit in one
+  native call, the loop's last tick excepted). It moved the commit's
+  call into native code (the Rust share fell from 9.5% to 7.6% of the
+  samples) but the step functions took 1.4%, and the throughput was the
+  same (medians of 8 alternating processes, nestest: 10485 against
+  10507 k ticks/s).
+
+Rust share of a keyed `raw` run on nestest (perf, `profiling` build,
+spec on without the fallback, k ticks per CPU-second of that run in
+brackets): before 22% (`spec_keyed` 15.5, `evaluate_body` 5.7, `run`
+0.9; 8183), after 9.5% (`run` 9.1, `Table::find_other` 0.4; 10166).
+Throughput (`engine_bench`, k ticks per CPU-second, median of 5
+processes alternating before and after, shared 4-core Xeon; `raw` is
+`Sim::run(1M)`, `engine` the threaded engine's worker; spec on is
+`SpecOptions::interactive`, so a `run` may take supersteps):
+
+| | spec on, raw | spec on, engine | spec off, raw | spec off, engine |
+|---|---|---|---|---|
+| NES console (nestest) | 8806 -> 9751 (+11%) | 8366 -> 10516 (+26%) | 7551 -> 7405 | 7435 -> 7375 |
+| Blade Buster (MMC3) | 5889 -> 6098 (+4%) | 6074 -> 7339 (+21%) | 6201 -> 6365 | 6421 -> 6353 |
+| snow (NROM) | 8304 -> 8942 (+8%) | 8256 -> 9183 (+11%) | 7376 -> 7092 | 7385 -> 7270 |
+
+Spec off runs none of this code; its differences (-4 to +3%) are the
+machine's noise (single processes vary by 10 to 30%).
 
 ### Building and installing
 
