@@ -6,7 +6,8 @@
 //!   arrays of gates, chained and wired to buses, laid out).
 //! - `mcp/edit`: a small `edit` (one part, one wire) of that circuit.
 //! - `mcp/outline`: its `view` outline (200 lines).
-//! - `mcp/make_chip`: 1,000 of its parts made a chip.
+//! - `mcp/make_chip`: 1,000 of its parts (a third from each array) made a
+//!   chip.
 //! - `mcp/expand`: a 64-bit adder expanded to gates.
 //! - `mcp/test`: a stored formula test of 200 samples on it.
 
@@ -78,7 +79,10 @@ fn bench(c: &mut Criterion) {
     g.bench_function("outline", |b| {
         b.iter(|| black_box(view::outline(&ws, &ws.root, None, view::DEFAULT_LIMIT)))
     });
-    let chip = json!({"ops": [{"make_chip": {"parts": ["a[0..1000]"], "name": "block"}}]});
+    // The first 334 gates of each array: a thousand parts, a few ports (a
+    // chip has at most 256 on a side, `chip::MAX_CHIP_PINS`).
+    let chip = json!({"ops": [{"make_chip": {
+        "parts": ["x[0..334]", "a[0..334]", "o[0..334]"], "name": "block"}}]});
     g.bench_function("make_chip", |b| b.iter(|| black_box(edit(&ws, &chip))));
     let expand = json!({"ops": [{"expand": ["sum"]}]});
     g.bench_function("expand", |b| b.iter(|| black_box(edit(&ws, &expand))));
