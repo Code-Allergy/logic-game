@@ -1023,9 +1023,14 @@ fn attribute_ops(
         } = *live;
         const FRAME: u64 = 89_342;
         let mut sim = Sim::with_options(Arc::new(p.clone()), SimOptions::default());
+        // An input is held while any of its presses is on.
         let press_at = |sim: &mut Sim, f: u64| {
+            let mut held: BTreeMap<&str, bool> = BTreeMap::new();
             for (from, name, len) in presses {
-                sim.set(name, u64::from((*from..from + len).contains(&f)));
+                *held.entry(name.as_str()).or_default() |= (*from..from + len).contains(&f);
+            }
+            for (name, on) in held {
+                sim.set(name, u64::from(on));
             }
         };
         for f in 1..=skip {
@@ -1036,6 +1041,9 @@ fn attribute_ops(
         // after 340; the line counter: one that steps when it wraps.
         // Candidates in a fixed order, the timing block's first (other
         // slots can step in lockstep, e.g. the line plus one).
+        // Found on the running console, then put back: measurement starts
+        // at frame `skip + 1`, with that frame's presses.
+        let at_skip = sim.export_state();
         let mut cands: Vec<u32> = owner.keys().copied().collect();
         cands.sort_by_key(|&s| (!slot_name(s).is_some_and(|n| n.starts_with("timing/")), s));
         let mut hist: Vec<Vec<u64>> = vec![Vec::new(); cands.len()];
@@ -1077,6 +1085,7 @@ fn attribute_ops(
             .map(|(&i, _)| i)
             .ok_or("no line counter")?;
         let (dot, line) = (cands[dot_i], cands[line_i]);
+        sim.import_state(&at_skip);
         eprintln!(
             "dot {dot} ({:?}), line {line} ({:?})",
             slot_name(dot),
@@ -1267,9 +1276,13 @@ fn attribute_ops(
                         }
                     }
                 }
+                // A guard's tests stop at the first that fails.
                 for g in &body.guards {
                     for c in &g.conds {
                         mark(c.slot, &mut need);
+                        if (sim.read(c.slot) != 0) != c.when {
+                            break;
+                        }
                     }
                 }
                 for o in &p.ports.outputs {
@@ -1304,10 +1317,12 @@ fn attribute_ops(
                     let (ua, ub, uc) = block.op.slot_operands();
                     for k in (block.start..block.start + block.len).rev() {
                         let i = body.instrs[k as usize];
+                        // A skipped op neither counts nor makes its
+                        // operands needed: its slot keeps an older value.
+                        if !runs {
+                            continue;
+                        }
                         if !need[i.dst as usize] {
-                            if !runs {
-                                continue;
-                            }
                             let key = key_ix[&key_of(i.dst)];
                             dead[key][r] += 1;
                             let e = dead_op
