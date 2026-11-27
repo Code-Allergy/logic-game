@@ -670,8 +670,8 @@ pub struct Sim {
     mem_ptrs: Vec<usize>,
     #[cfg(feature = "jit")]
     mem_ptrs_fresh: bool,
-    /// Scratch of `keyed_ticks_native`: per run, its native settle and
-    /// commit functions (valid during one call only).
+    /// Scratch of `keyed_ticks_native`: per run, its native functions
+    /// (valid during one call only).
     #[cfg(all(feature = "jit", not(feature = "counters")))]
     native_fns: Vec<NativeFns>,
     /// Per guard of every body, how often a superstep skipped it
@@ -1419,7 +1419,8 @@ impl Sim {
     /// [`Sim::keyed_ticks`] while native code is installed: the same
     /// calls, each body's native function called from here through a
     /// table of them by run taken for this call (the interpreter's paths
-    /// for a body without one).
+    /// for a body without one). A prefix with a key entry settles and
+    /// returns the key in one call.
     #[cfg(all(feature = "jit", not(feature = "counters")))]
     fn keyed_ticks_native(&mut self, n: u64) {
         // Past this many runs (tests of the run index cap) the table would
@@ -2131,7 +2132,8 @@ impl Sim {
     }
 }
 
-/// A body's native settle and commit, each when it is one function.
+/// A body's native functions: its settle and its commit, each when it is
+/// one function, and a key prefix's key entry.
 #[cfg(all(feature = "jit", not(feature = "counters")))]
 #[derive(Clone, Copy)]
 struct NativeFns {
