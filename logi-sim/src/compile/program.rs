@@ -519,15 +519,18 @@ pub struct Body {
     pub guards: Vec<Guard>,
 }
 
-/// Blocks `start..end` of a [`Body`] run only when every condition holds,
-/// tested in order (see `guard.rs`). Nothing but the instruction consuming
-/// them reads their results when they are skipped, so they keep stale
-/// values nobody observes.
+/// Blocks `start..end` of a [`Body`] run only when every condition of
+/// `conds` holds and, when `any` is not empty, at least one of `any` (see
+/// `guard.rs`). Nothing but the instructions consuming them reads their
+/// results when they are skipped, so they keep stale values nobody
+/// observes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Guard {
     pub start: u32,
     pub end: u32,
     pub conds: Vec<Cond>,
+    /// A group of arms with different conditions: their disjunction.
+    pub any: Vec<Cond>,
 }
 
 /// `(slots[slot] != 0) == when`.
@@ -541,9 +544,13 @@ impl Guard {
     /// Whether the guarded blocks run, given the slots.
     #[inline]
     pub fn holds(&self, slots: &[u64]) -> bool {
-        self.conds
-            .iter()
-            .all(|c| (slots[c.slot as usize] != 0) == c.when)
+        let ok = |c: &Cond| (slots[c.slot as usize] != 0) == c.when;
+        self.conds.iter().all(ok) && (self.any.is_empty() || self.any.iter().any(ok))
+    }
+
+    /// Every slot the guard tests.
+    pub fn slots(&self) -> impl Iterator<Item = u32> + '_ {
+        self.conds.iter().chain(&self.any).map(|c| c.slot)
     }
 }
 

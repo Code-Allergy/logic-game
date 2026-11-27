@@ -24,7 +24,7 @@ use super::bits::SlotBits;
 use super::superstep::{Plan, SItem, Stream};
 use super::{BodyRef, CommitFn, Item, JitError, SettleFn, SuperFn, arity, operands};
 use crate::compile::spec::possible_of;
-use crate::compile::{Commit, Guard, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
+use crate::compile::{Commit, Cond, Guard, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
 use crate::netlist::mask;
 
 /// Whether native code probes its stack: where the system needs it (see
@@ -698,6 +698,40 @@ fn not_masked(b: &mut FunctionBuilder<'_>, x: Value, bound: u64, m: u64) -> Valu
     }
 }
 
+/// The test of guard `g` (nonzero when it holds): its conditions and'd,
+/// and with the or of its `any` conditions.
+fn guard_test(b: &mut FunctionBuilder<'_>, sl: &mut Slots<'_>, g: &Guard) -> Value {
+    let mut cond = |b: &mut FunctionBuilder<'_>, c: &Cond| {
+        let v = sl.read(b, c.slot);
+        let cc = if c.when {
+            IntCC::NotEqual
+        } else {
+            IntCC::Equal
+        };
+        b.ins().icmp_imm_u(cc, v, 0)
+    };
+    let mut all: Option<Value> = None;
+    for c in &g.conds {
+        let t = cond(b, c);
+        all = Some(match all {
+            Some(x) => b.ins().band(x, t),
+            None => t,
+        });
+    }
+    let mut any: Option<Value> = None;
+    for c in &g.any {
+        let t = cond(b, c);
+        any = Some(match any {
+            Some(x) => b.ins().bor(x, t),
+            None => t,
+        });
+    }
+    match (all, any) {
+        (Some(x), Some(y)) => b.ins().band(x, y),
+        (x, y) => x.or(y).expect("a guard has conditions"),
+    }
+}
+
 /// An open guarded run in a settle chunk: the block after it, and the
 /// slot and memory-pointer caches from before it (values defined inside
 /// do not dominate the code after it).
@@ -795,25 +829,6 @@ fn build_settle(
     }
     b.ins().return_(&[]);
     b.finalize(cfg);
-}
-
-/// Whether every condition of guard `g` holds (an `I8`).
-fn guard_test(b: &mut FunctionBuilder<'_>, sl: &mut Slots<'_>, g: &Guard) -> Value {
-    let mut test: Option<Value> = None;
-    for c in &g.conds {
-        let v = sl.read(b, c.slot);
-        let cc = if c.when {
-            IntCC::NotEqual
-        } else {
-            IntCC::Equal
-        };
-        let t = b.ins().icmp_imm_u(cc, v, 0);
-        test = Some(match test {
-            Some(x) => b.ins().band(x, t),
-            None => t,
-        });
-    }
-    test.expect("a guard has conditions")
 }
 
 /// Carry out of `a + b + c` at bit `w` (0..=64), as the interpreter's

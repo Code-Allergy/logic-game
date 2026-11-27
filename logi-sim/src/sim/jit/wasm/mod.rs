@@ -313,20 +313,36 @@ fn nonzero(f: &mut Func, x: u32) {
     f.op(op::I32_EQZ);
 }
 
-/// Push the test of guard `conds` (an `i32`, nonzero when it holds).
-pub(super) fn guard_test(f: &mut Func, sl: &mut Slots, conds: &[crate::compile::Cond]) {
-    for (k, c) in conds.iter().enumerate() {
+/// Push the test of guard `g` (an `i32`, nonzero when it holds): its
+/// conditions and'd, and with the or of its `any` conditions.
+pub(super) fn guard_test(f: &mut Func, sl: &mut Slots, g: &crate::compile::Guard) {
+    let mut cond = |f: &mut Func, c: &crate::compile::Cond| {
         let v = sl.read(f, c.slot);
         f.get(v);
         f.op(op::I64_EQZ);
         if c.when {
             f.op(op::I32_EQZ);
         }
+    };
+    for (k, c) in g.conds.iter().enumerate() {
+        cond(f, c);
         if k > 0 {
             f.op(op::I32_AND);
         }
     }
-    assert!(!conds.is_empty(), "a guard has conditions");
+    for (k, c) in g.any.iter().enumerate() {
+        cond(f, c);
+        if k > 0 {
+            f.op(op::I32_OR);
+        }
+    }
+    if !g.conds.is_empty() && !g.any.is_empty() {
+        f.op(op::I32_AND);
+    }
+    assert!(
+        !g.conds.is_empty() || !g.any.is_empty(),
+        "a guard has conditions"
+    );
 }
 
 /// An open guarded run in a settle chunk: the slot and memory-pointer
@@ -366,7 +382,7 @@ fn build_settle(
                 mem_ptrs = ptrs;
             }
             if seg > 0 {
-                guard_test(&mut f, &mut sl, &body.guards[seg as usize - 1].conds);
+                guard_test(&mut f, &mut sl, &body.guards[seg as usize - 1]);
                 f.if_();
                 open = Some((sl.vals.clone(), mem_ptrs.clone()));
             }

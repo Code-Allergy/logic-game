@@ -247,8 +247,8 @@ pub(super) fn plan(p: &Program, bodies: &[BodyRef<'_>], st: &Stream, live_end: &
                 if seg > 0 {
                     instance += 1;
                     let (body, g) = st.regions[seg as usize - 1];
-                    for c in &bodies[body as usize].guards[g as usize].conds {
-                        read(&last, &mut store, &mut used, c.slot, &at);
+                    for s in bodies[body as usize].guards[g as usize].slots() {
+                        read(&last, &mut store, &mut used, s, &at);
                     }
                     at.region = instance;
                 }
