@@ -76,6 +76,9 @@ enum Runner {
     Raw {
         sim: Box<Sim>,
         chunk: u64,
+        /// Spec builds: their times and install times (ms).
+        builds: Vec<f64>,
+        installs: Vec<f64>,
     },
     Local {
         e: Box<LocalEngine>,
@@ -104,7 +107,12 @@ impl Mode {
         let origin = t0;
         let clock = move || origin.elapsed();
         match &mut self.r {
-            Runner::Raw { sim, chunk } => {
+            Runner::Raw {
+                sim,
+                chunk,
+                builds,
+                installs,
+            } => {
                 let c0 = cpu(THREAD);
                 let n0 = sim.tick_count();
                 while t0.elapsed().as_secs_f64() < secs {
@@ -116,7 +124,12 @@ impl Mode {
                     }
                     for q in sim.spec_requests() {
                         let p = Arc::clone(sim.program());
-                        sim.install_spec(build_spec(&p, &q));
+                        let t = Instant::now();
+                        let b = build_spec(&p, &q);
+                        builds.push(t.elapsed().as_secs_f64() * 1e3);
+                        let t = Instant::now();
+                        sim.install_spec(b);
+                        installs.push(t.elapsed().as_secs_f64() * 1e3);
                     }
                 }
                 (
@@ -209,6 +222,11 @@ fn main() -> Result<(), String> {
     let sim_options = SimOptions {
         jit: true,
         spec: spec.then(SpecOptions::default),
+        // `SUPERSTEP_CHUNK`: items per superstep chunk function.
+        superstep_chunk: std::env::var("SUPERSTEP_CHUNK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SimOptions::default().superstep_chunk),
         ..SimOptions::default()
     };
     let root = design.root_def();
@@ -250,16 +268,27 @@ fn main() -> Result<(), String> {
         let r = match m {
             "raw" | "chunk" => {
                 let chunk = arg.parse().unwrap_or(1_000_000);
+                let t = Instant::now();
                 let mut sim =
                     Box::new(Sim::with_options(Arc::clone(&program), sim_options.clone()));
                 if !sim.jit_active() {
                     return Err("no JIT (build with --features jit)".into());
                 }
+                eprintln!(
+                    "  {m}: built in {:.0} ms ({} bytes of code)",
+                    t.elapsed().as_secs_f64() * 1e3,
+                    sim.jit_code().map_or(0, |c| c.code_bytes)
+                );
                 if let Some(i) = input {
                     let p = sim.program().ports.input_by_node(i).expect("a port");
                     sim.set_input(p, 0);
                 }
-                Runner::Raw { sim, chunk }
+                Runner::Raw {
+                    sim,
+                    chunk,
+                    builds: Vec::new(),
+                    installs: Vec::new(),
+                }
             }
             "local" => {
                 let mut e = Box::new(LocalEngine::with_sim_options(
@@ -334,6 +363,21 @@ fn main() -> Result<(), String> {
             m.wall.iter().copied().fold(0.0, f64::max),
             med(&m.cpu),
         );
+        if let Runner::Raw {
+            builds, installs, ..
+        } = &m.r
+            && !builds.is_empty()
+        {
+            let max = |v: &[f64]| v.iter().copied().fold(0.0, f64::max);
+            println!(
+                "  {:<12} spec builds: {}, {:.1} ms in all, longest {:.2} ms; installs: longest {:.3} ms",
+                "",
+                builds.len(),
+                builds.iter().sum::<f64>(),
+                max(builds),
+                max(installs),
+            );
+        }
     }
     Ok(())
 }
