@@ -4,7 +4,7 @@
 //!
 //! ```sh
 //! cargo run -p logi-sim --release --features jit --example engine_bench -- \
-//!     nes/workspace [--secs 2] [--rounds 5] [--warm 4] [--spec] \
+//!     nes/workspace [--secs 2] [--rounds 5] [--warm 4] [--spec [--timed-builds]] \
 //!     [--debug] [--modes raw,chunk:4096,local,engine]
 //! ```
 //!
@@ -21,7 +21,8 @@
 //!   paused while the other modes run. Its CPU time is the worker thread's.
 //!
 //! `--spec` turns on adaptive specialization (`SpecOptions::default`) in
-//! every mode; the raw modes then install their builds between runs.
+//! every mode; the raw modes build bodies inside `Sim::run`, or with
+//! `--timed-builds` between runs, timing each build and install.
 
 mod workspace;
 
@@ -221,7 +222,12 @@ fn main() -> Result<(), String> {
     let program = Arc::new(compile(&design, &options).map_err(|e| format!("{e:?}"))?);
     let sim_options = SimOptions {
         jit: true,
-        spec: spec.then(SpecOptions::default),
+        // `--timed-builds`: spec bodies are built by the raw modes between
+        // runs (not inside `Sim::run`), and timed.
+        spec: spec.then(|| SpecOptions {
+            inline_build: !args.iter().any(|a| a == "--timed-builds"),
+            ..SpecOptions::default()
+        }),
         // `SUPERSTEP_CHUNK`: items per superstep chunk function.
         superstep_chunk: std::env::var("SUPERSTEP_CHUNK")
             .ok()
