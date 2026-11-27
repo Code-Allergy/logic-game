@@ -236,7 +236,7 @@ fn op_of(blocks: &[Block], len: usize) -> Vec<Op> {
 }
 
 /// The bits an instruction's result can have, from its operands'.
-fn possible_of(op: Op, i: &Instr, imm: u64, pos: &[u64], mems: &[MemDesc]) -> u64 {
+pub(crate) fn possible_of(op: Op, i: &Instr, imm: u64, pos: &[u64], mems: &[MemDesc]) -> u64 {
     // Lazily: a `Clock`'s fields are literals, not slots.
     let a = || pos[i.a as usize];
     let b = || pos[i.b as usize];

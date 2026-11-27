@@ -73,7 +73,7 @@ pub fn compile_unit(p: &Program, body: BodyRef<'_>) -> Result<JitUnit, JitError>
         body.guards,
     )
     .map_err(|e| JitError(format!("bad body: {}", e.0)))?;
-    let mut b = backend::Builder::new(super::code_hint(std::slice::from_ref(&body)))?;
+    let mut b = super::new_builder(p, super::code_hint(std::slice::from_ref(&body)))?;
     let (mut instrs, mut bytes) = (0usize, 0usize);
     let ids = compile_body(&mut b, p, &body, &mut instrs, &mut bytes)?
         .ok_or_else(|| JitError("body not compiled (unused or too large)".into()))?;
@@ -246,7 +246,7 @@ pub fn compile_superstep(
     if s.live_end.iter().any(|&x| x >= p.slot_count) {
         return Err(JitError("bad live slot".into()));
     }
-    let mut b = backend::Builder::new(super::code_hint(bodies))?;
+    let mut b = super::new_builder(p, super::code_hint(bodies))?;
     let (id, info) = define_superstep(&mut b, p, bodies, s)?;
     let fin = b.finish()?;
     Ok(SuperUnit {
