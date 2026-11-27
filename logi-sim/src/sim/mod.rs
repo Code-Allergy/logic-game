@@ -1,0 +1,2389 @@
+//! Runtime for compiled programs (design doc section 6).
+//!
+//! [`Sim`] implements the execution model documented in
+//! [`crate::compile::program`]: commit, advance the tick, apply staged
+//! inputs, settle by running the blocks in order. Dispatch happens once per
+//! block; each block's inner loop is a pass over a contiguous slice of
+//! instructions with one opcode.
+//!
+//! `tick()` allocates nothing, and the code is the same on native and wasm.
+//! Every index in the program is checked once in [`Sim::new`], so the inner
+//! loops can skip bounds checks. The program is first lowered into the
+//! runtime's own streaming encoding (`code.rs`).
+//!
+//! Single-threaded (the default), a `Sim` uses no locks or atomics. With
+//! [`SimOptions::threads`] > 1 it owns a pool of worker threads that share
+//! each settle (`pool.rs`, which documents why that is race-free); results
+//! are identical.
+
+mod code;
+// The JIT backends (feature `jit`; issue #117): Cranelift natively,
+// generated WebAssembly on wasm32.
+#[cfg(feature = "jit")]
+pub mod jit;
+#[cfg(not(target_arch = "wasm32"))]
+mod pool;
+#[cfg(any(test, feature = "selftest"))]
+pub(crate) mod shift_cases;
+/// No threads on wasm. `Pool` is uninhabited, so a `Sim`'s pool is always
+/// `None`, every settle takes the single-threaded path, and no thread or
+/// synchronization code is compiled in. A threaded `SimOptions` silently
+/// runs on one thread.
+#[cfg(target_arch = "wasm32")]
+mod pool {
+    pub(super) enum Pool {}
+    pub(super) struct Schedule {
+        pub phases: Vec<()>,
+    }
+    impl Schedule {
+        pub fn parallel_phases(&self) -> usize {
+            0
+        }
+    }
+    impl Pool {
+        pub fn threads(&self) -> usize {
+            match *self {}
+        }
+        pub fn schedule(&self) -> &Schedule {
+            match *self {}
+        }
+        pub fn settle(&self, _: &mut [u64], _: &[Vec<u64>], _: u64) {
+            match *self {}
+        }
+    }
+}
+mod spec;
+#[cfg(test)]
+mod tests;
+
+pub use spec::{
+    FallbackOptions, PhasePlan, SpecBuilt, SpecOptions, SpecPlan, SpecRequest, SpecStats,
+    build_spec, spec_contexts,
+};
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::compile::{
+    Block, Body, Commit, Guard, Instr, NodePath, Op, Program, StateLoc, ZERO_SLOT,
+};
+use crate::netlist::{NetId, NodeId, mask};
+
+/// Index of a root port, in port order.
+pub type PortId = usize;
+
+/// A program index is out of range. Programs from [`crate::compile::compile`]
+/// never produce this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadProgram(pub String);
+
+/// State of every state element, keyed by its node path, plus the tick count.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateSnapshot {
+    pub tick: u64,
+    pub words: HashMap<NodePath, u64>,
+    /// RAM contents with their geometry `(addr_bits, width)`.
+    pub mems: HashMap<NodePath, (u8, u8, Vec<u64>)>,
+}
+
+/// Runtime options (issue #41). Every field only changes speed, never
+/// results. [`SimOptions::default`] is single-threaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimOptions {
+    /// Re-encode blocks whose destinations are consecutive so they stream
+    /// only their operands (see `sim/code.rs`). Off runs every block from
+    /// the program's own instructions.
+    pub stream: bool,
+    /// Threads per settle, counting the caller (1 = single-threaded). The
+    /// [`Sim`] starts `threads - 1` workers and keeps them for its
+    /// lifetime; it starts none if no rank reaches `par_min`, and none on
+    /// wasm.
+    pub threads: usize,
+    /// Work (about one unit per instruction) a rank needs to be split
+    /// between threads; smaller ranks run on the calling thread.
+    pub par_min: u64,
+    /// Tick fusion (issue #117): within [`Sim::run`], a tick that is not
+    /// the last settles only what the commit after it reads, since nothing
+    /// observes the slots in between (see [`Sim::run`]). Single-threaded
+    /// only.
+    pub fuse: bool,
+    /// Run the program's clock-phase variants ([`Program::phases`]) when
+    /// it has them. Single-threaded only: a pool runs the unspecialized
+    /// program.
+    pub phases: bool,
+    /// Run every body as native code compiled by Cranelift (`sim/jit/`)
+    /// instead of the block interpreter. Needs the crate feature `jit` on
+    /// a native target, and one thread; otherwise (or if compiling fails)
+    /// the interpreter runs. Off by default.
+    pub jit: bool,
+    /// Enable-guarded cones (issue #117, stage 6; `compile::guard`): skip
+    /// the instructions that only compute a mux arm the select does not
+    /// pick (the data input of a register whose enable is 0). Applies to
+    /// fused-run bodies, and to full settles of a program not compiled
+    /// with `Options::debug`, where only slots nothing exposes are
+    /// skipped. Single-threaded only, and with the JIT only unless
+    /// [`SimOptions::guard_interpreter`] is on.
+    pub guard: bool,
+    /// Guard the interpreter's bodies too (off by default). The guarded
+    /// segments split the interpreter's blocks and break its streaming:
+    /// on the NES console the interpreter ran about 17% slower with
+    /// guards, while the JIT, which branches inside its chunks, gains.
+    /// When the JIT is requested but cannot run, the interpreter runs the
+    /// guarded bodies (correct, just not the fastest layout).
+    pub guard_interpreter: bool,
+    /// Fewest instructions a guarded region holds
+    /// ([`crate::compile::guard::MIN_REGION`] by default; smaller values
+    /// guard more, smaller cones).
+    pub guard_min: usize,
+    /// Supersteps (issue #117; `sim/jit/superstep.rs`): with the JIT and
+    /// tick fusion, [`Sim::run`] runs whole clock periods (at least
+    /// `superstep_ticks` ticks, a multiple of the clock-phase period) as
+    /// one stream of native code, forwarding committed state into the
+    /// next settle and storing only what is read later. Single-threaded,
+    /// JIT only (the interpreter runs tick by tick).
+    pub superstep: bool,
+    /// Fewest ticks per superstep (rounded up to a multiple of the
+    /// clock-phase period).
+    pub superstep_ticks: u64,
+    /// Items (instructions and commits) per superstep chunk function.
+    pub superstep_chunk: usize,
+    /// Known-bits fused bodies (issue #117, adaptive specialization):
+    /// every fused-run body is rebuilt by [`crate::compile::spec`] with no
+    /// key, folding what the program's possible bits of state and ports
+    /// imply (ROM reads with partly known addresses, constant bits,
+    /// demanded-bits dead code). Needs `fuse`.
+    ///
+    /// The folds read ROM contents, so a write to a ROM
+    /// ([`Sim::set_mem_word`], [`Sim::import_state`]) switches them off
+    /// for that `Sim` (it runs the unfolded fused bodies, as with this
+    /// option off) until [`Sim::reset`]. The constant-address ROM folds of
+    /// the compiler and the phase variants are part of the [`Program`]
+    /// and stay: they are not covered (see `set_mem_word`).
+    pub known_bits: bool,
+    /// State-keyed specialization (issue #117, `docs/adaptive-spec.md`):
+    /// in a fused tick of a phase the plan keys, run the key's prefix,
+    /// then the body built for the key's value, or the fallback (the
+    /// general body without the prefix's work) on a miss. Needs `fuse`;
+    /// single-threaded only. While a phase is keyed (or an automatic plan
+    /// is awaited), [`Sim::run`] runs no supersteps, unless
+    /// [`SpecOptions::fallback`] runs them where keys do not pay; an
+    /// automatic plan that keys no phase brings the superstep with it
+    /// (compiled with the plan). Like the known-bits bodies, a ROM write
+    /// switches it off until [`Sim::reset`]. Off (`None`) by default.
+    pub spec: Option<SpecOptions>,
+}
+
+/// Where the fallback's measurement of a `run` starts.
+#[cfg(feature = "jit")]
+#[derive(Debug, Clone, Copy)]
+enum Mark {
+    #[cfg(not(target_arch = "wasm32"))]
+    Wall(std::time::Instant),
+    /// Tests: hits and misses so far (`spec::VIRTUAL`).
+    #[cfg(test)]
+    Virtual(u64, u64),
+}
+
+#[cfg(feature = "jit")]
+impl Mark {
+    /// Now, by the wall clock (none on wasm32: no fallback there).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    fn wall() -> Option<Mark> {
+        Some(Mark::Wall(std::time::Instant::now()))
+    }
+    #[cfg(target_arch = "wasm32")]
+    fn wall() -> Option<Mark> {
+        None
+    }
+}
+
+/// Default [`SimOptions::par_min`] (see the design doc, section 13).
+pub const DEFAULT_PAR_MIN: u64 = 2048;
+
+impl Default for SimOptions {
+    fn default() -> Self {
+        Self {
+            stream: true,
+            threads: 1,
+            par_min: DEFAULT_PAR_MIN,
+            fuse: true,
+            phases: true,
+            jit: false,
+            guard: true,
+            guard_interpreter: false,
+            guard_min: crate::compile::guard::MIN_REGION,
+            superstep: true,
+            superstep_ticks: DEFAULT_SUPERSTEP_TICKS,
+            superstep_chunk: DEFAULT_SUPERSTEP_CHUNK,
+            known_bits: true,
+            spec: None,
+        }
+    }
+}
+
+/// Default [`SimOptions::superstep_ticks`].
+pub const DEFAULT_SUPERSTEP_TICKS: u64 = 1;
+/// Default [`SimOptions::superstep_chunk`]: 128 items on native targets,
+/// 64 on wasm32 (not measured there).
+///
+/// Chunks of 128 ran 2-4 % faster than chunks of 64 on the NES workspaces
+/// (spec off), the same on dense generated designs, and cost 5-10 % more
+/// compile time. Chunks of 256 ran no faster on the NES, 4-11 % slower on
+/// dense designs (`gates1_30k` and `dag32_10k` with state: Cranelift
+/// spills 3-4 times as many values, long live ranges of values forwarded
+/// within a chunk), and compiled 10-25 % slower. (An earlier sweep on
+/// another machine favored 256-512 with chunks laid out a page each, see
+/// `jit::ARENA`.)
+pub const DEFAULT_SUPERSTEP_CHUNK: usize = if cfg!(target_arch = "wasm32") {
+    64
+} else {
+    128
+};
+
+impl SimOptions {
+    /// Everything off: the M3 runtime.
+    pub fn baseline() -> Self {
+        Self {
+            stream: false,
+            fuse: false,
+            phases: false,
+            guard: false,
+            superstep: false,
+            known_bits: false,
+            ..Self::default()
+        }
+    }
+
+    /// The interpreted layout of these options for JIT tiering: `jit` off,
+    /// but the bodies laid out as the JIT would run them (guarded when
+    /// `jit` asks for guards), so native code compiled from this layout
+    /// later swaps into a `Sim` built with it.
+    pub fn tier_layout(&self) -> Self {
+        Self {
+            jit: false,
+            guard_interpreter: self.guard_interpreter || self.jit,
+            ..self.clone()
+        }
+    }
+
+    /// The defaults with the JIT on (see [`SimOptions::jit`]).
+    pub fn jit() -> Self {
+        Self {
+            jit: true,
+            ..Self::default()
+        }
+    }
+
+    /// The options of an interactive engine ([`crate::engine::Engine`]):
+    /// the JIT, tiered by the engine, and with it adaptive state-keyed
+    /// specialization with an automatic plan and the fallback to
+    /// supersteps where keys do not pay ([`SpecOptions::interactive`]),
+    /// whose bodies the engine builds on its compile thread. Results are
+    /// those of the defaults; the threaded engine ran 25 to 45% faster on
+    /// the NES console and 25% on an MMC3 game once the bodies were in
+    /// (3.5 to 14 s into the run: the plan is sampled first, and meanwhile
+    /// the runtime runs without supersteps, an MMC3 game 20% slower for
+    /// about 10 s; see `docs/adaptive-spec.md`). Without the `jit` feature this is
+    /// [`SimOptions::default`]: the interpreter alone gains little. On
+    /// wasm it is the JIT (the wasm backend) without specialization: wasm
+    /// has no compile thread (`LocalEngine` would stall a `run` for the
+    /// plan's build).
+    pub fn interactive() -> Self {
+        Self {
+            jit: cfg!(feature = "jit"),
+            spec: cfg!(all(feature = "jit", not(target_arch = "wasm32")))
+                .then(SpecOptions::interactive),
+            ..Self::default()
+        }
+    }
+
+    /// The defaults with `threads` threads.
+    pub fn threaded(threads: usize) -> Self {
+        Self {
+            threads,
+            ..Self::default()
+        }
+    }
+
+    /// The defaults with one thread per available core (1 on wasm).
+    pub fn all_cores() -> Self {
+        let n = if cfg!(target_arch = "wasm32") {
+            1
+        } else {
+            std::thread::available_parallelism().map_or(1, |n| n.get())
+        };
+        Self::threaded(n)
+    }
+}
+
+/// Work done by a [`Sim`] since it was created or [`Sim::reset_counters`]
+/// (feature `counters`, off by default; without it nothing is counted and
+/// the runtime is unchanged). Every count is deterministic: the same
+/// program and the same calls give the same counts on every machine, which
+/// makes them suitable for regression gates (`cargo xtask perf check`).
+#[cfg(feature = "counters")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counters {
+    /// Calls to [`Sim::tick`].
+    pub ticks: u64,
+    /// Settles (one per tick, plus construction, [`Sim::reset`],
+    /// [`Sim::import_state`] and [`Sim::resettle`]).
+    pub settles: u64,
+    /// Blocks dispatched.
+    pub blocks: u64,
+    /// Scalar instructions executed.
+    pub instrs: u64,
+    /// Packed words executed (each up to 64 lanes).
+    pub packed_words: u64,
+    /// Commits processed (state copies, RAM writes and clears, taken or
+    /// not).
+    pub commits: u64,
+    /// Memory writes and clears actually taken.
+    pub mem_writes: u64,
+}
+
+#[cfg(feature = "counters")]
+impl Counters {
+    /// Executed operations: instructions, packed words and commits.
+    pub fn ops(&self) -> u64 {
+        self.instrs + self.packed_words + self.commits
+    }
+}
+
+/// One body the runtime can settle and commit with: the program's own, a
+/// clock-phase variant, or either pruned to its commits' cone (tick
+/// fusion).
+struct Run {
+    /// `None` for the program's own body.
+    body: Option<Body>,
+    code: code::Code,
+    /// What one settle with this body executes (`blocks`, `instrs`,
+    /// `packed_words`).
+    #[cfg(feature = "counters")]
+    per_settle: Counters,
+    /// Per guard of `body`: the blocks and instructions it skips when its
+    /// conditions do not hold.
+    #[cfg(feature = "counters")]
+    guard_cost: Vec<(u64, u64)>,
+}
+
+impl Run {
+    fn new(p: &Program, body: Option<Body>, stream: bool) -> Self {
+        let (blocks, instrs, imms) = parts(p, body.as_ref());
+        let code = if stream {
+            code::Code::new(blocks, instrs, imms)
+        } else {
+            code::Code::plain(blocks)
+        };
+        #[cfg(feature = "counters")]
+        let mut per_settle = Counters::default();
+        #[cfg(feature = "counters")]
+        for b in &code.blocks {
+            per_settle.blocks += 1;
+            match b.form {
+                code::Form::Packed { .. } => per_settle.packed_words += u64::from(b.len),
+                _ => per_settle.instrs += u64::from(b.len),
+            }
+        }
+        #[cfg(feature = "counters")]
+        let guard_cost = body.as_ref().map_or(Vec::new(), |b| {
+            b.guards
+                .iter()
+                .map(|g| {
+                    let blocks = &b.blocks[g.start as usize..g.end as usize];
+                    let instrs = blocks.iter().map(|x| u64::from(x.len)).sum();
+                    (blocks.len() as u64, instrs)
+                })
+                .collect()
+        });
+        Run {
+            body,
+            code,
+            #[cfg(feature = "counters")]
+            per_settle,
+            #[cfg(feature = "counters")]
+            guard_cost,
+        }
+    }
+}
+
+/// Blocks, instructions and immediates of `body`, or of the program.
+fn parts<'a>(p: &'a Program, body: Option<&'a Body>) -> (&'a [Block], &'a [Instr], &'a [u64]) {
+    match body {
+        Some(b) => (&b.blocks, &b.instrs, &b.imms),
+        None => (&p.blocks, &p.instrs, &p.imms),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Mutation for the tests: a ROM write does not switch the folds off.
+    static SKIP_ROM_SWITCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The bodies a `Sim` runs and which of them runs when.
+struct Layout {
+    runs: Vec<Run>,
+    period: u64,
+    full: Vec<u16>,
+    fused: Vec<u16>,
+    /// Some fused body is a known-bits body, or some phase is keyed: the
+    /// bodies fold ROM contents.
+    folded: bool,
+    /// Keys, tables and specialized bodies.
+    spec: spec::Spec,
+}
+
+/// What `Sim::compile_jit_with` made.
+#[cfg(feature = "jit")]
+enum Compiled {
+    Now(jit::JitProgram),
+    #[cfg(target_arch = "wasm32")]
+    Pending(jit::PendingJit),
+}
+
+/// What a ROM write sets aside (see [`Sim::rom_changed`]).
+struct Stash {
+    runs: Vec<Run>,
+    full: Vec<u16>,
+    fused: Vec<u16>,
+    spec: spec::Spec,
+    #[cfg(feature = "jit")]
+    jit: Option<Arc<jit::JitProgram>>,
+}
+
+impl Layout {
+    /// The program's own body for every tick.
+    fn own() -> Self {
+        Layout {
+            runs: Vec::new(),
+            period: 1,
+            full: vec![0],
+            fused: vec![0],
+            folded: false,
+            spec: spec::Spec::default(),
+        }
+    }
+}
+
+/// Run indices specialized bodies leave free for the plain runs added
+/// after them: a full and a fused body per clock phase (at most 8 phases)
+/// and the program's own, with room to spare.
+const SPEC_RUN_RESERVE: usize = 64;
+
+/// The bodies of `program` under `options`: clock-phase variants, fused-run
+/// bodies, guards, and, when `folds` (the ROMs hold the program's
+/// contents), known-bits fused bodies (`options.known_bits`) and the
+/// specialized bodies of `options.spec`.
+fn build_layout(program: &Arc<Program>, options: &SimOptions, folds: bool) -> Layout {
+    use crate::compile::{guard, phases, spec as cspec};
+    let Layout {
+        mut runs,
+        mut period,
+        mut full,
+        mut fused,
+        mut folded,
+        spec: _,
+    } = Layout::own();
+    let guards = options.guard && (options.jit || options.guard_interpreter);
+    let add = |runs: &mut Vec<Run>, body: Option<Body>| {
+        runs.push(Run::new(program, body, options.stream));
+        u16::try_from(runs.len()).expect("run index fits u16")
+    };
+    let n_slots = program.slot_count as usize;
+    // Full settles are observed: guard only what nothing exposes, and
+    // nothing under `Options::debug`.
+    let exposed = (guards && !program.debug_options).then(|| phases::exposed(program));
+    let guard_full = |b: &Body| {
+        let e = exposed.as_deref()?;
+        guard::guard_with(n_slots, b, Some(e), options.guard_min)
+    };
+    // Fused-run bodies are guarded alike, specialized or not.
+    let guard_fused = |b: &Body| {
+        guards
+            .then(|| guard::guard_with(n_slots, b, None, options.guard_min))
+            .flatten()
+    };
+    let spec_options = options.spec.as_ref().filter(|_| folds && options.fuse);
+    let plan = spec_options.and_then(|s| s.plan.as_deref());
+    // Adaptive tables (the caps and thresholds), and an automatic plan.
+    let adaptive = spec_options.filter(|s| s.adaptive);
+    let automatic = spec_options.filter(|s| s.automatic());
+    let known_bits = folds && options.known_bits;
+    let possible = ((known_bits || plan.is_some() || automatic.is_some()) && options.fuse)
+        .then(|| cspec::possible_bits(program));
+    let mut specs: Vec<Option<spec::PhaseSpec>> = Vec::new();
+    let mut contexts: Vec<Option<Arc<cspec::SpecContext>>> = Vec::new();
+    // A fused-run body: pruned to its commits' cone, folded by the known
+    // bits (no key), then guarded; and the phase's specialized bodies
+    // when the plan keys it.
+    // `same` is the run to use when nothing changes the body.
+    let mut fused_body = |runs: &mut Vec<Run>, b: &Body, phase: Option<u64>, same: u16| -> u16 {
+        let k = phase.unwrap_or(0) as usize;
+        let (pruned, cx) = spec::fused_context(program, b, possible.as_deref(), phase);
+        let base = pruned.as_ref().unwrap_or(b);
+        let known = cx
+            .as_ref()
+            .filter(|_| known_bits)
+            .map(|c| c.fallback(program, &[]))
+            .filter(|k| k.instrs.len() < base.instrs.len());
+        folded |= known.is_some();
+        let body = known.or(pruned);
+        let body = guard_fused(body.as_ref().unwrap_or(b)).or(body);
+        let f = match body {
+            Some(body) => add(runs, Some(body)),
+            None => same,
+        };
+        let cx = cx.map(Arc::new);
+        let phase_plan = plan.and_then(|p| p.phases.get(k)?.as_ref());
+        if let (Some(pp), Some(cx)) = (phase_plan, cx.as_ref()) {
+            // Leave room for the runs every later phase still adds (its
+            // full and fused bodies) under the u16 run index.
+            let mut add_spec = |body: Body| {
+                (runs.len() < usize::from(u16::MAX) - SPEC_RUN_RESERVE)
+                    .then(|| add(runs, Some(body)))
+            };
+            let guard_spec = |body: Body| guard_fused(&body).unwrap_or(body);
+            let ps =
+                spec::PhaseSpec::build(program, cx, pp, f, adaptive, &mut add_spec, &guard_spec);
+            specs.resize(k + 1, None);
+            specs[k] = ps;
+        }
+        if automatic.is_some() {
+            contexts.resize(k + 1, None);
+            contexts[k] = cx;
+        }
+        f
+    };
+    let own = || Body {
+        blocks: program.blocks.clone(),
+        instrs: program.instrs.clone(),
+        imms: program.imms.clone(),
+        commits: program.commits.clone(),
+        guards: Vec::new(),
+    };
+    match program.phases.as_deref() {
+        Some(ph) if options.phases => {
+            period = u64::from(ph.period);
+            full.clear();
+            fused.clear();
+            for (k, v) in ph.variants.iter().enumerate() {
+                let f = add(&mut runs, Some(guard_full(v).unwrap_or_else(|| v.clone())));
+                full.push(f);
+                fused.push(match options.fuse {
+                    true => fused_body(&mut runs, v, Some(k as u64), f),
+                    false => f,
+                });
+            }
+        }
+        _ => {
+            if program.packs.is_empty() && (options.fuse || exposed.is_some()) {
+                let own = own();
+                if let Some(b) = guard_full(&own) {
+                    full[0] = add(&mut runs, Some(b));
+                    fused[0] = full[0];
+                }
+                if options.fuse {
+                    fused[0] = fused_body(&mut runs, &own, None, full[0]);
+                }
+            }
+        }
+    }
+    if specs.iter().all(Option::is_none) {
+        specs.clear();
+    } else {
+        specs.resize(period as usize, None);
+    }
+    contexts.resize(period as usize, None);
+    let spec = spec::Spec::new(specs, contexts, automatic, runs.len());
+    // The specialized bodies fold ROM contents (those of an automatic
+    // plan will).
+    folded |= spec.folds();
+    Layout {
+        runs,
+        period,
+        full,
+        fused,
+        folded,
+        spec,
+    }
+}
+
+pub struct Sim {
+    program: Arc<Program>,
+    /// The program's own body, lowered (shared with the pool).
+    code: Arc<code::Code>,
+    /// Bodies other than the program's own (index 0 in `full`/`fused` means
+    /// the program's own; `k > 0` means `runs[k - 1]`).
+    runs: Vec<Run>,
+    /// Ticks per clock-phase cycle (1 without phases).
+    period: u64,
+    /// Per tick residue: the body that settles an observed tick and
+    /// commits after it.
+    full: Vec<u16>,
+    /// Per tick residue: the body that settles a tick only its own commit
+    /// observes (tick fusion), with the same commits as `full`.
+    fused: Vec<u16>,
+    /// Whether some fused body is a known-bits or specialized body (reads
+    /// ROM contents to fold; see [`SimOptions::known_bits`]).
+    folded: bool,
+    /// Per clock phase, its key and specialized bodies, the bodies
+    /// installed since the layout was built ([`SimOptions::spec`]).
+    spec: spec::Spec,
+    /// The generation of builds this `Sim` accepts, and what its tables
+    /// did.
+    spec_life: spec::Life,
+    /// The fallback from keys to supersteps ([`SpecOptions::fallback`]).
+    spec_fallback: Option<Box<spec::Fallback>>,
+    /// The body that settled the slots now: the next commit is its own
+    /// (a known-bits body may not compute what the full body's commits
+    /// read). Between calls it is the full body of the tick.
+    last: u16,
+    /// The folded layout and its native code, set aside by a ROM write
+    /// until [`Sim::reset`].
+    stash: Option<Box<Stash>>,
+    options: SimOptions,
+    /// Worker threads, when `options.threads > 1` and some rank is large
+    /// enough. Declared before `slots` and `mems`, so it is dropped (and
+    /// its workers joined) before the buffers they may still be using are
+    /// freed, even when unwinding out of a settle.
+    pool: Option<pool::Pool>,
+    slots: Vec<u64>,
+    mems: Vec<Vec<u64>>,
+    /// Per memory, a count of the commits that wrote it (see
+    /// [`Sim::mem_version`]).
+    mem_writes: Vec<u64>,
+    tick: u64,
+    /// Root input values, applied to their slots at the start of each settle.
+    inputs: Vec<u64>,
+    /// Native code for every body (`SimOptions::jit`), indexed like
+    /// `full`/`fused` (0 the program's own, `k` `runs[k - 1]`).
+    #[cfg(feature = "jit")]
+    jit: Option<Arc<jit::JitProgram>>,
+    /// One pointer per memory, for the JIT'd code (`usize` keeps `Sim`
+    /// `Send`). The buffers never reallocate, but a write through a new
+    /// `&mut` (the interpreter's commit, a reset, an import, a poke) would
+    /// invalidate pointers taken before it, so those clear
+    /// `mem_ptrs_fresh` and the next JIT call takes them again.
+    #[cfg(feature = "jit")]
+    mem_ptrs: Vec<usize>,
+    #[cfg(feature = "jit")]
+    mem_ptrs_fresh: bool,
+    /// Scratch of `keyed_ticks_native`: per run, its native functions
+    /// (valid during one call only).
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    native_fns: Vec<NativeFns>,
+    /// Per guard of every body, how often a superstep skipped it
+    /// (feature `counters`; see `jit::JitSuper::skip_base`).
+    #[cfg(all(feature = "counters", feature = "jit"))]
+    skips: Vec<u64>,
+    #[cfg(feature = "counters")]
+    counters: Counters,
+    /// What one settle of the program's own body executes (`blocks`,
+    /// `instrs`, `packed_words`).
+    #[cfg(feature = "counters")]
+    per_settle: Counters,
+}
+
+impl Sim {
+    /// Load the program and perform the tick-0 settle. Panics if the program
+    /// is malformed; see [`Sim::try_new`].
+    #[track_caller]
+    pub fn new(program: Arc<Program>) -> Self {
+        Self::try_new(program).unwrap_or_else(|e| panic!("bad program: {}", e.0))
+    }
+
+    pub fn try_new(program: Arc<Program>) -> Result<Self, BadProgram> {
+        Self::try_with_options(program, SimOptions::default())
+    }
+
+    /// [`Sim::new`] with runtime options.
+    #[track_caller]
+    pub fn with_options(program: Arc<Program>, options: SimOptions) -> Self {
+        Self::try_with_options(program, options).unwrap_or_else(|e| panic!("bad program: {}", e.0))
+    }
+
+    /// [`Sim::try_new`] with runtime options.
+    pub fn try_with_options(
+        program: Arc<Program>,
+        options: SimOptions,
+    ) -> Result<Self, BadProgram> {
+        check(&program)?;
+        let code = if options.stream {
+            code::Code::new(&program.blocks, &program.instrs, &program.imms)
+        } else {
+            code::Code::plain(&program.blocks)
+        };
+        let mems = program
+            .mems
+            .iter()
+            .map(|m| {
+                let mut v = vec![0u64; 1usize << m.addr_bits];
+                v[..m.init.len()].copy_from_slice(&m.init);
+                v
+            })
+            .collect();
+        let code = Arc::new(code);
+        let pool = start_pool(&program, &code, &options);
+        // Variants, fusion and guards run single-threaded only.
+        let Layout {
+            runs,
+            period,
+            full,
+            fused,
+            folded,
+            spec,
+        } = if pool.is_none() {
+            build_layout(&program, &options, true)
+        } else {
+            Layout::own()
+        };
+        for r in &runs {
+            if let Some(b) = &r.body {
+                check_body(
+                    &program, &b.blocks, &b.instrs, &b.imms, &b.commits, &b.guards,
+                )?;
+            }
+        }
+        let mut sim = Sim {
+            code,
+            runs,
+            period,
+            full,
+            fused,
+            folded,
+            spec,
+            spec_life: spec::Life::new(),
+            spec_fallback: options
+                .spec
+                .as_ref()
+                .and_then(|s| s.fallback.as_ref())
+                .map(|f| Box::new(spec::Fallback::new(f))),
+            last: 0,
+            stash: None,
+            options,
+            pool,
+            slots: vec![0; program.slot_count as usize],
+            mem_writes: vec![0; program.mems.len()],
+            mems,
+            tick: 0,
+            inputs: vec![0; program.ports.inputs.len()],
+            program,
+            #[cfg(feature = "jit")]
+            jit: None,
+            #[cfg(feature = "jit")]
+            mem_ptrs: Vec::new(),
+            #[cfg(feature = "jit")]
+            mem_ptrs_fresh: false,
+            #[cfg(all(feature = "jit", not(feature = "counters")))]
+            native_fns: Vec::new(),
+            #[cfg(all(feature = "counters", feature = "jit"))]
+            skips: Vec::new(),
+            #[cfg(feature = "counters")]
+            counters: Counters::default(),
+            #[cfg(feature = "counters")]
+            per_settle: Counters::default(),
+        };
+        #[cfg(feature = "jit")]
+        if sim.options.jit && sim.pool.is_none() {
+            // A program the JIT cannot compile runs interpreted.
+            sim.jit = sim.compile_jit().ok().map(Arc::new);
+        }
+        #[cfg(feature = "counters")]
+        for b in &sim.code.blocks {
+            sim.per_settle.blocks += 1;
+            match b.form {
+                code::Form::Packed { .. } => sim.per_settle.packed_words += u64::from(b.len),
+                _ => sim.per_settle.instrs += u64::from(b.len),
+            }
+        }
+        for &(s, v) in &sim.program.consts {
+            sim.slots[s as usize] = v;
+        }
+        sim.settle(sim.full_run());
+        if sim.options.spec.as_ref().is_some_and(|s| s.inline_build) {
+            // The plan's key values (adaptive tables start with them).
+            sim.spec_build_inline();
+        }
+        Ok(sim)
+    }
+
+    pub fn program(&self) -> &Arc<Program> {
+        &self.program
+    }
+
+    pub fn options(&self) -> &SimOptions {
+        &self.options
+    }
+
+    /// Whether the bodies run as JIT-compiled native code.
+    pub fn jit_active(&self) -> bool {
+        #[cfg(feature = "jit")]
+        return self.jit.is_some();
+        #[cfg(not(feature = "jit"))]
+        false
+    }
+
+    /// The native code installed, if any (diagnostics: code size, chunks,
+    /// the superstep).
+    #[cfg(feature = "jit")]
+    pub fn jit_code(&self) -> Option<&jit::JitProgram> {
+        self.jit.as_deref()
+    }
+
+    /// Compile every body this `Sim` runs (the program's own and each run)
+    /// with the JIT, without installing it. Thread-safe and independent of
+    /// the `Sim`'s state, so it can run off the hot path; see
+    /// [`Sim::install_jit`].
+    #[cfg(feature = "jit")]
+    pub fn compile_jit(&self) -> Result<jit::JitProgram, jit::JitError> {
+        match self.compile_jit_with(false)? {
+            Compiled::Now(code) => Ok(code),
+            #[cfg(target_arch = "wasm32")]
+            Compiled::Pending(_) => unreachable!("asked for a program now"),
+        }
+    }
+
+    /// [`Sim::compile_jit`], or (wasm32, `asynchronous`) its asynchronous
+    /// instantiation.
+    #[cfg(feature = "jit")]
+    fn compile_jit_with(
+        &self,
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))] asynchronous: bool,
+    ) -> Result<Compiled, jit::JitError> {
+        let p = &*self.program;
+        let bodies = self.body_refs();
+        // No superstep while a phase is keyed (unless the fallback may run
+        // it) or a plan is awaited: supersteps run the general fused
+        // bodies (an automatic plan that keys nothing brings its own,
+        // `Spec::superstep`).
+        let keyed_ok = self.spec_fallback.is_some();
+        let (parts, live_end) =
+            if (self.spec.phases.is_empty() || keyed_ok) && !self.spec.awaiting_plan {
+                self.super_parts(&bodies).unwrap_or_default()
+            } else {
+                Default::default()
+            };
+        let sup = (!parts.is_empty()).then(|| jit::SuperRef {
+            parts: &parts,
+            ticks: parts.len() as u64 / 2,
+            live_end: &live_end,
+            chunk: self.options.superstep_chunk,
+        });
+        #[cfg(target_arch = "wasm32")]
+        if asynchronous {
+            let mut pending = jit::JitProgram::compile_async(p, &bodies, sup.as_ref())?;
+            pending.key = Some(self.run_key());
+            return Ok(Compiled::Pending(pending));
+        }
+        let mut code = jit::JitProgram::compile_with(p, &bodies, sup.as_ref())?;
+        code.key = Some(self.run_key());
+        Ok(Compiled::Now(code))
+    }
+
+    /// The layout native code compiled from this `Sim` runs in.
+    #[cfg(feature = "jit")]
+    fn run_key(&self) -> jit::RunKey {
+        jit::RunKey {
+            program: Arc::downgrade(&self.program),
+            full: self.full.clone(),
+            fused: self.fused.clone(),
+            folded: self.folded,
+            spec: self.spec.key.clone(),
+        }
+    }
+
+    /// [`Sim::compile_jit`] on wasm32, instantiated asynchronously (see
+    /// `jit::JitProgram::compile_async`): poll the result, then give it to
+    /// [`Sim::install_jit`]. The code is generated now.
+    #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+    pub fn compile_jit_async(&self) -> Result<jit::PendingJit, jit::JitError> {
+        match self.compile_jit_with(true)? {
+            Compiled::Pending(p) => Ok(p),
+            Compiled::Now(_) => unreachable!("asked for a pending program"),
+        }
+    }
+
+    /// The superstep of the layout's fused bodies (`bodies`, as
+    /// [`Sim::body_refs`]), when the options ask for one: whole clock
+    /// periods of fused ticks, starting at phase 0 (see `Sim::run`), and
+    /// the slots read after it. Runs the general fused bodies: the caller
+    /// checks that no phase is keyed.
+    #[cfg(feature = "jit")]
+    fn super_parts(&self, bodies: &[jit::BodyRef<'_>]) -> Option<(Vec<jit::Part>, Vec<u32>)> {
+        let o = &self.options;
+        if !(o.superstep && o.fuse && self.pool.is_none()) {
+            return None;
+        }
+        let l = self.period;
+        let n = o.superstep_ticks.max(1).div_ceil(l) * l;
+        let mut parts = Vec::new();
+        for i in 0..n {
+            // A superstep follows a fused settle: its commits are the
+            // fused body's.
+            parts.push(jit::Part::Commit {
+                body: self.fused[(i % l) as usize] as usize,
+            });
+            parts.push(jit::Part::Settle {
+                body: self.fused[((i + 1) % l) as usize] as usize,
+                offset: i + 1,
+            });
+        }
+        // Read after a superstep before anything writes them: what any
+        // commit reads, and every state slot.
+        let mut live_end = Vec::new();
+        let mut seen = vec![false; self.program.slot_count as usize];
+        for b in bodies {
+            for c in b.commits {
+                let mut reads = c.reads().to_vec();
+                if let Commit::Copy { state, .. } = *c {
+                    reads.push(state);
+                }
+                for s in reads {
+                    if !std::mem::replace(&mut seen[s as usize], true) {
+                        live_end.push(s);
+                    }
+                }
+            }
+        }
+        Some((parts, live_end))
+    }
+
+    /// [`Sim::super_parts`] as a self-contained request (for an automatic
+    /// plan that may key nothing): the bodies it names, owned, numbered in
+    /// the order the parts first name them.
+    #[cfg(feature = "jit")]
+    fn super_build(&self) -> Option<spec::SuperBuild> {
+        let bodies = self.body_refs();
+        let (parts, live_end) = self.super_parts(&bodies)?;
+        let mut runs: Vec<u16> = Vec::new();
+        let mut local = |r: usize| match runs.iter().position(|&x| usize::from(x) == r) {
+            Some(i) => i,
+            None => {
+                runs.push(r as u16);
+                runs.len() - 1
+            }
+        };
+        let parts: Vec<jit::Part> = parts
+            .into_iter()
+            .map(|part| match part {
+                jit::Part::Commit { body } => jit::Part::Commit { body: local(body) },
+                jit::Part::Settle { body, offset } => jit::Part::Settle {
+                    body: local(body),
+                    offset,
+                },
+            })
+            .collect();
+        let p = &*self.program;
+        let own = || Body {
+            blocks: p.blocks.clone(),
+            instrs: p.instrs.clone(),
+            imms: p.imms.clone(),
+            commits: p.commits.clone(),
+            guards: Vec::new(),
+        };
+        let owned = runs
+            .iter()
+            .map(|&r| match r {
+                0 => own(),
+                k => self.runs[k as usize - 1].body.clone().unwrap_or_else(own),
+            })
+            .collect();
+        Some(spec::SuperBuild {
+            bodies: owned,
+            runs,
+            ticks: parts.len() as u64 / 2,
+            parts,
+            live_end,
+            chunk: self.options.superstep_chunk,
+        })
+    }
+
+    /// Run from `code` from now on, or interpret again with `None`.
+    /// Results are the same either way, so this can happen at any time
+    /// (tiering: start interpreted, swap native code in when it is ready).
+    /// `code` must come from [`Sim::compile_jit`] of a `Sim` of the same
+    /// `Arc<Program>` with the same run layout (the same fusion and phase
+    /// options, no thread pool); otherwise nothing changes and this
+    /// returns `false`. Specialized bodies installed at run time
+    /// ([`Sim::install_spec`]) are not part of the layout: they bring
+    /// their own native code, which runs while native code is installed.
+    #[cfg(feature = "jit")]
+    pub fn install_jit(&mut self, code: Option<Arc<jit::JitProgram>>) -> bool {
+        if let Some(c) = &code {
+            let fits = c.key.as_ref().is_some_and(|k| {
+                std::ptr::eq(k.program.as_ptr(), Arc::as_ptr(&self.program))
+                    && k.full == self.full
+                    && k.fused == self.fused
+                    && k.folded == self.folded
+                    && k.spec == self.spec.key
+            }) && c.bodies.len() == self.spec.base + 1
+                && self.pool.is_none();
+            if !fits {
+                return false;
+            }
+        }
+        self.jit = code;
+        true
+    }
+
+    /// Guarded block ranges over every body this `Sim` runs, and the
+    /// instructions they hold (diagnostics; see [`SimOptions::guard`]).
+    pub fn guarded(&self) -> (usize, usize) {
+        let mut out = (0, 0);
+        for b in self.runs.iter().filter_map(|r| r.body.as_ref()) {
+            out.0 += b.guards.len();
+            for g in &b.guards {
+                out.1 += b.blocks[g.start as usize..g.end as usize]
+                    .iter()
+                    .map(|x| x.len as usize)
+                    .sum::<usize>();
+            }
+        }
+        out
+    }
+
+    /// Threads each settle uses (1 when no worker threads were started).
+    pub fn threads(&self) -> usize {
+        self.pool.as_ref().map_or(1, pool::Pool::threads)
+    }
+
+    /// `(parallel, total)` settle phases (diagnostics; `(0, 0)` when
+    /// single-threaded).
+    pub fn phases(&self) -> (usize, usize) {
+        self.pool.as_ref().map_or((0, 0), |p| {
+            (p.schedule().parallel_phases(), p.schedule().phases.len())
+        })
+    }
+
+    /// Set a root input. It is visible to logic at the next settle (the next
+    /// [`Self::tick`]) and to state at the commit after that.
+    pub fn set_input(&mut self, port: PortId, value: u64) {
+        self.inputs[port] = value & mask(self.program.ports.inputs[port].width);
+    }
+
+    /// Root input `port` as last given to [`Self::set_input`].
+    pub fn input(&self, port: PortId) -> u64 {
+        self.inputs[port]
+    }
+
+    /// Root input `port` as the logic saw it at the last settle: a value
+    /// set since then is not in it yet.
+    pub fn settled_input(&self, port: PortId) -> u64 {
+        self.slots[self.program.ports.inputs[port].slot as usize]
+    }
+
+    /// Set a root input by name. Panics if there is no such port.
+    #[track_caller]
+    pub fn set(&mut self, name: &str, value: u64) {
+        let port = self
+            .program
+            .ports
+            .input(name)
+            .unwrap_or_else(|| panic!("no input port {name:?}"));
+        self.set_input(port, value);
+    }
+
+    /// Value of root output `port` after the last settle.
+    pub fn output(&self, port: PortId) -> u64 {
+        self.slots[self.program.ports.outputs[port].slot as usize]
+    }
+
+    /// Root output by name. Panics if there is no such port.
+    #[track_caller]
+    pub fn get(&self, name: &str) -> u64 {
+        let port = self
+            .program
+            .ports
+            .output(name)
+            .unwrap_or_else(|| panic!("no output port {name:?}"));
+        self.output(port)
+    }
+
+    /// Raw slot value (see [`crate::compile::DebugMap`]). A lane or view
+    /// slot (at or above `slot_count`, see [`Program::resolve`]) reads its
+    /// bits of the word holding it. Panics if `slot` is none of these.
+    pub fn read(&self, slot: u32) -> u64 {
+        match self.program.resolve(slot) {
+            Some((s, shift, m)) => (self.slots[s as usize] >> shift) & m,
+            None => match self.program.shadow(slot) {
+                Some((shadow, value)) => self.read_shadow(shadow, value),
+                None => panic!("slot {slot} out of range"),
+            },
+        }
+    }
+
+    /// Value `value` of a substituted instance's gate-level evaluation
+    /// (see [`crate::compile::Shadow`]), from its inputs and state now.
+    fn read_shadow(&self, shadow: &crate::compile::Shadow, value: u32) -> u64 {
+        let ins: smallvec::SmallVec<[u64; 8]> =
+            shadow.inputs.iter().map(|&s| self.read(s)).collect();
+        let state: smallvec::SmallVec<[u64; 8]> =
+            shadow.states.iter().map(|&s| self.read(s)).collect();
+        let mut vals = vec![0u64; shadow.flat.values()];
+        shadow.flat.eval(&ins, &state, &mut vals);
+        vals[value as usize]
+    }
+
+    /// Write `value` into `slot` (a plain, lane or view slot), leaving the
+    /// other bits of the word holding it alone.
+    fn write_slot(&mut self, slot: u32, value: u64) {
+        let (s, shift, m) = self
+            .program
+            .resolve(slot)
+            .unwrap_or_else(|| panic!("slot {slot} out of range"));
+        let w = &mut self.slots[s as usize];
+        *w = (*w & !(m << shift)) | ((value & m) << shift);
+    }
+
+    /// Value of an authored net, by instance path and `NetId`.
+    pub fn read_net(&self, path: &[NodeId], net: NetId) -> Option<u64> {
+        self.program.debug.slot(path, net).map(|s| self.read(s))
+    }
+
+    /// Contents of memory `index` (see [`crate::compile::MemDesc`]).
+    pub fn mem(&self, index: u32) -> &[u64] {
+        &self.mems[index as usize]
+    }
+
+    /// Changes whenever memory `index` may have changed: a count of the
+    /// writes (and clears) committed to it, plus state imports. Lets a
+    /// reader that copies a memory (a screen) skip unchanged ones.
+    pub fn mem_version(&self, index: u32) -> u64 {
+        self.mem_writes[index as usize]
+    }
+
+    /// Memory index of the RAM or screen at `path` (its `StateKey`).
+    pub fn mem_index(&self, path: &NodePath) -> Option<u32> {
+        self.program.state_keys.iter().find_map(|k| match k.loc {
+            StateLoc::Mem(m) if k.path == *path => Some(m),
+            _ => None,
+        })
+    }
+
+    pub fn tick_count(&self) -> u64 {
+        self.tick
+    }
+
+    /// Work done so far (feature `counters`).
+    #[cfg(feature = "counters")]
+    pub fn counters(&self) -> &Counters {
+        &self.counters
+    }
+
+    /// Zero the [`Counters`] (feature `counters`).
+    #[cfg(feature = "counters")]
+    pub fn reset_counters(&mut self) {
+        self.counters = Counters::default();
+    }
+
+    /// The body that settles the current tick when it is observed.
+    #[inline]
+    fn full_run(&self) -> u16 {
+        self.full[(self.tick % self.period) as usize]
+    }
+
+    pub fn tick(&mut self) {
+        #[cfg(feature = "counters")]
+        {
+            self.counters.ticks += 1;
+        }
+        // The commit belongs to the body that settled the previous tick.
+        self.commit(self.last);
+        self.tick += 1;
+        self.settle(self.full_run());
+    }
+
+    /// Run `ticks` ticks. Exactly as many [`Self::tick`] calls at every
+    /// tick boundary anything can observe; nothing can observe the slots
+    /// between two ticks of one call, so with [`SimOptions::fuse`] every
+    /// tick but the last settles only what the following commit reads
+    /// (its next-state values, RAM write ports): state, memories, memory
+    /// versions and the tick count evolve exactly as tick by tick, and the
+    /// last tick settles everything. Root inputs cannot change within one
+    /// call.
+    pub fn run(&mut self, ticks: u64) {
+        if ticks == 0 {
+            return;
+        }
+        let mut left = ticks - 1;
+        // Keys or supersteps, as the fallback says (`None`: no choice).
+        #[cfg(feature = "jit")]
+        let choice = self.fallback_choice(ticks);
+        #[cfg(feature = "jit")]
+        let keyed_super = choice.is_some_and(|c| c.0 == spec::Mode::Super);
+        #[cfg(feature = "jit")]
+        if self.options.superstep
+            && (!self.spec.hooked || keyed_super)
+            && let Some((entry, n)) = self.super_fn()
+            && left > n
+        {
+            // The first tick applies the inputs (supersteps do not), and
+            // a superstep starts at phase 0, after a settle with the
+            // general fused body (its commit is the superstep's first
+            // part; a specialized body may not compute what it reads).
+            #[cfg(test)]
+            let general = spec::MUTATION.get() != 7;
+            #[cfg(not(test))]
+            let general = true;
+            let lead = |s: &mut Self| {
+                if keyed_super && general {
+                    s.general_tick();
+                } else {
+                    s.fused_tick();
+                }
+            };
+            lead(self);
+            left -= 1;
+            let period = self.period;
+            #[cfg(any(test, feature = "selftest"))]
+            let aligned = |t: u64| jit::MUTATION.get() == 2 || t.is_multiple_of(period);
+            #[cfg(not(any(test, feature = "selftest")))]
+            let aligned = |t: u64| t.is_multiple_of(period);
+            while left > 0 && !aligned(self.tick) {
+                lead(self);
+                left -= 1;
+            }
+            while left >= n {
+                // `entry` stays valid: the code cannot change within `run`.
+                self.superstep(entry, n);
+                left -= n;
+            }
+        }
+        if self.spec.hooked && !self.spec.awaiting_plan && left > 1 {
+            // Keyed phases: the first tick applies the inputs, the others
+            // go through `keyed_ticks`.
+            #[cfg(test)]
+            let first = spec::MUTATION.get() != 6;
+            #[cfg(not(test))]
+            let first = true;
+            if first {
+                self.fused_tick();
+                left -= 1;
+            }
+            self.keyed_ticks(left);
+            left = 0;
+        }
+        for _ in 0..left {
+            self.fused_tick();
+        }
+        self.tick();
+        #[cfg(feature = "jit")]
+        if let Some(c) = choice {
+            self.fallback_record(c, ticks);
+        }
+        if self.options.spec.as_ref().is_some_and(|s| s.inline_build) && self.spec.has_work() {
+            self.spec_build_inline();
+        }
+    }
+
+    /// One tick of a `run` that is not the last: commit, then settle only
+    /// what the next commit reads.
+    #[inline]
+    fn fused_tick(&mut self) {
+        #[cfg(feature = "counters")]
+        {
+            self.counters.ticks += 1;
+        }
+        self.commit(self.last);
+        self.tick += 1;
+        let k = (self.tick % self.period) as usize;
+        if self.spec.hooked {
+            self.spec_fused(k);
+            return;
+        }
+        self.settle(self.fused[k]);
+    }
+
+    /// A fused tick settled by the phase's general fused body, keyed or
+    /// not (before a superstep the fallback runs on a keyed `Sim`).
+    #[cfg(feature = "jit")]
+    fn general_tick(&mut self) {
+        #[cfg(feature = "counters")]
+        {
+            self.counters.ticks += 1;
+        }
+        self.commit(self.last);
+        self.tick += 1;
+        self.settle(self.fused[(self.tick % self.period) as usize]);
+    }
+
+    /// Whether this `run` of `ticks` ticks of a keyed `Sim` may choose
+    /// between keys and supersteps ([`SpecOptions::fallback`]), and
+    /// which: the mode, and what the run's cost is measured from.
+    #[cfg(feature = "jit")]
+    #[inline]
+    fn fallback_choice(&self, ticks: u64) -> Option<(spec::Mode, Mark)> {
+        let f = self.spec_fallback.as_ref()?;
+        if self.spec.phases.is_empty()
+            || self.spec.awaiting_plan
+            || !self.options.superstep
+            || self.super_fn().is_none()
+        {
+            return None;
+        }
+        #[cfg(test)]
+        let mode = match spec::FORCE.get() {
+            0 => f.mode(ticks)?,
+            1 => {
+                thread_local!(static FLIP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+                if FLIP.replace(!FLIP.get()) {
+                    spec::Mode::Super
+                } else {
+                    spec::Mode::Spec
+                }
+            }
+            _ => spec::Mode::Super,
+        };
+        #[cfg(not(test))]
+        let mode = f.mode(ticks)?;
+        Some((mode, self.mark()?))
+    }
+
+    /// Where a measured `run` starts.
+    #[cfg(feature = "jit")]
+    #[inline]
+    fn mark(&self) -> Option<Mark> {
+        #[cfg(test)]
+        if spec::VIRTUAL.get().is_some() {
+            let (h, m) = self
+                .spec
+                .phases
+                .iter()
+                .flatten()
+                .fold((0, 0), |(h, m), ps| (h + ps.hits, m + ps.misses));
+            return Some(Mark::Virtual(h, m));
+        }
+        Mark::wall()
+    }
+
+    /// The fallback's measurement of a `run` of `ticks` ticks.
+    #[cfg(feature = "jit")]
+    fn fallback_record(&mut self, (mode, mark): (spec::Mode, Mark), ticks: u64) {
+        let nanos = match mark {
+            #[cfg(not(target_arch = "wasm32"))]
+            Mark::Wall(t) => t.elapsed().as_nanos() as u64,
+            #[cfg(test)]
+            Mark::Virtual(h0, m0) => {
+                let (sup, hit, miss) = spec::VIRTUAL.get().expect("a virtual clock");
+                let (h, m) = self
+                    .spec
+                    .phases
+                    .iter()
+                    .flatten()
+                    .fold((0, 0), |(h, m), ps| (h + ps.hits, m + ps.misses));
+                let (h, m) = (h - h0, m - m0);
+                (ticks - h - m) * sup + h * hit + m * miss
+            }
+        };
+        if let Some(f) = &mut self.spec_fallback {
+            f.record(mode, ticks, nanos);
+        }
+    }
+
+    /// Fused ticks of a `run` while some phase is keyed (and no plan is
+    /// awaited), after a fused tick of the same `run`: as `fused_tick`,
+    /// without what a superstep does not do either (applying the inputs
+    /// again: nothing writes their slots within a `run`, and the tick
+    /// before applied them) and with the clock phase counted instead of
+    /// divided out. Keyed supersteps were measured and not built (see
+    /// `sim/spec.rs`); this is the part of their gain that needs none.
+    fn keyed_ticks(&mut self, n: u64) {
+        #[cfg(all(feature = "jit", not(feature = "counters")))]
+        if self.jit.is_some() {
+            self.keyed_ticks_native(n);
+            return;
+        }
+        let period = self.period as usize;
+        let mut k = (self.tick % self.period) as usize;
+        for _ in 0..n {
+            #[cfg(feature = "counters")]
+            {
+                self.counters.ticks += 1;
+            }
+            self.commit(self.last);
+            self.tick += 1;
+            k += 1;
+            if k == period {
+                k = 0;
+            }
+            if self.spec.phases.get(k).is_some_and(Option::is_some) {
+                self.spec_keyed(k);
+            } else {
+                self.evaluate(self.fused[k]);
+            }
+        }
+    }
+
+    /// [`Sim::keyed_ticks`] while native code is installed: the same
+    /// calls, each body's native function called from here through a
+    /// table of them by run taken for this call (the interpreter's paths
+    /// for a body without one). A prefix with a key entry settles and
+    /// returns the key in one call.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    fn keyed_ticks_native(&mut self, n: u64) {
+        // Past this many runs (tests of the run index cap) the table would
+        // cost more than it saves: bodies are looked up per call.
+        const TABLE_MAX: usize = 1 << 12;
+        let mut fns = std::mem::take(&mut self.native_fns);
+        fns.clear();
+        if self.runs.len() < TABLE_MAX {
+            fns.extend((0..=self.runs.len() as u16).map(|r| NativeFns::of(self.native_body(r))));
+        }
+        // Nothing installs, evicts or frees a body within the loop, so the
+        // functions stay valid.
+        let of = |s: &Self, fns: &[NativeFns], run: u16| match fns.get(run as usize) {
+            Some(&f) => f,
+            None => NativeFns::of(s.native_body(run)),
+        };
+        let period = self.period as usize;
+        let mut k = (self.tick % self.period) as usize;
+        for _ in 0..n {
+            let last = self.last;
+            self.commit_with(last, of(self, &fns, last).commit);
+            self.tick += 1;
+            k += 1;
+            if k == period {
+                k = 0;
+            }
+            let run = if self.spec.phases.get(k).is_some_and(Option::is_some) {
+                self.spec_run(k, |s, pre| {
+                    let f = of(s, &fns, pre);
+                    match f.key {
+                        Some(key) => Some(s.settle_key(key)),
+                        None => {
+                            s.settle_with(pre, f.settle);
+                            None
+                        }
+                    }
+                })
+            } else {
+                self.fused[k]
+            };
+            self.last = run;
+            self.settle_with(run, of(self, &fns, run).settle);
+        }
+        self.native_fns = fns;
+    }
+
+    /// The settle of a fused tick of keyed phase `k`: the inputs, then
+    /// [`Sim::spec_keyed`]. The commit after it is the settled body's.
+    fn spec_settle(&mut self, k: usize) {
+        let p = &*self.program;
+        for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
+            self.slots[port.slot as usize] = v;
+        }
+        self.spec_keyed(k);
+    }
+
+    /// The key's prefix, then the body built for the key or the fallback
+    /// (see `sim/spec.rs`), on inputs already in their slots.
+    fn spec_keyed(&mut self, k: usize) {
+        let run = self.spec_run(k, |s, pre| {
+            s.evaluate_body(pre);
+            None
+        });
+        self.evaluate(run);
+    }
+
+    /// The key's prefix (settled by `prefix`, which may return the key
+    /// its native code packed), then the run for the key (its body or the
+    /// fallback), counted as a hit or a miss: what settles keyed phase
+    /// `k`.
+    #[inline]
+    fn spec_run(&mut self, k: usize, prefix: impl FnOnce(&mut Self, u16) -> Option<u64>) -> u16 {
+        let ps = self.spec.phases[k].as_ref().expect("a keyed phase");
+        let pre = ps.prefix;
+        #[cfg(test)]
+        if spec::MUTATION.get() == 2 {
+            // Mutation: no prefix (a stale key, and a body missing the
+            // prefix's values).
+            let run = ps.lookup(ps.key(&self.slots));
+            return if run == ps.fallback {
+                self.fused[k]
+            } else {
+                run
+            };
+        }
+        let mut key = None;
+        if let Some(pre) = pre {
+            // The prefix is part of this settle, not one of its own.
+            key = prefix(self, pre);
+            #[cfg(feature = "counters")]
+            {
+                self.counters.settles -= 1;
+            }
+        }
+        let ps = self.spec.phases[k].as_mut().expect("a keyed phase");
+        debug_assert!(key.is_none_or(|key| key == ps.key(&self.slots)));
+        ps.dispatch(key.unwrap_or_else(|| ps.key(&self.slots)))
+    }
+
+    /// The native code of body `run`.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn native_body(&self, run: u16) -> Option<&jit::JitBody> {
+        native(&self.jit, &self.spec, run)
+    }
+
+    /// [`Sim::evaluate_body`] of `run`, by its native settle function `f`
+    /// when it has one.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn settle_with(&mut self, run: u16, f: Option<jit::SettleFn>) {
+        let Some(f) = f else {
+            return self.evaluate_body(run);
+        };
+        let m = self.mem_ptrs();
+        // SAFETY: as in `evaluate_body`: `f` is the settle of `run`, whose
+        // code the installed native code (or `run`'s unit) owns.
+        unsafe { f(self.slots.as_mut_ptr(), m, self.tick) };
+        debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+    }
+
+    /// A key prefix's settle by its native key function `f`: the key.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn settle_key(&mut self, f: jit::KeyFn) -> u64 {
+        let m = self.mem_ptrs();
+        // SAFETY: as in `settle_with`.
+        let key = unsafe { f(self.slots.as_mut_ptr(), m, self.tick) };
+        debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+        key
+    }
+
+    /// [`Sim::commit`] of `run`, by its native commit function `f` when it
+    /// has one.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn commit_with(&mut self, run: u16, f: Option<jit::CommitFn>) {
+        let Some(f) = f else {
+            return self.commit(run);
+        };
+        let m = self.mem_ptrs();
+        // SAFETY: as in `commit`.
+        unsafe { f(self.slots.as_mut_ptr(), m, self.mem_writes.as_mut_ptr()) };
+    }
+
+    /// The memory pointers native code takes (`mem_ptrs`), taken again
+    /// when stale.
+    #[cfg(all(feature = "jit", not(feature = "counters")))]
+    #[inline]
+    fn mem_ptrs(&mut self) -> *const *mut u64 {
+        if !self.mem_ptrs_fresh {
+            self.mem_ptrs.clear();
+            self.mem_ptrs
+                .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+            self.mem_ptrs_fresh = true;
+        }
+        self.mem_ptrs.as_ptr() as *const *mut u64
+    }
+
+    /// The superstep `run` uses, and the ticks it advances: the installed
+    /// native code's, or the one an automatic plan brought (only while
+    /// native code is installed).
+    #[cfg(feature = "jit")]
+    #[inline]
+    fn super_fn(&self) -> Option<(jit::SuperFn, u64)> {
+        let j = self.jit.as_ref()?;
+        let s = match j.superstep() {
+            Some(s) => s,
+            None => self.spec.superstep.as_ref()?.code.superstep(),
+        };
+        Some((s.entry, s.info.ticks))
+    }
+
+    /// The JIT's superstep, from a settled tick at phase 0: as many
+    /// `fused_tick`s as it holds, after the first tick of a `run` (so the
+    /// inputs are already in their slots).
+    #[cfg(feature = "jit")]
+    fn superstep(&mut self, entry: jit::SuperFn, ticks: u64) {
+        #[cfg(not(any(test, feature = "selftest")))]
+        debug_assert_eq!(self.tick % self.period, 0);
+        // The superstep's guards, numbered by its bodies: the program's
+        // runs, or (an automatic plan's) those of `SpecSuper::runs`.
+        #[cfg(feature = "counters")]
+        let (j, sup) = (self.jit.clone(), self.spec.superstep.clone());
+        #[cfg(feature = "counters")]
+        let (info, map) = match j.as_ref().and_then(|j| j.superstep()) {
+            Some(s) => (&s.info, None),
+            None => {
+                let s = sup.as_ref().expect("a superstep");
+                (s.code.info(), Some(&s.runs[..]))
+            }
+        };
+        if !self.mem_ptrs_fresh {
+            self.mem_ptrs.clear();
+            self.mem_ptrs
+                .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+            self.mem_ptrs_fresh = true;
+        }
+        #[cfg(feature = "counters")]
+        let before: u64 = self.mem_writes.iter().sum();
+        #[cfg(feature = "counters")]
+        self.skips.resize(info.skip_len, 0);
+        #[cfg(feature = "counters")]
+        let skips = self.skips.as_mut_ptr();
+        #[cfg(not(feature = "counters"))]
+        let skips = std::ptr::null_mut();
+        let (s, m, w) = (
+            self.slots.as_mut_ptr(),
+            self.mem_ptrs.as_ptr() as *const *mut u64,
+            self.mem_writes.as_mut_ptr(),
+        );
+        // SAFETY: as in `commit` and `evaluate_body`: `entry` is the
+        // superstep of the installed code, every body of which passed
+        // `check_body`; `skips` has `skip_len` entries (and is not
+        // touched without the counters).
+        unsafe { entry(s, m, self.tick, w, skips) };
+        #[cfg(feature = "counters")]
+        {
+            let c = &mut self.counters;
+            c.mem_writes += self.mem_writes.iter().sum::<u64>() - before;
+            for i in 0..ticks {
+                let (full, fused) = (
+                    self.fused[((self.tick + i) % self.period) as usize],
+                    self.fused[((self.tick + i + 1) % self.period) as usize],
+                );
+                let commits = match full {
+                    0 => self.program.commits.len(),
+                    k => self.runs[k as usize - 1]
+                        .body
+                        .as_ref()
+                        .map_or(self.program.commits.len(), |b| b.commits.len()),
+                };
+                let per = match fused {
+                    0 => &self.per_settle,
+                    k => &self.runs[k as usize - 1].per_settle,
+                };
+                c.ticks += 1;
+                c.settles += 1;
+                c.commits += commits as u64;
+                c.blocks += per.blocks;
+                c.instrs += per.instrs;
+                c.packed_words += per.packed_words;
+            }
+            let bodies: Vec<(usize, u16)> = match map {
+                None => (1..=self.spec.base).map(|k| (k, k as u16)).collect(),
+                Some(runs) => runs.iter().copied().enumerate().collect(),
+            };
+            for (i, run) in bodies {
+                let Some(r) = (run as usize).checked_sub(1).map(|k| &self.runs[k]) else {
+                    continue;
+                };
+                let base = info.skip_base[i];
+                for (g, &(blocks, instrs)) in r.guard_cost.iter().enumerate() {
+                    let n = std::mem::take(&mut self.skips[base + g]);
+                    c.blocks -= n * blocks;
+                    c.instrs -= n * instrs;
+                }
+            }
+        }
+        debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+        self.tick += ticks;
+        self.last = self.fused[(self.tick % self.period) as usize];
+    }
+
+    fn commit(&mut self, run: u16) {
+        let p = &*self.program;
+        let commits = match run {
+            0 => &p.commits,
+            k => match &self.runs[k as usize - 1].body {
+                Some(b) => &b.commits,
+                None => &p.commits,
+            },
+        };
+        #[cfg(feature = "counters")]
+        {
+            self.counters.commits += commits.len() as u64;
+        }
+        #[cfg(feature = "jit")]
+        if let Some(fs) = native(&self.jit, &self.spec, run).and_then(|b| b.commit.as_ref()) {
+            // Count taken writes from the versions (only bodies with RAM
+            // writes can change them: summing every memory's version per
+            // commit costs more than the commit on designs with many ROMs).
+            #[cfg(feature = "counters")]
+            let writes = commits.iter().any(|c| !matches!(c, Commit::Copy { .. }));
+            #[cfg(feature = "counters")]
+            let before: u64 = if writes {
+                self.mem_writes.iter().sum()
+            } else {
+                0
+            };
+            if !self.mem_ptrs_fresh {
+                self.mem_ptrs.clear();
+                self.mem_ptrs
+                    .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+                self.mem_ptrs_fresh = true;
+            }
+            // SAFETY: the code was compiled from this body, which passed
+            // `check`; `slots` has `slot_count` entries, `mem_ptrs` one
+            // pointer per memory (each `2^addr_bits` words) and
+            // `mem_writes` one counter per memory.
+            for f in fs {
+                unsafe {
+                    f(
+                        self.slots.as_mut_ptr(),
+                        self.mem_ptrs.as_ptr() as *const *mut u64,
+                        self.mem_writes.as_mut_ptr(),
+                    )
+                };
+            }
+            #[cfg(feature = "counters")]
+            if writes {
+                self.counters.mem_writes += self.mem_writes.iter().sum::<u64>() - before;
+            }
+            return;
+        }
+        // `mems_touched`, with `commits` borrowed.
+        #[cfg(feature = "jit")]
+        {
+            self.mem_ptrs_fresh = false;
+        }
+        for c in commits {
+            match *c {
+                Commit::Copy { state, next } => {
+                    // SAFETY: indices checked in `check`.
+                    unsafe {
+                        let v = *self.slots.get_unchecked(next as usize);
+                        *self.slots.get_unchecked_mut(state as usize) = v;
+                    }
+                }
+                Commit::RamWrite {
+                    mem,
+                    we,
+                    addr,
+                    data,
+                } => unsafe {
+                    if *self.slots.get_unchecked(we as usize) != 0 {
+                        let m = self.mems.get_unchecked_mut(mem as usize);
+                        let a = *self.slots.get_unchecked(addr as usize) as usize & (m.len() - 1);
+                        *m.get_unchecked_mut(a) = *self.slots.get_unchecked(data as usize);
+                        *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
+                        #[cfg(feature = "counters")]
+                        {
+                            self.counters.mem_writes += 1;
+                        }
+                    }
+                },
+                Commit::MemClear { mem, en } => unsafe {
+                    if *self.slots.get_unchecked(en as usize) != 0 {
+                        self.mems.get_unchecked_mut(mem as usize).fill(0);
+                        *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
+                        #[cfg(feature = "counters")]
+                        {
+                            self.counters.mem_writes += 1;
+                        }
+                    }
+                },
+                Commit::RamWriteMasked {
+                    mem,
+                    mask,
+                    addr,
+                    data,
+                } => unsafe {
+                    let bits = *self.slots.get_unchecked(mask as usize);
+                    if bits != 0 {
+                        let m = self.mems.get_unchecked_mut(mem as usize);
+                        let a = *self.slots.get_unchecked(addr as usize) as usize & (m.len() - 1);
+                        let word = m.get_unchecked_mut(a);
+                        *word = (*word & !bits) | (*self.slots.get_unchecked(data as usize) & bits);
+                        *self.mem_writes.get_unchecked_mut(mem as usize) += 1;
+                        #[cfg(feature = "counters")]
+                        {
+                            self.counters.mem_writes += 1;
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    /// Memories are about to be written through new references: pointers
+    /// the JIT'd code holds must be taken again (see `mem_ptrs`).
+    #[inline]
+    fn mems_touched(&mut self) {
+        #[cfg(feature = "jit")]
+        {
+            self.mem_ptrs_fresh = false;
+        }
+    }
+
+    /// Apply the staged root inputs to their slots, then evaluate `run`
+    /// (0: the full program or variant; otherwise a fused-run body).
+    fn settle(&mut self, run: u16) {
+        let p = &*self.program;
+        for (port, &v) in p.ports.inputs.iter().zip(&self.inputs) {
+            self.slots[port.slot as usize] = v;
+        }
+        self.evaluate(run);
+    }
+
+    /// Run the blocks of `run` once, from the input slots as they are.
+    fn evaluate(&mut self, run: u16) {
+        self.last = run;
+        self.evaluate_body(run);
+        // Guarded blocks that did not run: a guard's conditions are slots
+        // no later instruction writes, so they still say what ran.
+        #[cfg(feature = "counters")]
+        if run > 0 {
+            let r = &self.runs[run as usize - 1];
+            if let Some(b) = &r.body {
+                for (g, &(blocks, instrs)) in b.guards.iter().zip(&r.guard_cost) {
+                    if !g.holds(&self.slots) {
+                        self.counters.blocks -= blocks;
+                        self.counters.instrs -= instrs;
+                    }
+                }
+            }
+        }
+    }
+
+    fn evaluate_body(&mut self, run: u16) {
+        #[cfg(feature = "counters")]
+        {
+            let c = &mut self.counters;
+            let per = match run {
+                0 => &self.per_settle,
+                k => &self.runs[k as usize - 1].per_settle,
+            };
+            c.settles += 1;
+            c.blocks += per.blocks;
+            c.instrs += per.instrs;
+            c.packed_words += per.packed_words;
+        }
+        #[cfg(feature = "jit")]
+        if let Some(j) = native(&self.jit, &self.spec, run) {
+            if !self.mem_ptrs_fresh {
+                self.mem_ptrs.clear();
+                self.mem_ptrs
+                    .extend(self.mems.iter_mut().map(|m| m.as_mut_ptr() as usize));
+                self.mem_ptrs_fresh = true;
+            }
+            let s = self.slots.as_mut_ptr();
+            for f in &j.settle {
+                // SAFETY: as in `commit`; settle code reads memories only.
+                unsafe { f(s, self.mem_ptrs.as_ptr() as *const *mut u64, self.tick) };
+            }
+            debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+            return;
+        }
+        let p = &*self.program;
+        if let Some(pool) = &self.pool {
+            pool.settle(&mut self.slots, &self.mems, self.tick);
+            debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+            return;
+        }
+        let s = self.slots.as_mut_ptr();
+        let (code, body) = match run {
+            0 => (&*self.code, None),
+            k => {
+                let r = &self.runs[k as usize - 1];
+                (&r.code, r.body.as_ref())
+            }
+        };
+        let (_, instrs, imms) = parts(p, body);
+        let env = code::Env {
+            program: p,
+            instrs,
+            imms,
+            code,
+            mems: &self.mems,
+            tick: self.tick,
+        };
+        let guards = body.map_or(&[][..], |b| &b.guards[..]);
+        let mut at = 0;
+        for g in guards {
+            // SAFETY: as below; `check_body` validated the guard's block
+            // range and condition slots.
+            unsafe {
+                for b in code.blocks.get_unchecked(at..g.start as usize) {
+                    code::exec(&env, b, 0, b.len, s);
+                }
+                let ok = |c: &crate::compile::Cond| (*s.add(c.slot as usize) != 0) == c.when;
+                if g.conds.iter().all(ok) && (g.any.is_empty() || g.any.iter().any(ok)) {
+                    for b in code.blocks.get_unchecked(g.start as usize..g.end as usize) {
+                        code::exec(&env, b, 0, b.len, s);
+                    }
+                }
+            }
+            at = g.end as usize;
+        }
+        for b in &code.blocks[at..] {
+            // SAFETY: the program passed `check`, `code` was built from it,
+            // and `slots` has `slot_count` entries. Nothing else touches the
+            // slots meanwhile.
+            unsafe { code::exec(&env, b, 0, b.len, s) };
+        }
+        debug_assert_eq!(self.slots[ZERO_SLOT as usize], 0);
+    }
+
+    /// Return to power-on: every state element (registers, latches,
+    /// delays, RAM, screens) back to its initial value, ROM and RAM `init`
+    /// contents restored, tick 0, then the tick-0 settle. Root inputs keep
+    /// their current values, so that settle sees them.
+    pub fn reset(&mut self) {
+        self.mems_touched();
+        self.slots.fill(0);
+        for &(s, v) in &self.program.consts {
+            self.slots[s as usize] = v;
+        }
+        for (mem, d) in self.mems.iter_mut().zip(&self.program.mems) {
+            mem.fill(0);
+            mem[..d.init.len()].copy_from_slice(&d.init);
+        }
+        // Every memory may have changed (see `mem_version`).
+        for v in &mut self.mem_writes {
+            *v += 1;
+        }
+        self.rom_restored();
+        self.tick = 0;
+        self.settle(self.full_run());
+    }
+
+    // ── State carry-over ──────────────────────────────────────────────────
+
+    /// Snapshot every state element, keyed by node path.
+    pub fn export_state(&self) -> StateSnapshot {
+        let mut snap = StateSnapshot {
+            tick: self.tick,
+            ..Default::default()
+        };
+        for key in &self.program.state_keys {
+            match key.loc {
+                StateLoc::Slot(s) => {
+                    snap.words.insert(key.path.clone(), self.read(s));
+                }
+                StateLoc::Mem(m) => {
+                    let d = &self.program.mems[m as usize];
+                    snap.mems.insert(
+                        key.path.clone(),
+                        (d.addr_bits, d.width, self.mems[m as usize].clone()),
+                    );
+                }
+            }
+        }
+        snap
+    }
+
+    /// Restore state from a snapshot (typically taken from a previous
+    /// program), then re-settle so every net is consistent. Elements whose
+    /// path is not in the snapshot, or whose RAM geometry changed, reset.
+    /// Word values are masked to the current width. The tick count is
+    /// restored.
+    pub fn import_state(&mut self, snap: &StateSnapshot) {
+        self.mems_touched();
+        let program = Arc::clone(&self.program);
+        let mut rom_changed = false;
+        for key in &program.state_keys {
+            match key.loc {
+                StateLoc::Slot(s) => {
+                    let v = snap
+                        .words
+                        .get(&key.path)
+                        .map_or(0, |&v| v & mask(key.width));
+                    self.write_slot(s, v);
+                }
+                StateLoc::Mem(m) => {
+                    let d = &program.mems[m as usize];
+                    self.mem_writes[m as usize] += 1;
+                    let mem = &mut self.mems[m as usize];
+                    match snap.mems.get(&key.path) {
+                        Some((ab, w, data)) if *ab == d.addr_bits && *w == d.width => {
+                            rom_changed |= !d.writable && *mem != *data;
+                            mem.copy_from_slice(data);
+                        }
+                        _ => {
+                            mem.fill(0);
+                            mem[..d.init.len()].copy_from_slice(&d.init);
+                        }
+                    }
+                }
+            }
+        }
+        if rom_changed {
+            self.rom_changed();
+        }
+        self.tick = snap.tick;
+        self.settle(self.full_run());
+    }
+
+    // ── Writing single state elements ─────────────────────────────────────
+    //
+    // For harnesses that set a few registers and memory words before each
+    // of many cases: each write costs one slot or word, not a copy of the
+    // state. Write what is needed, then call `resettle` once.
+
+    /// Value of state element `key` (an index into
+    /// [`Program::state_keys`]); 0 for a memory (read it with [`Sim::mem`]).
+    pub fn state(&self, key: usize) -> u64 {
+        match self.program.state_keys[key].loc {
+            StateLoc::Slot(s) => self.read(s),
+            StateLoc::Mem(_) => 0,
+        }
+    }
+
+    /// Set state element `key` (an index into [`Program::state_keys`]) to
+    /// `value`, masked to its width. Nothing is evaluated: nets keep their
+    /// values until [`Sim::resettle`] or the next tick. Panics if `key` is
+    /// a memory (use [`Sim::set_mem_word`]).
+    pub fn set_state(&mut self, key: usize, value: u64) {
+        let k = &self.program.state_keys[key];
+        let StateLoc::Slot(slot) = k.loc else {
+            panic!("state key {key} is a memory; set its words with set_mem_word");
+        };
+        let value = value & mask(k.width);
+        self.write_slot(slot, value);
+    }
+
+    /// Set word `addr` of memory `index` (see [`crate::compile::MemDesc`])
+    /// to `value`, masked to the memory's width. Nothing is evaluated until
+    /// [`Sim::resettle`] or the next tick. A ROM's word changes for this
+    /// simulation until [`Sim::reset`]. Panics if `addr` is past the end.
+    pub fn set_mem_word(&mut self, index: u32, addr: usize, value: u64) {
+        let d = &self.program.mems[index as usize];
+        let (width, rom) = (d.width, !d.writable);
+        self.mems_touched();
+        let old = std::mem::replace(&mut self.mems[index as usize][addr], value & mask(width));
+        self.mem_writes[index as usize] += 1;
+        if rom && old != value & mask(width) {
+            self.rom_changed();
+        }
+    }
+
+    /// A ROM word changed: the known-bits fused bodies and the specialized
+    /// bodies fold ROM reads from the program's contents
+    /// ([`SimOptions::known_bits`], [`SimOptions::spec`]), so set them
+    /// aside and run the unfolded fused bodies until [`Sim::reset`]
+    /// puts the contents back. (Native code is compiled again for the
+    /// unfolded bodies when the `Sim` ran native code.) Folds the
+    /// compiler and the phase variants did are part of the [`Program`] and
+    /// are not undone: a poke of a ROM word they folded (a
+    /// constant-address read) never reaches that read, with or without
+    /// this switch.
+    fn rom_changed(&mut self) {
+        #[cfg(test)]
+        if SKIP_ROM_SWITCH.get() {
+            return;
+        }
+        if !self.folded {
+            return;
+        }
+        let off = build_layout(&self.program, &self.options, false);
+        debug_assert!(off.period == self.period && !off.folded && !off.spec.hooked);
+        self.stash = Some(Box::new(Stash {
+            runs: std::mem::replace(&mut self.runs, off.runs),
+            full: std::mem::replace(&mut self.full, off.full),
+            fused: std::mem::replace(&mut self.fused, off.fused),
+            spec: std::mem::replace(&mut self.spec, off.spec),
+            #[cfg(feature = "jit")]
+            jit: self.jit.take(),
+        }));
+        self.folded = false;
+        // Between calls the slots are those of a full settle.
+        self.last = self.full_run();
+        self.spec_new_generation();
+        #[cfg(feature = "jit")]
+        if self.stash.as_ref().is_some_and(|s| s.jit.is_some()) {
+            self.jit = self.compile_jit().ok().map(Arc::new);
+        }
+    }
+
+    /// Undo [`Sim::rom_changed`] (the ROM holds the program's contents).
+    fn rom_restored(&mut self) {
+        let Some(stash) = self.stash.take() else {
+            return;
+        };
+        let Stash {
+            runs,
+            full,
+            fused,
+            spec,
+            #[cfg(feature = "jit")]
+            jit,
+        } = *stash;
+        self.runs = runs;
+        self.full = full;
+        self.fused = fused;
+        self.spec = spec;
+        self.folded = true;
+        self.last = self.full_run();
+        self.spec_new_generation();
+        #[cfg(feature = "jit")]
+        {
+            // Keep the backend the caller has now: native code (the stashed
+            // code, or compiled again) only when it runs native code, so a
+            // `install_jit(None)` since the ROM write stays in effect.
+            if self.jit.is_some() {
+                self.jit = jit.or_else(|| self.compile_jit().ok().map(Arc::new));
+            }
+        }
+    }
+
+    /// Evaluate every net again from the current state, at the current
+    /// tick, without a commit: after [`Sim::set_state`] or
+    /// [`Sim::set_mem_word`], every net is consistent with the new state
+    /// and the next tick commits from it. Root inputs set since the last
+    /// tick are not applied: they still reach the logic at the next tick,
+    /// as they would have without this call.
+    pub fn resettle(&mut self) {
+        self.evaluate(self.full_run());
+    }
+}
+
+/// A body's native functions: its settle and its commit, each when it is
+/// one function, and a key prefix's key entry.
+#[cfg(all(feature = "jit", not(feature = "counters")))]
+#[derive(Clone, Copy)]
+struct NativeFns {
+    settle: Option<jit::SettleFn>,
+    commit: Option<jit::CommitFn>,
+    key: Option<jit::KeyFn>,
+}
+
+#[cfg(all(feature = "jit", not(feature = "counters")))]
+impl NativeFns {
+    #[inline]
+    fn of(b: Option<&jit::JitBody>) -> Self {
+        NativeFns {
+            settle: b.and_then(jit::JitBody::settle_fn),
+            commit: b.and_then(jit::JitBody::commit_fn),
+            key: b.and_then(jit::JitBody::key_fn),
+        }
+    }
+}
+
+/// The native code of `run`: the installed program's, or (a body
+/// installed at run time) its own unit, while native code is installed.
+#[cfg(feature = "jit")]
+#[inline]
+fn native<'a>(
+    jit: &'a Option<Arc<jit::JitProgram>>,
+    spec: &'a spec::Spec,
+    run: u16,
+) -> Option<&'a jit::JitBody> {
+    let j = jit.as_ref()?;
+    match j.bodies.get(run as usize) {
+        Some(b) => b.as_ref(),
+        None => spec.unit(run).map(jit::JitUnit::body),
+    }
+}
+
+/// Worker threads for `options`, or `None`: always with one thread (the
+/// default, so nothing is spawned and the settle never touches pool or
+/// synchronization code), when no rank is large enough, and on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_pool(
+    program: &Arc<Program>,
+    code: &Arc<code::Code>,
+    options: &SimOptions,
+) -> Option<pool::Pool> {
+    if options.threads <= 1 {
+        return None;
+    }
+    let sched = pool::Schedule::new(program, code, options.threads, options.par_min);
+    pool::Pool::new(
+        Arc::clone(program),
+        Arc::clone(code),
+        sched,
+        options.threads,
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_pool(_: &Arc<Program>, _: &Arc<code::Code>, _: &SimOptions) -> Option<pool::Pool> {
+    None
+}
+
+/// Check every index the unchecked loops rely on.
+fn check(p: &Program) -> Result<(), BadProgram> {
+    let n = p.slot_count;
+    let bad = |m: String| Err(BadProgram(m));
+    if n == 0 {
+        return bad("no zero slot".into());
+    }
+    let slot_ok = |s: u32| s < n;
+    if p.imms.len() != p.instrs.len() {
+        return bad("imms and instrs differ in length".into());
+    }
+    for pk in &p.packs {
+        if !slot_ok(pk.dst) || pk.dst == ZERO_SLOT {
+            return bad(format!("bad packed dst in {pk:?}"));
+        }
+        for o in [&pk.a, &pk.b, &pk.c] {
+            let end = o.gather_start as u64 + o.gather_len as u64;
+            if !slot_ok(o.base) || !slot_ok(o.splat) || o.splat_bit >= 64 {
+                return bad(format!("bad packed operand in {pk:?}"));
+            }
+            if end > p.gathers.len() as u64 {
+                return bad(format!("gathers out of range in {pk:?}"));
+            }
+        }
+        let end = pk.scatter_start as u64 + pk.scatter_len as u64;
+        if end > p.scatters.len() as u64 {
+            return bad(format!("scatters out of range in {pk:?}"));
+        }
+    }
+    for g in &p.gathers {
+        if !slot_ok(g.slot) || g.bit >= 64 || g.lane >= 64 {
+            return bad(format!("bad gather {g:?}"));
+        }
+    }
+    for x in &p.scatters {
+        if !slot_ok(x.slot) || x.slot == ZERO_SLOT || x.lane >= 64 {
+            return bad(format!("bad scatter {x:?}"));
+        }
+    }
+    if !p.block_parts.is_empty() && p.block_parts.len() != p.blocks.len() {
+        return bad("block_parts and blocks differ in length".into());
+    }
+    for &w in &p.lane_words {
+        if !slot_ok(w) {
+            return bad(format!("bad lane word {w}"));
+        }
+    }
+    if p.slot_count as u64 + 64 * p.lane_words.len() as u64 > u32::MAX as u64 + 1 {
+        return bad("too many lane slots".into());
+    }
+    check_body(p, &p.blocks, &p.instrs, &p.imms, &p.commits, &[])?;
+    if let Some(ph) = &p.phases {
+        if ph.period == 0 || ph.variants.len() != ph.period as usize || ph.period > 255 {
+            return bad(format!("bad phases: period {}", ph.period));
+        }
+        for v in &ph.variants {
+            if v.imms.len() != v.instrs.len() || v.blocks.iter().any(|b| b.packed) {
+                return bad("bad phase variant".into());
+            }
+            check_body(p, &v.blocks, &v.instrs, &v.imms, &v.commits, &v.guards)?;
+        }
+    }
+    for m in &p.mems {
+        if m.addr_bits > crate::netlist::MAX_ADDR_BITS || m.init.len() > 1usize << m.addr_bits {
+            return bad(format!("bad memory {m:?}"));
+        }
+    }
+    for &(s, _) in &p.consts {
+        if !slot_ok(s) || s == ZERO_SLOT {
+            return bad(format!("bad const slot {s}"));
+        }
+    }
+    for port in &p.ports.inputs {
+        if !slot_ok(port.slot) || port.slot == ZERO_SLOT {
+            return bad(format!("bad port {port:?}"));
+        }
+    }
+    for port in &p.ports.outputs {
+        if !slot_ok(port.slot) {
+            return bad(format!("bad port {port:?}"));
+        }
+    }
+    for v in &p.views {
+        if !slot_ok(v.slot) || v.width == 0 || v.shift as u32 + v.width as u32 > 64 {
+            return bad(format!("bad view {v:?}"));
+        }
+    }
+    for sh in &p.shadows {
+        let real = |s: u32| p.resolve(s).is_some_and(|(s, _, _)| slot_ok(s));
+        if !sh.inputs.iter().chain(&sh.states).all(|&s| real(s))
+            || sh.inputs.len() != sh.flat.inputs.len()
+            || sh.states.len() != sh.flat.states.len()
+        {
+            return bad("bad shadow".to_string());
+        }
+    }
+    for &(s, v) in &p.shadow_nets {
+        if p.shadows
+            .get(s as usize)
+            .is_none_or(|sh| v as usize >= sh.flat.values())
+        {
+            return bad(format!("bad shadow net {s}/{v}"));
+        }
+    }
+    for key in &p.state_keys {
+        let ok = match key.loc {
+            StateLoc::Slot(s) => p.resolve(s).is_some_and(|(s, _, _)| slot_ok(s)),
+            StateLoc::Mem(m) => (m as usize) < p.mems.len(),
+        };
+        if !ok {
+            return bad(format!("bad state key {key:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Check one body's blocks and commits (the program's own, or a
+/// clock-phase variant's) against `p`'s slots and memories.
+fn check_body(
+    p: &Program,
+    blocks: &[Block],
+    instrs: &[Instr],
+    imms: &[u64],
+    commits: &[Commit],
+    guards: &[Guard],
+) -> Result<(), BadProgram> {
+    let n = p.slot_count;
+    let bad = |m: String| Err(BadProgram(m));
+    let slot_ok = |s: u32| s < n;
+    let mut at = 0;
+    for g in guards {
+        if g.start < at || g.end < g.start || g.end as usize > blocks.len() {
+            return bad(format!("bad guard {g:?}"));
+        }
+        if g.slots().any(|s| !slot_ok(s)) {
+            return bad(format!("bad guard condition {g:?}"));
+        }
+        at = g.end;
+    }
+    for b in blocks {
+        let end = b.start as u64 + b.len as u64;
+        if b.packed {
+            if end > p.packs.len() as u64 || !code::packable_op(b.op) {
+                return bad(format!("packed block {b:?} out of range"));
+            }
+            continue;
+        }
+        if end > instrs.len() as u64 {
+            return bad(format!("block {b:?} out of range"));
+        }
+        let (sa, sb, sc) = b.op.slot_operands();
+        for (k, i) in instrs[b.start as usize..end as usize].iter().enumerate() {
+            let imm = imms[b.start as usize + k];
+            if !slot_ok(i.dst) || i.dst == ZERO_SLOT {
+                return bad(format!("bad dst in {i:?}"));
+            }
+            if (sa && !slot_ok(i.a)) || (sb && !slot_ok(i.b)) || (sc && !slot_ok(i.c)) {
+                return bad(format!("bad operand in {i:?}"));
+            }
+            match b.op {
+                Op::MemRead if i.b as usize >= p.mems.len() => {
+                    return bad(format!("bad memory in {i:?}"));
+                }
+                Op::Clock if i.a == 0 => return bad(format!("zero clock period in {i:?}")),
+                Op::Sext if !(1..=64).contains(&i.b) => return bad(format!("bad sext in {i:?}")),
+                Op::Shr if i.b >= 64 => return bad(format!("bad shift in {i:?}")),
+                Op::Concat if i.c >= 64 => return bad(format!("bad shift in {i:?}")),
+                Op::Shl if i.b >= 64 || i.c >= 64 => return bad(format!("bad shift in {i:?}")),
+                Op::AddCarry if imm > 64 => return bad(format!("bad width in {i:?}")),
+                _ => {}
+            }
+        }
+    }
+    for c in commits {
+        let ok = match *c {
+            Commit::Copy { state, next } => slot_ok(state) && slot_ok(next) && state != ZERO_SLOT,
+            Commit::RamWrite { mem, .. } | Commit::RamWriteMasked { mem, .. } => {
+                (mem as usize) < p.mems.len()
+                    && p.mems[mem as usize].writable
+                    && c.reads().into_iter().all(slot_ok)
+            }
+            Commit::MemClear { mem, en } => {
+                (mem as usize) < p.mems.len() && p.mems[mem as usize].writable && slot_ok(en)
+            }
+        };
+        if !ok {
+            return bad(format!("bad commit {c:?}"));
+        }
+    }
+    Ok(())
+}

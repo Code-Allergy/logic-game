@@ -4,22 +4,62 @@ version = "0.1.0"
 edition = "2024"
 
 
+[features]
+# Deterministic work counters on `Sim` (`Sim::counters`), for the
+# regression gate (`cargo xtask perf check`). Off by default; without it
+# the runtime has no counting code at all.
+counters = []
+# A JIT backend for the settle loop (`sim/jit/`, issues #117 and #111):
+# Cranelift natively; on wasm32, WebAssembly modules generated at run time
+# and instantiated through the host's WebAssembly API (`sim/jit/wasm/`).
+# Even with the feature, it runs only when `SimOptions::jit` asks for it.
+jit = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+]
+# The JIT test suite compiled into the library, so that it can run where
+# `cargo test` cannot: on wasm32 under Node (`examples/wasm_selftest.rs`,
+# `scripts/wasm-selftest.sh`). Not for other uses.
+selftest = []
+
 [dependencies]
+blake3 = "1.8"
+foldhash = "0.2"
 slotmap = "1.1.1"
 smallvec = "1.15.2"
-wide = "0.7.15"
-log = "0.4"
 
-[features]
-default = []
-simd-profile = []
+# The JIT (feature `jit`): exact versions, since Cranelift's API changes
+# with every release. Only what a host-only JIT needs: no timing, no other
+# architectures (`cranelift-jit` itself turns on `unwind`).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cranelift-codegen = { version = "=0.138.0", optional = true, default-features = false, features = ["std", "host-arch"] }
+cranelift-frontend = { version = "=0.138.0", optional = true, default-features = false, features = ["std"] }
+cranelift-jit = { version = "=0.138.0", optional = true, default-features = false }
+cranelift-module = { version = "=0.138.0", optional = true, default-features = false, features = ["std"] }
+cranelift-native = { version = "=0.138.0", optional = true, default-features = false, features = ["std"] }
 
+# The wasm backend of the JIT (feature `jit` on wasm32): the host's
+# WebAssembly API, the module's memory and its function table.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
 
-[dev-dependencies]
-criterion = "0.5"
+# (Not on wasm32, where criterion does not build: the examples there, such
+# as `wasm_selftest`, need no benchmarks.)
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = "0.8"
+
+[[example]]
+name = "wasm_selftest"
+required-features = ["jit", "selftest"]
 
 [[bench]]
-name = "runners"
+name = "sim"
 harness = false
 
 [[bench]]

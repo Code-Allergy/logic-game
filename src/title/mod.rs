@@ -3,8 +3,11 @@
 // Takes in a target state to be active in
 // Requires the 2dCamera to be setup in the main.rs file
 
-use crate::{HOVERED_BUTTON, NORMAL_BUTTON, PRESSED_BUTTON, settings_overlay::SettingsMenuOpen};
+use crate::theme::Theme;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui::Pressed;
+use bevy::ui_widgets::{Activate, ActivateOnPress, Button};
 
 use crate::GameState;
 
@@ -16,11 +19,79 @@ struct MainMenu;
 #[derive(Component, Clone, Copy)]
 pub enum MainMenuButtonAction {
     Start,
-    Settings,
+    /// The demo map (the curriculum road).
+    DemoMap,
+    /// Switch the day and night workshop (the one setting there is; `T`
+    /// does the same anywhere).
+    Theme,
     Exit,
 }
 
-fn setup_main_menu(mut commands: Commands) {
+/// The theme button's label: the current theme.
+pub fn theme_button_label(theme: &Theme) -> &'static str {
+    if theme.is_night() {
+        "Theme: night"
+    } else {
+        "Theme: day"
+    }
+}
+
+fn setup_main_menu(
+    mut commands: Commands,
+    theme: Res<Theme>,
+    art: Option<Res<crate::sim::art::CanvasArt>>,
+) {
+    spawn_main_menu(&mut commands, &theme, art.as_deref());
+}
+
+/// Rebuild the menu in the new colours when the theme changes.
+fn restyle_main_menu(
+    mut commands: Commands,
+    theme: Res<Theme>,
+    art: Option<Res<crate::sim::art::CanvasArt>>,
+    query: Query<Entity, With<MainMenu>>,
+) {
+    if !theme.is_changed() || theme.is_added() {
+        return;
+    }
+    for entity in &query {
+        commands.entity(entity).despawn();
+    }
+    spawn_main_menu(&mut commands, &theme, art.as_deref());
+}
+
+fn spawn_main_menu(
+    commands: &mut Commands,
+    theme: &Theme,
+    art: Option<&crate::sim::art::CanvasArt>,
+) {
+    let palette = theme.palette;
+    let font =
+        |size: f32| art.map_or_else(|| TextFont::from_font_size(size), |a| a.fonts.name(size));
+    let button = |action: MainMenuButtonAction| {
+        (
+            // Acts on press, as the menu always has.
+            Button,
+            ActivateOnPress,
+            Hovered::default(),
+            Node {
+                width: Val::Px(220.0),
+                height: Val::Px(52.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: UiRect {
+                    bottom: Val::Px(6.0),
+                    ..UiRect::all(Val::Px(2.5))
+                },
+                border_radius: BorderRadius::all(Val::Px(12.0)),
+                ..default()
+            },
+            BorderColor::all(palette.ink),
+            BackgroundColor(palette.raised),
+            action,
+        )
+    };
+    let label = |text: &str| (Text::new(text), font(20.0), TextColor(palette.text));
     commands
         .spawn((
             Node {
@@ -29,106 +100,68 @@ fn setup_main_menu(mut commands: Commands) {
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(10.0),
+                row_gap: Val::Px(14.0),
                 ..default()
             },
             MainMenu,
         ))
         .with_children(|parent| {
+            parent.spawn((
+                Text::new(crate::GAME_TITLE),
+                font(56.0),
+                TextColor(palette.text),
+            ));
             parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(50.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    // BorderColor::all(Color::BLACK),
-                    // BorderRadius::MAX,
-                    MainMenuButtonAction::Start,
-                ))
-                .with_children(|parent| {
-                    parent.spawn(Text::new("Start"));
-                });
+                .spawn(button(MainMenuButtonAction::Start))
+                .with_child(label("Start"));
             parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(50.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    // BorderColor(Color::BLACK),
-                    // BorderRadius::MAX,
-                    MainMenuButtonAction::Settings,
-                ))
-                .with_children(|parent| {
-                    parent.spawn(Text::new("Options"));
-                });
+                .spawn(button(MainMenuButtonAction::DemoMap))
+                .with_child(label("Demo map"));
             parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(50.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    // BorderColor(Color::BLACK),
-                    // BorderRadius::MAX,
-                    MainMenuButtonAction::Exit,
-                ))
-                .with_children(|parent| {
-                    parent.spawn(Text::new("Exit"));
-                });
+                .spawn(button(MainMenuButtonAction::Theme))
+                .with_child(label(theme_button_label(theme)));
+            parent
+                .spawn(button(MainMenuButtonAction::Exit))
+                .with_child(label("Exit"));
         });
 }
 
-fn main_menu_button_system(
-    mut interaction_query: Query<
-        (
-            &Interaction,
-            &mut BackgroundColor,
-            &mut BorderColor,
-            &MainMenuButtonAction,
-        ),
-        Changed<Interaction>,
-    >,
+/// Run a main menu button's action when it is activated (on press).
+fn main_menu_activate(
+    activate: On<Activate>,
+    actions: Query<&MainMenuButtonAction>,
     mut next_state: ResMut<NextState<GameState>>,
-    mut settings_open: ResMut<SettingsMenuOpen>,
     mut exit: MessageWriter<AppExit>,
+    mut theme: ResMut<Theme>,
 ) {
-    if settings_open.0 {
+    let Ok(action) = actions.get(activate.entity) else {
         return;
-    }
-
-    for (interaction, mut color, mut _border_color, action) in &mut interaction_query {
-        match *interaction {
-            Interaction::Pressed => {
-                *color = PRESSED_BUTTON.into();
-                // border_color. = RED.into();
-                match action {
-                    MainMenuButtonAction::Start => next_state.set(GameState::Simulating),
-                    MainMenuButtonAction::Settings => settings_open.0 = !settings_open.0,
-                    MainMenuButtonAction::Exit => {
-                        exit.write(AppExit::Success);
-                    }
-                };
-            }
-            Interaction::Hovered => {
-                *color = HOVERED_BUTTON.into();
-                // border_color.0 = Color::WHITE;
-            }
-            Interaction::None => {
-                *color = NORMAL_BUTTON.into();
-                // border_color.0 = Color::BLACK;
-            }
+    };
+    match action {
+        MainMenuButtonAction::Start => next_state.set(GameState::Simulating),
+        MainMenuButtonAction::DemoMap => next_state.set(GameState::DemoMap),
+        MainMenuButtonAction::Theme => theme.toggle(),
+        MainMenuButtonAction::Exit => {
+            exit.write(AppExit::Success);
         }
+    }
+}
+
+/// Colour the main menu buttons by their pressed and hovered state.
+fn main_menu_button_system(
+    mut buttons: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor), With<MainMenuButtonAction>>,
+    theme: Res<Theme>,
+) {
+    let palette = theme.palette;
+    for (hovered, pressed, mut color) in &mut buttons {
+        let want = if pressed {
+            palette.on
+        } else if hovered.get() {
+            palette.hover
+        } else {
+            palette.raised
+        };
+        color.set_if_neq(want.into());
     }
 }
 
@@ -150,11 +183,74 @@ impl MainMenuPlugin {
 
 impl Plugin for MainMenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(self.state.clone()), setup_main_menu)
+        app.add_observer(main_menu_activate)
+            .add_systems(OnEnter(self.state.clone()), setup_main_menu)
             .add_systems(
                 Update,
-                (main_menu_button_system,).run_if(in_state(self.state.clone())),
+                (main_menu_button_system, restyle_main_menu)
+                    .chain()
+                    .run_if(in_state(self.state.clone())),
             )
             .add_systems(OnExit(self.state.clone()), cleanup_main_menu);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::state::app::StatesPlugin;
+
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_resource::<Theme>()
+            .add_message::<AppExit>()
+            .init_state::<GameState>()
+            .add_plugins(MainMenuPlugin::new(GameState::MainMenu));
+        app.update();
+        app
+    }
+
+    fn labels(app: &mut App) -> Vec<String> {
+        let mut q = app.world_mut().query::<&Text>();
+        let mut out: Vec<String> = q.iter(app.world()).map(|t| t.0.clone()).collect();
+        out.sort();
+        out
+    }
+
+    /// The menu offers only settings that exist: the theme, which the
+    /// button switches, and the menu follows it.
+    #[test]
+    fn the_theme_button_switches_day_and_night() {
+        let mut app = app();
+        assert!(labels(&mut app).iter().any(|l| l == "Theme: day"));
+        let theme_button = app
+            .world_mut()
+            .query::<(Entity, &MainMenuButtonAction)>()
+            .iter(app.world())
+            .find(|(_, a)| matches!(a, MainMenuButtonAction::Theme))
+            .map(|(e, _)| e)
+            .unwrap();
+        // What the button widget sends when it is pressed.
+        app.world_mut().trigger(Activate {
+            entity: theme_button,
+        });
+        app.update();
+        assert!(app.world().resource::<Theme>().is_night());
+        app.update();
+        let labels = labels(&mut app);
+        assert!(labels.iter().any(|l| l == "Theme: night"), "{labels:?}");
+        assert_eq!(
+            labels.iter().filter(|l| l.starts_with("Theme")).count(),
+            1,
+            "the menu is rebuilt, not doubled"
+        );
+        let menus = app
+            .world_mut()
+            .query_filtered::<(), With<MainMenu>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(menus, 1);
     }
 }

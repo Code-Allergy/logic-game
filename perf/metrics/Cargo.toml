@@ -1,0 +1,18 @@
+[package]
+name = "perf-metrics"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Deterministic performance metrics (program sizes, executed ops and allocations per tick) for `cargo xtask perf check`."
+
+# A separate package so that only it turns on logi-sim's `counters`
+# feature: the benchmarks (`perf`) and the game build without it.
+[dependencies]
+perf = { path = ".." }
+logi-sim = { path = "../../logi-sim", features = ["counters"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+
+[features]
+# Lets `perf-metrics jit <case>` compare the JIT backend with the
+# interpreter (logi-sim feature `jit`). The metrics never use it.
+jit = ["logi-sim/jit"]

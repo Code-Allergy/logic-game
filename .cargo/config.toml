@@ -3,3 +3,11 @@
 # Keep native builds tuned for this machine, but don't pass host-specific CPU flags to wasm32.
 [target.'cfg(not(target_arch = "wasm32"))']
 rustflags = ["-C", "target-cpu=native"]
+
+[alias]
+# `cargo dev`: run the game with the `dev` feature (dynamic linking and the
+# world inspector).
+dev = "run -p gate_quest --features dev"
+# `cargo xtask perf ...`: benchmarks, comparisons, the regression gate and
+# profiling (docs/performance.md).
+xtask = "run -q -p xtask --"

@@ -5,33 +5,115 @@ publish = false
 authors = ["Ryan Schaffer <codeallergy@gmail.com>"]
 edition = "2024"
 exclude = ["build", "assets"]
+default-run = "gate_quest"
 
 [lib]
 name = "gate_quest"
 
+# The MCP server on stdio, with no window (docs/mcp-server.md).
+[[bin]]
+name = "gatequest-mcp"
+path = "src/bin/gatequest-mcp.rs"
+required-features = ["mcp"]
+
+[features]
+default = []
+# Native development: Bevy as a dynamic library (faster incremental links)
+# plus the world inspector. Not for release or wasm builds.
+dev = ["bevy/dynamic_linking", "inspector"]
+# The egui world inspector window.
+# (Registering every reflected type is only of use to the inspector.)
+inspector = ["dep:bevy-inspector-egui", "bevy/reflect_auto_register"]
+# The MCP server: an AI assistant builds and inspects circuits
+# (docs/mcp-server.md). Native only.
+mcp = ["dep:rmcp", "dep:tokio", "dep:axum"]
+# The simulator's Cranelift JIT backend (logi-sim feature `jit`, native
+# only), tiered: every edit runs interpreted at once and switches to native
+# code when it is compiled. Off by default for now.
+jit = ["logi-sim/jit"]
+# Deterministic work counters on the simulator (logi-sim feature
+# `counters`), for benchmarks that report executed ops.
+counters = ["logi-sim/counters"]
+
 [dependencies]
 logi-sim = { path = "logi-sim" }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+smallvec = "1"
 
 # egui
-bevy = { version = "0.19.0", features = ["dynamic_linking", "wayland"] }
-bevy_egui = "0.40"
-bevy_mod_debugdump = "0.16"
-bevy-inspector-egui = "0.37"
+# Only what a 2D game with a bevy_ui title menu and an egui HUD uses: no
+# 3D/PBR, glTF, audio, animation, scenes, gamepads (gilrs) or image
+# formats (the game loads no image files). `webgl2` is the wasm backend.
+bevy = { version = "0.20.1", default-features = false, features = [
+    "std",
+    "async_executor",
+    "multi_threaded",
+    "bevy_log",
+    "bevy_state",
+    "bevy_asset",
+    "bevy_winit",
+    "x11",
+    "wayland",
+    "webgl2",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite_render",
+    "bevy_gizmos_render",
+    "bevy_text",
+    "default_font",
+    "bevy_ui_render",
+    "bevy_ui_widgets",
+    "bevy_input_focus",
+    "ui_picking",
+] }
+bevy_egui = "0.43"
+bevy-inspector-egui = { version = "0.38", optional = true, default-features = false, features = ["2d", "documentation", "egui_clipboard"] }
 
 serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+
+# The MCP server (feature `mcp`).
+# (`client` is for the tests, which drive the server through the protocol.)
+rmcp = { version = "3.11", optional = true, features = [
+    "server",
+    "client",
+    "macros",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+tokio = { version = "1", optional = true, features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "io-std",
+    "io-util",
+    "net",
+] }
+# The HTTP endpoint of the running game (`--mcp`).
+axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "tokio"] }
 
 [build-dependencies]
-embed-resource = "1"
+embed-resource = "3"
 
+
+# The web build runs the simulator's wasm JIT (logi-sim feature `jit` on
+# wasm32: generated WebAssembly, tiered by the engine; see
+# logi-sim/src/sim/jit/wasm/). Natively the JIT stays behind the `jit`
+# feature above.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+logi-sim = { path = "logi-sim", features = ["jit"] }
+
+# The browser benchmark (`examples/web_sim_bench.rs`).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
 
 # Blake3 pure on windows, for cross compilation
 [target.'cfg(all(target_os = "windows", target_env = "gnu"))'.dependencies]
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 [workspace]
 resolver = "3"
-members = ["logi-sim", "mobile"]
+members = ["logi-sim", "mobile", "perf", "perf/metrics", "xtask"]
 
 [profile.dev]
 opt-level = 1
@@ -49,6 +131,10 @@ lto = true
 codegen-units = 1
 strip = true
 
+# The simulator is the hot path; "s" measured ~1.65x slower (on the old Flat runner).
+[profile.release.package.logi-sim]
+opt-level = 3
+
 # Profile for distribution
 [profile.dist]
 inherits = "release"
@@ -64,6 +150,22 @@ opt-level = 3
 lto = true
 codegen-units = 1
 debug = true
+
+# `cargo xtask perf` (bench and flamegraph): optimized like release but
+# without LTO and with many codegen units, so the benchmark crates that
+# link Bevy build in reasonable time and memory, and with line tables
+# for profiles. The simulator keeps one codegen unit.
+[profile.profiling]
+inherits = "release"
+opt-level = 3
+lto = false
+codegen-units = 16
+debug = "line-tables-only"
+strip = false
+
+[profile.profiling.package.logi-sim]
+opt-level = 3
+codegen-units = 1
 
 # Optimized native code with symbols retained for perf/cargo-flamegraph.
 [profile.flamegraph]

@@ -1,0 +1,96 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "lfsr8",
+      "title": "8-bit LFSR",
+      "nodes": [
+        {"name": "one", "type": "Const", "value": 1, "at": [160, 200]},
+        {"name": "Clk", "type": "Input", "at": [0, -20]},
+        {"name": "next", "type": "Merge", "widths": [1, 7], "label": "shift in", "at": [160, 80]},
+        {"name": "reg", "use": "register/register8", "label": "shift register", "at": [300, 80]},
+        {
+          "name": "low7",
+          "type": "Split",
+          "w": 8,
+          "lo": 0,
+          "len": 7,
+          "label": "bits 0-6",
+          "at": [440, -40]
+        },
+        {
+          "name": "mid",
+          "type": "Split",
+          "w": 8,
+          "lo": 3,
+          "len": 3,
+          "label": "bits 3-5",
+          "at": [440, -120]
+        },
+        {
+          "name": "top",
+          "type": "Split",
+          "w": 8,
+          "lo": 7,
+          "len": 1,
+          "label": "bit 7",
+          "at": [440, -200]
+        },
+        {"name": "taps", "type": "Merge", "widths": [3, 1], "at": [300, -160]},
+        {"name": "x", "type": "ReduceXor", "w": 4, "label": "xor of taps", "at": [160, -160]},
+        {"name": "fb", "type": "Not", "label": "feedback", "at": [40, -160]},
+        {"name": "Q", "type": "Output", "w": 8, "at": [600, 80]}
+      ],
+      "wires": [
+        ["one", "reg.Load"],
+        ["Clk", "reg.Clk"],
+        ["next", "reg.D"],
+        ["reg", "Q", "low7", "mid", "top"],
+        ["low7", "next.a1"],
+        ["mid", "taps.a0"],
+        ["top", "taps.a1"],
+        ["taps", "x"],
+        ["x", "fb"],
+        ["fb", "next.a0"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "Pseudo-random numbers (LFSR)",
+      "nodes": [
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Clock",
+          "at": [0, 0]
+        },
+        {"name": "rnd", "use": "lfsr8", "label": "LFSR", "at": [160, 0]},
+        {"name": "show", "type": "Display", "w": 8, "label": "Random number", "at": [340, 400]},
+        {
+          "name": "s",
+          "type": "Split",
+          "w": 8,
+          "lo": "{i}",
+          "len": 1,
+          "at": [340, 280],
+          "count": 8,
+          "step": [0, -80]
+        },
+        {
+          "name": "led",
+          "type": "Output",
+          "label": "Q{i}",
+          "at": [480, 280],
+          "count": 8,
+          "step": [0, -80]
+        }
+      ],
+      "wires": [["clock", "rnd"], ["rnd", "show", "s"], ["s", "led"]]
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "_comment": "nestest in automation mode ($C000) on cpu_tb: the 16 KiB PRG at $8000 and $C000 of the 64 KiB RAM. This copy: on cpu_tb_gates (cpu6502, the phase 4 CPU). The first tick (`start` [{\"ticks\": 1}]) lets the inputs reach the design: a fresh simulation's first tick does not see them yet (runner bug).",
+  "kind": "nestest",
+  "circuit": "cpu_tb_gates",
+  "signals": {
+    "sync": "cpu.sync"
+  },
+  "registers": {
+    "pc": "cpu/pc_unit/pc_reg",
+    "sp": "cpu/regs/s_reg",
+    "a": "cpu/regs/a_reg",
+    "x": "cpu/regs/x_reg",
+    "y": "cpu/regs/y_reg",
+    "p": "cpu/status/p_reg"
+  },
+  "inputs": {
+    "ce": 1,
+    "rdy": 1,
+    "res_n": 1,
+    "irq_n": 1,
+    "nmi_n": 1,
+    "bcd_en": 0,
+    "magic": 255
+  },
+  "start": [
+    {
+      "ticks": 1
+    },
+    {
+      "load": {
+        "part": "ram",
+        "file": "../roms/other/nestest.nes",
+        "skip": 16,
+        "length": 16384,
+        "at": 32768
+      }
+    },
+    {
+      "load": {
+        "part": "ram",
+        "file": "../roms/other/nestest.nes",
+        "skip": 16,
+        "length": 16384,
+        "at": 49152
+      }
+    },
+    {
+      "poke": {
+        "pc": "0xC000",
+        "sp": "0xFD",
+        "p": "0x24",
+        "cpu/timing/t_reg": 0,
+        "cpu/timing/kind_reg": 0
+      }
+    }
+  ],
+  "boundary": "sync",
+  "timing": {
+    "ticks_per_cycle": 1,
+    "sample": 0
+  },
+  "log": "../roms/other/nestest.log",
+  "record": [
+    "pc",
+    "a",
+    "x",
+    "y",
+    "p",
+    "sp"
+  ],
+  "compare": {
+    "columns": [
+      "pc"
+    ],
+    "radix": 16,
+    "context": 8
+  },
+  "cycle_column": {
+    "name": "cyc",
+    "start": 7
+  },
+  "max_cycles": 30000000
+}

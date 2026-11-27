@@ -1,0 +1,61 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "text",
+  "circuits": [
+    {
+      "name": "text",
+      "title": "Hello, text screen",
+      "nodes": [
+        {"name": "one", "type": "Const", "value": 1, "at": [0, 0]},
+        {"name": "write", "type": "Const", "value": 1, "label": "always", "at": [740, -200]},
+        {"name": "i", "type": "Register", "w": 7, "label": "cell", "at": [160, 100]},
+        {"name": "iinc", "type": "Add", "w": 7, "label": "+1", "at": [160, -60]},
+        {
+          "name": "rom",
+          "type": "Rom",
+          "addr_bits": 7,
+          "w": 8,
+          "contents": [
+            160, 199, 193, 212, 197, 160, 209, 213, 197, 211, 212, 160, 160, 170, 160, 160, 212,
+            197, 216, 212, 160, 211, 195, 210, 197, 197, 206, 160, 160, 160, 160, 160, 32, 32, 32,
+            32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+            32, 32, 32, 32, 32, 32, 32, 32, 32, 72, 69, 76, 76, 79, 44, 32, 71, 65, 84, 69, 32, 81,
+            85, 69, 83, 84, 33, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 79, 110,
+            101, 32, 65, 83, 67, 73, 73, 32, 99, 111, 100, 101, 32, 112, 101, 114, 32, 99, 101, 108,
+            108, 46, 32, 32, 32, 32, 32, 32
+          ],
+          "label": "message",
+          "at": [340, 100]
+        },
+        {"name": "Write", "type": "Input", "at": [340, -260]},
+        {"name": "Cell", "type": "Input", "w": 7, "at": [340, -140]},
+        {"name": "Char", "type": "Input", "w": 8, "at": [340, -20]},
+        {"name": "where", "type": "Mux", "w": 7, "label": "address", "at": [540, -60]},
+        {"name": "what", "type": "Mux", "w": 8, "label": "character", "at": [540, 60]},
+        {
+          "name": "screen",
+          "type": "Screen",
+          "mode": "Text",
+          "width": 32,
+          "height": 4,
+          "scale": 2,
+          "label": "Text",
+          "at": [960, 0]
+        }
+      ],
+      "wires": [
+        ["one", "i.en", "iinc.cin"],
+        ["write", "screen.we"],
+        ["i", "iinc.a", "rom", "where.a"],
+        ["iinc.sum", "i.d"],
+        ["rom", "what.a"],
+        ["Write", "where.sel", "what.sel"],
+        ["Cell", "where.b"],
+        ["Char", "what.b"],
+        ["where", "screen.addr"],
+        ["what", "screen.char"]
+      ]
+    }
+  ]
+}

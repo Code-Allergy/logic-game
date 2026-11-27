@@ -1,0 +1,56 @@
+{
+  "_comment": "Tom Harte's nes6502 single-step tests on cpu_tb (cpu6502_ref, or the gate CPU once it replaces it). This copy: on cpu_tb_gates (cpu6502, the phase 4 CPU).",
+  "kind": "harte",
+  "circuit": "cpu_tb_gates",
+  "cases": "../roms/harte/nes6502/v1",
+  "chunk": 250,
+  "signals": {
+    "addr": "cpu.addr",
+    "dout": "cpu.dout",
+    "din": "ram",
+    "rw": "cpu.rw"
+  },
+  "registers": {
+    "pc": "cpu/pc_unit/pc_reg",
+    "s": "cpu/regs/s_reg",
+    "a": "cpu/regs/a_reg",
+    "x": "cpu/regs/x_reg",
+    "y": "cpu/regs/y_reg",
+    "p": "cpu/status/p_reg"
+  },
+  "fixed": {
+    "cpu/timing/t_reg": 0,
+    "cpu/timing/kind_reg": 0
+  },
+  "memory": {
+    "part": "ram"
+  },
+  "bus": {
+    "addr": "addr",
+    "read_data": "din",
+    "write_data": "dout",
+    "rw": "rw",
+    "read_value": 1
+  },
+  "inputs": {
+    "ce": 1,
+    "rdy": 1,
+    "res_n": 1,
+    "irq_n": 1,
+    "nmi_n": 1,
+    "bcd_en": 0,
+    "magic": 238
+  },
+  "timing": {
+    "ticks_per_cycle": 1,
+    "sample": 0,
+    "before": 0,
+    "after": 0
+  },
+  "_start": "One tick before any case: the runner sets `inputs` on a fresh simulation and only resettles before the first case, and Sim::resettle does not apply pending inputs, so that case's first cycle was lost. With ce still 0 during this tick nothing commits or is written.",
+  "start": [
+    {
+      "ticks": 1
+    }
+  ]
+}

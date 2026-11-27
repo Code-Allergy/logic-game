@@ -1,0 +1,46 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "johnson",
+  "circuits": [
+    {
+      "name": "johnson",
+      "title": "Johnson counter",
+      "nodes": [
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 8,
+          "duty": 4,
+          "phase": 4,
+          "label": "Clock",
+          "at": [0, 160]
+        },
+        {
+          "name": "ff",
+          "use": "flip_flop/dff",
+          "label": "flip-flop {i}",
+          "at": [160, 0],
+          "count": 4,
+          "step": [160, 0]
+        },
+        {"name": "inv", "type": "Not", "label": "inverted feedback", "at": [400, 140]},
+        {
+          "name": "q",
+          "type": "Output",
+          "label": "Q{i}",
+          "at": [160, -140],
+          "count": 4,
+          "step": [160, 0]
+        }
+      ],
+      "wires": [
+        ["inv", "ff[0].D"],
+        ["ff[0..3].Q", "ff[1..4].D"],
+        ["ff[3].Q", "inv"],
+        ["clock", "ff.Clk"],
+        ["ff.Q", "q"]
+      ]
+    }
+  ]
+}

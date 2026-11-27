@@ -9,3 +9,12 @@ simulation.json
 perf.data*
 flamegraph*.svg
 workspaces/
+
+# Workspaces of the MCP server started from .mcp.json (docs/mcp-server.md).
+.gatequest/
+nes/roms/
+
+# NES project (nes/): Python caches, generated requests and Verilog, suite reports.
+__pycache__/
+nes/build/
+nes/tests/*.report/

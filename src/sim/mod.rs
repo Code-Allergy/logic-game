@@ -2,274 +2,196 @@
 //!
 //! # Module layout
 //!
-//! - [`model`]  – Game-side data model (`GameCircuit`, `GameNode`, `GameWire`).
-//! - [`bridge`] – `SimBridge`: thread lifecycle, ID mapping, event draining.
-//! - [`systems`] – Bevy systems for rendering and user interaction.
-//! - [`plugin`]  – `SimulationPlugin` that wires everything into Bevy.
-//! - [`spatial_grid`] – Spatial acceleration for entity picking.
+//! - [`kind`] – [`GateKind`], the single editor node-kind enum.
+//! - [`authoring`] – ECS authoring components (the source of truth) and the
+//!   commands that edit them.
+//! - [`document`] – portable circuit documents (demos, save format,
+//!   subcircuit definitions) and the [`CircuitLibrary`].
+//! - [`source`] – save format version 6, the hand-editable authoring form
+//!   (names, arrays, bus wiring), and its expansion into documents.
+//! - [`demos`] – the built-in demos, loaded from `assets/demos/`.
+//! - [`challenges`] – the build-it challenges on the demo road and their
+//!   checks.
+//! - [`rtl`] – RTL import: a Yosys JSON netlist becomes a workspace.
+//! - [`netlist`] – a workspace as a `logi_sim` design, for simulating it
+//!   without the app (tests, benchmarks).
+//! - [`layout`] – automatic layered layout of a circuit.
+//! - [`routing`] – orthogonal wire routing on the grid.
+//! - [`bridge`] – `SimBridge`: maps the ECS onto a `logi_sim` v2 `Design`,
+//!   sends revisions to the engine and reads probes back.
+//! - [`chip`] – make chip: a selection becomes a subcircuit definition.
+//! - [`multi_select`] – selecting several parts (Shift+click, Shift+drag).
+//! - [`history`] – undo and redo of edits (workspace snapshots).
+//! - [`view`] – instance views: opening a subcircuit shows its definition
+//!   with live values probed from the running root simulation.
+//! - [`visuals`] – change-driven gate and wire visuals, loop highlight.
+//! - [`art`] – the Workshop art kit: theme-driven materials, cached tile,
+//!   pin and glyph meshes, fonts, the dot-grid bench.
+//! - [`screen`] – drawing a screen part: palettes, the text font, the
+//!   rasterizer.
+//! - [`shapes`] – triangle-list shapes (rounded rectangles, strokes).
+//! - [`systems`] – Bevy systems for picking, dragging and egui panels.
+//! - [`plugin`] – plugins that wire everything into Bevy.
+//! - [`spatial_grid`] – spatial acceleration for entity picking.
 
 mod plugin;
 
 #[cfg(test)]
 mod tests;
 
-pub mod bridge;
+pub mod art;
 pub mod authoring;
-pub mod cache;
-pub mod fixtures;
-pub mod model;
-pub mod service;
+pub mod bridge;
+pub mod challenges;
+pub mod chip;
+pub mod demos;
+pub mod document;
+pub mod history;
+pub mod keybind;
+pub mod kind;
+pub mod layout;
+pub mod multi_select;
+pub mod netlist;
+pub mod routing;
+pub mod rtl;
+pub mod screen;
+pub mod shapes;
+pub mod source;
 pub mod spatial_grid;
 pub mod systems;
+pub mod view;
+pub mod visuals;
+pub mod wiring;
 
-pub use bridge::SimBridge;
 pub use authoring::*;
-pub use cache::SimCache;
-pub use model::{GameCircuit, GameNode, GameNodeKind, GameWire, SavedSimulation, WireKind};
-pub use plugin::{
-    SimulationPlugin, SimulationProjectionPlugin, SimulationRuntimePlugin,
-    SimulationViewPlugin,
+pub use bridge::{CompileFailure, LoopNode, SimBridge, SimDiagnostics, SimRuntime};
+pub use chip::{ChipPlan, MakeChip, plan_chip};
+pub use demos::{Demo, DemoCatalog};
+pub use document::{
+    CircuitDocument, CircuitLibrary, CircuitTests, DEFAULT_LAYER_UUID, DocNode, DocWire, Incoming,
+    MergeReport, PinAddr, WorkspaceDocument,
 };
-pub use service::{SimExecutionService, SimRuntime};
+pub use history::{HISTORY_LIMIT, HistoryCommand, UndoHistory};
+pub use kind::{GateKind, MAX_SCREEN_SCALE, SCREEN_BEZEL, ScreenMode, ScreenPalette, TEXT_CELL};
+pub use plugin::{SimulationPlugin, SimulationRuntimePlugin, SimulationViewPlugin};
+pub use view::{
+    CircuitView, CloseView, InstanceViewItem, OpenDefinitionView, OpenInstanceView, ViewFrame,
+};
+pub use visuals::{EntityWorkCounter, LoopHighlight, ON_TOP_Z, OnTop, SimulationVisualsPlugin};
 
 use bevy::prelude::*;
 use bevy::reflect::Reflect;
-use logi_sim::engine::RunnerType;
-use uuid::Uuid;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Bevy components
-// ─────────────────────────────────────────────────────────────────────────────
+/// Default simulation rate in ticks per second.
+pub const DEFAULT_TICK_RATE: f64 = 1000.0;
 
-/// Bevy component that links a rendered entity to a [`GameNode`] by UUID.
-#[derive(Component, Debug, Clone)]
-pub struct GateComponent {
-    pub id: Uuid,
-    pub label: String,
-    pub kind: GateKindTag,
-    pub input_count: u8,
-    pub output_count: u8,
-    pub input_bits: u64,
-    pub output_bits: u64,
-}
-
-impl GateComponent {
-    pub fn new(node: &GameNode) -> Self {
-        let kind = GateKindTag::from_node_kind(&node.kind);
-        Self {
-            id: node.id,
-            label: node
-                .label
-                .clone()
-                .unwrap_or_else(|| node.id.to_string()[..8].to_string()),
-            kind,
-            input_count: node.kind.input_count().min(u8::MAX as usize) as u8,
-            output_count: node.kind.output_count().min(u8::MAX as usize) as u8,
-            input_bits: 0,
-            output_bits: 0,
-        }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        self.kind.display_name()
-    }
-}
-
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
-pub enum GateKindTag {
-    Input,
-    Input8,
-    Input64,
-    Output,
-    Output8,
-    Output64,
-    Display,
-    Expand8,
-    Expand64,
-    ReduceOr8,
-    ReduceOr64,
-    And,
-    Or,
-    Not,
-    Xor,
-    Nand,
-    Nor,
-    Xnor,
-    Buffer,
-    Mux,
-    Demux,
-    TriStateBuffer,
-    Counter8,
-    Clock,
-    SubCircuit,
-}
-
-impl GateKindTag {
-    pub fn from_node_kind(kind: &GameNodeKind) -> Self {
-        match kind {
-            GameNodeKind::Input => Self::Input,
-            GameNodeKind::Input8 => Self::Input8,
-            GameNodeKind::Input64 => Self::Input64,
-            GameNodeKind::Output => Self::Output,
-            GameNodeKind::Output8 => Self::Output8,
-            GameNodeKind::Output64 => Self::Output64,
-            GameNodeKind::Display { .. } => Self::Display,
-            GameNodeKind::Expand8 => Self::Expand8,
-            GameNodeKind::Expand64 => Self::Expand64,
-            GameNodeKind::ReduceOr8 => Self::ReduceOr8,
-            GameNodeKind::ReduceOr64 => Self::ReduceOr64,
-            GameNodeKind::And => Self::And,
-            GameNodeKind::Or => Self::Or,
-            GameNodeKind::Not => Self::Not,
-            GameNodeKind::Xor => Self::Xor,
-            GameNodeKind::Nand => Self::Nand,
-            GameNodeKind::Nor => Self::Nor,
-            GameNodeKind::Xnor => Self::Xnor,
-            GameNodeKind::Buffer => Self::Buffer,
-            GameNodeKind::Mux => Self::Mux,
-            GameNodeKind::Demux => Self::Demux,
-            GameNodeKind::TriStateBuffer => Self::TriStateBuffer,
-            GameNodeKind::Counter8 => Self::Counter8,
-            GameNodeKind::Clock { .. } => Self::Clock,
-            GameNodeKind::SubCircuit { .. } => Self::SubCircuit,
-        }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::Input => "INPUT",
-            Self::Input8 => "INPUT8",
-            Self::Input64 => "INPUT64",
-            Self::Output => "OUTPUT",
-            Self::Output8 => "OUTPUT8",
-            Self::Output64 => "OUTPUT64",
-            Self::Display => "DISPLAY",
-            Self::Expand8 => "1->8",
-            Self::Expand64 => "1->64",
-            Self::ReduceOr8 => "8->1",
-            Self::ReduceOr64 => "64->1",
-            Self::And => "AND",
-            Self::Or => "OR",
-            Self::Not => "NOT",
-            Self::Xor => "XOR",
-            Self::Nand => "NAND",
-            Self::Nor => "NOR",
-            Self::Xnor => "XNOR",
-            Self::Buffer => "BUFFER",
-            Self::Mux => "MUX",
-            Self::Demux => "DEMUX",
-            Self::TriStateBuffer => "TRI-STATE",
-            Self::Counter8 => "COUNTER8",
-            Self::Clock => "CLOCK",
-            Self::SubCircuit => "SUBCIRCUIT",
-        }
-    }
-}
-
-/// Human-friendly label for inspector/overlay display.
-pub fn gate_display_name(node_id: Uuid, label: &Option<String>, kind: &GameNodeKind) -> String {
-    let fallback = format!("{}", &node_id.to_string()[..8]);
-    match label {
-        Some(text) if !text.is_empty() => format!("{} {}", kind.display_name(), text),
-        _ => format!("{} {}", kind.display_name(), fallback),
-    }
-}
-
-/// Bevy component representing a rendered wire between two nodes.
-#[derive(Component, Debug, Clone)]
-pub struct ConnectionLine {
-    pub id: Uuid,
-    pub source_node: Uuid,
-    pub source_pin: u8,
-    pub sink_node: Uuid,
-    pub sink_pin: u8,
-    pub bit_width: u8,
-    pub value: bool,
-    pub wire_kind: WireKind,
-}
-
-/// Inspector-only hierarchy root for logical wire entities.
-#[derive(Component, Debug, Reflect)]
-#[reflect(Component)]
-pub struct WireCollection;
-
-/// Per-gate snapshot of all output pin states (bits 0..63).
-#[derive(Component, Debug, Clone, Copy, Default, Reflect)]
-#[reflect(Component)]
-pub struct SimNodeOutputs {
-    pub bits: u64,
-}
-
-/// Per-gate snapshot of all input pin states (bits 0..63).
-#[derive(Component, Debug, Clone, Copy, Default, Reflect)]
-#[reflect(Component)]
-pub struct SimNodeInputs {
-    pub bits: u64,
-}
-
-/// Text attached to a multi-bit display node.
+/// Text attached to output/display gates showing their value.
 #[derive(Component, Debug, Clone, Copy, Reflect)]
 #[reflect(Component)]
-pub struct LogicDisplay {
-    pub node_id: Uuid,
-    pub bits: u8,
+pub struct LogicDisplay;
+
+/// Tracks which gate entity is currently selected in the editor.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectedGate(pub Option<Entity>);
+
+/// Parts selected together (Shift+click, Shift+drag a box), for Make chip,
+/// Delete and moving them as a group. Empty when only [`SelectedGate`] (the
+/// part in the inspector) is selected; when not empty it contains the
+/// [`SelectedGate`] too.
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct MultiSelection(Vec<Entity>);
+
+impl MultiSelection {
+    pub fn entities(&self) -> &[Entity] {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains(&self, entity: Entity) -> bool {
+        self.0.contains(&entity)
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Add `entity` (no duplicates).
+    pub fn insert(&mut self, entity: Entity) {
+        if !self.0.contains(&entity) {
+            self.0.push(entity);
+        }
+    }
+
+    /// Remove `entity`; returns whether it was selected.
+    pub fn remove(&mut self, entity: Entity) -> bool {
+        let before = self.0.len();
+        self.0.retain(|e| *e != entity);
+        self.0.len() != before
+    }
+
+    /// Keep only the entities for which `keep` holds.
+    pub fn retain(&mut self, keep: impl FnMut(&Entity) -> bool) {
+        self.0.retain(keep);
+    }
+
+    /// Shift+click on `entity` with `primary` in the inspector: start a
+    /// group from the primary part if there is none, then add `entity`,
+    /// or take it out if it was in. Returns the new primary part.
+    pub fn toggle(&mut self, entity: Entity, primary: Option<Entity>) -> Option<Entity> {
+        if self.0.is_empty()
+            && let Some(p) = primary
+        {
+            self.0.push(p);
+        }
+        if self.remove(entity) {
+            if primary == Some(entity) || primary.is_none() {
+                return self.0.last().copied();
+            }
+            return primary;
+        }
+        self.0.push(entity);
+        Some(entity)
+    }
+
+    /// Every selected part: the group, or the primary part alone.
+    pub fn all(&self, primary: Option<Entity>) -> Vec<Entity> {
+        if self.0.is_empty() {
+            primary.into_iter().collect()
+        } else {
+            self.0.clone()
+        }
+    }
 }
-
-/// Marker for gate entities that are currently selected for dragging.
-#[derive(Component, Reflect)]
-#[reflect(Component)]
-pub struct Selected {
-    pub offset: Vec2,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Resources
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Tracks which gate entity + UUID is currently selected in the editor.
-#[derive(Resource, Default)]
-pub struct SelectedGate(pub Option<(Entity, Uuid)>);
 
 /// Simulation tick-rate configuration (ticks per second).
 #[derive(Resource, Debug)]
 pub struct SimulationConfig {
     pub tick_rate: f64,
     pub unlimited_tick_rate: bool,
-    pub current_runner: RunnerType,
 }
 
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
-            tick_rate: 10.0,
+            tick_rate: DEFAULT_TICK_RATE,
             unlimited_tick_rate: false,
-            current_runner: RunnerType::default(),
         }
     }
 }
 
-/// Low-frequency throughput sampler for the config UI. Sampling the bridge's
-/// atomic tick counter keeps measurement work off the simulation thread.
-#[derive(Resource, Debug)]
+/// Low-frequency throughput sampler for the config UI.
+#[derive(Resource, Debug, Default)]
 pub struct TickRateMeter {
     last_tick_count: u64,
     sample_window_secs: f64,
     pub average_hz: Option<f64>,
-}
-
-impl Default for TickRateMeter {
-    fn default() -> Self {
-        Self {
-            last_tick_count: 0,
-            sample_window_secs: 0.0,
-            average_hz: None,
-        }
-    }
-}
-
-#[derive(Resource, Default)]
-pub struct ThreadlessStepper {
-    pending_ticks: f64,
 }
 
 impl TickRateMeter {
@@ -299,57 +221,6 @@ impl TickRateMeter {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Gate sprite colours
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Returns a base [`Sprite`] for a given node kind.
-pub fn get_gate_sprite(kind: &GameNodeKind) -> Sprite {
-    let color = match kind {
-        GameNodeKind::And => Color::srgb(0.0, 0.6, 0.3),
-        GameNodeKind::Or => Color::srgb(1.0, 1.0, 0.0),
-        GameNodeKind::Not => Color::srgb(0.0, 0.1, 0.5),
-        GameNodeKind::Nand => Color::srgb(0.6, 0.2, 0.0),
-        GameNodeKind::Nor => Color::srgb(0.5, 0.5, 0.0),
-        GameNodeKind::Xor => Color::srgb(0.0, 0.5, 0.8),
-        GameNodeKind::Xnor => Color::srgb(0.2, 0.3, 0.8),
-        GameNodeKind::Buffer => Color::srgb(0.4, 0.4, 0.4),
-        GameNodeKind::Mux => Color::srgb(0.6, 0.0, 0.6),
-        GameNodeKind::Demux => Color::srgb(0.8, 0.0, 0.8),
-        GameNodeKind::TriStateBuffer => Color::srgb(0.3, 0.3, 0.6),
-        GameNodeKind::Counter8 => Color::srgb(0.1, 0.45, 0.65),
-        GameNodeKind::Clock { .. } => Color::srgb(0.5, 0.1, 0.3),
-        GameNodeKind::Input => Color::srgb(0.1, 0.1, 0.1),
-        GameNodeKind::Input8 => Color::srgb(0.13, 0.24, 0.48),
-        GameNodeKind::Input64 => Color::srgb(0.08, 0.19, 0.38),
-        GameNodeKind::Output => Color::srgb(0.15, 0.15, 0.15),
-        GameNodeKind::Output8 => Color::srgb(0.12, 0.35, 0.12),
-        GameNodeKind::Output64 => Color::srgb(0.08, 0.26, 0.08),
-        GameNodeKind::Expand8 => Color::srgb(0.35, 0.35, 0.0),
-        GameNodeKind::Expand64 => Color::srgb(0.28, 0.28, 0.0),
-        GameNodeKind::ReduceOr8 => Color::srgb(0.75, 0.45, 0.0),
-        GameNodeKind::ReduceOr64 => Color::srgb(0.52, 0.25, 0.0),
-        GameNodeKind::Display { .. } => Color::srgb(0.04, 0.09, 0.12),
-        GameNodeKind::SubCircuit { .. } => Color::srgb(0.1, 0.5, 0.3),
-    };
-    let size = match kind {
-        GameNodeKind::Display { bits } => {
-            let hex_digits = usize::from(*bits).div_ceil(4);
-            Vec2::new((hex_digits as f32 * 18.0 + 40.0).max(120.0), 70.0)
-        }
-        _ => Vec2::new(50.0, 50.0),
-    };
-    Sprite {
-        color,
-        custom_size: Some(size),
-        ..Default::default()
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Geometry helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Compute midpoint, rotation quaternion, and length for a connection line sprite.
 #[inline]
 pub fn calculate_connection_geometry(from: &Vec3, to: &Vec3) -> (Vec3, Quat, f32) {
@@ -358,4 +229,18 @@ pub fn calculate_connection_geometry(from: &Vec3, to: &Vec3) -> (Vec3, Quat, f32
     let dist = (*to - *from).length();
     let rot = Quat::from_rotation_arc(Vec3::X, dir);
     (mid, rot, dist)
+}
+
+/// Format a value for a display gate.
+pub fn format_value(value: u64, width: u8, config: &DisplayConfig) -> String {
+    let width = usize::from(width.max(1));
+    match (config.radix, config.leading_zeroes) {
+        (DisplayRadix::Hexadecimal, true) => {
+            format!("0x{value:0digits$X}", digits = width.div_ceil(4))
+        }
+        (DisplayRadix::Hexadecimal, false) => format!("0x{value:X}"),
+        (DisplayRadix::Binary, true) => format!("0b{value:0width$b}"),
+        (DisplayRadix::Binary, false) => format!("0b{value:b}"),
+        (DisplayRadix::Decimal, _) => format!("{value}"),
+    }
 }

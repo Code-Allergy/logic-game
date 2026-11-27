@@ -1,0 +1,36 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "debounce",
+  "circuits": [
+    {
+      "name": "debounce",
+      "title": "Debouncer",
+      "nodes": [
+        {"name": "Button", "type": "Input", "at": [0, 120]},
+        {
+          "name": "d",
+          "type": "Delay",
+          "label": "sample {i}",
+          "at": [160, 120],
+          "count": 4,
+          "step": [0, -80]
+        },
+        {"name": "all1", "type": "ReduceAnd", "w": 4, "label": "all 1", "at": [440, 120]},
+        {"name": "any1", "type": "ReduceOr", "w": 4, "label": "any 1", "at": [440, -120]},
+        {"name": "all0", "type": "Not", "label": "all 0", "at": [580, -120]},
+        {"name": "latch", "type": "SrLatch", "at": [720, 0]},
+        {"name": "Clean", "type": "Output", "at": [860, 0]}
+      ],
+      "wires": [
+        ["Button", "d[0]"],
+        ["d[0..3]", "d[1..4]"],
+        ["d", "all1", "any1"],
+        ["any1", "all0"],
+        ["all1", "latch.s"],
+        ["all0", "latch.r"],
+        ["latch", "Clean"]
+      ]
+    }
+  ]
+}

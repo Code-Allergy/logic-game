@@ -1,0 +1,64 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "parity8",
+      "title": "8-bit parity (XOR tree)",
+      "nodes": [
+        {"name": "D", "type": "Input", "w": 8, "at": [0, 0]},
+        {
+          "name": "d",
+          "type": "Split",
+          "w": 8,
+          "lo": "{i}",
+          "len": 1,
+          "at": [140, 280],
+          "count": 8,
+          "step": [0, -80]
+        },
+        {"name": "x1", "type": "Xor", "at": [280, 240], "count": 4, "step": [0, -160]},
+        {"name": "x2", "type": "Xor", "at": [420, 160], "count": 2, "step": [0, -320]},
+        {"name": "x3", "type": "Xor", "at": [560, 0]},
+        {"name": "P", "type": "Output", "label": "Parity", "at": [700, 0]}
+      ],
+      "wires": [
+        ["D", "d"],
+        ["d[0]", "x1[0].a"],
+        ["d[1]", "x1[0].b"],
+        ["d[2]", "x1[1].a"],
+        ["d[3]", "x1[1].b"],
+        ["d[4]", "x1[2].a"],
+        ["d[5]", "x1[2].b"],
+        ["d[6]", "x1[3].a"],
+        ["d[7]", "x1[3].b"],
+        ["x1[0]", "x2[0].a"],
+        ["x1[1]", "x2[0].b"],
+        ["x1[2]", "x2[1].a"],
+        ["x1[3]", "x2[1].b"],
+        ["x2[0]", "x3.a"],
+        ["x2[1]", "x3.b"],
+        ["x3", "P"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "Parity generator",
+      "nodes": [
+        {"name": "D", "type": "Input", "w": 8, "at": [0, 0]},
+        {"name": "tree", "use": "parity8", "label": "XOR tree", "at": [220, 80]},
+        {
+          "name": "rx",
+          "type": "ReduceXor",
+          "w": 8,
+          "label": "ReduceXor primitive",
+          "at": [220, -80]
+        },
+        {"name": "p_tree", "type": "Output", "label": "Parity (gates)", "at": [440, 80]},
+        {"name": "p_rx", "type": "Output", "label": "Parity (ReduceXor)", "at": [440, -80]}
+      ],
+      "wires": [["D", "tree.D", "rx"], ["tree", "p_tree"], ["rx", "p_rx"]]
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "_comment": "Klaus Dormann's 6502_functional_test (the prebuilt binary, decimal tests included) on cpu_tb with decimal mode on. This copy: on cpu_tb_gates (cpu6502, the phase 4 CPU). The first tick (`start` [{\"ticks\": 1}]) lets the inputs reach the design: a fresh simulation's first tick does not see them yet (runner bug).",
+  "kind": "klaus",
+  "circuit": "cpu_tb_gates",
+  "signals": {
+    "sync": "cpu.sync"
+  },
+  "registers": {
+    "pc": "cpu/pc_unit/pc_reg",
+    "s": "cpu/regs/s_reg",
+    "p": "cpu/status/p_reg"
+  },
+  "inputs": {
+    "ce": 1,
+    "rdy": 1,
+    "res_n": 1,
+    "irq_n": 1,
+    "nmi_n": 1,
+    "bcd_en": 1,
+    "magic": 255
+  },
+  "start": [
+    {
+      "ticks": 1
+    },
+    {
+      "load": {
+        "part": "ram",
+        "file": "../roms/klaus/bin_files/6502_functional_test.bin",
+        "at": 0
+      }
+    },
+    {
+      "poke": {
+        "pc": "0x0400",
+        "s": "0xFF",
+        "p": "0x24",
+        "cpu/timing/t_reg": 0,
+        "cpu/timing/kind_reg": 0
+      }
+    }
+  ],
+  "boundary": "sync",
+  "timing": {
+    "ticks_per_cycle": 1,
+    "sample": 0
+  },
+  "pc": "pc",
+  "success": "0x3469",
+  "max_cycles": 200000000
+}

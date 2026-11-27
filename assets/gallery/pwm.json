@@ -1,0 +1,29 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "pwm",
+  "circuits": [
+    {
+      "name": "pwm",
+      "title": "PWM generator",
+      "nodes": [
+        {"name": "one", "type": "Const", "w": 4, "value": 1, "at": [0, 200]},
+        {"name": "on", "type": "Const", "value": 1, "at": [0, 80]},
+        {"name": "Duty", "type": "Input", "w": 4, "at": [0, -120]},
+        {"name": "inc", "type": "Add", "w": 4, "label": "count + 1", "at": [160, 200]},
+        {"name": "cnt", "type": "Register", "w": 4, "label": "count", "at": [320, 120]},
+        {"name": "cmp", "use": "magnitude/mag4", "label": "count < Duty?", "at": [500, -40]},
+        {"name": "show", "type": "Display", "w": 4, "label": "Count", "at": [700, 120]},
+        {"name": "Out", "type": "Output", "label": "PWM", "at": [680, -40]}
+      ],
+      "wires": [
+        ["one", "inc.b"],
+        ["on", "cnt.en"],
+        ["inc.sum", "cnt.d"],
+        ["cnt", "inc.a", "cmp.A", "show"],
+        ["Duty", "cmp.B"],
+        ["cmp.Lt", "Out"]
+      ]
+    }
+  ]
+}

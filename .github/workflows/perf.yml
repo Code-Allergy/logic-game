@@ -1,0 +1,46 @@
+name: Performance
+
+# The regression gate of docs/performance.md: deterministic metrics
+# (program sizes, executed operations and allocations per tick) against
+# perf/baseline.json. Wall-clock benchmarks are not run here.
+# Runner budget (as ci.yml): only PRs into main, pushes to main and
+# manual runs.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: perf-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # As ci.yml: override `-C target-cpu=native` from .cargo/config.toml (a
+  # cached target/ from another runner's CPU dies with SIGILL). The metrics
+  # do not depend on it.
+  RUSTFLAGS: ""
+
+jobs:
+  perf-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-cargo-perf-${{ hashFiles('**/Cargo.toml') }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install alsa and udev
+        run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev
+      - name: Check performance metrics against the baseline
+        run: cargo xtask perf check

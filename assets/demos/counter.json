@@ -1,0 +1,92 @@
+{
+  "format": "gatequest-workspace",
+  "version": 6,
+  "root": "main",
+  "circuits": [
+    {
+      "name": "counter8",
+      "title": "8-bit counter",
+      "nodes": [
+        {"name": "Clk", "type": "Input", "at": [0, -160]},
+        {"name": "Enable", "type": "Input", "at": [0, 0]},
+        {"name": "Reset", "type": "Input", "at": [0, -80]},
+        {"name": "zero", "type": "Const", "w": 8, "value": 0, "at": [0, 160]},
+        {"name": "one", "type": "Const", "value": 1, "at": [0, 240]},
+        {"name": "inc", "use": "ripple_adder/adder8", "label": "Q + 1", "at": [280, 160]},
+        {"name": "clear", "use": "mux/mux2x8", "label": "0 on Reset", "at": [420, 40]},
+        {"name": "load", "use": "gates/or", "label": "Enable or Reset", "at": [420, -80]},
+        {"name": "reg", "use": "register/register8", "label": "register", "at": [560, 0]},
+        {"name": "Q", "type": "Output", "w": 8, "at": [700, 0]}
+      ],
+      "wires": [
+        ["reg", "inc.A", "Q"],
+        ["zero", "inc.B", "clear.B"],
+        ["one", "inc.Cin"],
+        ["inc.Sum", "clear.A"],
+        ["Reset", "clear.Sel", "load.B"],
+        ["Enable", "load.A"],
+        ["clear", "reg.D"],
+        ["load", "reg.Load"],
+        ["Clk", "reg.Clk"]
+      ]
+    },
+    {
+      "name": "main",
+      "title": "Counter",
+      "nodes": [
+        {
+          "name": "clock",
+          "type": "Clock",
+          "period": 4,
+          "duty": 2,
+          "phase": 2,
+          "label": "Clock",
+          "at": [0, 240]
+        },
+        {"name": "Enable", "type": "Input", "at": [0, 160]},
+        {"name": "Reset", "type": "Input", "at": [0, 80]},
+        {"name": "counter", "use": "counter8", "label": "8-bit counter (gates)", "at": [840, 160]},
+        {"name": "count", "type": "Display", "w": 8, "label": "Count", "at": [1000, 160]},
+        {"name": "prev", "type": "Delay", "label": "clock last tick", "at": [280, 0]},
+        {"name": "not_prev", "type": "Not", "at": [420, 0]},
+        {"name": "edge", "type": "And", "label": "rising edge", "at": [560, 0]},
+        {"name": "any", "type": "Or", "at": [280, -120]},
+        {"name": "en_w", "type": "And", "at": [700, -80]},
+        {"name": "one_w", "type": "Const", "w": 8, "value": 1, "at": [420, -200]},
+        {"name": "zero_w", "type": "Const", "w": 8, "value": 0, "at": [560, -320]},
+        {"name": "add_w", "type": "Add", "w": 8, "at": [560, -160]},
+        {"name": "mux_w", "type": "Mux", "w": 8, "at": [700, -280]},
+        {
+          "name": "reg_w",
+          "type": "Register",
+          "w": 8,
+          "label": "Register primitive",
+          "at": [840, -200]
+        },
+        {
+          "name": "count_w",
+          "type": "Display",
+          "w": 8,
+          "label": "Count (Register)",
+          "at": [1000, -200]
+        }
+      ],
+      "wires": [
+        ["clock", "counter.Clk", "prev", "edge.a"],
+        ["Enable", "counter.Enable", "any.a"],
+        ["Reset", "counter.Reset", "any.b", "mux_w.sel"],
+        ["counter", "count"],
+        ["prev", "not_prev"],
+        ["not_prev", "edge.b"],
+        ["edge", "en_w.a"],
+        ["any", "en_w.b"],
+        ["en_w", "reg_w.en"],
+        ["reg_w", "add_w.a", "count_w"],
+        ["one_w", "add_w.b"],
+        ["add_w.sum", "mux_w.a"],
+        ["zero_w", "mux_w.b"],
+        ["mux_w", "reg_w.d"]
+      ]
+    }
+  ]
+}

@@ -8,9 +8,14 @@ publish = false
 name = "mobile"
 crate-type = ["staticlib", "cdylib"]
 
-[dependencies]
+# Only for the mobile targets. As plain dependencies, every desktop
+# `--workspace` build compiled Bevy with `android-native-activity` too (a
+# second feature set, so a second Bevy build beside `cargo run`'s), and
+# reported `gate_quest` as unused: the entry point in `src/lib.rs` is
+# commented out until the game exposes an app plugin it can add.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 gate_quest = { path = ".." }
-bevy = { version = "0.19", default-features = false, features = ["android-native-activity"] }
+bevy = { version = "0.20.1", default-features = false, features = ["android-native-activity"] }
 
 [package.metadata.android]
 package = "org.codeallergy.GateQuest"

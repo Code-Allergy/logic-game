@@ -1,0 +1,21 @@
+{
+  "_comment": "Klaus Dormann's 6502_functional_test on cpu_tb: a 64 KiB image loaded at 0, started at $0400. The success address depends on how the test was assembled. Paths are placeholders; see README.md.",
+  "kind": "klaus",
+  "circuit": "cpu_tb",
+  "signals": {"sync": "cpu.sync"},
+  "registers": {
+    "pc": "cpu/pc_unit/pc",
+    "s": "cpu/regs/s",
+    "p": "cpu/status/p"
+  },
+  "inputs": {"res_n": 1, "ce": 1, "rdy": 1, "irq_n": 1, "nmi_n": 1},
+  "start": [
+    {"load": {"part": "ram", "file": "../roms/klaus/6502_functional_test.bin", "at": 0}},
+    {"poke": {"pc": "0x0400", "s": "0xFF", "p": "0x24", "cpu/timing/t": 0}}
+  ],
+  "boundary": "sync",
+  "timing": {"ticks_per_cycle": 1, "sample": 0},
+  "pc": "pc",
+  "success": "0x3469",
+  "max_cycles": 200000000
+}
