@@ -318,6 +318,11 @@ fn main() -> Result<(), String> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(SimOptions::default().superstep_chunk),
+        // `GUARD_MIN`: the fewest instructions a guarded region holds.
+        guard_min: std::env::var("GUARD_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SimOptions::default().guard_min),
         ..SimOptions::default()
     };
     let root = design.root_def();
