@@ -18,31 +18,106 @@
 // happens once. The PPU's own bus (pa, pd) reads combinationally: an
 // address put out in a dot is answered in the same dot.
 
+// Every dot and line predicate of the PPU, decoded once: two ROMs, indexed
+// by the dot and by the line, whose words hold one flag per predicate (the
+// blocks below read single bits instead of comparing `dot` and `line`, so
+// the comparisons cost one ROM read per tick, not one operation each).
+// The flags, by bit, are defined in `dflags` and `lflags`:
+//
+//   d[0..4]: fetch window (1-256, 321-336) and dot mod 8 = 1, 3, 5, 7, 0
+//            (nametable, attribute, pattern low, pattern high, coarse x)
+//   d[5] 256, d[6] 257, d[11] 1, d[13] 64, d[19] 328: that dot
+//   d[7]: 280-304 (vertical scroll copy)  d[8]: 2-257 or 322-337 (shift)
+//   d[9]: dot mod 8 = 1 in 9-257, or 329, 337 (shifter reload)
+//   d[10]: 1-256 (a pixel's dot)  d[12]: 65-128 (sprite evaluation)
+//   d[14]: 257-320 (sprite fetches); d[15], d[16], d[17]: and dot mod 8
+//          in 5-7 or 0, = 5, = 7  d[18]: 264-327 (line buffer fill)
+//   d[20]: 0-8 (left column)  d[21]: dot mod 8 = 7 or 0 (pattern high)
+//   d[27:22]: dot - 65 (the OAM entry sprite evaluation reads)
+//   d[30:28]: (dot - 257) / 8 mod 8 (the sprite slot being fetched)
+//   d[38:31]: dot - 1 (the pixel's column, mod 256)
+//   d[40:39]: what a background fetch puts on the bus: 0 nametable (dot
+//             mod 8 = 1, 2), 1 attribute (3, 4), 2 pattern low (5, 6),
+//             3 pattern high (7, 0)
+//   l[0]: 0-239  l[1]: 261  l[2]: 241  l[3]: 0-239 or 261
+module ppu_decode (input [8:0] dot, input [8:0] line, output [40:0] d, output [3:0] l);
+  function [40:0] dflags(input integer n);
+    reg [2:0] f;
+    reg fw, sreg;
+    begin
+      f = n % 8;
+      fw = (n >= 1 && n <= 256) || (n >= 321 && n <= 336);
+      sreg = n >= 257 && n <= 320;
+      dflags = 41'd0;
+      dflags[0] = fw && f == 1;
+      dflags[1] = fw && f == 3;
+      dflags[2] = fw && f == 5;
+      dflags[3] = fw && f == 7;
+      dflags[4] = fw && f == 0;
+      dflags[5] = n == 256;
+      dflags[6] = n == 257;
+      dflags[7] = n >= 280 && n <= 304;
+      dflags[8] = (n >= 2 && n <= 257) || (n >= 322 && n <= 337);
+      dflags[9] = f == 1 && ((n >= 9 && n <= 257) || n == 329 || n == 337);
+      dflags[10] = n >= 1 && n <= 256;
+      dflags[11] = n == 1;
+      dflags[12] = n >= 65 && n <= 128;
+      dflags[13] = n == 64;
+      dflags[14] = sreg;
+      dflags[15] = sreg && (f == 5 || f == 6 || f == 7 || f == 0);
+      dflags[16] = sreg && f == 5;
+      dflags[17] = sreg && f == 7;
+      dflags[18] = n >= 264 && n <= 327;
+      dflags[19] = n == 328;
+      dflags[20] = n <= 8;
+      dflags[21] = f == 7 || f == 0;
+      dflags[27:22] = n - 65;
+      dflags[30:28] = (n - 257) >> 3;
+      dflags[38:31] = n - 1;
+      dflags[40:39] = (f == 1 || f == 2) ? 2'd0 : (f == 3 || f == 4) ? 2'd1
+                    : (f == 5 || f == 6) ? 2'd2 : 2'd3;
+    end
+  endfunction
+  function [3:0] lflags(input integer n);
+    begin
+      lflags[0] = n < 240;
+      lflags[1] = n == 261;
+      lflags[2] = n == 241;
+      lflags[3] = n < 240 || n == 261;
+    end
+  endfunction
+  reg [40:0] drom [0:511];
+  reg [3:0] lrom [0:511];
+  integer i;
+  initial for (i = 0; i < 512; i = i + 1) begin
+    drom[i] = dflags(i);
+    lrom[i] = lflags(i);
+  end
+  assign d = drom[dot];
+  assign l = lrom[line];
+endmodule
+
 // Which dots fetch, shift, reload, scroll; vertical blank.
-module ppu_render_ctl (input [8:0] dot, input [8:0] line, input [7:0] mask,
+module ppu_render_ctl (input [40:0] d, input [3:0] l, input [7:0] mask,
                        output fetch_nt, output fetch_at, output fetch_lo, output fetch_hi,
                        output inc_x, output inc_y, output copy_h, output copy_v,
                        output shift, output reload, output pixel_on, output set_vbl,
                        output clr_vbl);
   wire ren = mask[3] | mask[4];
-  wire vis = line < 9'd240;
-  wire pre = line == 9'd261;
-  wire rl = ren & (vis | pre);
-  wire fw = (dot >= 9'd1 && dot <= 9'd256) || (dot >= 9'd321 && dot <= 9'd336);
-  wire [2:0] f = dot[2:0];
-  assign fetch_nt = rl & fw & (f == 3'd1);
-  assign fetch_at = rl & fw & (f == 3'd3);
-  assign fetch_lo = rl & fw & (f == 3'd5);
-  assign fetch_hi = rl & fw & (f == 3'd7);
-  assign inc_x = rl & fw & (f == 3'd0);
-  assign inc_y = rl & (dot == 9'd256);
-  assign copy_h = rl & (dot == 9'd257);
-  assign copy_v = ren & pre & dot >= 9'd280 & dot <= 9'd304;
-  assign shift = rl & ((dot >= 9'd2 && dot <= 9'd257) || (dot >= 9'd322 && dot <= 9'd337));
-  assign reload = rl & (f == 3'd1) & ((dot >= 9'd9 && dot <= 9'd257) || dot == 9'd329 || dot == 9'd337);
-  assign pixel_on = vis & dot >= 9'd1 & dot <= 9'd256;
-  assign set_vbl = (line == 9'd241) & (dot == 9'd1);
-  assign clr_vbl = pre & (dot == 9'd1);
+  wire rl = ren & l[3];
+  assign fetch_nt = rl & d[0];
+  assign fetch_at = rl & d[1];
+  assign fetch_lo = rl & d[2];
+  assign fetch_hi = rl & d[3];
+  assign inc_x = rl & d[4];
+  assign inc_y = rl & d[5];
+  assign copy_h = rl & d[6];
+  assign copy_v = ren & l[1] & d[7];
+  assign shift = rl & d[8];
+  assign reload = rl & d[9];
+  assign pixel_on = l[0] & d[10];
+  assign set_vbl = l[2] & d[11];
+  assign clr_vbl = l[1] & d[11];
 endmodule
 
 // PPUCTRL, PPUMASK, PPUSTATUS, the read buffer and the open-bus latch.
@@ -141,7 +216,7 @@ module ppu_loopy (input clk, input [7:0] wd, input [7:0] ctrl, input w2000, inpu
 endmodule
 
 // The background: fetch addresses, tile latches, shift registers, pixel.
-module ppu_bg (input clk, input [8:0] dot, input [14:0] v, input [2:0] fx, input [7:0] ctrl,
+module ppu_bg (input clk, input [40:0] d, input [14:0] v, input [2:0] fx, input [7:0] ctrl,
                input [7:0] mask, input [7:0] pd, input fetch_nt, input fetch_at, input fetch_lo,
                input fetch_hi, input shift, input reload, output reg [13:0] fa,
                output [3:0] pixel);
@@ -151,10 +226,10 @@ module ppu_bg (input clk, input [8:0] dot, input [14:0] v, input [2:0] fx, input
   wire [13:0] pt = {1'b0, ctrl[4], nt, 1'b0, v[14:12]};
   // What each dot of an 8-dot fetch group puts on the bus (dot mod 8):
   // 1-2 nametable, 3-4 attribute, 5-6 pattern low, 7-0 pattern high.
-  always @* case (dot[2:0])
-    3'd1, 3'd2: fa = {2'b10, v[11:0]};
-    3'd3, 3'd4: fa = {2'b10, v[11:10], 4'b1111, v[9:7], v[4:2]};
-    3'd5, 3'd6: fa = pt;
+  always @* case (d[40:39])
+    2'd0: fa = {2'b10, v[11:0]};
+    2'd1: fa = {2'b10, v[11:10], 4'b1111, v[9:7], v[4:2]};
+    2'd2: fa = pt;
     default: fa = {pt[13:4], 1'b1, pt[2:0]};
   endcase
   wire [7:0] at_byte_sh = pd >> {v[6], v[1], 1'b0};
@@ -172,7 +247,7 @@ module ppu_bg (input clk, input [8:0] dot, input [14:0] v, input [2:0] fx, input
   wire [15:0] ah_n = reload ? {ah_s[15:8], {8{at[1]}}} : ah_s;
   // The pixel after this dot's shift: bit 15 - fine x of the shifted value.
   wire [15:0] psl = sl_s << fx, psh = sh_s << fx, pal = al_s << fx, pah = ah_s << fx;
-  wire clip = ~mask[3] | (dot <= 9'd8 & ~mask[1]);
+  wire clip = ~mask[3] | (d[20] & ~mask[1]);
   assign pixel = clip ? 4'd0 : {pah[15], pal[15], psh[15], psl[15]};
   ppu_reg8 nt_reg (.clk(clk), .en(1'b1), .d(nt_n), .q(nt));
   ppu_reg2 at_reg (.clk(clk), .en(1'b1), .d(at_n), .q(at));
@@ -249,7 +324,8 @@ endmodule
 // Seen from outside (pixels, priority, sprite 0 hit, overflow) this is the
 // 2C02; it costs one buffer read per dot instead of eight comparisons,
 // shifts and a priority chain.
-module ppu_sprites (input clk, input [8:0] dot, input [8:0] line, input [7:0] ctrl,
+module ppu_sprites (input clk, input [8:0] line, input [40:0] d,
+                    input [3:0] l, input [7:0] ctrl,
                     input [7:0] mask, input [7:0] pd, input [31:0] eval_word,
                     output [5:0] eval_idx, output [13:0] fa, output fetching, output clr_oam_addr,
                     output [1:0] bits, output [1:0] pal, output prio,
@@ -259,33 +335,31 @@ module ppu_sprites (input clk, input [8:0] dot, input [8:0] line, input [7:0] ct
   wire [3:0] cnt;
   wire s0_next;
   wire ren = mask[3] | mask[4];
-  wire vis = line < 9'd240;
-  wire pre = line == 9'd261;
-  wire rl = ren & (vis | pre);
+  wire vis = l[0];
+  wire rl = ren & l[3];
   wire h16 = ctrl[5];
   // Evaluation: OAM entry dot - 65 at dots 65..128 of a visible line.
-  assign eval_idx = dot - 9'd65;
-  wire evaluating = ren & vis & dot >= 9'd65 & dot <= 9'd128;
+  assign eval_idx = d[27:22];
+  wire evaluating = ren & vis & d[12];
   wire [8:0] diff = line - {1'b0, eval_word[7:0]};
   wire in_range = (line >= {1'b0, eval_word[7:0]}) & (diff < (h16 ? 9'd16 : 9'd8));
   wire take = evaluating & in_range & ~cnt[3];
   assign set_ovf = evaluating & in_range & cnt[3];
   always @(posedge clk) if (take) sec[cnt[2:0]] <= eval_word;
-  wire [3:0] cnt_n = (dot == 9'd64) ? 4'd0 : take ? cnt + 4'd1 : cnt;
-  wire s0_next_n = (dot == 9'd64) ? 1'b0 : (take & (eval_idx == 6'd0)) ? 1'b1 : s0_next;
+  wire [3:0] cnt_n = d[13] ? 4'd0 : take ? cnt + 4'd1 : cnt;
+  wire s0_next_n = d[13] ? 1'b0 : (take & (eval_idx == 6'd0)) ? 1'b1 : s0_next;
   // Fetches: slot k at dots 257 + 8k .. 264 + 8k (dot mod 8: 1-4 garbage
   // nametable and attribute, 5-6 pattern low, 7-0 pattern high).
-  wire region = rl & (dot >= 9'd257) & (dot <= 9'd320);
-  wire [8:0] rel = dot - 9'd257;
-  wire [2:0] k = rel[5:3];
+  wire region = rl & d[14];
+  wire [2:0] k = d[30:28];
   wire valid = {1'b0, k} < cnt;
   wire [31:0] e = valid ? sec[k] : 32'hFFFFFFFF;
   wire [8:0] row9 = line - {1'b0, e[7:0]};
   wire [3:0] row = e[23] ? ((h16 ? 4'd15 : 4'd7) - row9[3:0]) : row9[3:0];   // vertical flip
-  wire plane = (dot[2:0] == 3'd7) | (dot[2:0] == 3'd0);
+  wire plane = d[21];
   assign fa = h16 ? {1'b0, e[8], e[15:9], row[3], plane, row[2:0]}
                   : {1'b0, ctrl[3], e[15:8], plane, row[2:0]};
-  assign fetching = region & ((dot[2:0] == 3'd5) | (dot[2:0] == 3'd6) | plane);
+  assign fetching = rl & d[15];
   assign clr_oam_addr = region;
   // The fetched sprite, held while its pixels are written: pattern bytes
   // (flipped horizontally if asked, zero for an empty slot), shifted out
@@ -295,9 +369,9 @@ module ppu_sprites (input clk, input [8:0] dot, input [8:0] line, input [7:0] ct
   wire wvalid, ws0, front;
   wire [7:0] rpd = {pd[0], pd[1], pd[2], pd[3], pd[4], pd[5], pd[6], pd[7]};
   wire [7:0] pat = ~valid ? 8'h00 : e[22] ? rpd : pd;
-  wire fetch_lo = region & (dot[2:0] == 3'd5);
-  wire capture = region & (dot[2:0] == 3'd7);
-  wire filling = rl & (dot >= 9'd264) & (dot <= 9'd327);
+  wire fetch_lo = rl & d[16];
+  wire capture = rl & d[17];
+  wire filling = rl & d[18];
   wire [7:0] lo_fetched;
   ppu_reg8 lo_fetch_reg (.clk(clk), .en(fetch_lo), .d(pat), .q(lo_fetched));
   wire [7:0] lo_n = capture ? lo_fetched : filling ? {lo[6:0], 1'b0} : lo;
@@ -310,8 +384,8 @@ module ppu_sprites (input clk, input [8:0] dot, input [8:0] line, input [7:0] ct
   // front buffer and clears it in the back one; a fill dot writes the held
   // sprite's next pixel into the back one where it is still transparent.
   // The two never fall on the same dot. After a fill, the buffers swap.
-  wire [7:0] px = dot[7:0] - 8'd1;
-  wire showing = (vis | pre) & (dot >= 9'd1) & (dot <= 9'd256);
+  wire [7:0] px = d[38:31];
+  wire showing = l[3] & d[10];
   wire [1:0] wbits = {hi[7], lo[7]};
   wire [5:0] under = buf_ram[{~front, wx[7:0]}];
   wire put = filling & wvalid & (wbits != 2'd0) & ~wx[8] & (under[1:0] == 2'd0);
@@ -319,7 +393,7 @@ module ppu_sprites (input clk, input [8:0] dot, input [8:0] line, input [7:0] ct
     if (showing) buf_ram[{~front, px}] <= 6'd0;
     else if (put) buf_ram[{~front, wx[7:0]}] <= {ws0, wattr[5], wattr[1:0], wbits};
   end
-  wire front_n = (rl & (dot == 9'd328)) ? ~front : front;
+  wire front_n = (rl & d[19]) ? ~front : front;
   wire [5:0] got = buf_ram[{front, px}];
   // With sprites off, or in the clipped left column, there is no sprite.
   wire show = vis & mask[4] & ~((px < 8'd8) & ~mask[2]);
@@ -340,12 +414,12 @@ endmodule
 
 // Background against sprite: the palette index of the pixel, and sprite 0 hit.
 module ppu_mux (input [3:0] bg, input [1:0] sbits, input [1:0] spal, input sprio, input from0,
-                input [7:0] mask, input [8:0] dot, input pixel_on, output [4:0] index,
+                input [7:0] mask, input [40:0] d, input pixel_on, output [4:0] index,
                 output set_hit);
   wire bg_op = bg[1:0] != 2'd0;
   wire sp_op = sbits != 2'd0;
   assign index = (sp_op & (~bg_op | ~sprio)) ? {1'b1, spal, sbits} : bg_op ? {1'b0, bg} : 5'd0;
-  assign set_hit = pixel_on & from0 & sp_op & bg_op & (dot != 9'd256) & mask[3] & mask[4];
+  assign set_hit = pixel_on & from0 & sp_op & bg_op & ~d[5] & mask[3] & mask[4];
 endmodule
 
 module ppu_ref (input clk, input [8:0] dot, input [8:0] line,
@@ -367,8 +441,11 @@ module ppu_ref (input clk, input [8:0] dot, input [8:0] line,
   wire [13:0] spr_fa;
   wire [1:0] sbits, spal;
   wire [4:0] index;
+  wire [40:0] d;
+  wire [3:0] l;
   assign rendering = mask[3] | mask[4];
-  ppu_render_ctl render (.dot(dot), .line(line), .mask(mask), .fetch_nt(fetch_nt),
+  ppu_decode decode (.dot(dot), .line(line), .d(d), .l(l));
+  ppu_render_ctl render (.d(d), .l(l), .mask(mask), .fetch_nt(fetch_nt),
                          .fetch_at(fetch_at), .fetch_lo(fetch_lo), .fetch_hi(fetch_hi),
                          .inc_x(inc_x), .inc_y(inc_y), .copy_h(copy_h), .copy_v(copy_v),
                          .shift(shift), .reload(reload), .pixel_on(pixel_on),
@@ -381,16 +458,16 @@ module ppu_ref (input clk, input [8:0] dot, input [8:0] line,
                  .pal_we(pal_we));
   ppu_oam oam (.clk(clk), .wd(cpu_wd), .w2003(w2003), .w2004(w2004), .clr_addr(clr_oam_addr),
                .eval_idx(eval_idx), .cpu_rd(oam_rd), .eval_word(eval_word));
-  ppu_sprites sprites (.clk(clk), .dot(dot), .line(line), .ctrl(ctrl), .mask(mask), .pd(pd),
+  ppu_sprites sprites (.clk(clk), .line(line), .d(d), .l(l), .ctrl(ctrl), .mask(mask), .pd(pd),
                        .eval_word(eval_word), .eval_idx(eval_idx), .fa(spr_fa),
                        .fetching(spr_fetching), .clr_oam_addr(clr_oam_addr), .bits(sbits),
                        .pal(spal), .prio(sprio), .from0(from0), .set_ovf(set_ovf));
   ppu_mux mux (.bg(pixel), .sbits(sbits), .spal(spal), .sprio(sprio), .from0(from0),
-               .mask(mask), .dot(dot), .pixel_on(pixel_on), .index(index), .set_hit(set_hit));
+               .mask(mask), .d(d), .pixel_on(pixel_on), .index(index), .set_hit(set_hit));
   ppu_loopy loopy (.clk(clk), .wd(cpu_wd), .ctrl(ctrl), .w2000(w2000), .w2005(w2005),
                    .w2006(w2006), .r2002(r2002), .a2007(a2007), .inc_x(inc_x), .inc_y(inc_y),
                    .copy_h(copy_h), .copy_v(copy_v), .v(v), .fx(fx));
-  ppu_bg bg (.clk(clk), .dot(dot), .v(v), .fx(fx), .ctrl(ctrl), .mask(mask), .pd(pd),
+  ppu_bg bg (.clk(clk), .d(d), .v(v), .fx(fx), .ctrl(ctrl), .mask(mask), .pd(pd),
              .fetch_nt(fetch_nt), .fetch_at(fetch_at), .fetch_lo(fetch_lo), .fetch_hi(fetch_hi),
              .shift(shift), .reload(reload), .fa(fa), .pixel(pixel));
   ppu_palette palette (.clk(clk), .we(pal_we), .waddr(v[4:0]), .wd(cpu_wd), .index(index),
