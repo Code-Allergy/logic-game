@@ -1290,6 +1290,15 @@ fn attribute_ops(
                                 mark(data, &mut need);
                             }
                         }
+                        logi_sim::compile::Commit::RamWriteMasked {
+                            mask, addr, data, ..
+                        } => {
+                            mark(mask, &mut need);
+                            if sim.read(mask) != 0 {
+                                mark(addr, &mut need);
+                                mark(data, &mut need);
+                            }
+                        }
                         _ => {
                             for s in c.reads() {
                                 mark(s, &mut need);
