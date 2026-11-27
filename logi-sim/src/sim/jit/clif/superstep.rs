@@ -1,7 +1,6 @@
 //! Superstep chunks as Cranelift functions (see `jit/superstep.rs` for the
 //! stream, the store plan and the rules they follow).
 
-use cranelift_codegen::ir::condcodes::IntCC;
 #[cfg(feature = "counters")]
 use cranelift_codegen::ir::types::I64;
 use cranelift_codegen::ir::{Function, InstBuilder, Value};
@@ -11,7 +10,7 @@ use foldhash::{HashMap, HashMapExt};
 
 #[cfg(feature = "counters")]
 use super::flags;
-use super::{Slots, emit_instr, emit_pack, emit_ram_write};
+use super::{Slots, emit_instr, emit_pack, emit_ram_write, guard_test};
 use crate::compile::{Commit, Program};
 use crate::sim::jit::superstep::{Plan, SItem, Stream};
 use crate::sim::jit::{BodyRef, Item};
@@ -78,21 +77,7 @@ pub(super) fn build_chunk(
             close(&mut b, &mut sl, &mut mem_ptrs, &mut open);
             if seg > 0 {
                 let (body, g) = st.regions[seg as usize - 1];
-                let mut test: Option<Value> = None;
-                for c in &bodies[body as usize].guards[g as usize].conds {
-                    let v = sl.read(&mut b, c.slot);
-                    let cc = if c.when {
-                        IntCC::NotEqual
-                    } else {
-                        IntCC::Equal
-                    };
-                    let t = b.ins().icmp_imm_u(cc, v, 0);
-                    test = Some(match test {
-                        Some(x) => b.ins().band(x, t),
-                        None => t,
-                    });
-                }
-                let test = test.expect("a guard has conditions");
+                let test = guard_test(&mut b, &mut sl, &bodies[body as usize].guards[g as usize]);
                 let then = b.create_block();
                 let merge = b.create_block();
                 // A range the previous chunk began was counted there.

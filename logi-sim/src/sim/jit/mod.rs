@@ -540,7 +540,7 @@ fn compile_body(
         // settle (`Sim::evaluate`), so they must be in the slots.
         #[cfg(feature = "counters")]
         for g in body.guards {
-            live.extend(g.conds.iter().map(|c| c.slot));
+            live.extend(g.slots());
         }
     }
     let mut lives = vec![HashSet::new(); chunks.len()];
@@ -552,9 +552,7 @@ fn compile_body(
                     live.insert(s);
                 });
                 if seg > 0 {
-                    for c in &body.guards[seg as usize - 1].conds {
-                        live.insert(c.slot);
-                    }
+                    live.extend(body.guards[seg as usize - 1].slots());
                 }
             }
         }

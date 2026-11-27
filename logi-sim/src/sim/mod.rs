@@ -1769,10 +1769,8 @@ impl Sim {
                 for b in code.blocks.get_unchecked(at..g.start as usize) {
                     code::exec(&env, b, 0, b.len, s);
                 }
-                if g.conds
-                    .iter()
-                    .all(|c| (*s.add(c.slot as usize) != 0) == c.when)
-                {
+                let ok = |c: &crate::compile::Cond| (*s.add(c.slot as usize) != 0) == c.when;
+                if g.conds.iter().all(ok) && (g.any.is_empty() || g.any.iter().any(ok)) {
                     for b in code.blocks.get_unchecked(g.start as usize..g.end as usize) {
                         code::exec(&env, b, 0, b.len, s);
                     }
@@ -2178,7 +2176,7 @@ fn check_body(
         if g.start < at || g.end < g.start || g.end as usize > blocks.len() {
             return bad(format!("bad guard {g:?}"));
         }
-        if g.conds.iter().any(|c| !slot_ok(c.slot)) {
+        if g.slots().any(|s| !slot_ok(s)) {
             return bad(format!("bad guard condition {g:?}"));
         }
         at = g.end;

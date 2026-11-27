@@ -19,7 +19,7 @@ use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
 use super::superstep::{Plan, SItem, Stream};
 use super::{BodyRef, CommitFn, Item, JitError, SettleFn, SuperFn, arity, operands};
-use crate::compile::{Commit, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
+use crate::compile::{Commit, Cond, Guard, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
 use crate::netlist::mask;
 
 /// Whether native code probes its stack: where the system needs it (see
@@ -497,6 +497,40 @@ fn bool64(b: &mut FunctionBuilder<'_>, c: Value) -> Value {
     b.ins().uextend(I64, c)
 }
 
+/// The test of guard `g` (nonzero when it holds): its conditions and'd,
+/// and with the or of its `any` conditions.
+fn guard_test(b: &mut FunctionBuilder<'_>, sl: &mut Slots, g: &Guard) -> Value {
+    let mut cond = |b: &mut FunctionBuilder<'_>, c: &Cond| {
+        let v = sl.read(b, c.slot);
+        let cc = if c.when {
+            IntCC::NotEqual
+        } else {
+            IntCC::Equal
+        };
+        b.ins().icmp_imm_u(cc, v, 0)
+    };
+    let mut all: Option<Value> = None;
+    for c in &g.conds {
+        let t = cond(b, c);
+        all = Some(match all {
+            Some(x) => b.ins().band(x, t),
+            None => t,
+        });
+    }
+    let mut any: Option<Value> = None;
+    for c in &g.any {
+        let t = cond(b, c);
+        any = Some(match any {
+            Some(x) => b.ins().bor(x, t),
+            None => t,
+        });
+    }
+    match (all, any) {
+        (Some(x), Some(y)) => b.ins().band(x, y),
+        (x, y) => x.or(y).expect("a guard has conditions"),
+    }
+}
+
 /// An open guarded run in a settle chunk: the block after it, and the
 /// slot and memory-pointer caches from before it (values defined inside
 /// do not dominate the code after it).
@@ -550,21 +584,7 @@ fn build_settle(
                 mem_ptrs = ptrs;
             }
             if seg > 0 {
-                let mut test: Option<Value> = None;
-                for c in &body.guards[seg as usize - 1].conds {
-                    let v = sl.read(&mut b, c.slot);
-                    let cc = if c.when {
-                        IntCC::NotEqual
-                    } else {
-                        IntCC::Equal
-                    };
-                    let t = b.ins().icmp_imm_u(cc, v, 0);
-                    test = Some(match test {
-                        Some(x) => b.ins().band(x, t),
-                        None => t,
-                    });
-                }
-                let test = test.expect("a guard has conditions");
+                let test = guard_test(&mut b, &mut sl, &body.guards[seg as usize - 1]);
                 let then = b.create_block();
                 let merge = b.create_block();
                 b.ins().brif(test, then, &[], merge, &[]);
