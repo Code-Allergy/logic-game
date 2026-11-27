@@ -48,7 +48,7 @@ fn the_jit_runs_generated_modules() {
         if !b.used {
             continue;
         }
-        let mut builder = super::Builder::new().unwrap();
+        let mut builder = super::Builder::new(0).unwrap();
         let (mut n, mut bytes) = (0, 0);
         super::super::compile_body(&mut builder, &sim.program, &b, &mut n, &mut bytes).unwrap();
         let (module, _) = builder.bytes();

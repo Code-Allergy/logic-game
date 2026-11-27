@@ -128,7 +128,8 @@ impl Finished {
 }
 
 impl Builder {
-    pub fn new() -> Result<Self, JitError> {
+    /// A builder (`hint`, the code's estimated size, is not needed).
+    pub fn new(_hint: usize) -> Result<Self, JitError> {
         Ok(Builder {
             funcs: Vec::new(),
             exports: Vec::new(),
@@ -163,9 +164,24 @@ impl Builder {
         body: &BodyRef<'_>,
         items: &[(Item, u32)],
         live: Option<&HashSet<u32>>,
+        inner: bool,
     ) -> Result<(FnId, usize), JitError> {
         check_slots(p)?;
         let f = build_settle(p, body, items, live);
+        // An inner chunk is only called by its body's entry, directly.
+        Ok(self.define(T_SETTLE, f, !inner))
+    }
+
+    /// A body's settle entry ([`SettleFn`]): calls its `chunks` (defined
+    /// `inner`) in order.
+    pub fn settle_entry(&mut self, chunks: &[FnId]) -> Result<(FnId, usize), JitError> {
+        let mut f = Func::new(3);
+        for &c in chunks {
+            for a in 0..3 {
+                f.get(a);
+            }
+            f.call(c);
+        }
         Ok(self.define(T_SETTLE, f, true))
     }
 
