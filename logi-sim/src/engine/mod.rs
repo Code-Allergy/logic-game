@@ -32,7 +32,7 @@ use std::time::Duration;
 use crate::compile::func::MatchCache;
 use crate::compile::{CompileError, NodePath, Options, Program, compile_cached};
 use crate::netlist::{Design, NetId, NodeId};
-use crate::sim::{Sim, SimOptions, SpecBuilt, SpecRequest};
+use crate::sim::{Sim, SimOptions, SpecBuilt, SpecRequest, SpecStats};
 
 /// Tick pacing.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -532,6 +532,12 @@ impl EngineCore {
         self.sim.as_ref().map_or(0, |s| s.spec_stats().installed)
     }
 
+    /// What specialization did in the running program (hits, bodies, the
+    /// fallback to supersteps).
+    pub fn spec_stats(&self) -> SpecStats {
+        self.sim.as_ref().map(Sim::spec_stats).unwrap_or_default()
+    }
+
     /// Builds handed out and not yet installed.
     pub fn spec_inflight(&self) -> usize {
         self.spec_inflight
@@ -898,6 +904,8 @@ mod threaded {
         /// Specialized bodies (and plans) installed so far in the running
         /// program, as of the last publish.
         spec_installed: AtomicU64,
+        /// [`EngineCore::spec_stats`] as of the last publish.
+        spec_stats: Mutex<SpecStats>,
     }
 
     /// Runs an [`EngineCore`] on a worker thread. Designs compile on a
@@ -948,6 +956,7 @@ mod threaded {
                 tick: AtomicU64::new(0),
                 revision: AtomicU64::new(0),
                 spec_installed: AtomicU64::new(0),
+                spec_stats: Mutex::new(SpecStats::default()),
             });
 
             let back = tx.clone();
@@ -1108,6 +1117,11 @@ mod threaded {
         pub fn spec_installed(&self) -> u64 {
             self.shared.spec_installed.load(Ordering::Relaxed)
         }
+        /// What specialization did in the running program, as of the last
+        /// frame.
+        pub fn spec_stats(&self) -> SpecStats {
+            *self.shared.spec_stats.lock().expect("stats lock")
+        }
         pub fn try_event(&self) -> Option<EngineEvent> {
             self.events.try_recv().ok()
         }
@@ -1163,6 +1177,7 @@ mod threaded {
             shared
                 .spec_installed
                 .store(core.spec_installed(), Ordering::Relaxed);
+            *shared.spec_stats.lock().expect("stats lock") = core.spec_stats();
         };
 
         // Returns false on shutdown.

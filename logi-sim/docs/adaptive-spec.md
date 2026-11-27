@@ -6,7 +6,9 @@ sampling window) implemented (`sim/spec.rs`, section 4 "P4 as built" and
 "P5b as built"); the pure part of the plan choice (`compile/spec/plan.rs`,
 P6, section 3b); P8 measured, partly built ("P8 as built": keyed
 supersteps do not pay, the superstep comes back where nothing is keyed);
-P7 and P9 designed here.
+P7 built ("P7 as built"); the fallback from keys to supersteps where
+specialization does not pay built ("Fallback to supersteps"); P9
+designed here.
 
 ## 1. Goal
 
@@ -625,6 +627,101 @@ Measured first, then built what pays:
   together: NES 3.2 s (7.1M ticks), Blade Buster 6.3 s (10.0M ticks).
   Longest gap between tick-count updates (frame stalls): 10 to 40 ms with
   spec off and 15 to 30 ms on, nothing at the install of the plan.
+
+### Fallback to supersteps (as built)
+
+Keys and supersteps were alternatives fixed per `Sim`: a keyed plan
+disabled the superstep for every tick, and nothing noticed when keys
+cost more than they saved (a low hit rate while bodies build or are
+evicted, a scene whose keys are many, the dispatch itself: key packing
+and lookup, the call loop and the commit are about a fifth of a keyed
+tick on the NES). `SpecOptions::fallback: Option<FallbackOptions>` lets
+each `run` of a keyed `Sim` take either path, by measured cost.
+
+- **Policy** (`sim/spec/fallback.rs`, pure: fed ticks and nanoseconds of
+  whole `run` calls, it says the mode of the next one). Keyed runs are
+  measured per `window` ticks (2^20). A window that costs more than the
+  baseline (nanoseconds per tick of the superstep) by over `margin` (5%),
+  every `resample` (16) windows, and before any baseline, is followed by
+  a *sample*: `sample` (2^18) ticks of supersteps measuring the baseline
+  afresh right after the window it judges (the load of a shared machine
+  drifts). `patience` (2) confirmed losing windows in a row fall back.
+  Fallen back, the baseline is measured over the whole wait; after
+  `probe` superstep ticks (2^22 at first, doubled per lost probe up to
+  2^26, halved per confirmed winning window back down) one keyed window
+  probes; it comes back only if it beats the baseline by `margin`. So
+  the band between 1/1.05 and 1.05 is hysteresis: the runtime stays
+  where it is. Calls under `min_run` (256) ticks are neither measured nor
+  switched (they run keyed). Samples run about 1.5% of the ticks as
+  supersteps while keys pay (3% with `resample` 8, as measured below).
+- **Exactness.** A mode holds for a whole `run`, and both modes leave
+  the same state at its end, so switching at any call boundary is exact.
+  A superstep starts at phase 0 after a settled tick whose commit it
+  runs first (the fused body's), so the ticks of a fallen-back `run`
+  before its first superstep settle with the general fused body
+  (`Sim::general_tick`), not the keyed path: a specialized body may not
+  compute what the general commit reads (mutation 7, caught). The ticks
+  after the last superstep go through the keyed path as before.
+- **Code.** With the fallback on, the layout's native code keeps its
+  superstep beside the keys (a fixed plan), and an automatic plan's
+  request compiles the layout's superstep whatever the plan keys
+  (`Spec::superstep`, pinned as before). Without native code there is no
+  superstep and no fallback; not on wasm32 (no clock).
+- **Keys while fallen back** are not computed: no misses are counted (no
+  new body is requested) and no body ages (bodies are not evicted for
+  disuse). A probe is when the keys of the moment turn hot and get
+  bodies, which install while the runtime waits for the next probe.
+- **Switch.** `SpecOptions::default()` keeps the fallback off (library
+  users, tests and their counters are unchanged); `SpecOptions::
+  interactive()` turns it on, and `SimOptions::interactive()` (the
+  game's engine) uses it. `SpecStats` adds `super_ticks`, `fallbacks`,
+  `probes` and `fallen`; `Engine::spec_stats` publishes them per frame.
+- **Tests** (`sim/spec/fallback_tests.rs`, unit tests in
+  `sim/spec/fallback.rs`): with modes forced to alternate at every `run`
+  or always supersteps (`FORCE`), `check_batches_with` and `check_pair`
+  on the microcoded machine (fixed plans with all and some key values,
+  adaptive tables under a cap of 2, an automatic plan) and on every
+  `standard_configs` design with default and debug options; the wall
+  clock with windows of 4 ticks (flips at random boundaries); with a
+  virtual clock (`VIRTUAL`: nanoseconds per superstep tick, hit and
+  miss): a key that always misses falls back and mostly runs supersteps
+  after, keys that always hit stay on (samples only), a cost that moves
+  within the margin, past it, back within it and below it moves the
+  runtime both ways with hysteresis; no superstep (interpreter) and
+  short runs leave the fallback out; a plan keying nothing is left alone.
+  Mutations caught: the keyed path before a superstep (7), each of the
+  superstep's mutations on keyed `Sim`s forced to supersteps (so they do
+  run), and in the policy: no patience, coming back within the margin,
+  no backoff, never falling back, no resampling, no shrinking of the
+  probe interval. `nes_bench --compare` checks a `Sim` whose fallback
+  flips by the wall clock on windows of 64 ticks: 500k NES ticks in
+  batches of 1 to 41 with 354 fallbacks, the same state at every
+  boundary.
+- **Measured** (`engine_spec --modes off,on,fallback`: threaded engine,
+  JIT, unlimited rate, median of the 5 s intervals of a 30 s run, three
+  rounds interleaved, k ticks/s, shared 4-core machine; "on" is spec
+  without the fallback):
+
+  | | off | on | fallback |
+  |---|---|---|---|
+  | NES console (nestest) | 5000, 4893, 5228 | 5664, 5971, 5751 (+13..+22%) | 5534, 6188, 5760; 0 fallbacks |
+  | Blade Buster (MMC3) | 4581, 4625, 4529 | 4759, 4436, 4692 (-4..+4%) | 4511, 4675, 4482; 0 to 6 fallbacks |
+  | RasterDemo | 5165, 5158, 5198 | 5094, 4946, 4707 (-1..-9%) | 5016, 4833, 4836; 0 to 4 fallbacks |
+  | Blade Buster, `--per-phase 2` | 4484, 4472 | 3984 at 66% hits (falling to 3288), 4691 at 95% | 4460 at 95%, 4473 at 66% hits (5 fallbacks, 85 to 94% supersteps) |
+  | NES console, `--per-phase 2` | 5172, 5119 | 6072, 6118 | 5970, 5891; 0 fallbacks |
+
+  Hit rates: NES 98%, Blade Buster 96%, RasterDemo 85%. A cap of 2
+  bodies per phase (`--per-phase 2`) gives Blade Buster one of two plans
+  run to run, hitting 66% or 95%: at 66% keys lose 11% and more as the
+  run goes on, and the fallback runs supersteps 85 to 94% of the time
+  and holds the rate of spec off. Where keys win (the NES, +13 to +22%)
+  the fallback keeps them (no fallback in any run; the samples ran 3%
+  of the ticks as supersteps); where the two are within the margin
+  (Blade Buster, RasterDemo) it mostly stays keyed. The 5 s intervals
+  vary by 5 to 10% on this machine, more than the differences it
+  arbitrates there. (The original report of keys losing 30% on Blade
+  Buster at a 31% hit rate did not reproduce on the current code: its
+  plans hit 95 to 97% here.)
 
 ### Per fused tick (`Sim::run`, the path without a superstep)
 

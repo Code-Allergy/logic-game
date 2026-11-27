@@ -57,7 +57,8 @@ mod spec;
 mod tests;
 
 pub use spec::{
-    PhasePlan, SpecBuilt, SpecOptions, SpecPlan, SpecRequest, SpecStats, build_spec, spec_contexts,
+    FallbackOptions, PhasePlan, SpecBuilt, SpecOptions, SpecPlan, SpecRequest, SpecStats,
+    build_spec, spec_contexts,
 };
 
 use std::collections::HashMap;
@@ -164,11 +165,37 @@ pub struct SimOptions {
     /// then the body built for the key's value, or the fallback (the
     /// general body without the prefix's work) on a miss. Needs `fuse`;
     /// single-threaded only. While a phase is keyed (or an automatic plan
-    /// is awaited), [`Sim::run`] runs no supersteps; an automatic plan
-    /// that keys no phase brings the superstep with it (compiled with the
-    /// plan). Like the known-bits bodies, a ROM write switches it off
-    /// until [`Sim::reset`]. Off (`None`) by default.
+    /// is awaited), [`Sim::run`] runs no supersteps, unless
+    /// [`SpecOptions::fallback`] runs them where keys do not pay; an
+    /// automatic plan that keys no phase brings the superstep with it
+    /// (compiled with the plan). Like the known-bits bodies, a ROM write
+    /// switches it off until [`Sim::reset`]. Off (`None`) by default.
     pub spec: Option<SpecOptions>,
+}
+
+/// Where the fallback's measurement of a `run` starts.
+#[cfg(feature = "jit")]
+#[derive(Debug, Clone, Copy)]
+enum Mark {
+    #[cfg(not(target_arch = "wasm32"))]
+    Wall(std::time::Instant),
+    /// Tests: hits and misses so far (`spec::VIRTUAL`).
+    #[cfg(test)]
+    Virtual(u64, u64),
+}
+
+#[cfg(feature = "jit")]
+impl Mark {
+    /// Now, by the wall clock (none on wasm32: no fallback there).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    fn wall() -> Option<Mark> {
+        Some(Mark::Wall(std::time::Instant::now()))
+    }
+    #[cfg(target_arch = "wasm32")]
+    fn wall() -> Option<Mark> {
+        None
+    }
 }
 
 /// Default [`SimOptions::par_min`] (see the design doc, section 13).
@@ -236,7 +263,8 @@ impl SimOptions {
 
     /// The options of an interactive engine ([`crate::engine::Engine`]):
     /// the JIT, tiered by the engine, and with it adaptive state-keyed
-    /// specialization with an automatic plan ([`SpecOptions::default`]),
+    /// specialization with an automatic plan and the fallback to
+    /// supersteps where keys do not pay ([`SpecOptions::interactive`]),
     /// whose bodies the engine builds on its compile thread. Results are
     /// those of the defaults; the threaded engine ran 25 to 45% faster on
     /// the NES console and 25% on an MMC3 game once the bodies were in
@@ -251,7 +279,7 @@ impl SimOptions {
         Self {
             jit: cfg!(feature = "jit"),
             spec: cfg!(all(feature = "jit", not(target_arch = "wasm32")))
-                .then(SpecOptions::default),
+                .then(SpecOptions::interactive),
             ..Self::default()
         }
     }
@@ -592,6 +620,8 @@ pub struct Sim {
     /// The generation of builds this `Sim` accepts, and what its tables
     /// did.
     spec_life: spec::Life,
+    /// The fallback from keys to supersteps ([`SpecOptions::fallback`]).
+    spec_fallback: Option<Box<spec::Fallback>>,
     /// The body that settled the slots now: the next commit is its own
     /// (a known-bits body may not compute what the full body's commits
     /// read). Between calls it is the full body of the tick.
@@ -707,6 +737,11 @@ impl Sim {
             folded,
             spec,
             spec_life: spec::Life::new(),
+            spec_fallback: options
+                .spec
+                .as_ref()
+                .and_then(|s| s.fallback.as_ref())
+                .map(|f| Box::new(spec::Fallback::new(f))),
             last: 0,
             stash: None,
             options,
@@ -799,14 +834,17 @@ impl Sim {
     ) -> Result<Compiled, jit::JitError> {
         let p = &*self.program;
         let bodies = self.body_refs();
-        // No superstep while a phase is keyed or a plan is awaited:
-        // supersteps run the general fused bodies (an automatic plan that
-        // keys nothing brings its own, `Spec::superstep`).
-        let (parts, live_end) = if self.spec.phases.is_empty() && !self.spec.awaiting_plan {
-            self.super_parts(&bodies).unwrap_or_default()
-        } else {
-            Default::default()
-        };
+        // No superstep while a phase is keyed (unless the fallback may run
+        // it) or a plan is awaited: supersteps run the general fused
+        // bodies (an automatic plan that keys nothing brings its own,
+        // `Spec::superstep`).
+        let keyed_ok = self.spec_fallback.is_some();
+        let (parts, live_end) =
+            if (self.spec.phases.is_empty() || keyed_ok) && !self.spec.awaiting_plan {
+                self.super_parts(&bodies).unwrap_or_default()
+            } else {
+                Default::default()
+            };
         let sup = (!parts.is_empty()).then(|| jit::SuperRef {
             parts: &parts,
             ticks: parts.len() as u64 / 2,
@@ -1150,15 +1188,33 @@ impl Sim {
             return;
         }
         let mut left = ticks - 1;
+        // Keys or supersteps, as the fallback says (`None`: no choice).
+        #[cfg(feature = "jit")]
+        let choice = self.fallback_choice(ticks);
+        #[cfg(feature = "jit")]
+        let keyed_super = choice.is_some_and(|c| c.0 == spec::Mode::Super);
         #[cfg(feature = "jit")]
         if self.options.superstep
-            && !self.spec.hooked
+            && (!self.spec.hooked || keyed_super)
             && let Some((entry, n)) = self.super_fn()
             && left > n
         {
             // The first tick applies the inputs (supersteps do not), and
-            // a superstep starts at phase 0.
-            self.fused_tick();
+            // a superstep starts at phase 0, after a settle with the
+            // general fused body (its commit is the superstep's first
+            // part; a specialized body may not compute what it reads).
+            #[cfg(test)]
+            let general = spec::MUTATION.get() != 7;
+            #[cfg(not(test))]
+            let general = true;
+            let lead = |s: &mut Self| {
+                if keyed_super && general {
+                    s.general_tick();
+                } else {
+                    s.fused_tick();
+                }
+            };
+            lead(self);
             left -= 1;
             let period = self.period;
             #[cfg(any(test, feature = "selftest"))]
@@ -1166,7 +1222,7 @@ impl Sim {
             #[cfg(not(any(test, feature = "selftest")))]
             let aligned = |t: u64| t.is_multiple_of(period);
             while left > 0 && !aligned(self.tick) {
-                self.fused_tick();
+                lead(self);
                 left -= 1;
             }
             while left >= n {
@@ -1193,6 +1249,10 @@ impl Sim {
             self.fused_tick();
         }
         self.tick();
+        #[cfg(feature = "jit")]
+        if let Some(c) = choice {
+            self.fallback_record(c, ticks);
+        }
         if self.options.spec.as_ref().is_some_and(|s| s.inline_build) && self.spec.has_work() {
             self.spec_build_inline();
         }
@@ -1214,6 +1274,92 @@ impl Sim {
             return;
         }
         self.settle(self.fused[k]);
+    }
+
+    /// A fused tick settled by the phase's general fused body, keyed or
+    /// not (before a superstep the fallback runs on a keyed `Sim`).
+    #[cfg(feature = "jit")]
+    fn general_tick(&mut self) {
+        #[cfg(feature = "counters")]
+        {
+            self.counters.ticks += 1;
+        }
+        self.commit(self.last);
+        self.tick += 1;
+        self.settle(self.fused[(self.tick % self.period) as usize]);
+    }
+
+    /// Whether this `run` of `ticks` ticks of a keyed `Sim` may choose
+    /// between keys and supersteps ([`SpecOptions::fallback`]), and
+    /// which: the mode, and what the run's cost is measured from.
+    #[cfg(feature = "jit")]
+    #[inline]
+    fn fallback_choice(&self, ticks: u64) -> Option<(spec::Mode, Mark)> {
+        let f = self.spec_fallback.as_ref()?;
+        if self.spec.phases.is_empty()
+            || self.spec.awaiting_plan
+            || !self.options.superstep
+            || self.super_fn().is_none()
+        {
+            return None;
+        }
+        #[cfg(test)]
+        let mode = match spec::FORCE.get() {
+            0 => f.mode(ticks)?,
+            1 => {
+                thread_local!(static FLIP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+                if FLIP.replace(!FLIP.get()) {
+                    spec::Mode::Super
+                } else {
+                    spec::Mode::Spec
+                }
+            }
+            _ => spec::Mode::Super,
+        };
+        #[cfg(not(test))]
+        let mode = f.mode(ticks)?;
+        Some((mode, self.mark()?))
+    }
+
+    /// Where a measured `run` starts.
+    #[cfg(feature = "jit")]
+    #[inline]
+    fn mark(&self) -> Option<Mark> {
+        #[cfg(test)]
+        if spec::VIRTUAL.get().is_some() {
+            let (h, m) = self
+                .spec
+                .phases
+                .iter()
+                .flatten()
+                .fold((0, 0), |(h, m), ps| (h + ps.hits, m + ps.misses));
+            return Some(Mark::Virtual(h, m));
+        }
+        Mark::wall()
+    }
+
+    /// The fallback's measurement of a `run` of `ticks` ticks.
+    #[cfg(feature = "jit")]
+    fn fallback_record(&mut self, (mode, mark): (spec::Mode, Mark), ticks: u64) {
+        let nanos = match mark {
+            #[cfg(not(target_arch = "wasm32"))]
+            Mark::Wall(t) => t.elapsed().as_nanos() as u64,
+            #[cfg(test)]
+            Mark::Virtual(h0, m0) => {
+                let (sup, hit, miss) = spec::VIRTUAL.get().expect("a virtual clock");
+                let (h, m) = self
+                    .spec
+                    .phases
+                    .iter()
+                    .flatten()
+                    .fold((0, 0), |(h, m), ps| (h + ps.hits, m + ps.misses));
+                let (h, m) = (h - h0, m - m0);
+                (ticks - h - m) * sup + h * hit + m * miss
+            }
+        };
+        if let Some(f) = &mut self.spec_fallback {
+            f.record(mode, ticks, nanos);
+        }
     }
 
     /// Fused ticks of a `run` while some phase is keyed (and no plan is
