@@ -10,8 +10,11 @@ use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, MemFlagsData, UserF
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_jit::{
+    ArenaMemoryProvider, BranchProtection, JITBuilder, JITMemoryKind, JITMemoryProvider, JITModule,
+    SystemMemoryProvider,
+};
+use cranelift_module::{FuncId, Linkage, Module, ModuleResult};
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
 use super::superstep::{Plan, SItem, Stream};
@@ -75,8 +78,9 @@ impl Finished {
 }
 
 impl Builder {
-    pub fn new() -> Result<Self, JitError> {
-        let owned = new_module()?;
+    /// A builder for about `hint` bytes of code (see `code_hint`).
+    pub fn new(hint: usize) -> Result<Self, JitError> {
+        let owned = new_module(hint)?;
         let ctx = owned.0.as_ref().expect("just created").make_context();
         Ok(Builder {
             owned,
@@ -248,7 +252,7 @@ impl Drop for Owned {
 
 /// A Cranelift module configured for this crate's code (see
 /// `Builder`), owned so that its code is freed on drop.
-fn new_module() -> Result<Owned, JitError> {
+fn new_module(hint: usize) -> Result<Owned, JitError> {
     let err = |e: &dyn std::fmt::Display| JitError(e.to_string());
     let mut flags = settings::builder();
     // The IR is already simplified (constant folding, CSE and DCE ran in
@@ -299,10 +303,110 @@ fn new_module() -> Result<Owned, JitError> {
         .map_err(|e| err(&e))?
         .finish(settings::Flags::new(flags))
         .map_err(|e| err(&e))?;
-    Ok(Owned(Some(JITModule::new(JITBuilder::with_isa(
-        isa,
-        cranelift_module::default_libcall_names(),
-    )))))
+    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    let t = super::tune::get();
+    if t.arena || t.align > 1 {
+        builder.memory_provider(Box::new(CodeMemory {
+            arenas: Vec::new(),
+            next: hint.next_power_of_two().clamp(ARENA_MIN, ARENA_MAX),
+            align: t.align,
+            system: (!t.arena).then(SystemMemoryProvider::new),
+        }));
+    }
+    Ok(Owned(Some(JITModule::new(builder))))
+}
+
+/// Bounds of a first arena's size (a module's estimated code size).
+const ARENA_MIN: usize = 64 << 10;
+const ARENA_MAX: usize = 64 << 20;
+
+/// Where a module's code goes (`tune`: `LOGI_JIT_ARENA`, `LOGI_JIT_ALIGN`).
+///
+/// By default `cranelift-jit` maps a new page-rounded block for each
+/// function that does not fit what is left of the last block, and leaves
+/// that rest unused. The system usually maps each block just below the
+/// one before, so functions that run one after the other sit in
+/// descending pages, each from the start of its page: the hot code of a
+/// tick then crowds the instruction cache's sets for the low page
+/// offsets (with chunks of about 3 KiB, every set past 3 KiB stays
+/// empty), and sequential fetch never runs on into the next function. On
+/// `BladeBuster` (spec off), superstep chunks of 128 items ran 26 %
+/// slower than chunks of 64 that way, and 3 % faster in arenas.
+///
+/// Here functions are placed in order, back to back (after `align`), in
+/// arenas reserved up front (`ArenaMemoryProvider`: address space only,
+/// committed as it is used); a function that does not fit the last arena
+/// starts a new one, twice as large.
+struct CodeMemory {
+    arenas: Vec<ArenaMemoryProvider>,
+    /// The size of the next arena.
+    next: usize,
+    align: u64,
+    /// Placement as by default (`LOGI_JIT_ARENA=0`), aligned to `align`.
+    system: Option<SystemMemoryProvider>,
+}
+
+impl JITMemoryProvider for CodeMemory {
+    fn allocate(
+        &mut self,
+        size: usize,
+        align: u64,
+        kind: JITMemoryKind,
+    ) -> std::io::Result<*mut u8> {
+        let align = match kind {
+            JITMemoryKind::Executable => align.max(self.align),
+            _ => align,
+        };
+        if let Some(s) = &mut self.system {
+            return s.allocate(size, align, kind);
+        }
+        if let Some(a) = self.arenas.last_mut()
+            && let Ok(p) = a.allocate(size, align, same(&kind))
+        {
+            return Ok(p);
+        }
+        // Room for the function, its alignment, and a segment per kind
+        // (each starts on a page).
+        let want = (size + align as usize + (16 << 10)).next_power_of_two();
+        let n = self.next.max(want);
+        self.next = n.saturating_mul(2);
+        let mut a = ArenaMemoryProvider::new_with_size(n).map_err(std::io::Error::other)?;
+        let p = a.allocate(size, align, kind);
+        self.arenas.push(a);
+        p
+    }
+
+    unsafe fn free_memory(&mut self) {
+        for a in &mut self.arenas {
+            // SAFETY: the caller's contract (`Owned::drop`): nothing uses
+            // the code any more.
+            unsafe { a.free_memory() };
+        }
+        self.arenas.clear();
+        if let Some(s) = &mut self.system {
+            // SAFETY: as above.
+            unsafe { s.free_memory() };
+        }
+    }
+
+    fn finalize(&mut self, branch_protection: BranchProtection) -> ModuleResult<()> {
+        for a in &mut self.arenas {
+            a.finalize(branch_protection)?;
+        }
+        match &mut self.system {
+            Some(s) => s.finalize(branch_protection),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A copy of `k` (`JITMemoryKind` is not `Copy`).
+fn same(k: &JITMemoryKind) -> JITMemoryKind {
+    match k {
+        JITMemoryKind::Executable => JITMemoryKind::Executable,
+        JITMemoryKind::Writable => JITMemoryKind::Writable,
+        JITMemoryKind::ReadOnly => JITMemoryKind::ReadOnly,
+    }
 }
 
 /// Bytes of machine code `ctx` holds after `define_function`.

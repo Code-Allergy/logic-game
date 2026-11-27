@@ -69,6 +69,7 @@ mod clif;
 mod superstep;
 #[cfg(any(test, feature = "selftest"))]
 pub mod tests;
+mod tune;
 mod unit;
 #[cfg(any(test, feature = "selftest"))]
 pub mod unit_tests;
@@ -111,6 +112,14 @@ pub const CHUNK: usize = 64;
 
 /// Commits per commit chunk at most.
 pub const COMMIT_CHUNK: usize = 256;
+
+/// Bytes each native function is aligned to (Cranelift's own minimum).
+/// Aligning to 64 measured the same.
+pub const FN_ALIGN: u64 = 1;
+
+/// Whether native code is placed in order in contiguous arenas (see
+/// `clif::CodeMemory`) rather than where `cranelift-jit` puts it.
+pub const ARENA: bool = true;
 
 /// Bodies with more instructions (or packed words) than this run
 /// interpreted. Native code is about 20 bytes per instruction, so beyond
@@ -361,7 +370,7 @@ fn define_program(
     bodies: &[BodyRef<'_>],
     superstep: Option<&SuperRef<'_>>,
 ) -> Result<(backend::Builder, Layout), JitError> {
-    let mut b = backend::Builder::new()?;
+    let mut b = backend::Builder::new(code_hint(bodies) * if superstep.is_some() { 2 } else { 1 })?;
     let mut ids: Vec<Option<Ids>> = Vec::with_capacity(bodies.len());
     let mut count = 0usize;
     let mut bytes = 0usize;
@@ -390,6 +399,17 @@ fn define_program(
             code_bytes: bytes,
         },
     ))
+}
+
+/// About how many bytes of native code `bodies` compile to (for the size
+/// of the first arena, see `clif::CodeMemory`).
+fn code_hint(bodies: &[BodyRef<'_>]) -> usize {
+    bodies
+        .iter()
+        .filter(|b| b.used)
+        .map(|b| b.blocks.iter().map(|x| x.len as usize).sum::<usize>() + b.commits.len())
+        .sum::<usize>()
+        * 32
 }
 
 /// Define the chunks and the entry of superstep `s` over `bodies` in `b`
@@ -502,7 +522,7 @@ fn compile_body(
         .all(|c| !matches!(c, Commit::MemClear { .. }))
     {
         let mut out = Vec::new();
-        for part in body.commits.chunks(COMMIT_CHUNK) {
+        for part in body.commits.chunks(tune::get().commit_chunk) {
             let (id, size) = b.commit(p, part)?;
             *bytes += size;
             out.push(id);
@@ -554,6 +574,7 @@ impl Item {
 fn chunks(body: &BodyRef<'_>) -> Vec<Vec<(Item, u32)>> {
     let mut out: Vec<Vec<(Item, u32)>> = vec![Vec::new()];
     let mut g = 0;
+    let chunk = tune::get().settle_chunk;
     for (bi, b) in body.blocks.iter().enumerate() {
         while g < body.guards.len() && body.guards[g].end as usize <= bi {
             g += 1;
@@ -563,7 +584,7 @@ fn chunks(body: &BodyRef<'_>) -> Vec<Vec<(Item, u32)>> {
             _ => 0,
         };
         for k in b.start..b.start + b.len {
-            if out.last().is_some_and(|c| c.len() >= CHUNK) {
+            if out.last().is_some_and(|c| c.len() >= chunk) {
                 out.push(Vec::new());
             }
             let item = if b.packed {

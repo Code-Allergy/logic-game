@@ -128,7 +128,8 @@ impl Finished {
 }
 
 impl Builder {
-    pub fn new() -> Result<Self, JitError> {
+    /// A builder (`hint`, the code's estimated size, is not needed).
+    pub fn new(_hint: usize) -> Result<Self, JitError> {
         Ok(Builder {
             funcs: Vec::new(),
             exports: Vec::new(),
