@@ -317,7 +317,7 @@ circuit's own parts only.
 its port labels, so adding, removing or renaming a port moves the
 others. When an edit (or a replacing import) changes a chip's ports,
 every wire on its placements stays on the port of the same label; a wire
-whose port is gone or changed width is removed and reported.
+whose port is gone, changed width, or moved past the 256 pins a wire can reach is removed and reported.
 
 A call may hold several `{circuit, ops}` groups (`"edits": […]`), applied
 in order; a circuit that does not exist is created as a definition.

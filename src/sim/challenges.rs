@@ -390,19 +390,19 @@ pub struct PortTest<'a> {
 }
 
 impl PortTest<'_> {
-    fn width(&self, name: &str) -> u8 {
-        self.inputs
-            .iter()
-            .chain(self.outputs)
-            .find(|p| p.name == name)
-            .map_or(64, |p| p.w)
+    /// The width of the port `name` among `ports` (the inputs or the
+    /// outputs: an input and an output may share a label, with different
+    /// widths).
+    fn width(ports: &[Port], name: &str) -> u8 {
+        ports.iter().find(|p| p.name == name).map_or(64, |p| p.w)
     }
 
-    fn signals(&self, values: impl IntoIterator<Item = (String, u64)>) -> Vec<Signal> {
+    /// `values` of `ports` (the inputs or the outputs) as signals.
+    fn signals(ports: &[Port], values: impl IntoIterator<Item = (String, u64)>) -> Vec<Signal> {
         values
             .into_iter()
             .map(|(name, value)| Signal {
-                w: self.width(&name),
+                w: Self::width(ports, &name),
                 name,
                 value,
             })
@@ -430,9 +430,9 @@ impl PortTest<'_> {
                 Failure::Case(Box::new(FailedCase {
                     case: n,
                     tick: None,
-                    inputs: self.signals(inputs),
-                    expected: self.signals(expected),
-                    got: self.signals(got),
+                    inputs: Self::signals(self.inputs, inputs),
+                    expected: Self::signals(self.outputs, expected),
+                    got: Self::signals(self.outputs, got),
                 }))
             })
         };
@@ -469,7 +469,12 @@ impl PortTest<'_> {
                     let var = |n: &str| ins.iter().find(|(k, _)| k == n).map_or(0, |(_, v)| *v);
                     let exp = expect
                         .iter()
-                        .map(|(name, e)| (name.clone(), e.eval(&var) & mask(self.width(name))))
+                        .map(|(name, e)| {
+                            (
+                                name.clone(),
+                                e.eval(&var) & mask(Self::width(self.outputs, name)),
+                            )
+                        })
                         .collect();
                     if let Some(f) = case(&mut sim, cases, ins, exp) {
                         return CheckReport::failed(cases, f);
@@ -485,7 +490,7 @@ impl PortTest<'_> {
                     for (name, v) in &step.set {
                         sim.set(name, *v);
                         if let Some(h) = held.iter_mut().find(|(n, _)| n == name) {
-                            h.1 = *v & mask(self.width(name));
+                            h.1 = *v & mask(Self::width(self.inputs, name));
                         }
                     }
                     sim.run(u64::from(step.ticks));
@@ -500,9 +505,9 @@ impl PortTest<'_> {
                             Failure::Case(Box::new(FailedCase {
                                 case: cases,
                                 tick: Some(sim.tick_count()),
-                                inputs: self.signals(held.clone()),
-                                expected: self.signals(step.expect.clone()),
-                                got: self.signals(got),
+                                inputs: Self::signals(self.inputs, held.clone()),
+                                expected: Self::signals(self.outputs, step.expect.clone()),
+                                got: Self::signals(self.outputs, got),
                             })),
                         );
                     }
@@ -641,13 +646,18 @@ fn mask(w: u8) -> u64 {
 
 /// The input values a formula test runs: every combination (inputs in
 /// order, the first one counting fastest), or all-zero, all-ones and
-/// `samples` random ones from `seed`.
-pub fn formula_cases(inputs: &[Port], samples: Option<u32>, seed: u64) -> Vec<Vec<u64>> {
+/// `samples` random ones from `seed`. Made one case at a time: a test of
+/// many samples holds one of them, and stops at the first that fails.
+pub fn formula_cases<'a>(
+    inputs: &'a [Port],
+    samples: Option<u32>,
+    seed: u64,
+) -> Box<dyn Iterator<Item = Vec<u64>> + 'a> {
     match samples {
         None => {
             let bits: u32 = inputs.iter().map(|p| u32::from(p.w)).sum();
-            (0..1u64 << bits.min(MAX_EXHAUSTIVE_BITS))
-                .map(|mut n| {
+            Box::new(
+                (0..1u64 << bits.min(MAX_EXHAUSTIVE_BITS)).map(move |mut n| {
                     inputs
                         .iter()
                         .map(|p| {
@@ -656,12 +666,12 @@ pub fn formula_cases(inputs: &[Port], samples: Option<u32>, seed: u64) -> Vec<Ve
                             v
                         })
                         .collect()
-                })
-                .collect()
+                }),
+            )
         }
         Some(count) => {
             let mut state = seed;
-            let mut next = || {
+            let mut next = move || {
                 // SplitMix64: a fixed, dependency-free sequence.
                 state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
                 let mut z = state;
@@ -669,14 +679,13 @@ pub fn formula_cases(inputs: &[Port], samples: Option<u32>, seed: u64) -> Vec<Ve
                 z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
                 z ^ (z >> 31)
             };
-            let mut cases = vec![
+            let ends = [
                 vec![0; inputs.len()],
                 inputs.iter().map(|p| mask(p.w)).collect(),
             ];
-            for _ in 0..count {
-                cases.push(inputs.iter().map(|p| next() & mask(p.w)).collect());
-            }
-            cases
+            Box::new(ends.into_iter().chain(
+                (0..count).map(move |_| inputs.iter().map(|p| next() & mask(p.w)).collect()),
+            ))
         }
     }
 }

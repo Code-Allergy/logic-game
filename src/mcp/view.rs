@@ -128,7 +128,12 @@ impl Outline<'_> {
         );
         let (ins, _) = self.library.pin_names(&node.kind);
         for (i, pin) in ins.iter().enumerate() {
-            let _ = write!(line, "  {pin}<-{}", self.input(node.id, i as u8, 0));
+            // (A pin past the 256th cannot be wired.)
+            let source = match u8::try_from(i) {
+                Ok(i) => self.input(node.id, i, 0),
+                Err(_) => "-".to_string(),
+            };
+            let _ = write!(line, "  {pin}<-{source}");
         }
         line
     }
@@ -298,7 +303,7 @@ pub fn diagnostics(ws: &WorkspaceDocument) -> String {
         for n in &doc.nodes {
             let (ins, _) = library.pin_names(&n.kind);
             for (i, pin) in ins.iter().enumerate() {
-                if !driven.contains(&(n.id, i as u8)) {
+                if !u8::try_from(i).is_ok_and(|i| driven.contains(&(n.id, i))) {
                     open.push((natural_key(&names.reference[&n.id]), pin.clone()));
                 }
             }

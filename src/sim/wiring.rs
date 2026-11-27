@@ -99,14 +99,17 @@ pub fn gate_pins<'a>(
             .iter()
             .zip(spots)
             .enumerate()
-            .map(move |(i, (&width, &spot))| PinRef {
-                gate,
-                uuid,
-                output,
-                index: i as u8,
-                width,
-                at: at + spot,
-                radius: layout.radius,
+            // (A pin index is a `u8`: pins past the 256th cannot be wired.)
+            .filter_map(move |(i, (&width, &spot))| {
+                Some(PinRef {
+                    gate,
+                    uuid,
+                    output,
+                    index: u8::try_from(i).ok()?,
+                    width,
+                    at: at + spot,
+                    radius: layout.radius,
+                })
             })
     };
     side(false, &spec.inputs, &layout.inputs).chain(side(true, &spec.outputs, &layout.outputs))

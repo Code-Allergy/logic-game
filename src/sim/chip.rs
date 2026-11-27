@@ -111,6 +111,10 @@ fn unique(base: &str, taken: &HashSet<String>) -> String {
         .expect("an unused name")
 }
 
+/// The most input (or output) ports [`plan_chip`] gives a chip: what a
+/// wire's pin index (`u8`) can name.
+pub const MAX_CHIP_PINS: usize = 256;
+
 /// Plan making a chip of `selection` in `circuit` (see the module docs).
 pub fn plan_chip(
     circuit: &CircuitDocument,
@@ -222,6 +226,17 @@ pub fn plan_chip(
     };
     order(&mut incoming, |w| w.to.node);
     order(&mut outgoing, |w| w.to.node);
+    // A wire names a pin with a `u8`: a chip with more ports on a side
+    // could not be wired back in (pin 256 would land on pin 0).
+    for (side, count) in [("inputs", incoming.len()), ("outputs", outgoing.len())] {
+        if count > MAX_CHIP_PINS {
+            return Err(format!(
+                "This selection would make a chip with {count} {side}; a chip has at most \
+                 {MAX_CHIP_PINS} on a side. Select fewer parts, or parts with fewer \
+                 connections to the rest."
+            ));
+        }
+    }
 
     // Layout: the parts' bounding box, centred on the origin.
     let bounds = inner
@@ -294,8 +309,10 @@ pub fn plan_chip(
 
     // The instance and its wires, on the pins of the ports' order.
     let (ins, outs) = def.interface();
-    let pin_of =
-        |ports: &[&DocNode], id: Uuid| ports.iter().position(|p| p.id == id).expect("a port") as u8;
+    let pin_of = |ports: &[&DocNode], id: Uuid| {
+        let i = ports.iter().position(|p| p.id == id).expect("a port");
+        u8::try_from(i).expect("checked: at most MAX_CHIP_PINS ports on a side")
+    };
     let mut instance = DocNode::labeled(
         GateKind::SubCircuit { definition: def.id },
         centre,

@@ -519,7 +519,7 @@ fn formula_cases_are_exhaustive_or_seeded() {
             w: 1,
         },
     ];
-    let all = formula_cases(&ports, None, 0);
+    let all: Vec<Vec<u64>> = formula_cases(&ports, None, 0).collect();
     assert_eq!(all.len(), 8);
     assert_eq!(all[0], [0, 0]);
     assert_eq!(all[1], [1, 0]);
@@ -535,12 +535,17 @@ fn formula_cases_are_exhaustive_or_seeded() {
             w: 8,
         },
     ];
-    let a = formula_cases(&wide, Some(50), 95);
+    let cases = |n: u32, seed: u64| formula_cases(&wide, Some(n), seed).collect::<Vec<_>>();
+    let a = cases(50, 95);
     assert_eq!(a.len(), 52, "all-zero, all-ones and the samples");
     assert_eq!(a[0], [0, 0]);
     assert_eq!(a[1], [255, 255]);
-    assert_eq!(a, formula_cases(&wide, Some(50), 95), "the same every time");
-    assert_ne!(a, formula_cases(&wide, Some(50), 96));
+    assert_eq!(a, cases(50, 95), "the same every time");
+    assert_ne!(a, cases(50, 96));
+    // Cases are made as they are asked for: the most samples a test can
+    // name cost nothing until they run (a list of them all would not fit).
+    let first: Vec<Vec<u64>> = formula_cases(&wide, Some(u32::MAX), 95).take(52).collect();
+    assert_eq!(first, a, "and the first cases do not depend on the count");
     assert!(a.iter().flatten().all(|&v| v <= 255));
     // The 8-bit adder's test samples instead of trying 2^17 cases.
     assert!(matches!(
@@ -550,6 +555,58 @@ fn formula_cases_are_exhaustive_or_seeded() {
             ..
         }
     ));
+}
+
+/// A formula's expected value is cut to the width of the output it names,
+/// also when an input has the same label and another width (the editor
+/// allows an input and an output of one label).
+#[test]
+fn a_formula_expectation_has_the_width_of_the_output_not_of_an_input_of_its_name() {
+    use crate::sim::challenges::{Port, PortTest, load_test};
+    let mut d = CircuitDocument::new("c");
+    let at = Vec2::new;
+    d.add(DocNode::labeled(
+        GateKind::Input { w: 1 },
+        at(-100.0, 60.0),
+        "A",
+    ));
+    let k = d.add(DocNode::new(
+        GateKind::Const { w: 8, value: 255 },
+        at(-100.0, 0.0),
+    ));
+    let out = d.add(DocNode::labeled(
+        GateKind::Output { w: 8 },
+        at(100.0, 0.0),
+        "A",
+    ));
+    d.connect(k, 0, out, 0);
+    let ws = WorkspaceDocument::new(d);
+    let design = crate::sim::netlist::design_of(&ws).expect("design");
+    let program = logi_sim::compile::compile(&design, &logi_sim::compile::Options::default())
+        .expect("compiles");
+    let (inputs, outputs) = (
+        [Port {
+            name: "A".into(),
+            w: 1,
+        }],
+        [Port {
+            name: "A".into(),
+            w: 8,
+        }],
+    );
+    let test = load_test(
+        serde_json::json!({"formula": {"expect": {"A": "255"}}}),
+        &inputs,
+        &outputs,
+    )
+    .expect("a test");
+    let report = PortTest {
+        inputs: &inputs,
+        outputs: &outputs,
+        test: &test,
+    }
+    .run(logi_sim::sim::Sim::new(std::sync::Arc::new(program)));
+    assert!(report.failure.is_none(), "{:?}", report.failure);
 }
 
 #[test]

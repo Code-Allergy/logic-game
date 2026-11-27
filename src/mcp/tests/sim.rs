@@ -242,6 +242,34 @@ fn recordings_go_to_a_trace_and_compare_with_expected_rows() {
         out.text
     );
 
+    // Names are case-sensitive: with `c` and `C` both recorded, each
+    // column is its own (both used to mean the first, leaving `C`
+    // unchecked). Another case still finds a signal where it says one.
+    let both = |rows: Value, columns: Value| {
+        script(
+            &ws,
+            json!({"signals": {"c": "Count", "C": "Data"}, "steps": [
+                {"set": {"Go": 1}}, {"record": ["c", "C"]},
+                {"compare": {"columns": columns, "rows": rows}},
+                {"ticks": 2}
+            ]}),
+        )
+    };
+    let out = both(json!([[5, 0], [5, 1]]), json!(["C", "c"]));
+    assert!(out.failed, "{}", out.text);
+    assert!(out.text.contains("C: expected"), "{}", out.text);
+    let out = both(json!([[0, 0], [0, 1]]), json!(["C", "c"]));
+    assert!(!out.failed, "{}", out.text);
+    let out = script(
+        &ws,
+        json!({"steps": [
+            {"set": {"Go": 1}}, {"record": ["Count"]},
+            {"compare": {"columns": ["COUNT"], "rows": [[0], [1]]}},
+            {"ticks": 2}
+        ]}),
+    );
+    assert!(!out.failed, "{}", out.text);
+
     // A context too large to keep is refused before anything runs (the
     // row limit is `context + 1`: the largest number overflowed it).
     let e = script_error(
@@ -471,6 +499,35 @@ fn snapshots_rewind_and_sessions_continue() {
     let out = s.run_tool(None, None, Map::new(), Some(&file)).unwrap();
     assert!(out.contains("ran 4 ticks"), "{out}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An edit that moves a wired port past the 256th drops its wire and says
+/// so: the wire used to be rebound to the wrapped pin (pin 0).
+#[test]
+fn a_port_moved_past_the_256th_drops_its_wire_instead_of_wrapping() {
+    let ports: Vec<Value> = (0..256)
+        .map(|i| json!({"name": format!("P{i:03}"), "type": "Input"}))
+        .collect();
+    let (ws, _) = edit(
+        &empty(),
+        json!({"edits": [
+            {"circuit": "wide", "ops": [{"add": ports}]},
+            {"ops": [{"add": [{"name": "In", "type": "Input"}, {"name": "w", "use": "wide"}]},
+                     {"wire": [["In", "w.P255"], ["In", "w.P000"]]}]}
+        ]}),
+    );
+    assert_eq!(ws.root.wires.len(), 2);
+    // `A` sorts first: every port moves up by one, `P255` to pin 256.
+    let (ws, report) = edit(
+        &ws,
+        json!({"edits": [{"circuit": "wide", "ops": [{"add": [{"name": "A", "type": "Input"}]}]}]}),
+    );
+    let pins: Vec<u8> = ws.root.wires.iter().map(|w| w.to.pin).collect();
+    assert_eq!(pins, [1], "P000 follows its port; P255's wire is gone");
+    assert!(
+        report.to_string().contains("past the 256 a wire can reach"),
+        "{report}"
+    );
 }
 
 #[test]
