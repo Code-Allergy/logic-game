@@ -11,14 +11,22 @@
 //! title, the file menu and the map into World 1-1, walking right.
 //!
 //! Measuring starts at `--at` (default tick 170,196,510, frame 1905: in
-//! 1-1, holding right) and lasts `--secs`. Per run (spec off, then on, a
-//! fresh engine each): the time to reach `--at`, k ticks/s per 5 s and the
-//! mean, the spec bodies installed at the start and the end, the first new
-//! install, and the longest gap between tick-count updates (a stall).
+//! 1-1, holding right; 0 measures from power-on, the title) and lasts
+//! `--secs`. Each round runs every mode of `--modes` on a fresh engine:
+//! `off` (no specialization), `on` (`SpecOptions::default`, no fallback),
+//! `fallback` (`SpecOptions::interactive`, the game's: falling back to
+//! supersteps where keys do not pay). `--per-phase N` caps the bodies per
+//! phase (`max_per_phase`, and `max_bodies` 3N). Per run: the time to
+//! reach `--at`, k ticks/s per 5 s and the mean, the spec bodies installed
+//! at the start and the end, the first new install, the longest gap
+//! between tick-count updates (a stall), and the `SpecStats` of the
+//! measured window: keyed hit rate, super ticks (share of all ticks),
+//! fallbacks, probes, and whether it is fallen back at the end.
 //!
 //! ```sh
 //! cargo run -p logi-sim --release --features jit --example engine_spec_press -- \
-//!     .gatequest/workspaces/nes [--secs 60] [--rounds 1] [--at TICKS]
+//!     .gatequest/workspaces/nes [--secs 60] [--rounds 1] [--at TICKS] \
+//!     [--modes off,on,fallback] [--per-phase N]
 //! ```
 //!
 //! The workspace must be a console with SMB3 in its cartridge and root
@@ -45,7 +53,14 @@ const PRESSES: &[(u64, &str, u64)] = &[
 ];
 const BUTTONS: &[&str] = &["p1_start", "p1_right", "p1_a", "p1_up"];
 
-fn run(design: &logi_sim::netlist::Design, base: &SimOptions, at: u64, secs: u64, spec: bool) {
+fn run(
+    design: &logi_sim::netlist::Design,
+    base: &SimOptions,
+    at: u64,
+    secs: u64,
+    mode: &str,
+    per_phase: Option<usize>,
+) {
     let root = &design.defs[design.root];
     let node = |name: &str| {
         root.nodes
@@ -56,7 +71,19 @@ fn run(design: &logi_sim::netlist::Design, base: &SimOptions, at: u64, secs: u64
     };
     let buttons: Vec<_> = BUTTONS.iter().map(|b| (*b, node(b))).collect();
     let sim_options = SimOptions {
-        spec: spec.then(SpecOptions::default),
+        spec: match mode {
+            "on" => Some(SpecOptions::default()),
+            "fallback" => Some(SpecOptions::interactive()),
+            _ => None,
+        }
+        .map(|s| match per_phase {
+            Some(n) => SpecOptions {
+                max_per_phase: n,
+                max_bodies: 3 * n,
+                ..s
+            },
+            None => s,
+        }),
         ..base.clone()
     };
     let e = Engine::spawn_with(Options::default(), sim_options);
@@ -90,9 +117,12 @@ fn run(design: &logi_sim::netlist::Design, base: &SimOptions, at: u64, secs: u64
         std::thread::sleep(Duration::from_micros(200));
     }
     let reach = t0.elapsed();
+    // A marker for tools that attach here (`perf stat -t <sim-worker>`).
+    eprintln!("MEASURING {mode} pid {}", std::process::id());
     let installed_at_start = e.spec_installed();
     let t1 = Instant::now();
     let n1 = e.tick_count();
+    let s1 = e.spec_stats();
     let (mut last_ticks, mut last_change, mut worst_gap) = (n1, t1, Duration::ZERO);
     let (mut mark_t, mut mark_n) = (t1, n1);
     let mut rates = Vec::new();
@@ -116,10 +146,14 @@ fn run(design: &logi_sim::netlist::Design, base: &SimOptions, at: u64, secs: u64
         }
     }
     let n2 = e.tick_count();
+    let s2 = e.spec_stats();
+    let keyed = (s2.hits + s2.misses) - (s1.hits + s1.misses);
     let r: Vec<String> = rates.iter().map(|r| format!("{r:.0}")).collect();
     println!(
-        "spec {:3}: reached tick {at} (frame {}) after {:.1} s; then {secs} s from frame {} to {}: k ticks/s per 5 s [{}], mean {:.0}; installed {} -> {}; first new install {}; worst gap {:.1} ms",
-        if spec { "on" } else { "off" },
+        "spec {mode:8}: reached tick {at} (frame {}) after {:.1} s; then {secs} s from frame {} to {}: \
+         k ticks/s per 5 s [{}], mean {:.0}; installed {} -> {}; first new install {}; \
+         worst gap {:.1} ms; window: hits {:.1}% of {} keyed ticks, super ticks {} ({:.1}%), \
+         fallbacks {}, probes {}, fallen at end {}",
         at / FRAME,
         reach.as_secs_f64(),
         n1 / FRAME,
@@ -133,31 +167,51 @@ fn run(design: &logi_sim::netlist::Design, base: &SimOptions, at: u64, secs: u64
             t.as_secs_f64(),
             n / FRAME
         )),
-        worst_gap.as_secs_f64() * 1e3
+        worst_gap.as_secs_f64() * 1e3,
+        100.0 * (s2.hits - s1.hits) as f64 / keyed.max(1) as f64,
+        keyed,
+        s2.super_ticks - s1.super_ticks,
+        100.0 * (s2.super_ticks - s1.super_ticks) as f64 / (n2 - n1).max(1) as f64,
+        s2.fallbacks - s1.fallbacks,
+        s2.probes - s1.probes,
+        s2.fallen
     );
 }
 
 fn main() -> Result<(), String> {
     let mut folder = None;
     let (mut secs, mut rounds, mut at) = (60, 1, 1905 * FRAME);
+    let mut modes = "off,on".to_string();
+    let mut per_phase = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--secs" => secs = it.next().and_then(|v| v.parse().ok()).ok_or("--secs N")?,
             "--rounds" => rounds = it.next().and_then(|v| v.parse().ok()).ok_or("--rounds N")?,
             "--at" => at = it.next().and_then(|v| v.parse().ok()).ok_or("--at TICKS")?,
+            "--modes" => modes = it.next().ok_or("--modes off,on,fallback")?,
+            "--per-phase" => {
+                per_phase = Some(
+                    it.next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("--per-phase N")?,
+                )
+            }
             f => folder = Some(f.to_string()),
         }
     }
-    let folder = folder.ok_or("usage: engine_spec_press <workspace> [--secs N] [--at T]")?;
+    let folder = folder.ok_or(
+        "usage: engine_spec_press <workspace> [--secs N] [--rounds N] [--at T] \
+         [--modes off,on,fallback] [--per-phase N]",
+    )?;
     let w = workspace::load(Path::new(&folder))?;
     let base = SimOptions {
         jit: cfg!(feature = "jit"),
         ..SimOptions::default()
     };
     for _ in 0..rounds {
-        for spec in [false, true] {
-            run(&w.design, &base, at, secs, spec);
+        for mode in modes.split(',') {
+            run(&w.design, &base, at, secs, mode, per_phase);
         }
     }
     Ok(())
