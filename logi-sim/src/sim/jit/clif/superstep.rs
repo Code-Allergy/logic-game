@@ -1,7 +1,6 @@
 //! Superstep chunks as Cranelift functions (see `jit/superstep.rs` for the
 //! stream, the store plan and the rules they follow).
 
-use cranelift_codegen::ir::condcodes::IntCC;
 #[cfg(feature = "counters")]
 use cranelift_codegen::ir::types::I64;
 use cranelift_codegen::ir::{Function, InstBuilder, Value};
@@ -11,7 +10,7 @@ use foldhash::{HashMap, HashMapExt};
 
 #[cfg(feature = "counters")]
 use super::flags;
-use super::{Slots, emit_instr, emit_pack, emit_ram_write};
+use super::{Load, SlotBits, Slots, emit_instr, emit_pack, emit_ram_write, guard_test};
 use crate::compile::{Commit, Program};
 use crate::sim::jit::superstep::{Plan, SItem, Stream};
 use crate::sim::jit::{BodyRef, Item};
@@ -35,6 +34,7 @@ pub(super) fn build_chunk(
     func: &mut Function,
     fctx: &mut FunctionBuilderContext,
     p: &Program,
+    bits: &SlotBits,
     bodies: &[BodyRef<'_>],
     st: &Stream,
     ch: &[(SItem, u32)],
@@ -53,13 +53,13 @@ pub(super) fn build_chunk(
         (params[0], params[1], params[2], params[3], params[4]);
     #[cfg(not(feature = "counters"))]
     let _ = (skips, skip_base, continues);
-    let mut sl = Slots::new(slots, ch.len() * 2);
+    let mut sl = Slots::new(slots, ch.len() * 2, bits);
     let mut mem_ptrs: HashMap<u32, Value> = HashMap::new();
     let mut cur = 0u32;
     let mut open: Option<Open> = None;
     let mut dead = 0;
     let close = |b: &mut FunctionBuilder<'_>,
-                 sl: &mut Slots,
+                 sl: &mut Slots<'_>,
                  mem_ptrs: &mut HashMap<u32, Value>,
                  open: &mut Option<Open>| {
         if let Some(o) = open.take() {
@@ -78,21 +78,7 @@ pub(super) fn build_chunk(
             close(&mut b, &mut sl, &mut mem_ptrs, &mut open);
             if seg > 0 {
                 let (body, g) = st.regions[seg as usize - 1];
-                let mut test: Option<Value> = None;
-                for c in &bodies[body as usize].guards[g as usize].conds {
-                    let v = sl.read(&mut b, c.slot);
-                    let cc = if c.when {
-                        IntCC::NotEqual
-                    } else {
-                        IntCC::Equal
-                    };
-                    let t = b.ins().icmp_imm_u(cc, v, 0);
-                    test = Some(match test {
-                        Some(x) => b.ins().band(x, t),
-                        None => t,
-                    });
-                }
-                let test = test.expect("a guard has conditions");
+                let test = guard_test(&mut b, &mut sl, &bodies[body as usize].guards[g as usize]);
                 let then = b.create_block();
                 let merge = b.create_block();
                 // A range the previous chunk began was counted there.
@@ -138,7 +124,7 @@ pub(super) fn build_chunk(
                             continue;
                         }
                         let m = bd.imms[k as usize];
-                        let r = emit_instr(
+                        let (r, bound) = emit_instr(
                             &mut b,
                             &mut sl,
                             &mut mem_ptrs,
@@ -148,17 +134,17 @@ pub(super) fn build_chunk(
                             i,
                             m,
                         );
-                        put(&mut b, &mut sl, &mut open, plan, w, i.dst, r);
+                        put(&mut b, &mut sl, &mut open, plan, w, i.dst, r, bound);
                     }
                     Item::Pack { op, k } => {
                         let pk = p.packs[k as usize];
                         let r = emit_pack(&mut b, &mut sl, p, op, &pk);
-                        put(&mut b, &mut sl, &mut open, plan, w, pk.dst, r);
+                        put(&mut b, &mut sl, &mut open, plan, w, pk.dst, r, u64::MAX);
                         let s0 = pk.scatter_start as usize;
                         for x in &p.scatters[s0..s0 + pk.scatter_len as usize] {
                             let lane = b.ins().ushr_imm_u(r, i64::from(x.lane));
                             let lane = b.ins().band_imm_u(lane, 1);
-                            put(&mut b, &mut sl, &mut open, plan, w, x.slot, lane);
+                            put(&mut b, &mut sl, &mut open, plan, w, x.slot, lane, 1);
                         }
                     }
                 }
@@ -167,8 +153,9 @@ pub(super) fn build_chunk(
                 let c = bodies[body as usize].commits[k as usize];
                 match c {
                     Commit::Copy { state, next } => {
-                        let v = sl.read(&mut b, next);
-                        put(&mut b, &mut sl, &mut open, plan, w, state, v);
+                        let v = sl.read_as(&mut b, next, Load::Zext);
+                        let bound = sl.bits(next);
+                        put(&mut b, &mut sl, &mut open, plan, w, state, v, bound);
                     }
                     Commit::RamWrite { .. } | Commit::RamWriteMasked { .. } => {
                         emit_ram_write(&mut b, &mut sl, p, &c, mems, writes);
@@ -185,20 +172,22 @@ pub(super) fn build_chunk(
 }
 
 /// Write `v` to slot `s` (the next write of the plan): into the SSA cache,
-/// and to memory if the plan stores it.
+/// and to memory if the plan stores it (`bound`: the bits `v` can have).
+#[allow(clippy::too_many_arguments)]
 fn put(
     b: &mut FunctionBuilder<'_>,
-    sl: &mut Slots,
+    sl: &mut Slots<'_>,
     open: &mut Option<Open>,
     plan: &Plan,
     w: &mut usize,
     s: u32,
     v: Value,
+    bound: u64,
 ) {
     let store = plan.store[*w];
     *w += 1;
     if let Some(o) = open.as_mut() {
         o.written.push(s);
     }
-    sl.write(b, s, v, store);
+    sl.write(b, s, v, bound, store);
 }

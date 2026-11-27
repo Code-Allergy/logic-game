@@ -5,8 +5,11 @@
 mod superstep;
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::types::I64;
-use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, MemFlagsData, UserFuncName, Value};
+use cranelift_codegen::ir::types::{I32, I64};
+use cranelift_codegen::ir::{
+    AbiParam, Function, InstBuilder, InstructionData, MemFlagsData, Opcode, Type, UserFuncName,
+    Value, ValueDef,
+};
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -17,9 +20,11 @@ use cranelift_jit::{
 use cranelift_module::{FuncId, Linkage, Module, ModuleResult};
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 
+use super::bits::SlotBits;
 use super::superstep::{Plan, SItem, Stream};
 use super::{BodyRef, CommitFn, Item, JitError, SettleFn, SuperFn, arity, operands};
-use crate::compile::{Commit, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
+use crate::compile::spec::possible_of;
+use crate::compile::{Commit, Guard, Instr, Op, Pack, PackOperand, Program, ZERO_SLOT};
 use crate::netlist::mask;
 
 /// Whether native code probes its stack: where the system needs it (see
@@ -37,6 +42,8 @@ pub(super) struct Builder {
     fctx: FunctionBuilderContext,
     /// Numbers the functions.
     n: u32,
+    /// The bits each slot can hold (see [`Slots`]).
+    bits: SlotBits,
 }
 
 /// The finished code of a [`Builder`]: function pointers by id, and the
@@ -78,8 +85,9 @@ impl Finished {
 }
 
 impl Builder {
-    /// A builder for about `hint` bytes of code (see `code_hint`).
-    pub fn new(hint: usize) -> Result<Self, JitError> {
+    /// A builder for about `hint` bytes of code (see `code_hint`), over
+    /// slots of `bits`.
+    pub fn new(hint: usize, bits: SlotBits) -> Result<Self, JitError> {
         let owned = new_module(hint)?;
         let ctx = owned.0.as_ref().expect("just created").make_context();
         Ok(Builder {
@@ -87,6 +95,7 @@ impl Builder {
             ctx,
             fctx: FunctionBuilderContext::new(),
             n: 0,
+            bits,
         })
     }
 
@@ -148,6 +157,7 @@ impl Builder {
             &mut self.ctx.func,
             &mut self.fctx,
             p,
+            &self.bits,
             body,
             items,
             live,
@@ -158,7 +168,14 @@ impl Builder {
     /// A commit chunk ([`CommitFn`]) of `commits` (no `MemClear`).
     pub fn commit(&mut self, p: &Program, commits: &[Commit]) -> Result<(FnId, usize), JitError> {
         let cfg = self.start(&[Ty::Ptr, Ty::Ptr, Ty::Ptr]);
-        build_commit(cfg, &mut self.ctx.func, &mut self.fctx, p, commits);
+        build_commit(
+            cfg,
+            &mut self.ctx.func,
+            &mut self.fctx,
+            p,
+            &self.bits,
+            commits,
+        );
         self.define("commit")
     }
 
@@ -185,6 +202,7 @@ impl Builder {
             &mut self.ctx.func,
             &mut self.fctx,
             p,
+            &self.bits,
             bodies,
             st,
             ch,
@@ -450,17 +468,51 @@ fn flags() -> MemFlagsData {
 /// slot is loaded at most once, and a store's value is reused by later
 /// reads. Slots only alias themselves, and memories never alias slots, so
 /// this is exactly the interpreter's sequence of memory states.
-struct Slots {
+///
+/// # Widths
+///
+/// A slot whose bits (`SlotBits`) fit 32 bits is an `I32` value: loaded
+/// from the low half of its word (little-endian), computed in 32-bit
+/// operations, and stored zero-extended to the whole word. Every value
+/// written is masked to its slot's bits where its own bound (the bits its
+/// op can produce from its operands' slots, `compile::spec::possible_of`)
+/// exceeds them, which only a body rewritten on demanded bits needs (a
+/// known-bits or specialized fused body may read an alias wider than the
+/// slot it replaces): there, the bits masked off are ones no reader
+/// observes, which are 0 in the true value. So every slot a function
+/// reads holds a value within its bits, whoever wrote it: the caller and
+/// the commits write values within them (state, inputs and constants),
+/// and a settle writes every other slot it reads before reading it (see
+/// `super`), in this code or exactly in the interpreter. Each operation
+/// is then computed exactly as the interpreter computes it, in fewer
+/// bits where its result fits them.
+struct Slots<'a> {
     base: Value,
     vals: HashMap<u32, Value>,
+    bits: &'a SlotBits,
+    /// The zero-extended `I64` form of an `I32` value, where one was made
+    /// with it (so that storing it costs no extension).
+    wide: HashMap<Value, Value>,
 }
 
-impl Slots {
-    fn new(base: Value, capacity: usize) -> Self {
+impl<'a> Slots<'a> {
+    fn new(base: Value, capacity: usize, bits: &'a SlotBits) -> Self {
         Slots {
             base,
             vals: HashMap::with_capacity(capacity),
+            bits,
+            wide: HashMap::new(),
         }
+    }
+
+    /// The bits `slot` can hold.
+    fn bits(&self, slot: u32) -> u64 {
+        self.bits.bits(slot)
+    }
+
+    /// The type of `slot`'s values.
+    fn ty(&self, slot: u32) -> Type {
+        if self.bits.narrow(slot) { I32 } else { I64 }
     }
 
     fn addr(&self, b: &mut FunctionBuilder<'_>, slot: u32) -> (Value, i32) {
@@ -471,30 +523,151 @@ impl Slots {
         }
     }
 
+    /// The value of `slot`: of type [`Self::ty`], or for a 32-bit slot
+    /// possibly its whole word (an `I64` within the slot's bits).
     fn read(&mut self, b: &mut FunctionBuilder<'_>, slot: u32) -> Value {
+        self.read_as(b, slot, Load::Narrow)
+    }
+
+    /// The value of `slot` as [`Self::read`], loaded (if it is not in the
+    /// cache yet) as `how` says.
+    fn read_as(&mut self, b: &mut FunctionBuilder<'_>, slot: u32, how: Load) -> Value {
         if slot == ZERO_SLOT {
-            return b.ins().iconst(I64, 0);
+            return b.ins().iconst(self.ty(slot), 0);
         }
         if let Some(&v) = self.vals.get(&slot) {
             return v;
         }
         let (a, o) = self.addr(b, slot);
-        let v = b.ins().load(I64, flags(), a, o);
+        let v = if self.ty(slot) == I64 {
+            b.ins().load(I64, flags(), a, o)
+        } else {
+            match how {
+                Load::Narrow => b.ins().load(I32, flags(), a, o),
+                Load::Zext => b.ins().uload32(flags(), a, o),
+            }
+        };
         self.vals.insert(slot, v);
         v
     }
 
-    fn write(&mut self, b: &mut FunctionBuilder<'_>, slot: u32, v: Value, store: bool) {
+    /// Write `v`, whose bits are within `bound`, to `slot` (see the type's
+    /// documentation), and store it if `store`.
+    fn write(&mut self, b: &mut FunctionBuilder<'_>, slot: u32, v: Value, bound: u64, store: bool) {
+        let keep = self.bits(slot);
+        let v = self.fit(b, v, bound, keep, self.ty(slot));
         if store {
+            let w = self.wide(b, v);
             let (a, o) = self.addr(b, slot);
-            b.ins().store(flags(), v, a, o);
+            b.ins().store(flags(), w, a, o);
         }
         self.vals.insert(slot, v);
     }
+
+    /// `v` (bits within `bound`) as a value of type `t` within `keep`.
+    fn fit(
+        &mut self,
+        b: &mut FunctionBuilder<'_>,
+        v: Value,
+        bound: u64,
+        keep: u64,
+        t: Type,
+    ) -> Value {
+        let mut v = v;
+        let mut bound = bound;
+        if bound & !keep != 0 {
+            if t == I32 {
+                v = self.narrow(b, v, bound);
+            }
+            v = b.ins().band_imm_u(v, keep as i64);
+            bound &= keep;
+        }
+        if t == I32 {
+            self.narrow(b, v, bound)
+        } else {
+            self.wide(b, v)
+        }
+    }
+
+    /// The low 32 bits of `v` (bits within `bound`).
+    fn narrow(&mut self, b: &mut FunctionBuilder<'_>, v: Value, bound: u64) -> Value {
+        if b.func.dfg.value_type(v) == I32 {
+            return v;
+        }
+        let n = b.ins().ireduce(I32, v);
+        if bound >> 32 == 0 {
+            self.wide.insert(n, v);
+        }
+        n
+    }
+
+    /// `v` zero-extended to 64 bits.
+    fn wide(&mut self, b: &mut FunctionBuilder<'_>, v: Value) -> Value {
+        if b.func.dfg.value_type(v) == I64 {
+            return v;
+        }
+        if let Some(&w) = self.wide.get(&v) {
+            return w;
+        }
+        let dfg = &b.func.dfg;
+        if let ValueDef::Result(inst, _) = dfg.value_def(v)
+            && let InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } = dfg.insts[inst]
+        {
+            return b.ins().iconst(I64, imm.bits() as u32 as i64);
+        }
+        b.ins().uextend(I64, v)
+    }
+
+    /// `v` as a value of type `t` (bits within `bound`, which fits `t`).
+    fn to(&mut self, b: &mut FunctionBuilder<'_>, v: Value, bound: u64, t: Type) -> Value {
+        if t == I32 {
+            self.narrow(b, v, bound)
+        } else {
+            self.wide(b, v)
+        }
+    }
 }
 
+/// How to load a 32-bit slot's value, for its first use in a function.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Load {
+    /// A 32-bit load, which Cranelift can fold into a 32-bit operation
+    /// reading memory.
+    Narrow,
+    /// A 32-bit load to a register, zero-extended (no extension to store
+    /// it, and no folding: an operation with an immediate operand then
+    /// takes the register rather than materializing the immediate).
+    Zext,
+}
+
+/// The type to compute a value of bits `bound` in.
+fn ty_of(bound: u64) -> Type {
+    if bound >> 32 == 0 { I32 } else { I64 }
+}
+
+/// A 0/1 value of comparison `c`, as an `I64` (a stored result needs its
+/// whole word; [`Slots::narrow`] keeps the `I64` for that).
 fn bool64(b: &mut FunctionBuilder<'_>, c: Value) -> Value {
     b.ins().uextend(I64, c)
+}
+
+/// `x & m`, left out when `x` (bits within `bound`) has no bits outside
+/// `m`.
+fn mask_to(b: &mut FunctionBuilder<'_>, x: Value, bound: u64, m: u64) -> Value {
+    if bound & !m == 0 {
+        x
+    } else {
+        b.ins().band_imm_u(x, m as i64)
+    }
+}
+
+/// `!x & m`.
+fn not_masked(b: &mut FunctionBuilder<'_>, x: Value, m: u64) -> Value {
+    let y = b.ins().bnot(x);
+    b.ins().band_imm_u(y, m as i64)
 }
 
 /// An open guarded run in a settle chunk: the block after it, and the
@@ -507,11 +680,13 @@ type Open = (
 );
 
 /// Build one settle chunk.
+#[allow(clippy::too_many_arguments)]
 fn build_settle(
     cfg: TargetFrontendConfig,
     func: &mut Function,
     fctx: &mut FunctionBuilderContext,
     p: &Program,
+    bits: &SlotBits,
     body: &BodyRef<'_>,
     items: &[(Item, u32)],
     live: Option<&HashSet<u32>>,
@@ -523,7 +698,7 @@ fn build_settle(
     b.seal_block(entry);
     let params = b.block_params(entry).to_vec();
     let (slots, mems, tick) = (params[0], params[1], params[2]);
-    let mut sl = Slots::new(slots, items.len() * 2);
+    let mut sl = Slots::new(slots, items.len() * 2, bits);
     // Slots this chunk reads: a result computed in a guarded run is only
     // in the SSA cache until the run ends, so a later read in the chunk
     // loads it from its slot.
@@ -550,21 +725,7 @@ fn build_settle(
                 mem_ptrs = ptrs;
             }
             if seg > 0 {
-                let mut test: Option<Value> = None;
-                for c in &body.guards[seg as usize - 1].conds {
-                    let v = sl.read(&mut b, c.slot);
-                    let cc = if c.when {
-                        IntCC::NotEqual
-                    } else {
-                        IntCC::Equal
-                    };
-                    let t = b.ins().icmp_imm_u(cc, v, 0);
-                    test = Some(match test {
-                        Some(x) => b.ins().band(x, t),
-                        None => t,
-                    });
-                }
-                let test = test.expect("a guard has conditions");
+                let test = guard_test(&mut b, &mut sl, &body.guards[seg as usize - 1]);
                 let then = b.create_block();
                 let merge = b.create_block();
                 b.ins().brif(test, then, &[], merge, &[]);
@@ -580,18 +741,20 @@ fn build_settle(
             Item::Instr { op, k } => {
                 let i = body.instrs[k as usize];
                 let m = body.imms[k as usize];
-                let r = emit_instr(&mut b, &mut sl, &mut mem_ptrs, p, (mems, tick, 0), op, i, m);
-                sl.write(&mut b, i.dst, r, store(i.dst));
+                let st = store(i.dst);
+                let (r, bound) =
+                    emit_instr(&mut b, &mut sl, &mut mem_ptrs, p, (mems, tick, 0), op, i, m);
+                sl.write(&mut b, i.dst, r, bound, st);
             }
             Item::Pack { op, k } => {
                 let pk = p.packs[k as usize];
                 let r = emit_pack(&mut b, &mut sl, p, op, &pk);
-                sl.write(&mut b, pk.dst, r, store(pk.dst));
+                sl.write(&mut b, pk.dst, r, u64::MAX, store(pk.dst));
                 let s0 = pk.scatter_start as usize;
                 for x in &p.scatters[s0..s0 + pk.scatter_len as usize] {
                     let lane = b.ins().ushr_imm_u(r, i64::from(x.lane));
                     let lane = b.ins().band_imm_u(lane, 1);
-                    sl.write(&mut b, x.slot, lane, store(x.slot));
+                    sl.write(&mut b, x.slot, lane, 1, store(x.slot));
                 }
             }
         }
@@ -605,9 +768,47 @@ fn build_settle(
     b.finalize(cfg);
 }
 
+/// Whether every condition of guard `g` holds (an `I8`).
+fn guard_test(b: &mut FunctionBuilder<'_>, sl: &mut Slots<'_>, g: &Guard) -> Value {
+    let mut test: Option<Value> = None;
+    for c in &g.conds {
+        let v = sl.read(b, c.slot);
+        let cc = if c.when {
+            IntCC::NotEqual
+        } else {
+            IntCC::Equal
+        };
+        let t = b.ins().icmp_imm_u(cc, v, 0);
+        test = Some(match test {
+            Some(x) => b.ins().band(x, t),
+            None => t,
+        });
+    }
+    test.expect("a guard has conditions")
+}
+
 /// Carry out of `a + b + c` at bit `w` (0..=64), as the interpreter's
 /// 128-bit sum: `((a + b + c) >> w) & 1`.
-fn add_carry(b: &mut FunctionBuilder<'_>, a: Value, x: Value, c: Value, w: u64) -> Value {
+fn add_carry(
+    b: &mut FunctionBuilder<'_>,
+    sl: &mut Slots<'_>,
+    [a, x, c]: [(Value, u64); 3],
+    w: u64,
+) -> Value {
+    if w < 32 {
+        // Bit `w` of the sum only depends on bits up to `w` of the
+        // operands: their low halves.
+        let a = sl.narrow(b, a.0, a.1);
+        let x = sl.narrow(b, x.0, x.1);
+        let c = sl.narrow(b, c.0, c.1);
+        let s = b.ins().iadd(a, x);
+        let s = b.ins().iadd(s, c);
+        let s = b.ins().ushr_imm_u(s, w as i64);
+        return b.ins().band_imm_u(s, 1);
+    }
+    let a = sl.wide(b, a.0);
+    let x = sl.wide(b, x.0);
+    let c = sl.wide(b, c.0);
     let s1 = b.ins().iadd(a, x);
     let c1 = b.ins().icmp(IntCC::UnsignedLessThan, s1, a);
     let s2 = b.ins().iadd(s1, c);
@@ -629,14 +830,16 @@ fn add_carry(b: &mut FunctionBuilder<'_>, a: Value, x: Value, c: Value, w: u64) 
 /// Assemble one packed operand word (see [`PackOperand`]).
 fn pack_operand(
     b: &mut FunctionBuilder<'_>,
-    sl: &mut Slots,
+    sl: &mut Slots<'_>,
     p: &Program,
     o: &PackOperand,
 ) -> Value {
     let base = sl.read(b, o.base);
+    let base = sl.wide(b, base);
     let mut v = b.ins().band_imm_u(base, o.keep as i64);
     if o.splat_mask != 0 {
         let s = sl.read(b, o.splat);
+        let s = sl.wide(b, s);
         let s = b.ins().ushr_imm_u(s, i64::from(o.splat_bit));
         let s = b.ins().band_imm_u(s, 1);
         let s = b.ins().ineg(s);
@@ -646,8 +849,19 @@ fn pack_operand(
     let g = o.gather_start as usize;
     for gt in &p.gathers[g..g + o.gather_len as usize] {
         let s = sl.read(b, gt.slot);
-        let s = b.ins().ushr_imm_u(s, i64::from(gt.bit));
-        let s = b.ins().band_imm_u(s, 1);
+        let bound = sl.bits(gt.slot);
+        // The bit, in the slot's own width.
+        let s = if b.func.dfg.value_type(s) == I32 && gt.bit >= 32 {
+            b.ins().iconst(I32, 0)
+        } else {
+            let s = if gt.bit > 0 {
+                b.ins().ushr_imm_u(s, i64::from(gt.bit))
+            } else {
+                s
+            };
+            mask_to(b, s, bound >> gt.bit, 1)
+        };
+        let s = sl.wide(b, s);
         let s = b.ins().ishl_imm_u(s, i64::from(gt.lane));
         v = b.ins().bor(v, s);
     }
@@ -660,6 +874,7 @@ fn build_commit(
     func: &mut Function,
     fctx: &mut FunctionBuilderContext,
     p: &Program,
+    bits: &SlotBits,
     commits: &[Commit],
 ) {
     let mut b = FunctionBuilder::new(func, fctx);
@@ -672,12 +887,13 @@ fn build_commit(
     // Commits are sequential: a copy's load sees every store before it.
     // Values are not cached across a RAM write's control flow, so each
     // commit loads its own operands (the program has few RAM writes).
-    let mut sl = Slots::new(slots, 0);
+    let mut sl = Slots::new(slots, 0, bits);
     for c in commits {
         match *c {
             Commit::Copy { state, next } => {
-                let v = sl.read(&mut b, next);
-                sl.write(&mut b, state, v, true);
+                let v = sl.read_as(&mut b, next, Load::Zext);
+                let bound = sl.bits(next);
+                sl.write(&mut b, state, v, bound, true);
             }
             Commit::RamWrite { .. } | Commit::RamWriteMasked { .. } => {
                 emit_ram_write(&mut b, &mut sl, p, c, mems, writes);
@@ -689,72 +905,137 @@ fn build_commit(
     b.finalize(cfg);
 }
 
+/// The address of word `a` (bits within `bound`) of memory `mem` (its
+/// base pointer `mp`), wrapped to the memory's size.
+fn mem_word(
+    b: &mut FunctionBuilder<'_>,
+    sl: &mut Slots<'_>,
+    p: &Program,
+    mem: u32,
+    mp: Value,
+    a: Value,
+    bound: u64,
+) -> Value {
+    let ptr = b.func.dfg.value_type(mp);
+    let len_mask = (1u64 << p.mems[mem as usize].addr_bits) - 1;
+    let idx = if len_mask >> 32 == 0 {
+        let a = sl.narrow(b, a, bound);
+        mask_to(b, a, bound, len_mask)
+    } else {
+        let a = sl.wide(b, a);
+        mask_to(b, a, bound, len_mask)
+    };
+    let idx = sl.wide(b, idx);
+    let off = b.ins().ishl_imm_u(idx, 3);
+    let off = if ptr == I64 {
+        off
+    } else {
+        b.ins().ireduce(ptr, off)
+    };
+    b.ins().iadd(mp, off)
+}
+
 /// The value of instruction `i` (opcode `op`, literal `m`) at tick
-/// `tick + tick_off`, reading its operands through the slot cache.
+/// `tick + tick_off`, reading its operands through the slot cache, and
+/// the bits it can have (computed in 32 bits where they fit).
 #[allow(clippy::too_many_arguments)]
 fn emit_instr(
     b: &mut FunctionBuilder<'_>,
-    sl: &mut Slots,
+    sl: &mut Slots<'_>,
     mem_ptrs: &mut HashMap<u32, Value>,
     p: &Program,
     (mems, tick, tick_off): (Value, Value, u64),
     op: Op,
     i: Instr,
     m: u64,
-) -> Value {
-    let slots = sl.base;
+) -> (Value, u64) {
     let ptr_ty = b.func.dfg.value_type(mems);
+    let bound = possible_of(op, &i, m, sl.bits.as_slice(), &p.mems);
+    let t = ty_of(bound);
+    let how = match op {
+        // Stored as loaded.
+        Op::Copy => Load::Zext,
+        _ => Load::Narrow,
+    };
     let (sa, sb, sc) = op.slot_operands();
-    let a = if sa { Some(sl.read(b, i.a)) } else { None };
-    let bb = if sb { Some(sl.read(b, i.b)) } else { None };
-    let c = if sc { Some(sl.read(b, i.c)) } else { None };
-    let (a, bv, c) = (
-        a.unwrap_or_else(|| b.ins().iconst(I64, 0)),
-        bb.unwrap_or(slots),
-        c.unwrap_or(slots),
-    );
+    // Operands: value and bits (unused ones are a zero placeholder).
+    let mut opnd = |b: &mut FunctionBuilder<'_>, used: bool, s: u32, how: Load| {
+        if used {
+            (sl.read_as(b, s, how), sl.bits(s))
+        } else {
+            (sl.read(b, ZERO_SLOT), 0)
+        }
+    };
+    let (a, ba) = opnd(b, sa, i.a, how);
+    let (bv, bb) = opnd(b, sb, i.b, how);
+    let (c, bc) = opnd(b, sc, i.c, how);
     let ins = b;
-    match op {
+    let r = match op {
         Op::Copy => a,
         Op::Not => {
-            let x = ins.ins().bnot(a);
-            ins.ins().band_imm_u(x, m as i64)
+            let x = sl.to(ins, a, ba, t);
+            not_masked(ins, x, m)
         }
-        Op::And => ins.ins().band(a, bv),
-        Op::Or => ins.ins().bor(a, bv),
-        Op::Xor => ins.ins().bxor(a, bv),
-        Op::Nand => {
-            let x = ins.ins().band(a, bv);
-            let x = ins.ins().bnot(x);
-            ins.ins().band_imm_u(x, m as i64)
+        Op::And | Op::Or | Op::Xor => {
+            let x = sl.to(ins, a, ba, t);
+            let y = sl.to(ins, bv, bb, t);
+            match op {
+                Op::And => ins.ins().band(x, y),
+                Op::Or => ins.ins().bor(x, y),
+                _ => ins.ins().bxor(x, y),
+            }
         }
-        Op::Nor => {
-            let x = ins.ins().bor(a, bv);
-            let x = ins.ins().bnot(x);
-            ins.ins().band_imm_u(x, m as i64)
+        Op::Nand | Op::Nor | Op::Xnor => {
+            let x = sl.to(ins, a, ba, t);
+            let y = sl.to(ins, bv, bb, t);
+            let z = match op {
+                Op::Nand => ins.ins().band(x, y),
+                Op::Nor => ins.ins().bor(x, y),
+                _ => ins.ins().bxor(x, y),
+            };
+            not_masked(ins, z, m)
         }
-        Op::Xnor => {
-            let x = ins.ins().bxor(a, bv);
-            let x = ins.ins().bnot(x);
-            ins.ins().band_imm_u(x, m as i64)
+        Op::Mux => {
+            let x = sl.to(ins, c, bc, t);
+            let y = sl.to(ins, bv, bb, t);
+            ins.ins().select(a, x, y)
         }
-        Op::Mux => ins.ins().select(a, c, bv),
+        Op::Switch if ba >> 1 == 0 => {
+            // `b & -a` for a 1-bit `a` (no constant 0 to select).
+            let x = sl.to(ins, bv, bb, t);
+            let s = sl.to(ins, a, ba, t);
+            let s = ins.ins().ineg(s);
+            ins.ins().band(x, s)
+        }
         Op::Switch => {
-            let z = ins.ins().iconst(I64, 0);
-            ins.ins().select(a, bv, z)
+            let x = sl.to(ins, bv, bb, t);
+            let z = ins.ins().iconst(t, 0);
+            ins.ins().select(a, x, z)
         }
         Op::AddSum => {
-            let x = ins.ins().iadd(a, bv);
-            let x = ins.ins().iadd(x, c);
+            let x = sl.to(ins, a, ba, t);
+            let y = sl.to(ins, bv, bb, t);
+            let z = sl.to(ins, c, bc, t);
+            let x = ins.ins().iadd(x, y);
+            let x = ins.ins().iadd(x, z);
             ins.ins().band_imm_u(x, m as i64)
         }
-        Op::AddCarry => add_carry(ins, a, bv, c, m),
-        Op::Eq => {
-            let x = ins.ins().icmp(IntCC::Equal, a, bv);
-            bool64(ins, x)
-        }
-        Op::LtU => {
-            let x = ins.ins().icmp(IntCC::UnsignedLessThan, a, bv);
+        Op::AddCarry => add_carry(ins, sl, [(a, ba), (bv, bb), (c, bc)], m),
+        Op::Eq | Op::LtU => {
+            let cc = if op == Op::Eq {
+                IntCC::Equal
+            } else {
+                IntCC::UnsignedLessThan
+            };
+            let x = if ty_of(ba | bb) == I32 {
+                let x = sl.narrow(ins, a, ba);
+                let y = sl.narrow(ins, bv, bb);
+                ins.ins().icmp(cc, x, y)
+            } else {
+                let x = sl.wide(ins, a);
+                let y = sl.wide(ins, bv);
+                ins.ins().icmp(cc, x, y)
+            };
             bool64(ins, x)
         }
         Op::ReduceOr => {
@@ -762,46 +1043,126 @@ fn emit_instr(
             bool64(ins, x)
         }
         Op::ReduceAnd => {
-            let x = ins.ins().icmp_imm_u(IntCC::Equal, a, m as i64);
-            bool64(ins, x)
+            if ins.func.dfg.value_type(a) == I32 && m >> 32 != 0 {
+                // A 32-bit value never equals it.
+                ins.ins().iconst(I64, 0)
+            } else {
+                let x = ins.ins().icmp_imm_u(IntCC::Equal, a, m as i64);
+                bool64(ins, x)
+            }
         }
         Op::ReduceXor => {
             let x = ins.ins().popcnt(a);
             ins.ins().band_imm_u(x, 1)
         }
         Op::Shr => {
-            let x = ins.ins().ushr_imm_u(a, i64::from(i.b));
-            ins.ins().band_imm_u(x, m as i64)
+            // `(a >> b) & imm`, `b` a literal below 64: bits `need` of
+            // `a`, shifted in 32 bits when they are in its low half.
+            let s = i.b;
+            let need = ((u128::from(m) << s) & u128::from(ba)) as u64;
+            let a = if need >> 32 == 0 {
+                sl.narrow(ins, a, ba)
+            } else {
+                a
+            };
+            if need == 0 {
+                ins.ins().iconst(t, 0)
+            } else {
+                let x = if s > 0 {
+                    ins.ins().ushr_imm_u(a, i64::from(s))
+                } else {
+                    a
+                };
+                let bx = ba >> s;
+                let x = sl.to(ins, x, bx, t);
+                mask_to(ins, x, bx, m)
+            }
         }
         Op::Concat => {
-            let x = ins.ins().ishl_imm_u(bv, i64::from(i.c));
-            ins.ins().bor(a, x)
+            // `a | (b << c)`, `c` a literal.
+            let x = sl.to(ins, a, ba, t);
+            let width = if t == I32 { 32 } else { 64 };
+            if i.c >= width {
+                x
+            } else {
+                let y = sl.to(ins, bv, bb, t);
+                let y = ins.ins().ishl_imm_u(y, i64::from(i.c));
+                ins.ins().bor(x, y)
+            }
         }
         Op::Shl => {
-            let x = ins.ins().ushr_imm_u(a, i64::from(i.c));
-            let x = ins.ins().ishl_imm_u(x, i64::from(i.b));
-            ins.ins().band_imm_u(x, m as i64)
+            // `((a >> c) << b) & imm`, `b` and `c` literals below 64: bits
+            // `need` of `a`, shifted in 32 bits when they are in its low
+            // half (and the result in its own).
+            let need = (u128::from(m >> i.b) << i.c) as u64 & ba;
+            let width = if t == I32 { 32 } else { 64 };
+            if need == 0 || i.b >= width {
+                ins.ins().iconst(t, 0)
+            } else {
+                let a = if need >> 32 == 0 && t == I32 {
+                    sl.narrow(ins, a, ba)
+                } else {
+                    a
+                };
+                let x = if i.c > 0 {
+                    ins.ins().ushr_imm_u(a, i64::from(i.c))
+                } else {
+                    a
+                };
+                let bx = ba >> i.c;
+                let x = sl.to(ins, x, bx, t);
+                let x = if i.b > 0 {
+                    ins.ins().ishl_imm_u(x, i64::from(i.b))
+                } else {
+                    x
+                };
+                mask_to(ins, x, bx << i.b, m)
+            }
         }
         Op::ShlV => {
-            // Cranelift takes the amount modulo 64: `b & 63`.
-            let x = ins.ins().ishl(a, bv);
-            ins.ins().band_imm_u(x, m as i64)
+            // `(a << (b & 63)) & imm`. Cranelift takes the amount modulo
+            // the type's width: 32 bits only for amounts below 32.
+            if t == I32 && bb >> 5 == 0 {
+                let x = sl.narrow(ins, a, ba);
+                let y = sl.narrow(ins, bv, bb);
+                let x = ins.ins().ishl(x, y);
+                ins.ins().band_imm_u(x, m as i64)
+            } else {
+                let x = sl.wide(ins, a);
+                let y = sl.wide(ins, bv);
+                let x = ins.ins().ishl(x, y);
+                ins.ins().band_imm_u(x, m as i64)
+            }
         }
         Op::Sext => {
             // `if (a >> (b - 1)) & 1 == 1 { (a | !mask(b)) & m } else { a }`
             let w = i.b;
-            let bit = ins.ins().ushr_imm_u(a, i64::from(w - 1));
-            let bit = ins.ins().band_imm_u(bit, 1);
-            let ext = ins.ins().bor_imm_u(a, !mask(w as u8) as i64);
-            let ext = ins.ins().band_imm_u(ext, m as i64);
-            ins.ins().select(bit, ext, a)
+            let at = ins.func.dfg.value_type(a);
+            if at == I32 && t == I32 && w <= 32 {
+                let bit = if w > 1 {
+                    ins.ins().ushr_imm_u(a, i64::from(w - 1))
+                } else {
+                    a
+                };
+                let bit = ins.ins().band_imm_u(bit, 1);
+                let ext = ins.ins().bor_imm_u(a, !mask(w as u8) as i64);
+                let ext = ins.ins().band_imm_u(ext, m as i64);
+                ins.ins().select(bit, ext, a)
+            } else {
+                let a = sl.wide(ins, a);
+                let bit = ins.ins().ushr_imm_u(a, i64::from(w - 1));
+                let bit = ins.ins().band_imm_u(bit, 1);
+                let ext = ins.ins().bor_imm_u(a, !mask(w as u8) as i64);
+                let ext = ins.ins().band_imm_u(ext, m as i64);
+                ins.ins().select(bit, ext, a)
+            }
         }
         Op::Clock => {
             // `((tick + c) % a) < b`
-            let t = ins
+            let x = ins
                 .ins()
                 .iadd_imm_u(tick, (tick_off + u64::from(i.c)) as i64);
-            let r = ins.ins().urem_imm_u(t, i64::from(i.a));
+            let r = ins.ins().urem_imm_u(x, i64::from(i.a));
             let x = ins
                 .ins()
                 .icmp_imm_u(IntCC::UnsignedLessThan, r, i64::from(i.b));
@@ -816,59 +1177,69 @@ fn emit_instr(
                     (i.b as usize * size_of::<usize>()) as i32,
                 )
             });
-            let len_mask = (1u64 << p.mems[i.b as usize].addr_bits) - 1;
-            let idx = ins.ins().band_imm_u(a, len_mask as i64);
-            let off = ins.ins().ishl_imm_u(idx, 3);
-            let off = if ptr_ty == I64 {
-                off
-            } else {
-                ins.ins().ireduce(ptr_ty, off)
-            };
-            let addr = ins.ins().iadd(mp, off);
-            ins.ins().load(I64, flags(), addr, 0)
+            let addr = mem_word(ins, sl, p, i.b, mp, a, ba);
+            // Memory words hold their width's bits (as slots do).
+            ins.ins().load(t, flags(), addr, 0)
+        }
+        Op::SrNext if (ba | bb | bc) >> 1 == 0 => {
+            // `(a | c) & !b` on single bits.
+            let x = sl.narrow(ins, a, ba);
+            let y = sl.narrow(ins, c, bc);
+            let x = ins.ins().bor(x, y);
+            let r = sl.narrow(ins, bv, bb);
+            let r = ins.ins().bxor_imm_u(r, 1);
+            ins.ins().band(x, r)
         }
         Op::SrNext => {
             // `if b != 0 { 0 } else if a != 0 { 1 } else { c }`
-            let one = ins.ins().iconst(I64, 1);
-            let z = ins.ins().iconst(I64, 0);
+            let one = ins.ins().iconst(t, 1);
+            let z = ins.ins().iconst(t, 0);
+            let c = sl.to(ins, c, bc, t);
             let x = ins.ins().select(a, one, c);
             ins.ins().select(bv, z, x)
         }
-    }
+    };
+    (r, bound)
 }
 
 /// The value of packed word `pk` (opcode `op`).
-fn emit_pack(b: &mut FunctionBuilder<'_>, sl: &mut Slots, p: &Program, op: Op, pk: &Pack) -> Value {
-    let slots = sl.base;
+fn emit_pack(
+    b: &mut FunctionBuilder<'_>,
+    sl: &mut Slots<'_>,
+    p: &Program,
+    op: Op,
+    pk: &Pack,
+) -> Value {
     let n = arity(op);
-    let mut v = [slots; 3];
+    let mut v = [None; 3];
     for (j, o) in operands(pk).into_iter().enumerate().take(n) {
-        v[j] = pack_operand(b, sl, p, o);
+        v[j] = Some(pack_operand(b, sl, p, o));
     }
     let [a, bv, c] = v;
+    let a = a.expect("a packed op reads a");
     let ins = b;
     match op {
         Op::Copy => a,
         Op::Not => ins.ins().bnot(a),
-        Op::And | Op::Switch => ins.ins().band(a, bv),
-        Op::Or => ins.ins().bor(a, bv),
-        Op::Xor => ins.ins().bxor(a, bv),
+        Op::And | Op::Switch => ins.ins().band(a, bv.expect("binary")),
+        Op::Or => ins.ins().bor(a, bv.expect("binary")),
+        Op::Xor => ins.ins().bxor(a, bv.expect("binary")),
         Op::Nand => {
-            let x = ins.ins().band(a, bv);
+            let x = ins.ins().band(a, bv.expect("binary"));
             ins.ins().bnot(x)
         }
         Op::Nor => {
-            let x = ins.ins().bor(a, bv);
+            let x = ins.ins().bor(a, bv.expect("binary"));
             ins.ins().bnot(x)
         }
         Op::Xnor => {
-            let x = ins.ins().bxor(a, bv);
+            let x = ins.ins().bxor(a, bv.expect("binary"));
             ins.ins().bnot(x)
         }
         Op::Mux => {
             // `(a & c) | (!a & b)`
-            let x = ins.ins().band(a, c);
-            let y = ins.ins().band_not(bv, a);
+            let x = ins.ins().band(a, c.expect("ternary"));
+            let y = ins.ins().band_not(bv.expect("ternary"), a);
             ins.ins().bor(x, y)
         }
         _ => unreachable!("checked: not a packable op"),
@@ -879,7 +1250,7 @@ fn emit_pack(b: &mut FunctionBuilder<'_>, sl: &mut Slots, p: &Program, op: Op, p
 /// unchanged, so the slot cache stays valid.
 fn emit_ram_write(
     b: &mut FunctionBuilder<'_>,
-    sl: &mut Slots,
+    sl: &mut Slots<'_>,
     p: &Program,
     c: &Commit,
     mems: Value,
@@ -916,17 +1287,11 @@ fn emit_ram_write(
         mems,
         (mem as usize * size_of::<usize>()) as i32,
     );
-    let len_mask = (1u64 << p.mems[mem as usize].addr_bits) - 1;
-    let idx = b.ins().band_imm_u(a, len_mask as i64);
-    let off = b.ins().ishl_imm_u(idx, 3);
-    let off = if ptr == I64 {
-        off
-    } else {
-        b.ins().ireduce(ptr, off)
-    };
-    let at = b.ins().iadd(mp, off);
+    let at = mem_word(b, sl, p, mem, mp, a, sl.bits(addr));
+    let d = sl.wide(b, d);
     let word = if masked {
         // `(*m & !bits) | (data & bits)`
+        let en = sl.wide(b, en);
         let old = b.ins().load(I64, flags(), at, 0);
         let keep = b.ins().band_not(old, en);
         let new = b.ins().band(d, en);
