@@ -66,7 +66,7 @@ fn check_layout(p: &Program, from: &Body, g: &Body, exposed: Option<&[bool]>) {
     let mut at = 0;
     for gd in &g.guards {
         assert!(gd.start >= at && gd.end > gd.start, "sorted, non-empty");
-        assert!(!gd.conds.is_empty());
+        assert!(!gd.conds.is_empty() || !gd.any.is_empty());
         at = gd.end;
     }
     for (bi, blk) in g.blocks.iter().enumerate() {
@@ -77,13 +77,13 @@ fn check_layout(p: &Program, from: &Body, g: &Body, exposed: Option<&[bool]>) {
         if let Some(gd) = inside
             && gd.start as usize == bi
         {
-            for c in &gd.conds {
+            for s in gd.slots() {
                 assert!(
-                    !writer_any[c.slot as usize] || written_in[c.slot as usize] < bi as u32,
-                    "condition slot {} written before its guard",
-                    c.slot
+                    !writer_any[s as usize] || written_in[s as usize] < bi as u32,
+                    "condition slot {s} written before its guard"
                 );
             }
+            assert!(gd.any.len() <= MAX_ANY, "{gd:?}");
         }
         let (sa, sb, sc) = blk.op.slot_operands();
         let range = blk.start as usize..(blk.start + blk.len) as usize;
@@ -424,6 +424,241 @@ fn lifted_registers_with_enables_are_guarded_exactly() {
     let q = b.merge(&qs);
     b.output("q", q);
     on_off("lifted dffe", &d, 300);
+}
+
+/// `t = (x + k) ^ y; !t & z`: four word ops, a cone too small to guard
+/// on its own.
+fn small(b: &mut Builder<'_>, x: NetId, y: NetId, z: NetId, k: u64) -> NetId {
+    let c = b.konst(8, k);
+    let (t, _) = b.add(x, c, None);
+    let t = b.xor(t, y);
+    let t = b.not(t);
+    b.and(t, z)
+}
+
+/// Registers sharing an enable share the values of their data cones:
+/// those values are guarded with them (one region for the enable), not
+/// left to run every tick.
+#[test]
+fn values_shared_under_one_enable_are_guarded() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let y = b.input("y", 8);
+    let en = b.input("en", 1);
+    let shared = cone(&mut b, x, 3);
+    let d1 = b.xor(shared, y);
+    let (d2, _) = b.add(shared, y, None);
+    let q1 = b.register(en, d1);
+    let q2 = b.register(en, d2);
+    b.output("q1", q1);
+    b.output("q2", q2);
+    let p = compile(&d, &Options::default()).unwrap();
+    let g = fused(&p, MIN_REGION).expect("guarded");
+    let en_slot = p.ports.inputs[2].slot;
+    assert_eq!(g.guards.len(), 1, "{:?}", g.guards);
+    assert_eq!(
+        g.guards[0].conds,
+        vec![Cond {
+            slot: en_slot,
+            when: true
+        }]
+    );
+    // The shared cone and both registers' own parts.
+    let n = guarded_instrs(&g);
+    assert!(n >= MIN_REGION as u32, "{n} guarded instructions");
+    on_off("shared enable", &d, 300);
+}
+
+/// Near miss: arms of one enable where one arm reads the other register's
+/// next value (a chain). One region cannot be ready before the first
+/// mux, so the arms are split into a region each, both still guarded.
+#[test]
+fn a_chain_under_one_enable_is_split() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let en = b.input("en", 1);
+    let one = b.one();
+    let (n1, q1) = b.state_placeholder(crate::netlist::NodeKind::Register { w: 8 });
+    let (n2, q2) = b.state_placeholder(crate::netlist::NodeKind::Register { w: 8 });
+    let f = cone(&mut b, x, 5);
+    let f = b.xor(f, q1);
+    let next1 = b.mux(en, q1, f);
+    let g = cone(&mut b, next1, 9);
+    let g = b.xor(g, q2);
+    let next2 = b.mux(en, q2, g);
+    b.connect(one, (n1, 0));
+    b.connect(next1, (n1, 1));
+    b.connect(one, (n2, 0));
+    b.connect(next2, (n2, 1));
+    b.output("q1", q1);
+    b.output("q2", q2);
+    let p = compile(&d, &Options::default()).unwrap();
+    let pr = phases::prune(&p, &own(&p)).unwrap_or_else(|| own(&p));
+    UNDONE.with(|u| u.set(0));
+    let g = guard(&p, &pr, None).expect("guarded");
+    assert_eq!(UNDONE.with(|u| u.get()), 1, "one merged region split");
+    check_layout(&p, &pr, &g, None);
+    assert_eq!(g.guards.len(), 2, "{:?}", g.guards);
+    on_off("chained enable", &d, 300);
+}
+
+/// Registers with enables of their own and small data cones: grouped,
+/// at most [`MAX_ANY`] enables to a group, each group run when any of
+/// its enables is 1.
+#[test]
+fn small_cones_of_different_enables_are_grouped() {
+    let mut d = Design::new("top");
+    let r = d.root;
+    let mut b = d.builder(r);
+    let x = b.input("x", 8);
+    let y = b.input("y", 8);
+    let z = b.input("z", 8);
+    let mut ens = Vec::new();
+    for k in 0..8 {
+        let en = b.input(format!("en{k}"), 1);
+        let dd = small(&mut b, x, y, z, 3 + 7 * k);
+        let q = b.register(en, dd);
+        b.output(format!("q{k}"), q);
+        ens.push(en);
+    }
+    let p = compile(&d, &Options::default()).unwrap();
+    let en_slots: Vec<u32> = p.ports.inputs[3..].iter().map(|i| i.slot).collect();
+    let g = fused(&p, MIN_REGION).expect("grouped");
+    let groups: Vec<&Guard> = g.guards.iter().filter(|x| !x.any.is_empty()).collect();
+    assert!(!groups.is_empty(), "{:?}", g.guards);
+    for gd in &groups {
+        assert!(gd.conds.is_empty());
+        assert!((2..=MAX_ANY).contains(&gd.any.len()), "{gd:?}");
+        for c in &gd.any {
+            assert!(c.when && en_slots.contains(&c.slot), "{gd:?}");
+        }
+    }
+    assert!(guarded_instrs(&g) >= MIN_REGION as u32);
+    // Without groups, nothing is big enough.
+    assert!(g.guards.iter().all(|x| !x.any.is_empty()));
+    on_off("grouped enables", &d, 400);
+    // Any one enable at a time, and none, against the unguarded body.
+    let p = Arc::new(p);
+    let off = SimOptions {
+        guard: false,
+        ..guarded_options()
+    };
+    for (o, jit) in [(guarded_options(), false), (SimOptions::jit(), true)] {
+        let mut on = Sim::with_options(Arc::clone(&p), o);
+        if jit && !on.jit_active() {
+            continue;
+        }
+        let mut reference = Sim::with_options(Arc::clone(&p), off.clone());
+        for t in 0..200u64 {
+            for s in [&mut on, &mut reference] {
+                s.set("x", t * 13 % 256);
+                s.set("y", t * 5 % 256);
+                s.set("z", 0xF0 ^ (t % 256));
+                for k in 0..8u64 {
+                    s.set(&format!("en{k}"), u64::from(t % 9 == k));
+                }
+                s.run(1 + t % 5);
+            }
+            for k in 0..8 {
+                assert_eq!(
+                    on.get(&format!("q{k}")),
+                    reference.get(&format!("q{k}")),
+                    "tick {t}"
+                );
+            }
+        }
+    }
+}
+
+/// Random registers with enables (inputs, decoded state, rarely 1) and
+/// data of every size, reading inputs, other registers and other
+/// registers' next values (chains through which groups and merged
+/// regions can close a loop): guards on against off, and the layout
+/// invariants, with groups and merged regions in some of them.
+#[test]
+fn random_enabled_registers_are_exact() {
+    let mut grouped = 0;
+    for seed in 0..40u64 {
+        let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let mut d = Design::new("top");
+        let r = d.root;
+        let mut b = d.builder(r);
+        let ins: Vec<NetId> = (0..3).map(|k| b.input(format!("x{k}"), 8)).collect();
+        let ens: Vec<NetId> = (0..4).map(|k| b.input(format!("en{k}"), 1)).collect();
+        let one = b.one();
+        let n = 6 + next(10) as usize;
+        let regs: Vec<(crate::netlist::NodeId, NetId)> = (0..n)
+            .map(|_| b.state_placeholder(crate::netlist::NodeKind::Register { w: 8 }))
+            .collect();
+        let mut values: Vec<NetId> = ins.clone();
+        values.extend(regs.iter().map(|x| x.1));
+        let mut nexts = Vec::new();
+        for (k, &(node, q)) in regs.iter().enumerate() {
+            let en = match next(3) {
+                0 => ens[next(4) as usize],
+                1 => {
+                    let s = values[next(values.len() as u64) as usize];
+                    b.eq_const(s, next(256))
+                }
+                _ => {
+                    let e = ens[next(4) as usize];
+                    let s = values[next(values.len() as u64) as usize];
+                    let c = b.eq_const(s, next(4));
+                    b.and(e, c)
+                }
+            };
+            let mut v = values[next(values.len() as u64) as usize];
+            for _ in 0..next(14) {
+                let o = values[next(values.len() as u64) as usize];
+                v = match next(5) {
+                    0 => b.add(v, o, None).0,
+                    1 => b.xor(v, o),
+                    2 => b.and(v, o),
+                    3 => b.not(v),
+                    _ => b.sub(v, o),
+                };
+            }
+            let nx = if next(4) == 0 {
+                let rst = ens[next(4) as usize];
+                let held = b.mux(en, q, v);
+                let z = b.zero(8);
+                b.mux(rst, held, z)
+            } else {
+                b.mux(en, q, v)
+            };
+            b.connect(one, (node, 0));
+            b.connect(nx, (node, 1));
+            b.output(format!("q{k}"), q);
+            nexts.push(nx);
+            // Later registers may read this one's next value.
+            values.push(nx);
+        }
+        let p = compile(&d, &Options::default()).unwrap();
+        for min in [MIN_REGION, 4] {
+            if let Some(g) = fused(&p, min) {
+                grouped += u32::from(g.guards.iter().any(|x| !x.any.is_empty()));
+            }
+        }
+        on_off(&format!("enabled registers {seed}"), &d, 60);
+    }
+    let undone = UNDONE.with(|u| u.get());
+    eprintln!(
+        "{grouped} bodies with groups; layouts undone: {} splits, {} ungroups",
+        undone & 0xFFFF,
+        undone >> 16
+    );
+    assert!(grouped >= 5, "only {grouped} bodies with groups");
+    assert!(undone & 0xFFFF > 0 && undone >> 16 > 0, "both undo paths");
 }
 
 #[test]
