@@ -411,6 +411,40 @@ fn port_names_follow_the_sources_and_are_unique() {
     assert!(plan_chip(&d, &ports_only, "P", &CircuitLibrary::default()).is_err());
 }
 
+/// A selection whose chip would need more ports on a side than a wire can
+/// name is refused: port 256 used to be wired to pin 0.
+#[test]
+fn a_chip_with_more_ports_than_a_wire_can_name_is_refused() {
+    let build = |gates: usize| {
+        let mut d = CircuitDocument::new("Wide");
+        let at = Vec2::new;
+        let mut sel = HashSet::new();
+        for i in 0..gates {
+            let y = i as f32 * 40.0;
+            let input = d.add(DocNode::new(GateKind::Input { w: 1 }, at(-200.0, y)));
+            let not = d.add(DocNode::new(GateKind::Not { w: 1 }, at(0.0, y)));
+            let out = d.add(DocNode::new(GateKind::Output { w: 1 }, at(200.0, y)));
+            d.connect(input, 0, not, 0);
+            d.connect(not, 0, out, 0);
+            sel.insert(not);
+        }
+        (d, sel)
+    };
+    let (d, sel) = build(256);
+    let plan = plan_chip(&d, &sel, "Wide", &CircuitLibrary::default()).expect("256 fit");
+    let mut pins: Vec<u8> = plan
+        .new_wires
+        .iter()
+        .filter(|w| w.to.node == plan.instance.id)
+        .map(|w| w.to.pin)
+        .collect();
+    pins.sort_unstable();
+    assert_eq!(pins, (0..=255).collect::<Vec<u8>>());
+    let (d, sel) = build(257);
+    let e = plan_chip(&d, &sel, "Wide", &CircuitLibrary::default()).unwrap_err();
+    assert!(e.contains("257 inputs") && e.contains("at most 256"), "{e}");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Make chip in the editor
 // ─────────────────────────────────────────────────────────────────────────────
