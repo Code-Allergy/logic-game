@@ -19,7 +19,7 @@ use crate::sim::jit::{BodyRef, Item};
 /// and the slots written inside it.
 struct Open {
     merge: cranelift_codegen::ir::Block,
-    vals: HashMap<u32, Value>,
+    vals: HashMap<u32, (Value, bool)>,
     ptrs: HashMap<u32, Value>,
     written: Vec<u32>,
 }
@@ -74,6 +74,7 @@ pub(super) fn build_chunk(
         }
     };
     for &(item, seg) in ch {
+        sl.now += 1;
         if seg != cur {
             close(&mut b, &mut sl, &mut mem_ptrs, &mut open);
             if seg > 0 {

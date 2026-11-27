@@ -16,6 +16,9 @@
 //! - `LOGI_JIT_NARROW`: `0` computes every value in 64-bit operations
 //!   (native code; by default values that fit 32 bits use 32-bit ones,
 //!   see `bits.rs`).
+//! - `LOGI_JIT_REMAT`: native code loads a slot's value again once it went
+//!   unused for more than this many items (`0`: never), see
+//!   [`super::REMAT`].
 //!
 //! The superstep's chunk is a `SimOptions` field
 //! (`SimOptions::superstep_chunk`); the benches read it from
@@ -35,6 +38,8 @@ pub struct Tune {
     pub settle_entry: bool,
     #[cfg_attr(target_arch = "wasm32", expect(dead_code))]
     pub narrow: bool,
+    #[cfg_attr(target_arch = "wasm32", expect(dead_code))]
+    pub remat: u32,
 }
 
 fn env<T: std::str::FromStr>(name: &str) -> Option<T> {
@@ -57,5 +62,6 @@ pub fn get() -> &'static Tune {
         arena: env::<u8>("LOGI_JIT_ARENA").map_or(super::ARENA, |v| v != 0),
         settle_entry: env::<u8>("LOGI_JIT_ENTRY").map_or(super::SETTLE_ENTRY, |v| v != 0),
         narrow: env::<u8>("LOGI_JIT_NARROW").is_none_or(|v| v != 0),
+        remat: env("LOGI_JIT_REMAT").unwrap_or(super::REMAT),
     })
 }

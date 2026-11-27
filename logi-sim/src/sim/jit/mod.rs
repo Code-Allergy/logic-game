@@ -119,6 +119,12 @@ use crate::compile::{Block, Commit, Guard, Instr, Op, Pack, PackOperand, Program
 /// 25 % and 55 % slower.
 pub const CHUNK: usize = 64;
 
+/// Native code loads a slot's value again from memory once it went unused
+/// for more than this many items of a function (0: never), instead of
+/// keeping it in a register, or in a spill slot: a load from the slot
+/// costs no more than the reload of a spill, and saves the spill.
+pub const REMAT: u32 = 16;
+
 /// Commits per commit chunk at most.
 pub const COMMIT_CHUNK: usize = 256;
 

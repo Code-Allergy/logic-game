@@ -488,7 +488,17 @@ fn flags() -> MemFlagsData {
 /// bits where its result fits them.
 struct Slots<'a> {
     base: Value,
-    vals: HashMap<u32, Value>,
+    /// Per slot read or written: its value, and whether its word in
+    /// memory holds it (it was loaded, or stored).
+    vals: HashMap<u32, (Value, bool)>,
+    /// Per slot: the item that last used its value (see `remat`).
+    used: HashMap<u32, u32>,
+    /// The item being emitted (items are counted by the caller).
+    now: u32,
+    /// Load a slot's value again (rather than keep it in a register or a
+    /// spill slot) once it went unused for more than this many items,
+    /// when memory holds it (0: never; `tune`: `LOGI_JIT_REMAT`).
+    remat: u32,
     bits: &'a SlotBits,
     /// The zero-extended `I64` form of an `I32` value, where one was made
     /// with it (so that storing it costs no extension).
@@ -500,6 +510,9 @@ impl<'a> Slots<'a> {
         Slots {
             base,
             vals: HashMap::with_capacity(capacity),
+            used: HashMap::with_capacity(capacity),
+            now: 0,
+            remat: super::tune::get().remat,
             bits,
             wide: HashMap::new(),
         }
@@ -535,8 +548,13 @@ impl<'a> Slots<'a> {
         if slot == ZERO_SLOT {
             return b.ins().iconst(self.ty(slot), 0);
         }
-        if let Some(&v) = self.vals.get(&slot) {
-            return v;
+        let now = self.now;
+        let last = self.used.insert(slot, now);
+        if let Some(&(v, mem)) = self.vals.get(&slot) {
+            let idle = now - last.unwrap_or(now);
+            if !(mem && self.remat > 0 && idle > self.remat) {
+                return v;
+            }
         }
         let (a, o) = self.addr(b, slot);
         let v = if self.ty(slot) == I64 {
@@ -547,7 +565,7 @@ impl<'a> Slots<'a> {
                 Load::Zext => b.ins().uload32(flags(), a, o),
             }
         };
-        self.vals.insert(slot, v);
+        self.vals.insert(slot, (v, true));
         v
     }
 
@@ -561,7 +579,8 @@ impl<'a> Slots<'a> {
             let (a, o) = self.addr(b, slot);
             b.ins().store(flags(), w, a, o);
         }
-        self.vals.insert(slot, v);
+        self.vals.insert(slot, (v, store));
+        self.used.insert(slot, self.now);
     }
 
     /// `v` (bits within `bound`) as a value of type `t` within `keep`.
@@ -684,7 +703,7 @@ fn not_masked(b: &mut FunctionBuilder<'_>, x: Value, bound: u64, m: u64) -> Valu
 /// do not dominate the code after it).
 type Open = (
     cranelift_codegen::ir::Block,
-    HashMap<u32, Value>,
+    HashMap<u32, (Value, bool)>,
     HashMap<u32, Value>,
 );
 
@@ -725,6 +744,7 @@ fn build_settle(
     let mut cur = 0u32;
     let mut open: Option<Open> = None;
     for &(item, seg) in items {
+        sl.now += 1;
         if seg != cur {
             if let Some((merge, vals, ptrs)) = open.take() {
                 b.ins().jump(merge, &[]);
